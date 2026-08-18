@@ -1,0 +1,15 @@
+{
+  "name": "computer-use-vision-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Vision-only desktop automation plugin for DeepSeek Harness (fusion refactor)",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@nut-tree/nut-js": "^4.2.0",
+    "screenshot-desktop": "^1.15.0",
+    "sharp": "^0.33.5"
+  }
+}
