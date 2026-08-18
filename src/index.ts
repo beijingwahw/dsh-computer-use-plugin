@@ -8,6 +8,7 @@ import { system } from './system';
 import { contextManager } from './contextManager';
 import { uiMemory } from './uiMemory';
 import { journal } from './journal';
+import { skillLibrary } from './skillLibrary';
 import { disposeOcr } from './textReader';
 import { buildAllTools } from './tools';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards';
@@ -102,6 +103,9 @@ export function apply(ctx: Context, config: Config) {
   system.configure(config);
   contextManager.configure(config.maxImageCount);
   uiMemory.configure(config.uiMemoryCapacity);
+  // 技能库：配置后从磁盘载入 —— 上一个会话学会的技能在本会话直接可用
+  skillLibrary.configure(config.enableSkillLibrary, config.skillLibraryPath);
+  skillLibrary.load();
 
   // 2. 注入 System Prompt（可选服务，优雅降级）
   tryInjectPrompt(ctx);
@@ -144,7 +148,29 @@ export function apply(ctx: Context, config: Config) {
         return '[FAILED] Actor loop is not wired to the DSH agents service yet (developer preview).';
       };
 
-      return await runOrchestrator(args.userRequest, actorFn, chat, args.time_budget_sec ? args.time_budget_sec * 1000 : undefined);
+      // 技能归纳准备：任务起点打标 + 入口场景指纹（成功轨迹的切片边界）
+      journal.markTaskStart();
+      const entryScene = contextManager.lastImageRecord()?.hash;
+
+      const report = await runOrchestrator(
+        args.userRequest, actorFn, chat,
+        args.time_budget_sec ? args.time_budget_sec * 1000 : undefined,
+      );
+
+      // 自动归纳（第五轮）：任务无失败标记且确有可重放轨迹 ⇒ 固化为技能。
+      // 同一步骤序列重复出现时只强化既有技能的可靠度，不堆卡片。
+      if (
+        config.autoInduceSkills && config.enableSkillLibrary &&
+        report && !report.includes('[FAILED]') && !report.includes('[TIMEOUT]') &&
+        !report.startsWith('[Planner]')
+      ) {
+        const skill = skillLibrary.induceFromJournal(args.userRequest, entryScene);
+        if (skill) {
+          console.log(`[Skill] Induced #${skill.id} "${skill.name}" (${skill.steps.length} steps) from a successful task.`);
+        }
+      }
+
+      return report;
     },
   }));
 
@@ -170,6 +196,8 @@ export function apply(ctx: Context, config: Config) {
       uiMemory.reset();            // 清空场景记忆（可选保留跨会话记忆：删除此行）
       journal.reset();             // 清空行动日志
       updatePopupState(false);     // 复位弹窗传感状态
+      skillLibrary.save();         // 技能落盘后仅清内存 —— 技能的寿命长于会话
+      skillLibrary.reset();
       void disposeOcr();           // 终止 OCR worker（语言数据有磁盘缓存，重载后即用）
     };
   });

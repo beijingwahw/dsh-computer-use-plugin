@@ -17,7 +17,7 @@ export interface Landmark {
 }
 
 /** 分词：拉丁词 + CJK 单字 + CJK 二元组 —— 中英混合描述都能命中 */
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   const latin = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
   const cjk = text.match(/[\u4e00-\u9fff]/g) ?? [];
   const bigrams: string[] = [];
@@ -26,7 +26,7 @@ function tokenize(text: string): string[] {
 }
 
 /** 重合系数：|A∩B| / min(|A|,|B|)，短查询也能命中长描述 */
-function overlapCoefficient(a: string[], b: string[]): number {
+export function overlapCoefficient(a: string[], b: string[]): number {
   if (a.length === 0 || b.length === 0) return 0;
   const setB = new Set(b);
   const inter = a.filter(t => setB.has(t)).length;

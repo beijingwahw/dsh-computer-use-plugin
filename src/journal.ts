@@ -39,6 +39,7 @@ class ActionJournal {
   private enabled = true;
   private filePath = '';
   private capacity = 1000;
+  private taskStartIndex = 0; // 最近一次复杂任务的日志起点（技能归纳的切片边界）
 
   configure(enabled: boolean, filePath: string, capacity: number) {
     this.enabled = enabled;
@@ -68,6 +69,16 @@ class ActionJournal {
 
   list(actionOnly = true): JournalEntry[] {
     return actionOnly ? this.entries.filter(e => ACTION_TOOLS.includes(e.tool)) : [...this.entries];
+  }
+
+  /** 任务起点打标：start_complex_task 执行前调用 */
+  markTaskStart(): void {
+    this.taskStartIndex = this.entries.length;
+  }
+
+  /** 本次任务以来的动作（技能归纳的原料） */
+  sinceTaskStart(): JournalEntry[] {
+    return this.entries.slice(this.taskStartIndex).filter(e => ACTION_TOOLS.includes(e.tool));
   }
 }
 

@@ -7,6 +7,7 @@ import { system } from '../system';
 import { captureBefore, settleAndVerify, CombinedEffect } from '../actionVerifier';
 import { focusTracker } from '../focusTracker';
 import { semanticConfirm, SemanticConfirm } from '../textReader';
+import { matchesRiskPatterns } from '../riskGate';
 import { uiMemory } from '../uiMemory';
 
 export function createClickMouseTool(config: Config) {
@@ -62,8 +63,12 @@ export function createClickMouseTool(config: Config) {
 
         await system.clickMouse(px, py, button);
 
-        // 焦点登记：后续 type_text 的区域验证将以此为中心（隐式工具间上下文）
-        focusTracker.set(x, y);
+        // 焦点登记：后续 type_text 的区域验证将以此为中心（隐式工具间上下文）。
+        // 风险感知：目标描述命中凭据语义 ⇒ 焦点标记为敏感，后续输入将被闸门拦截
+        const sensitive = config.enableRiskGate
+          && !!target_description
+          && matchesRiskPatterns(target_description, config.riskPatterns);
+        focusTracker.set(x, y, sensitive);
 
         let effect: CombinedEffect | null = null;
         if (before) {
@@ -110,6 +115,10 @@ export function createClickMouseTool(config: Config) {
           nextStep = `SEMANTIC MISMATCH: expected text "${expected_text}" was NOT found near the click point. ` +
             `Treat this click as FAILED even though pixels changed — re-examine with diff_view / take_screenshot.`;
         }
+        if (sensitive) {
+          nextStep = 'SENSITIVE FIELD: this looks like a credentials/input-secret area. ' +
+            'Do NOT type secrets via type_text here — ask the USER to enter them personally, then continue with take_screenshot.';
+        }
 
         return JSON.stringify({
           status: 'SUCCESS',
@@ -125,6 +134,7 @@ export function createClickMouseTool(config: Config) {
               region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
             } : 'verification-off',
             expected_change: expected_change || undefined, // 预期锚定：模型行动前声明的预期
+            sensitive_focus: sensitive || undefined,       // 风险闸门：焦点已标记为凭据区
             semantic: semantic
               ? (semantic === 'ocr-unavailable'
                 ? 'ocr-unavailable'

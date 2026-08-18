@@ -59,6 +59,17 @@ export interface Config {
   enableOcr: boolean;
   /** OCR 语言，如 'eng'、'chi_sim+eng' */
   ocrLang: string;
+  // ─── 第五轮创新 ───
+  /** 启用自进化技能库（save_skill / match_skill / run_skill + 自动归纳） */
+  enableSkillLibrary: boolean;
+  /** 技能库持久化路径（JSON）；留空仅内存。配置后技能跨会话存活 */
+  skillLibraryPath: string;
+  /** 复杂任务成功后自动把轨迹归纳为技能 */
+  autoInduceSkills: boolean;
+  /** 启用风险闸门：凭据类输入交还用户，Agent 不代劳 */
+  enableRiskGate: boolean;
+  /** 风险词（逗号分隔）：点击目标描述或待输文本命中即拦截 */
+  riskPatterns: string;
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -87,4 +98,9 @@ export const Config: Schema<Config> = Schema.object({
   focusMaxAgeMs: Schema.number().default(30000).description('Focus validity window for region verification'),
   enableOcr: Schema.boolean().default(false).description('Enable local OCR (read_text/find_text + semantic verification)'),
   ocrLang: Schema.string().default('eng').description('OCR language, e.g. eng / chi_sim+eng'),
+  enableSkillLibrary: Schema.boolean().default(true).description('Self-evolving skill library (induce/match/run)'),
+  skillLibraryPath: Schema.string().default('').description('Skill library JSON path; empty = memory only. Set a path for cross-session learning'),
+  autoInduceSkills: Schema.boolean().default(true).description('Auto-induce skills from successful complex tasks'),
+  enableRiskGate: Schema.boolean().default(true).description('Risk gate: credentials are typed by the user, not the agent'),
+  riskPatterns: Schema.string().default('password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥').description('Comma-separated risk keywords'),
 });

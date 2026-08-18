@@ -35,3 +35,9 @@
         # ─── 第四轮创新 ───
         enableOcr: false            # 本地 OCR（find_text/read_text/语义核对），语言包首次需联网
         ocrLang: eng                # 'eng' 或 'chi_sim+eng'
+        # ─── 第五轮创新 ───
+        enableSkillLibrary: true    # 自进化技能库（归纳/匹配/执行）
+        skillLibraryPath: ''        # 技能 JSON 路径；配置后技能跨会话存活
+        autoInduceSkills: true      # 复杂任务成功后自动归纳技能
+        enableRiskGate: true        # 风险闸门：凭据由用户输入，Agent 不代劳
+        riskPatterns: 'password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥'

@@ -7,6 +7,7 @@ import { system } from '../system';
 import { captureBefore, settleAndVerify } from '../actionVerifier';
 import { focusTracker } from '../focusTracker';
 import { semanticConfirm, SemanticConfirm } from '../textReader';
+import { matchesRiskPatterns } from '../riskGate';
 
 export function createTypeTextTool(config: Config) {
   return defineTool({
@@ -38,6 +39,23 @@ export function createTypeTextTool(config: Config) {
       // 前哨闸门：工具参数是被模型控制的输入面，防注入恶意长文本
       if (text.length > config.maxTextLength) {
         return `[Error]: Text too long. Maximum length is ${config.maxTextLength} characters.`;
+      }
+
+      // ── 风险闸门（第五轮）：凭据类输入不代劳 ──
+      // 两级判定：焦点被标记为敏感区（点击密码框后），或文本自身命中风险语义
+      // （如 "验证码 123456"）。拦截且绝不回显待输入内容。
+      if (config.enableRiskGate && (
+        focusTracker.isSensitive(config.focusMaxAgeMs) || matchesRiskPatterns(text, config.riskPatterns)
+      )) {
+        return JSON.stringify({
+          status: 'ACTION_REQUIRED',
+          state_anchor: {
+            current_state: 'Sensitive input detected (credentials / verification code).',
+            typed_content: '[REDACTED]', // 绝不回显敏感内容
+          },
+          next_step: 'STOP: do not type secrets yourself. Ask the user to enter this value personally ' +
+            '(or provide it explicitly in chat). After the user finishes, continue with take_screenshot.',
+        }, null, 2);
       }
 
       try {

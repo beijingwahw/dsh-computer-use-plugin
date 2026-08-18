@@ -19,6 +19,7 @@ import { createRememberUiTool, createRecallUiTool } from './uiMemoryTools';
 import { createReplayActionsTool } from './replayActions';
 import { createReadTextTool, createFindTextTool } from './textTools';
 import { createDiffViewTool } from './diffView';
+import { createSaveSkillTool, createMatchSkillTool, createRunSkillTool } from './skillTools';
 
 export function buildAllTools(config: Config) {
   const tools = [
@@ -54,6 +55,11 @@ export function buildAllTools(config: Config) {
   // 第四轮创新：文字感知（OCR 定位与读取）
   if (config.enableOcr) {
     tools.push(createReadTextTool(config), createFindTextTool(config));
+  }
+
+  // 第五轮创新：自进化技能库（轨迹归纳 / 匹配 / 一键执行）
+  if (config.enableSkillLibrary) {
+    tools.push(createSaveSkillTool(), createMatchSkillTool(), createRunSkillTool(config));
   }
 
   return tools;

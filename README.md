@@ -92,6 +92,27 @@ L3 语义   OCR 核对     —— 变化是否包含预期的文字内容？
 L4 预期   expected_*   —— 与模型行动前声明的预期对照
 ```
 
+## 第五轮创新：自进化技能库 + 风险感知人机协同
+
+前四轮都在改进「单次执行的质量」；本轮解决两个更高维的问题：**成功经验无法沉淀**（同一个工作流每次从零探索）与**凭据安全**（Agent 不该替人输密码）。
+
+### 自进化技能库（Trajectory → Skill → Reliability）
+
+| 环节 | 机制 |
+| --- | --- |
+| **归纳** | 复杂任务成功后自动把本次轨迹（`markTaskStart` 以来的可重放动作）固化为技能：触发描述 + 步骤序列 + 入口场景指纹；`save_skill` 供手动沉淀任意日志片段 |
+| **去重强化** | 完全相同的步骤序列不重复建卡——同一工作流做三遍 = 一个技能验证三次（可靠度 3/3），而非三张孤儿卡 |
+| **持久化** | `skillLibraryPath` 配置后技能跨会话存活：上一个会话学会的工作流，下一个会话开箱即用 |
+| **匹配** | `match_skill`：文本重合 + Laplace 平滑可靠度 + 入口场景同屏加成（dHash ≥ 0.9）+ 新近度；技能是先验不是保证，锚点仍要求事后验证 |
+| **闭环校准** | `run_skill` 的每次成败回写 `successCount/attemptCount` —— UI 演化导致技能失效时可靠度自然衰减，匹配排序自动降级；失败提示引导手动修复并重新 `save_skill` |
+
+### 风险闸门（Credentials Belong to Humans）
+
+世界级 CUA 的安全共识（如 Operator）：**凭据类输入交还用户**。本实现为两段式，全部复用既有基础设施：
+
+1. **敏感焦点标记**：`click_mouse` 的 `target_description` 命中风险词（密码/验证码/2FA/OTP/API key…，可配置）⇒ `focusTracker` 将焦点标记为敏感，锚点携带 `sensitive_focus` 并预警
+2. **输入拦截**：`type_text` 到敏感焦点（或文本自身命中风险语义）⇒ 返回 `ACTION_REQUIRED`，要求暂停并请用户亲自输入；**待输内容绝不回显**（`[REDACTED]`）
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
@@ -112,6 +133,7 @@ L4 预期   expected_*   —— 与模型行动前声明的预期对照
 | `diff_view` | 最近两截图的视觉差分：红框变化图 + 区域坐标清单 | 无 |
 | `remember_ui` / `recall_ui` | 场景式 UI 记忆写入 / 自然语言召回 | `description`,`x`,`y` / `query` |
 | `replay_actions` | 重放日志中的动作序列（宏） | `confirm`, `from_step?`, `to_step?` |
+| `save_skill` / `match_skill` / `run_skill` | 技能沉淀 / 可靠度匹配 / 一键执行（成败回写可靠度） | `description` / `query` / `id`,`confirm` |
 
 ## 快速开始
 

@@ -58,8 +58,8 @@ export function createReplayActionsTool(config: Config) {
   });
 }
 
-/** 单条日志 → 系统层调用。依赖运行时缓存的工具（click_element）显式跳过。 */
-async function replayOne(entry: JournalEntry): Promise<string> {
+/** 单条日志/技能步骤 → 系统层调用。依赖运行时缓存的工具（click_element）显式跳过。 */
+export async function replayOne(entry: { tool: string; args?: Record<string, any> }): Promise<string> {
   const a = entry.args ?? {};
   try {
     switch (entry.tool) {
