@@ -5,6 +5,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
 import { captureBefore, settleAndVerify } from '../actionVerifier';
+import { quantum } from '../quantumSense';
 import { focusTracker } from '../focusTracker';
 import { semanticConfirm, SemanticConfirm } from '../textReader';
 import { matchesRiskPatterns } from '../riskGate';
@@ -77,6 +78,8 @@ export function createTypeTextTool(config: Config) {
             regionRadius: config.regionVerifyRadius,
           });
         }
+        // D-3 量子感知：验证证据喂给状态机（effect=null ⇒ undefined ⇒ 不计数）
+        quantum.recordEffect(effect?.detected);
         const noopSuspected = effect && !effect.detected;
 
         // ── 语义自证（第四轮）：OCR 核对「输入的文字真的上屏了」──

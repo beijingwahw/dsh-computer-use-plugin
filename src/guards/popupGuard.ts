@@ -19,8 +19,10 @@ export function getPopupState(): boolean {
 }
 
 // 战术暂停指令：单一事实源，popupGuard 与 dismiss_popup 工具共享 —— 保证统一话术
+// B-4：status 对齐锚点协议枚举（ACTION_REQUIRED = 需模型重新介入，非失败非成功，
+// 熔断/遥测不计入失败统计 —— 语义正确的拦截态）
 export const TACTICAL_PAUSE = JSON.stringify({
-  status: 'GUARD_BLOCKED',
+  status: 'ACTION_REQUIRED',
   state_anchor: {
     current_state: 'Screen is blocked by an unexpected popup or modal.',
     required_action: 'Re-analyze the current screenshot.',

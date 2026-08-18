@@ -1,8 +1,10 @@
 // src/tools/scrollPage.ts
 // dirMap 一石二鸟：合法值枚举 + 方向翻译表，!dirMap[direction] 一行完成校验。
 // 修复原版「四方向全部 scrollDown」bug；滚动结果不可见 -> 回显自带复查指令。
+// B-4：返回值统一走 toolResult 工厂（反幻觉锚点全覆盖）。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system';
+import { toolOk, toolErr } from '../toolResult';
 
 export function createScrollPageTool() {
   return defineTool({
@@ -33,15 +35,27 @@ export function createScrollPageTool() {
       };
 
       if (!dirMap[direction]) {
-        return `[Error]: Invalid scroll direction. Options: up, down, left, right.`;
+        return toolErr(
+          'Scroll validation failed.',
+          `Invalid direction "${direction}".`,
+          'Retry with one of: up, down, left, right.',
+        );
       }
 
       try {
         await system.scroll(dirMap[direction], amount);
-        return `[System]: Scrolled '${direction}' by ${amount} lines. ` +
-          `[Next Step]: Call 'take_screenshot' to check if the target element is now visible.`;
+        return toolOk(
+          `Scrolled '${direction}' by ${amount} lines.`,
+          { direction, amount },
+          "Call 'take_screenshot' to check if the target element is now visible. " +
+          "If not, scroll again or check whether the page has its own inner scroll region.",
+        );
       } catch (error: any) {
-        return `[Error]: Scroll failed. ${error.message}`;
+        return toolErr(
+          `Scroll '${direction}' failed.`,
+          error.message,
+          'The scroll target may not be focused. Click inside the scrollable area first, then retry.',
+        );
       }
     },
   });

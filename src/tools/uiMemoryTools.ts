@@ -2,9 +2,11 @@
 // 突破二的工具面：remember_ui / recall_ui。
 // remember 在「验证生效的点击」后自动调用（或模型手动调用）；
 // recall 用自然语言召回历史位置先验 —— 注意先验≠事实，锚点强制要求截图复核。
+// B-4：返回值统一走 toolResult 工厂（反幻觉锚点全覆盖）。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { uiMemory } from '../uiMemory';
 import { contextManager } from '../contextManager';
+import { toolOk } from '../toolResult';
 
 export function createRememberUiTool() {
   return defineTool({
@@ -27,8 +29,17 @@ export function createRememberUiTool() {
     },
     async execute(args) {
       const lm = uiMemory.remember(args.description, args.x, args.y, args.app_hint);
-      return `[System]: Landmark #${lm.id} "${lm.description}" saved at (${lm.normalized.x}, ${lm.normalized.y}), ` +
-        `verified ${lm.successCount} time(s). Recall it later via recall_ui.`;
+      return toolOk(
+        `Landmark #${lm.id} "${lm.description}" saved.`,
+        {
+          landmark_id: lm.id,
+          description: lm.description,
+          normalized: lm.normalized,
+          verified_count: lm.successCount,
+        },
+        `Recall it later via recall_ui ("${lm.description}"), and pass the returned id as ` +
+        'from_memory_id to click_mouse — the system will pre-verify the target is still in place.',
+      );
     },
   });
 }
@@ -54,14 +65,23 @@ export function createRecallUiTool() {
       const currentScene = contextManager.lastImageRecord()?.hash;
       const hits = uiMemory.recall(args.query, 5, currentScene);
       if (hits.length === 0) {
-        return `[System]: No matching landmarks. Locate the element visually via take_screenshot / zoom_inspect.`;
+        return toolOk(
+          'No matching landmarks.',
+          { query: args.query, landmark_count: 0 },
+          'Locate the element visually via take_screenshot / zoom_inspect; after a verified click, ' +
+          'remember_ui will save it for future recall.',
+        );
       }
       const lines = hits.map(h =>
         `- [${h.id}] "${h.description}"${h.appHint ? ` @${h.appHint}` : ''} ` +
         `-> (${h.normalized.x}, ${h.normalized.y}) score=${h.score} verified=${h.successCount}x`,
       );
-      return `[System]: Top ${hits.length} landmark(s):\n${lines.join('\n')}\n` +
-        `[Next Step]: These are PRIORS, not facts. Call 'take_screenshot' to confirm the element is still there before clicking.`;
+      return toolOk(
+        `Recalled ${hits.length} landmark(s) for "${args.query}".`,
+        { query: args.query, landmarks: lines },
+        'These are PRIORS, not facts. Call take_screenshot to confirm the element is still there, ' +
+        'or pass the landmark id as from_memory_id to click_mouse for automatic pre-verification.',
+      );
     },
   });
 }

@@ -1,0 +1,21 @@
+{
+  "id": "dsh-computer-use-plugin",
+  "name": "DSH Computer Use Plugin",
+  "version": "1.0.0",
+  "description": "Vision-only desktop automation plugin for DeepSeek Harness: SoM-assisted grounding, Planner-Actor orchestration, effect verification, UI memory, skill library and multi-layer guards.",
+  "entry": "dist/index.js",
+  "patch": "cordis.patch.yml",
+  "author": "beijingwahw",
+  "license": "MIT",
+  "homepage": "https://github.com/beijingwahw/dsh-computer-use-plugin",
+  "repository": "https://github.com/beijingwahw/dsh-computer-use-plugin",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "computer-use",
+    "vision",
+    "desktop-automation",
+    "som",
+    "agent"
+  ]
+}

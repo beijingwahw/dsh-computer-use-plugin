@@ -8,10 +8,12 @@ import type { Config } from '../config';
 import { system } from '../system';
 import { addVisualOverlay } from '../visualOverlay';
 import { contextManager } from '../contextManager';
-import { detectPopupHeuristic } from '../popupDetector';
+import { detectPopup } from '../popupDetector';
 import { updatePopupState, getPopupState } from '../guards/popupGuard';
 import { extractInteractiveElements, UIElement } from '../uiExtractor';
+import { quantum } from '../quantumSense';
 import { dhash, hammingDistance } from '../perceptualHash';
+import { journal } from '../journal';
 
 export function createTakeScreenshotTool(config: Config) {
   return defineTool({
@@ -83,11 +85,20 @@ export function createTakeScreenshotTool(config: Config) {
           }
         }
 
-        // 4. SoM 视觉辅助：网格 + 准星（+ 元素框）
+        // 3.5 D-3 叠加态渲染：黑盒失明时白盒节点化作图上标注 —— 决策面永远是图。
+        //     标注与既有元素框去重合并（IoU/包含判定）；预算内裁剪；零进对话流。
+        const quantumOverlays = config.enableQuantumSense && quantum.mode() === 'superposition'
+          ? await quantum.overlayNodes(elements.map(el => ({ rect: el.rect })))
+          : [];
+
+        // 4. SoM 视觉辅助：网格 + 准星（+ 元素框 + 白盒标注）
         const overlayedBuffer = await addVisualOverlay(rawBuffer, {
           gridDivisions: config.gridDivisions,
           crosshair,
-          elements: elements.map(el => ({ id: el.id, label: el.id, rect: el.rect })),
+          elements: [
+            ...elements.map(el => ({ id: el.id, label: String(el.id), rect: el.rect })),
+            ...quantumOverlays.map(o => ({ id: o.tag, label: o.label, rect: o.rect })),
+          ],
         });
 
         // 5. Token 杀手：resize + jpeg。参数来自「纯视觉定型纪元」——
@@ -100,11 +111,18 @@ export function createTakeScreenshotTool(config: Config) {
 
         // 6. 存入滑动窗口（携带指纹）；驱逐通告原样透传给模型（上下文收缩全透明）
         const base64Image = `data:image/jpeg;base64,${compressedBuffer.toString('base64')}`;
-        const { currentId, message } = contextManager.addScreenshot(base64Image, rawHash);
+        const { currentId, message } = await contextManager.addScreenshot(base64Image, rawHash);
 
-        // 7. 弹窗传感：每次观察顺便更新全局弹窗状态，popupGuard 据此拦截盲操作
-        const hasPopup = await detectPopupHeuristic(compressedBuffer);
-        updatePopupState(hasPopup);
+        // 7. 弹窗传感（B-8 双模）：几何 + 语义证据融合，popupGuard 据此拦截盲操作
+        const popup = await detectPopup(compressedBuffer, {
+          enableOcr: config.enableOcr,
+          popupKeywords: config.popupKeywords,
+          ocrLang: config.ocrLang,
+        });
+        updatePopupState(popup.popup);
+
+        // 9. C-3 观察登记：截图锚点喂给因果链 —— 后续动作的 [观察] 字段引用此摘要
+        journal.noteObservation(`#${currentId} dHash=${rawHash.slice(0, 8)} popup=${popup.popup}`);
 
         // 8. 状态锚点：让模型对输入保真度有元认知，next_step 依据世界状态分支
         return JSON.stringify({
@@ -116,15 +134,27 @@ export function createTakeScreenshotTool(config: Config) {
               resolution: `${display.width}x${display.height}`,
               origin: { x: display.x, y: display.y }, // 多屏坐标换算的契约
             },
-            popup_detected: hasPopup,
+            popup_detected: popup.popup,
+            // B-8：弹窗判定证据链 —— 模型可据此区分「几何疑似」与「语义确认」
+            popup_evidence: popup.semantic
+              ? `semantic keywords: ${popup.matchedKeywords.join(', ')}`
+              : popup.geometric
+                ? 'geometric heuristic: bright uniform center panel'
+                : 'none',
+            // D-3 感知相位：模型对当前感知模式有元认知（叠加态 = 白盒标注已烧入图）
+            ...(config.enableQuantumSense
+              ? { sense: quantum.status() }
+              : {}),
             original_resolution: `${rawMeta.width}x${rawMeta.height}`,
             compressed_resolution: `${compressedMeta.width}x${compressedMeta.height}`,
             format: `JPEG (quality: ${config.jpegQuality})`,
             region,
             visual_overlay: `${config.gridDivisions}x${config.gridDivisions} SoM Grid + Crosshair` +
-              (elements.length ? ' + Element Boxes' : ''),
-            // Token 仪表盘：模型随时知道上下文图片预算的余量
+              (elements.length ? ' + Element Boxes' : '') +
+              (quantumOverlays.length ? ` + ${quantumOverlays.length} Structured-Sense Annotations` : ''),
+            // Token 仪表盘（B-7 双预算）：张数 + 体积余量，模型随时知道上下文预算水位
             context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
+            context_image_kb: `${contextManager.imageKb()}/${config.maxContextImageKb}`,
             // 图层图例（来自「视觉纪元」的图文双通道教学）：教模型「怎么读」这张图
             overlay_legend: [
               `Blue lines: a ${config.gridDivisions}x${config.gridDivisions} grid. Count cells to estimate normalized coordinates (0.0-1.0).`,
@@ -132,6 +162,11 @@ export function createTakeScreenshotTool(config: Config) {
               elements.length
                 ? 'Blue boxes: clickable elements. The number in the blue tag is the element ID usable with click_element.'
                 : 'No element boxes in this mode. Rely on grid estimation.',
+              ...(quantumOverlays.length
+                ? ['Text-labeled boxes: structured-sense annotations (quantum superposition) — whitebox grounding ' +
+                   'for blind spots. Use their rect + label for precise targeting; mode auto-reverts to pure vision ' +
+                   'after consecutive verified successes.']
+                : []),
             ],
           },
           message,
@@ -140,7 +175,7 @@ export function createTakeScreenshotTool(config: Config) {
             const cy = Math.round(el.rect.y + el.rect.height / 2);
             return `- [${el.id}] [${el.role}] "${el.name}" (Center@original-res: ${cx}, ${cy})`;
           }),
-          next_step: hasPopup
+          next_step: popup.popup
             ? 'WARNING: A popup is detected! You MUST handle it before proceeding.'
             : elements.length
               ? 'Analyze the grid to estimate normalized coordinates (0.0-1.0), or use element IDs with click_element.'

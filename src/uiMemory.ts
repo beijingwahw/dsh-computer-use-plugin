@@ -11,6 +11,7 @@ export interface Landmark {
   description: string;            // 模型对目标的自然语言描述
   appHint?: string;               // 可选的应用/上下文线索
   sceneHash?: string;             // 记忆形成时的整屏指纹：场景匹配加成的事实源
+  regionHash?: string;            // 目标邻域外观指纹：点击前核实「目标还在原位」的事实源
   normalized: { x: number; y: number };
   successCount: number;           // 该位置被验证成功的次数
   lastUsedAt: number;
@@ -46,8 +47,8 @@ class UIMemory {
     this.landmarks = [];
   }
 
-  /** 记录（或强化）一个 landmark：同描述就近复用，成功次数 +1；sceneHash 记录当时场景 */
-  remember(description: string, x: number, y: number, appHint?: string, sceneHash?: string): Landmark {
+  /** 记录（或强化）一个 landmark：同描述就近复用，成功次数 +1；sceneHash/regionHash 记录当时外观 */
+  remember(description: string, x: number, y: number, appHint?: string, sceneHash?: string, regionHash?: string): Landmark {
     const existing = this.landmarks.find(l =>
       l.description.toLowerCase() === description.toLowerCase() &&
       Math.abs(l.normalized.x - x) < 0.02 && Math.abs(l.normalized.y - y) < 0.02,
@@ -55,7 +56,8 @@ class UIMemory {
     if (existing) {
       existing.successCount++;
       existing.lastUsedAt = Date.now();
-      existing.sceneHash = sceneHash ?? existing.sceneHash; // 场景指纹滚动更新
+      existing.sceneHash = sceneHash ?? existing.sceneHash;   // 场景指纹滚动更新
+      existing.regionHash = regionHash ?? existing.regionHash; // 目标外观滚动更新
       return existing;
     }
 
@@ -64,6 +66,7 @@ class UIMemory {
       description,
       appHint,
       sceneHash,
+      regionHash,
       normalized: { x, y },
       successCount: 1,
       lastUsedAt: Date.now(),
@@ -77,6 +80,26 @@ class UIMemory {
       this.landmarks = this.landmarks.slice(0, this.capacity);
     }
     return landmark;
+  }
+
+  /** 按 ID 精确取回 landmark（记忆预验用）；不存在返回 undefined */
+  get(id: number): Landmark | undefined {
+    return this.landmarks.find(l => l.id === id);
+  }
+
+  get size(): number {
+    return this.landmarks.length;
+  }
+
+  /** checkpoint 序列化：完整内存态 + ID 发号器进度 */
+  dump(): { landmarks: Landmark[]; nextId: number } {
+    return { landmarks: this.landmarks, nextId: this.nextId };
+  }
+
+  restore(data: { landmarks?: Landmark[]; nextId?: number } | undefined): void {
+    if (!data?.landmarks) return;
+    this.landmarks = data.landmarks;
+    this.nextId = data.nextId ?? (this.landmarks.at(-1)?.id ?? 0) + 1;
   }
 
   /**

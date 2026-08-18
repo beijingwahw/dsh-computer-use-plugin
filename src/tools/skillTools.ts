@@ -5,7 +5,8 @@
 //   run_skill   — 一键执行技能；成败回写可靠度（越用越准的闭环）
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
-import { skillLibrary, SkillStep } from '../skillLibrary';
+import { skillLibrary, SkillStep, Skill } from '../skillLibrary';
+import { failureMemory } from '../failureMemory';
 import { journal } from '../journal';
 import { replayOne } from './replayActions';
 import { sleep } from '../actionVerifier';
@@ -52,12 +53,14 @@ export function createSaveSkillTool() {
   });
 }
 
-export function createMatchSkillTool() {
+export function createMatchSkillTool(config: Config) {
   return defineTool({
     name: 'match_skill',
     description:
-      'Searches the skill library for previously learned workflows matching a task description. ' +
-      'Call this BEFORE planning a complex task — a verified skill skips the whole explore-act-verify loop.',
+      'Searches the skill library for previously learned workflows matching a task description ' +
+      '(exact-token OR semantic-vector match), and surfaces known FAILED approaches from failure memory. ' +
+      'When nothing matches, skill DNA recombination may synthesize a new skill from gene segments of related ones. ' +
+      'Call this BEFORE planning a complex task.',
     parameters: {
       query: {
         type: 'string', required: true,
@@ -70,20 +73,54 @@ export function createMatchSkillTool() {
     },
     async execute(args) {
       const currentScene = contextManager.lastImageRecord()?.hash;
-      const hits = skillLibrary.match(args.query, currentScene, 3);
+      // 双记忆对照检索：正向技能（什么有效） + 负向失败（什么无效）同时召回
+      const query = args.query || journal.currentTask();
+      const hits = skillLibrary.match(query, currentScene, 3);
+      const antiHits = failureMemory.match(query, currentScene, 3);
+
+      // C-2 DNA 重组：无命中技能时尝试基因拼接合成（想象力的工具面）
+      let synthNote = '';
+      if (hits.length === 0 && config.enableRecombination && config.enableSkillLibrary) {
+        const { skill, plan } = skillLibrary.recombine(query, currentScene);
+        if (skill) {
+          const lineage = plan.map(p => `#${p.skillId} (${p.reason})`).join(' + ');
+          synthNote = `\n[Synthesized]: No exact skill matched, so gene segments were recombined into new skill ` +
+            `#${skill.id} "${skill.name}" (${skill.steps.length} steps, lineage: ${lineage}). ` +
+            `It starts unverified (0/0) — run it with confirm=true and the outcome will calibrate its reliability.`;
+          hits.push(skill as Skill & { score: number });
+        }
+      }
+
+      // 只有失败记忆命中：没有可用技能，但同场景有验证过的死路 —— 负向引导同样省掉整轮探索
+      if (hits.length === 0 && antiHits.length > 0) {
+        const anti = antiHits.map(a => `- tried "${a.approach}" -> ${a.symptom} (score=${a.score})`).join('\n');
+        return `[System]: No matching skills, but ${antiHits.length} known FAILED approach(es) for this context:\n` +
+          `${anti}\n[Next Step]: Avoid repeating the above. The normal explore-act-verify loop still applies — ` +
+          `try a different modality or route from the start.`;
+      }
       if (hits.length === 0) {
         return `[System]: No matching skills. Proceed with the normal explore-act-verify loop; ` +
           `consider save_skill afterwards if this workflow is worth remembering.`;
       }
       const lines = hits.map(s => {
-        const reliability = Math.round((s.successCount / s.attemptCount) * 100);
+        const reliability = s.attemptCount > 0 ? Math.round((s.successCount / s.attemptCount) * 100) : 0;
+        const via = (s as any).matched_via ? ` via=${(s as any).matched_via}` : '';
+        const synthTag = (s as any).synthesized ? ' [synthesized, unverified]' : '';
         const preview = s.steps.slice(0, 5).map((st, i) =>
           `    ${i + 1}. ${st.tool} ${JSON.stringify(st.args).slice(0, 80)}`).join('\n');
         const more = s.steps.length > 5 ? `\n    ... (+${s.steps.length - 5} more)` : '';
-        return `- #${s.id} "${s.name}" reliability=${reliability}% score=${s.score}\n` +
+        return `- #${s.id} "${s.name}" reliability=${reliability}% score=${s.score ?? '-'}${via}${synthTag}\n` +
           `  does: ${s.description}\n${preview}${more}`;
       });
-      return `[System]: ${hits.length} matching skill(s):\n${lines.join('\n')}\n` +
+
+      // 负向对照：技能命中但同场景存在失败记忆时，显式标注技能步骤中的已知死路段
+      let antiSection = '';
+      if (antiHits.length > 0) {
+        const anti = antiHits.map(a => `- "${a.approach}" failed with: ${a.symptom}`).join('\n');
+        antiSection = `\n[Known failures in this context] (do NOT repeat):\n${anti}`;
+      }
+
+      return `[System]: ${hits.length} matching skill(s):\n${lines.join('\n')}${antiSection}\n` +
         `[Next Step]: If a skill fits, call run_skill with confirm=true (verify with take_screenshot afterwards). ` +
         `Otherwise execute manually — skills are priors, not guarantees (UIs change).`;
     },

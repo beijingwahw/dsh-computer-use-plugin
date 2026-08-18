@@ -5,6 +5,10 @@
 import { mouse, keyboard, screen, Button, Key } from '@nut-tree/nut-js';
 import screenshot from 'screenshot-desktop';
 import type { Config } from './config';
+import { serialize } from './ioMutex';
+
+// D-1 物理躯体公理：serialize 自 system 层再导出 —— 下游只见防腐层，不见内部模块
+export { serialize };
 
 // 键位白名单：模型只能命中这里列出的键 —— 白名单即安全边界（来自 pressHotkey 地层）
 const keyMap: Record<string, Key> = {
@@ -27,6 +31,9 @@ export interface DisplayInfo {
 
 // 干跑标志：true 时动作类调用只记录不执行（截图保持真实，观察链路不受影响）
 let dryRun = false;
+
+// D-2 窗口操作委托：shaper 探测出能力后由 index.ts 注入（模块级状态与 dryRun 同款模式）
+let windowDelegate: ((keyword: string) => Promise<void>) | null = null;
 
 /** 所有动作方法的干跑闸门 */
 function guardDryRun(action: string, detail: unknown): boolean {
@@ -79,43 +86,52 @@ export const system = {
     const btn = btnMap[button];
     if (!btn) throw new Error(`Unknown mouse button: ${button}`);
     if (guardDryRun('clickMouse', { x, y, button })) return;
-    await mouse.move([{ x, y }]);
-    await mouse.click(btn);
+    // D-1：物理动作经唯一串行队列 —— 多心智并发触碰同一副手时自动排队
+    await serialize(async () => {
+      await mouse.move([{ x, y }]);
+      await mouse.click(btn);
+    });
   },
 
   /** 键盘输入：clearFirst 跨平台全选-删除时序（来自「双手纪元」） */
   async typeText(text: string, clearFirst: boolean = false): Promise<void> {
     if (guardDryRun('typeText', { text: text.substring(0, 30), clearFirst })) return;
-    if (clearFirst) {
-      // Windows/Linux 用 Ctrl+A，Mac 用 Cmd+A；全选必须先释放再按 Backspace（时序细节）
-      const isMac = process.platform === 'darwin';
-      const mod = isMac ? Key.LeftSuper : Key.LeftControl;
-      await keyboard.pressKey(mod, Key.A);
-      await keyboard.releaseKey(mod, Key.A);
-      await keyboard.pressKey(Key.Backspace);
-      await keyboard.releaseKey(Key.Backspace);
-    }
-    await keyboard.type(text);
+    await serialize(async () => {
+      if (clearFirst) {
+        // Windows/Linux 用 Ctrl+A，Mac 用 Cmd+A；全选必须先释放再按 Backspace（时序细节）
+        const isMac = process.platform === 'darwin';
+        const mod = isMac ? Key.LeftSuper : Key.LeftControl;
+        await keyboard.pressKey(mod, Key.A);
+        await keyboard.releaseKey(mod, Key.A);
+        await keyboard.pressKey(Key.Backspace);
+        await keyboard.releaseKey(Key.Backspace);
+      }
+      await keyboard.type(text);
+    });
   },
 
   /** 拖拽四拍时序：移->按->移->放，每拍 await（来自 dragMouse 地层） */
   async dragMouse(start: { x: number; y: number }, end: { x: number; y: number }): Promise<void> {
     if (guardDryRun('dragMouse', { start, end })) return;
-    await mouse.move([{ x: start.x, y: start.y }]);
-    await mouse.pressButton(Button.LEFT);
-    await mouse.move([{ x: end.x, y: end.y }]);
-    await mouse.releaseButton(Button.LEFT);
+    await serialize(async () => {
+      await mouse.move([{ x: start.x, y: start.y }]);
+      await mouse.pressButton(Button.LEFT);
+      await mouse.move([{ x: end.x, y: end.y }]);
+      await mouse.releaseButton(Button.LEFT);
+    });
   },
 
   /** 修复原版「四方向全部 scrollDown」的 bug：按方向分派 */
   async scroll(direction: 'up' | 'down' | 'left' | 'right', amount: number): Promise<void> {
     if (guardDryRun('scroll', { direction, amount })) return;
-    switch (direction) {
-      case 'up': await mouse.scrollUp(amount); break;
-      case 'down': await mouse.scrollDown(amount); break;
-      case 'left': await mouse.scrollLeft(amount); break;
-      case 'right': await mouse.scrollRight(amount); break;
-    }
+    await serialize(async () => {
+      switch (direction) {
+        case 'up': await mouse.scrollUp(amount); break;
+        case 'down': await mouse.scrollDown(amount); break;
+        case 'left': await mouse.scrollLeft(amount); break;
+        case 'right': await mouse.scrollRight(amount); break;
+      }
+    });
   },
 
   /**
@@ -128,15 +144,24 @@ export const system = {
     if (mapped.length !== keys.length) {
       throw new Error(`Unrecognized key names in combination: [${keys.join(', ')}]`);
     }
-    await keyboard.pressKey(...mapped);
-    await keyboard.releaseKey(...mapped);
+    await serialize(async () => {
+      await keyboard.pressKey(...mapped);
+      await keyboard.releaseKey(...mapped);
+    });
   },
 
   /**
-   * 按标题关键词激活窗口。nut-js 开源版不含窗口管理 —— 诚实抛出可操作的错误，
-   * 由上层工具给出 press_hotkey 降级路径（失败也设计成可恢复的路由节点）。
+   * D-2 债务清偿：从「诚实抛错」升级为「适配器委托」。
+   * 委托未注入或适配器无窗口能力 ⇒ 保留既有错误语义（降级路径不变）。
+   * 注入式委托而非直接 import：避免 system ↔ shaper 模块环（防腐层单向依赖纪律）。
    */
-  async switchWindowByTitle(_keyword: string): Promise<void> {
+  setWindowDelegate(fn: ((keyword: string) => Promise<void>) | null): void {
+    windowDelegate = fn;
+  },
+
+  async switchWindowByTitle(keyword: string): Promise<void> {
+    if (windowDelegate) return await windowDelegate(keyword);
+    // 无委托 = 无窗口管理能力：诚实抛出可操作的错误（press_hotkey 降级路径）
     throw new Error(
       'Window management is not available in this environment. ' +
       'Install a window-management provider, or switch windows via the press_hotkey tool.',

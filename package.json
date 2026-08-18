@@ -1,11 +1,38 @@
 {
-  "name": "computer-use-vision-plugin",
+  "name": "dsh-computer-use-plugin",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "description": "Vision-only desktop automation plugin for DeepSeek Harness (fusion refactor)",
+  "main": "dist/index.js",
   "engines": {
     "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-imports.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import ./test/register.mjs \"test/*.test.ts\"",
+    "doctor": "node --disable-warning=ExperimentalWarning --import ./test/register.mjs src/doctorCli.ts"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^24.0.0"
   },
   "dependencies": {
     "@nut-tree/nut-js": "^4.2.0",

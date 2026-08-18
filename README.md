@@ -1,6 +1,248 @@
-# DSH Computer Use: 纯视觉桌面自动化 Agent 插件（融合重构版）
+# DSH Computer Use Plugin
 
+**Give DeepSeek Harness real "eyes" and "hands"!**
 **赋予 DeepSeek Harness 真正的"眼睛"和"双手"！**
+
+**English** | [中文](#中文)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-green.svg)](package.json)
+[![DSH Plugin](https://img.shields.io/badge/DSH-plugin-orange.svg)](https://github.com/topics/dsh-plugin)
+
+A Computer Use plugin for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness). It completely abandons the underlying UI-tree dependency and adopts a **Vision-Only Grounding architecture**, letting the AI understand and operate a computer by "looking" at screenshots — just like a human.
+
+## Core Features
+
+- **Vision-Only Grounding**: No Accessibility API required; cross-platform (Win/Mac/Linux); works on cloud sandboxes, RDP sessions and even games
+- **Set-of-Mark (SoM) visual assistance**: Screenshots are automatically overlaid with a grid, a green crosshair and numbered element boxes; the state anchor carries a legend — killing coordinate hallucinations
+- **Smart context management**: Sliding window + image eviction to text summaries + `llm/pre-request` injection — however many screenshots you take, the model only ever sees the latest N images plus historical text placeholders
+- **State anchor protocol**: Every tool returns a structured `{status, state_anchor, next_step}` triple; `MANDATORY` directives enforce the ReAct verification loop
+- **Planner–Actor architecture**: The `start_complex_task` meta-tool decomposes long-horizon tasks into atomic actions and executes them step by step, failing fast on subtask failure
+- **Enterprise-grade guards**: Coordinate boundary validation, consecutive-failure circuit breaker, sensitive-action audit, popup interception (waterfall short-circuit semantics)
+- **Full desktop operations**: Screenshot, click, type, scroll, hotkeys, drag, tab/window switching, popup handling
+- **Pluggable hybrid mode**: Optionally hook up a local vision model (OmniParser-like) or an accessibility provider for precise coordinates
+
+## World-Class Breakthroughs: Four Self-Built Engines
+
+Four engines targeting the four real failure modes of vision-only CUA agents:
+
+| Failure mode | Engine | Mechanism |
+| --- | --- | --- |
+| **Blind spot**: click misses but agent believes it succeeded | Effect verification (`perceptualHash` + `actionVerifier`) | Take a full-screen dHash fingerprint before and after each action and compare Hamming distance; similarity > 0.97 flags a suspected no-op — the anchor warns and guides `zoom_inspect` recovery |
+| **Coordinate hallucination**: full-screen estimation is imprecise | Two-stage grounding (`zoom_inspect`) | Crop the target neighborhood, enlarge, redraw a 2×-density fine grid; the anchor carries `crop_bounds` and the mapping `full_x = x0 + fx*(x1-x0)` for exact back-mapping |
+| **No cross-session memory**: re-finding the same button from scratch every time | Scene-based UI memory (`remember_ui` / `recall_ui`) | Verified clicks are automatically persisted as landmarks; natural-language recall (mixed CJK/EN tokenization + overlap coefficient + success bonus + time decay); recalled values are priors only — screenshot re-verification is enforced |
+| **Non-reproducible**: successful paths cannot be persisted | Action journal & replay (`journal` + `replay_actions`) | A post-execute observer records every action as JSONL (optionally persisted); `replay_actions` replays step by step after explicit `confirm` — a successful sequence instantly becomes an executable macro |
+
+Companion enhancements:
+
+- **Progressive recovery hints** — circuit-breaker guard escalation: 1st failure injects a "zoom for precise grounding" hint, 2nd failure injects "switch modality (keyboard nav / scroll / memory recall)", 3rd failure cools down for one round
+- **Dry-run mode** (`dryRun: true`): action syscalls are recorded but not executed; screenshots stay real — a zero-risk sandbox for prompt tuning and demos
+- **Confidence self-report**: `click_mouse.confidence < 0.6` proactively suggests `zoom_inspect` first, making model uncertainty explicit
+
+## Round 2 — Adaptive Perception Loop
+
+With the four engines working, four new systemic losses surfaced. This round unifies them under "fingerprint-driven" control:
+
+| Loss point | Mechanism | Gain |
+| --- | --- | --- |
+| **Redundant screenshots**: full pipeline re-run even when the screen didn't change | Change-gated screenshots: after capture, compute dHash; distance ≤ 3 vs the newest fingerprint in window ⇒ skip compression/insertion, return an `unchanged` anchor referencing the old image (`force:true` bypasses) | Token & CPU drop in steady state; the model is explicitly told "screen unchanged, don't re-capture" |
+| **Animation misjudgment**: verifying at a fixed 400ms reads "still animating" as "took effect" | Adaptive settle: poll the full-screen fingerprint until two adjacent frames differ by ≤ 1 (stable) or settleMs×4 timeout | The verification window auto-aligns to real UI rhythm — fast pages return early, slow pages wait it out |
+| **Blind-retry loops**: re-clicking the same coordinate after failure | Anti-loop guard: last same-signature action already verified ineffective ⇒ intercept immediately and inject strategy-switch guidance (zoom / recall / keyboard nav / scroll); with no effect info, the 3rd repeat is intercepted | Idempotent retries get leeway; blind repetition gets cut |
+| **Cross-scene memory false recall**: login-page coordinates recalled for a settings page | Scene-fingerprint bonus: landmarks record the full-screen fingerprint at formation; `recall_ui` matches against the current window fingerprint — same scene (similarity ≥ 0.9) gets a +0.3 strong bonus | Historical coordinates are most trustworthy only when "it's the same screen again" — memory goes from superstition to context-awareness |
+
+Companion: **Token dashboard** — every screenshot anchor carries `context_images: n/limit` so the model always knows its image budget.
+
+## Round 3 — Expectation-Anchored Region-Level Verification
+
+Full-screen fingerprinting hides a flaw: it is insensitive to small local changes (a caret appearing, short text landing) — a 64-bit full-screen hash flips only a few bits and still reads >0.99 similarity, misjudging real effects as blind spots. Three mechanisms complete the perception stack:
+
+| Mechanism | Design | Problem solved |
+| --- | --- | --- |
+| **Dual-scale verification** | `regionDhash`: fingerprint the neighborhood around the action point separately. Decision matrix: full screen changed = `page-level`; region only = `element-level` (caret/highlight/text); neither = blind spot | Local-feedback misjudgment: the click did land but only a small patch changed → no more false "missed it" reports |
+| **Focus tracking** (`focusTracker`) | Click/drag endpoints auto-register a focus (30s expiry); `type_text` needs no coordinates from the model — verification centers on the focus region | Implicit inter-tool context: you almost always type where you last clicked; the faintest change (text landing) gets its own amplifier |
+| **Expectation anchoring** (`expected_change`) | New `click_mouse`/`type_text` parameter: declare the expected visual change before acting; the anchor echoes it, `next_step` mandates a verification screenshot, mismatch = partial failure | Upgrades verification from "did anything change" to "did the *expected* change happen" — the model's world model made explicit and checkable |
+| **Budget-aware orchestration** | `start_complex_task` gains `time_budget_sec`: subtask boundary clock checks; on expiry, gracefully abort with `[TIMEOUT]` + partial trajectory | The infinite-money-burning problem of long tasks: degrade instead of runaway |
+
+Third-generation anchor effect block:
+
+```json
+"effect": {
+  "detected": true,
+  "scale": "element-level",
+  "screen_similarity_pct": 99.8,
+  "region_similarity_pct": 71.2
+}
+```
+
+Full screen barely changed (99.8% similar) while the focus region changed dramatically (71.2%) — a textbook successful focus into an input box. The old version would falsely report a blind spot; the new one precisely identifies an element-level effect.
+
+## Round 4 — Semantic Closure (Text Perception + Visual Diff)
+
+The first three rounds stopped at the pixel layer — "did the change match the expectation" still relied on the model eyeballing images. This round installs **text perception** (local OCR) and **change localization** (visual diff), pushing verification to the semantic layer: the system directly confirms "did the expected content actually appear".
+
+| Mechanism | Design | Problem solved |
+| --- | --- | --- |
+| **`find_text`**: text → coordinates | Capture a clean screen (no grid overlay) → local OCR → return the **exact center coordinates** of every hit | Elements with text labels no longer rely on coordinate estimation — the biggest source of coordinate hallucination is eliminated |
+| **`read_text`**: region text read | Region crop + enlarge + OCR, returns plain text | Use text instead of screenshots when only content matters — order-of-magnitude Token savings |
+| **`diff_view`**: visual diff | Last two screenshots, pixel-wise diff → block aggregation → connected-component merge → red-boxed diff image + list of changed-region coordinates | "What did the action actually change" is computed and drawn by the system; the model no longer compares two full screens by eye |
+| **Semantic self-check (type_text)** | After typing, automatically OCR the focus neighborhood to verify **the typed text really landed** (no parameters) | Three invisible accidents exposed: typed into the wrong box / IME swallowed characters / focus lost |
+| **`expected_text` (click_mouse)** | After clicking, OCR the click neighborhood and check the expected text | Pixel change + semantic hit = double confirmation; semantic mismatch fails even if pixels changed |
+
+OCR is opt-in (`enableOcr: true`; language packs download once on first use — default `eng`, Chinese `chi_sim+eng`). All semantic features degrade gracefully when OCR is unavailable; everything else keeps working. `diff_view` is pure `sharp` — zero extra dependencies.
+
+The final verification stack (four layers):
+
+```
+L1 Pixel     dual-scale dHash   — did anything change? at which level (page/element)?
+L2 Locating  visualDiff         — exact bounds & center of the change
+L3 Semantic  OCR check          — does the change contain the expected text?
+L4 Expectation expected_*       — against what the model declared before acting
+```
+
+## Round 5 — Self-Evolving Skill Library + Risk-Aware Human-in-the-Loop
+
+Rounds 1–4 improved single-execution quality. This round tackles two higher-order problems: **successful experience cannot be persisted** (the same workflow re-explored from zero every time) and **credential safety** (an agent must not type passwords for humans).
+
+### Self-Evolving Skill Library (Trajectory → Skill → Reliability)
+
+| Stage | Mechanism |
+| --- | --- |
+| **Induction** | After a complex task succeeds, automatically solidify the trajectory (replayable actions since `markTaskStart`) into a skill: trigger description + step sequence + entry-scene fingerprint; `save_skill` persists arbitrary journal fragments manually |
+| **Dedup reinforcement** | Identical step sequences don't create duplicate cards — doing the same workflow three times = one skill verified three times (reliability 3/3), not three orphan cards |
+| **Persistence** | With `skillLibraryPath` configured, skills survive across sessions: what the last session learned, the next one uses out of the box |
+| **Matching** | `match_skill`: text overlap + Laplace-smoothed reliability + same-screen entry bonus (dHash ≥ 0.9) + recency; a skill is a prior, not a guarantee — anchors still require post-hoc verification |
+| **Closed-loop calibration** | Every `run_skill` outcome writes back `successCount/attemptCount` — as the UI evolves and a skill breaks, its reliability decays naturally and its match rank drops; failure hints guide manual repair and re-`save_skill` |
+
+### Risk Gate (Credentials Belong to Humans)
+
+World-class CUA consensus (e.g. Operator): **credential input belongs to the human**. Implemented in two stages, reusing existing infrastructure:
+
+1. **Sensitive-focus marking**: `click_mouse`'s `target_description` hits a risk keyword (password / verification code / 2FA / OTP / API key…, configurable) ⇒ `focusTracker` marks the focus sensitive; the anchor carries `sensitive_focus` and warns
+2. **Input interception**: `type_text` into a sensitive focus (or text that itself hits risk semantics) ⇒ returns `ACTION_REQUIRED`, pausing for the human to type personally; **the pending content is never echoed** (`[REDACTED]`)
+
+## Tool List
+
+| Tool | Description | Key parameters |
+| --- | --- | --- |
+| `take_screenshot` | Capture + SoM overlay + compression + sliding window + popup sensing + change gating | `region`, `force?` |
+| `click_mouse` | Normalized-coordinate click with built-in dHash effect verification + auto memory | `x`, `y`, `button`, `confidence?`, `target_description?` |
+| `type_text` | Type text at the focus; cross-platform clear-first | `text`, `clearFirst` |
+| `scroll_page` | Four-direction scrolling | `direction`, `amount` |
+| `press_hotkey` | Key combos (whitelisted, injection-proof) | `keys` (array) |
+| `drag_mouse` | Drag (four-beat sequence: move → press → move → release) | `startX/Y`, `endX/Y` |
+| `dismiss_popup` | Zero-side-effect meta tool: force a ReAct re-analysis | none |
+| `switch_tab` / `switch_window` | Tab / window switching (with fallback paths) | `direction` / `titleKeyword` |
+| `click_element` | Click by ID (element mode, short cache against ID drift) | `id` |
+| `extract_ui_vision` | Precise extraction via local vision model (optional) | none |
+| `start_complex_task` | Planner–Actor orchestration engine | `userRequest` |
+| `zoom_inspect` | Region crop + enlarge + fine grid, two-stage precise grounding | `x`, `y`, `half_size?` |
+| `find_text` / `read_text` | Text → exact coordinates / region text read (needs `enableOcr`) | `keyword` / `x?`, `y?`, `half_size?` |
+| `diff_view` | Visual diff of the last two screenshots: red-box diff image + changed-region list | none |
+| `remember_ui` / `recall_ui` | Scene-based UI memory write / natural-language recall | `description`, `x`, `y` / `query` |
+| `replay_actions` | Replay an action sequence from the journal (macro) | `confirm`, `from_step?`, `to_step?` |
+| `save_skill` / `match_skill` / `run_skill` | Skill persistence / reliability matching / one-click execution (outcomes write back reliability) | `description` / `query` / `id`, `confirm` |
+
+## Quick Start
+
+### 1. Prerequisites
+
+Node.js >= 18 (22 recommended) and pnpm. Native dependencies (`sharp` / `@nut-tree/nut-js` / `screenshot-desktop` / `tesseract.js`) install automatically with the plugin.
+
+### 2. Install the plugin
+
+DSH plugin source (name + origin):
+
+```
+dsh-computer-use-plugin github:beijingwahw/dsh-computer-use-plugin
+```
+
+Install with pnpm (git dependency):
+
+```bash
+pnpm add dsh-computer-use-plugin@github:beijingwahw/dsh-computer-use-plugin
+```
+
+Or add to `package.json` and `pnpm install`:
+
+```json
+{
+  "dependencies": {
+    "dsh-computer-use-plugin": "github:beijingwahw/dsh-computer-use-plugin"
+  }
+}
+```
+
+Install-and-run:
+
+- **Build artifacts are committed** (`dist/` ships with the repo) — no build scripts run at install time (no `prepare`/`postinstall`); `main` points straight at `dist/index.js`
+- **Framework dependencies are peers** (`@deepseek-ai/cordis` / `dsh-tools` / `schemastery`), provided by the DSH host
+- **`dsh.bundle` points to `cordis.patch.yml`** — the plugin registers and activates automatically on install
+
+### 3. Start DSH
+
+```bash
+pnpm dsh web
+```
+
+To override defaults, merge the `insert` entry from the bundled `cordis.patch.yml` into your own patch (when installed, `name` resolves via the package name — no absolute path needed):
+
+```yaml
+- insert:
+    - id: dsh-computer-use-plugin
+      name: 'dsh-computer-use-plugin'
+      config:
+        mouseSpeed: 1500
+        compressWidth: 1440
+        jpegQuality: 75
+        # ... every field has a code default; trim per deployment
+```
+
+### 4. Local development (from source)
+
+```bash
+git clone https://github.com/beijingwahw/dsh-computer-use-plugin
+cd dsh-computer-use-plugin
+pnpm install          # devDependencies (typescript etc.)
+npm run build         # regenerate dist/ (must re-run and commit after code changes)
+npm test
+```
+
+When loading directly from source, set the patch entry's `name` to the entry file's absolute path (e.g. `/your/path/dsh-computer-use-plugin/dist/index.js`).
+
+## Architecture
+
+```
+index.ts (apply)
+ ├─ systemPrompt  three orthogonal segments (grounding rules / ReAct workflow / popup handling)
+ ├─ buildAllTools(config)     tool factory (hybrid mode toggled by config)
+ ├─ start_complex_task        Planner–Actor meta tool
+ ├─ registerAllGuards         boundary / breaker / audit / popup interlock
+ ├─ onLlmPreRequest           sliding-window image injection into model requests
+ └─ ctx.effect                lifecycle cleanup
+
+Screenshot pipeline: captureScreen → multi-screen awareness → SoM overlay → sharp compression → sliding window → popup sensing → state anchor
+```
+
+- **Context Manager**: singleton sliding window; old screenshots "hollow out" into text summaries with a stable timeline; shrinkage is transparent to the model
+- **Visual Overlay**: high-performance SVG layer compositing via sharp (grid + crosshair + element boxes + adaptive labels)
+- **Orchestrator**: Planner decomposition + Actor execution + `[SUCCESS]/[FAILED]` string protocol + fail-fast
+- **Guards**: waterfall short-circuit interception; closure state dies automatically with plugin unload (Cordis register-as-effect model)
+
+## Notes & Safety Statement
+
+1. **System permissions**: macOS requires granting the terminal **Screen Recording** and **Accessibility** permissions in System Settings → Privacy & Security
+2. **Sandboxing**: this plugin directly controls the host machine by default. Strongly recommended to run inside an isolated environment (Docker, E2B or a VM)
+3. **Developer preview**: DSH core APIs iterate fast; tool-pipeline event names (`tools/pre-execute` etc.) are single-sourced in `src/guards/hooks.ts` — version migrations touch one place
+
+## License
+
+MIT
+
+---
+
+# 中文
+
+**[English（顶部）](#dsh-computer-use-plugin)** | **中文**
 
 基于 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 构建的 Computer Use 插件。完全摒弃底层 UI 树依赖，采用**纯视觉 Grounding 架构**，让 AI 像人类一样通过"看"屏幕截图来理解和操作电脑。
 
@@ -139,41 +381,68 @@ L4 预期   expected_*   —— 与模型行动前声明的预期对照
 
 ### 1. 环境准备
 
-Node.js >= 18（推荐 22）与 pnpm。
+Node.js >= 18（推荐 22）与 pnpm。原生依赖（`sharp` / `@nut-tree/nut-js` / `screenshot-desktop` / `tesseract.js`）随插件自动安装。
 
-### 2. 安装依赖
+### 2. 安装插件
 
-```bash
-npm install @nut-tree/nut-js screenshot-desktop sharp
+DSH 插件源（名称 + 来源）：
+
+```
+dsh-computer-use-plugin github:beijingwahw/dsh-computer-use-plugin
 ```
 
-### 3. 配置 DSH 加载插件
+以 pnpm 为例安装（git 依赖）：
 
-在 `cordis.yml` 中引入本插件（**name 必须是入口文件的绝对路径**）：
+```bash
+pnpm add dsh-computer-use-plugin@github:beijingwahw/dsh-computer-use-plugin
+```
+
+或直接写入 `package.json` 依赖后 `pnpm install`：
+
+```json
+{
+  "dependencies": {
+    "dsh-computer-use-plugin": "github:beijingwahw/dsh-computer-use-plugin"
+  }
+}
+```
+
+安装即用：
+
+- **构建产物已入库**（`dist/` 随仓库分发），安装时不执行任何构建脚本（无 `prepare`/`postinstall`），`main` 直指 `dist/index.js`
+- **框架依赖按 peer 声明**（`@deepseek-ai/cordis` / `dsh-tools` / `schemastery`），由 DSH 宿主提供
+- **`dsh.bundle` 指向 `cordis.patch.yml`**，插件随安装自动注册激活
+
+### 3. 启动 DSH
+
+```bash
+pnpm dsh web
+```
+
+需要覆盖默认配置时，把包内 `cordis.patch.yml` 的 `insert` 条目并入你自己的 patch（已安装场景 `name` 直接用包名解析，无需绝对路径）：
 
 ```yaml
 - insert:
-    - id: computer-use-vision-plugin
-      name: '/你的绝对路径/computer-use-vision-plugin/src/index.ts'
+    - id: dsh-computer-use-plugin
+      name: 'dsh-computer-use-plugin'
       config:
         mouseSpeed: 1500
         compressWidth: 1440
         jpegQuality: 75
-        gridDivisions: 10
-        maxImageCount: 3
-        maxConsecutiveFailures: 3
-        maxTextLength: 1000
-        enableElementIdMode: false
-        localVisionApi: ''
+        # ……全部字段均有代码默认值，可按部署裁剪
 ```
 
-全部配置字段均有代码默认值，可按部署裁剪。
-
-### 4. 启动 DSH
+### 4. 本地开发（源码直载）
 
 ```bash
-pnpm dsh web --patch ./cordis.yml
+git clone https://github.com/beijingwahw/dsh-computer-use-plugin
+cd dsh-computer-use-plugin
+pnpm install          # 安装 devDependencies（typescript 等）
+npm run build         # 重新生成 dist/（改代码后必须重跑并提交）
+npm test
 ```
+
+源码直载调试时，patch 条目的 `name` 写入口文件绝对路径（如 `/你的路径/dsh-computer-use-plugin/dist/index.js`）。
 
 ## 架构
 

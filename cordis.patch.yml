@@ -1,0 +1,69 @@
+# dsh-computer-use-plugin · DSH 加载覆盖层（cordis patch）
+# 安装方式：dsh-computer-use-plugin github:beijingwahw/dsh-computer-use-plugin
+# 注意：本插件经包管理器安装后，name 用包名即可解析（node_modules → package.json main → dist/index.js）；
+# 仅本地源码直载时才需要把 name 写成入口文件的绝对路径。
+# patch 文件只贡献配置层，不改变 loader 解析模块路径的 profile 目录。
+- insert:
+    - id: dsh-computer-use-plugin
+      name: 'dsh-computer-use-plugin'
+      # 全部字段均有代码默认值，以下为显式示例（可按部署裁剪）
+      config:
+        mouseSpeed: 1500            # 鼠标速度(ms)，越大越像人类
+        compressWidth: 1440         # 纯视觉架构画质优先
+        jpegQuality: 75
+        gridDivisions: 10           # SoM 网格，0 关闭
+        maxImageCount: 3            # 滑动窗口保留图片数
+        maxConsecutiveFailures: 3   # 熔断阈值
+        maxTextLength: 1000         # 单次输入上限
+        enableElementIdMode: false  # 混合 ID 寻址模式（需无障碍 Provider）
+        localVisionApi: ''          # 本地视觉模型，如 http://127.0.0.1:8000/parse_gui
+        # ─── 世界级升级 ───
+        verifyActions: true         # dHash 前后对比，检测盲点（点了没反应）
+        actionSettleMs: 400         # 动作后等待 UI 响应再取指纹
+        noopSimilarityThreshold: 0.97
+        autoRemember: true          # 验证生效的点击自动写入 UI 记忆
+        enableUIMemory: true        # remember_ui / recall_ui 工具
+        uiMemoryCapacity: 200
+        enableJournal: true         # 行动日志 + replay_actions
+        journalPath: ''             # JSONL 落盘路径，留空仅内存
+        replayMaxSteps: 100
+        dryRun: false               # 干跑：只记录不执行，截图真实
+        # ─── 第二轮优化创新 ───
+        stableScreenDistance: 3     # 变化门控：指纹距离<=3 视为屏幕未变
+        adaptiveSettle: true        # 自适应稳定等待（动画期不误判）
+        # ─── 第三轮创新 ───
+        regionVerifyRadius: 0.15    # 区域验证半径（屏幕比例），0 禁用
+        focusMaxAgeMs: 30000        # 焦点有效期：点击后多久内输入可复用其坐标
+        # ─── 第四轮创新 ───
+        enableOcr: false            # 本地 OCR（find_text/read_text/语义核对），语言包首次需联网
+        ocrLang: eng                # 'eng' 或 'chi_sim+eng'
+        # ─── 第五轮创新 ───
+        enableSkillLibrary: true    # 自进化技能库（归纳/匹配/执行）
+        skillLibraryPath: ''        # 技能 JSON 路径；配置后技能跨会话存活
+        autoInduceSkills: true      # 复杂任务成功后自动归纳技能
+        enableRiskGate: true        # 风险闸门：凭据由用户输入，Agent 不代劳
+        riskPatterns: 'password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥'
+        # ─── 第六轮创新：前瞻防御与失败学习 ───
+        enableApprovalGate: true    # 不可逆操作闸门：需 request_approval 一次性令牌
+        dangerPatterns: 'send,发送,delete,删除,pay,支付,submit order,format,uninstall,reset,withdraw,transfer'
+        # ─── 第七轮创新：工程卓越（可观测/可审计/可恢复）───
+        enableTelemetry: true       # per-tool 成败/noop/延迟分位 + get_metrics / self_diagnose
+        checkpointPath: '/var/lib/dsh/computer-use-checkpoint.json'  # 认知快照：启动恢复/卸载保存（留空禁用）
+        # ─── 创世纪（B-5~B-8）：外部护栏 + Token 硬预算 + 语义弹窗 ───
+        visionApiTimeoutMs: 5000    # 本地视觉 API 超时：服务挂起时快速失败，agent 不永挂
+        enableLegacySummary: true   # B-6 遗像摘要：驱逐前 OCR 中央区域，旧图文本保留语义（需 enableOcr）
+        legacySummaryMaxChars: 200  # B-6 遗像字符预算：防 OCR 长文反噬 Token
+        maxContextImageKb: 600      # B-7 图片累计体积硬预算（KB）：与 maxImageCount 双约束
+        popupKeywords: 'cookie,allow,accept,confirm,登录,订阅,update,install,trial,upgrade now,subscribe,accept all,agree'  # B-8 语义弹窗词表（需 enableOcr）
+        # ─── 认知升维（C-1~C-5）：直觉 / 想象力 / 自我意识 / 群体智慧 ───
+        intentVerify: true           # C-1 意图感知验证：动作携带 expected_effect 时物理规则裁决（无期望零回归）
+        physicsRules: ''             # C-1 物理规则启用清单；空 = 全部（toggle_on/menu_expand/scroll_content_up/...）
+        enableSemanticMatch: true    # C-2 语义技能匹配：零依赖嵌入零样本泛化
+        enableRecombination: true    # C-2 DNA 重组：无命中技能时基因拼接合成新技能
+        salienceFocus: true          # C-4 认知焦点：显著度驱逐 + 任务目标钉扎（关 = 纯 FIFO）
+        pinBudget: 1                 # C-4 钉扎名额上限（防全钉扎击穿双预算）
+        subconsciousCapacity: 32     # C-4 潜意识池容量；0 禁用灵光一闪
+        subconsciousMatchDistance: 6 # C-4 既视感阈值（dHash 汉明距离）
+        swarmEndpoint: ''            # C-5 群体智能中心；空 = 零网络（本地经验晶体依然生效）
+        swarmSyncIntervalMs: 300000  # C-5 同步间隔（ms，非阻塞 fire-and-forget）
+        crystalCapacity: 500         # C-5 经验晶体容量

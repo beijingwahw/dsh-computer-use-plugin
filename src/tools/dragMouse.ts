@@ -5,6 +5,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
 import { captureBefore, settleAndVerify } from '../actionVerifier';
+import { quantum } from '../quantumSense';
 import { focusTracker } from '../focusTracker';
 
 export function createDragMouseTool(config: Config) {
@@ -55,6 +56,8 @@ export function createDragMouseTool(config: Config) {
             regionRadius: config.regionVerifyRadius,
           });
         }
+        // D-3 量子感知：验证证据喂给状态机（effect=null ⇒ undefined ⇒ 不计数）
+        quantum.recordEffect(effect?.detected);
         const noopSuspected = effect && !effect.detected;
 
         return JSON.stringify({

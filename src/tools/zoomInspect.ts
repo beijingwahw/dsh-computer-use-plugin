@@ -59,7 +59,7 @@ export function createZoomInspectTool(config: Config) {
           .toBuffer();
 
         const base64 = `data:image/jpeg;base64,${compressed.toString('base64')}`;
-        const { currentId } = contextManager.addScreenshot(base64);
+        const { currentId } = await contextManager.addScreenshot(base64);
 
         return JSON.stringify({
           status: 'SUCCESS',

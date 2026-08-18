@@ -24,6 +24,11 @@ export function setAccessibilityProvider(p: AccessibilityProvider) {
   provider = p;
 }
 
+/** D-3 白盒源就绪判定：provider 已注入方可声明 isReady（同步、无副作用） */
+export function hasAccessibilityProvider(): boolean {
+  return provider !== null;
+}
+
 /**
  * 提取可交互元素。双重过滤（语义角色 + 几何面积>0）+ 三级 fallback 命名 + Token 预算(50)。
  */

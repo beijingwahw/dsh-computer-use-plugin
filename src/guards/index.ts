@@ -7,9 +7,11 @@ import { registerCircuitBreakerGuard } from './circuitBreakerGuard';
 import { registerAuditGuard } from './auditGuard';
 import { registerPopupGuard } from './popupGuard';
 import { registerRepeatActionGuard } from './repeatActionGuard';
+import { registerTelemetryGuard } from './telemetryGuard';
 import { registerJournalGuard } from '../journal';
 
 export { updatePopupState, getPopupState } from './popupGuard';
+export { onToolPre, onToolPost, onLlmPreRequest } from './hooks';
 
 export function registerAllGuards(ctx: Context, config: Config): void {
   registerBoundsGuard(ctx);
@@ -20,4 +22,6 @@ export function registerAllGuards(ctx: Context, config: Config): void {
   registerRepeatActionGuard(ctx);
   // 行动日志观察者（突破三）：记录一切动作类调用，供审计与重放
   if (config.enableJournal) registerJournalGuard(ctx, config);
+  // 遥测观察者（第七轮）：纯旁路指标采集，绝不改写结果
+  if (config.enableTelemetry) registerTelemetryGuard(ctx);
 }

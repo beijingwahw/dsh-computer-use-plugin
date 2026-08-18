@@ -7,6 +7,9 @@
 // 两者皆未变 = 疑似无效操作（盲点）。
 import { system } from './system';
 import { dhash, regionDhash, hammingDistance, similarity } from './perceptualHash';
+import { oscillationTracker } from './oscillationTracker';
+import type { IntentExpectation, PhysicsVerdict } from './intent';
+import { getEnabledPhysicsRules } from './intent';
 
 export const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
@@ -22,6 +25,8 @@ export interface SettleOptions {
   threshold: number;
   /** 区域验证半径（归一化屏幕比例）；0 = 禁用区域验证 */
   regionRadius: number;
+  /** C-1：物理规则启用清单（空 = 全部）；来自 config.physicsRules */
+  physicsRules?: string;
 }
 
 /** 动作前状态：全屏指纹 + 可选的区域指纹（同一帧截屏，区域由 focus 决定） */
@@ -29,19 +34,22 @@ export interface BeforeState {
   screen: string;
   region: string | null;
   focus: { x: number; y: number } | null;
+  /** C-1：动作前帧 buffer（物理规则需要前后两帧对比；无验证需求时不保留引用） */
+  buffer?: Buffer;
 }
 
 /** 动作前快照：一次性取全屏 buffer，分别算全屏/区域指纹 */
 export async function captureBefore(
   focus?: { x: number; y: number } | null,
   regionRadius = 0,
+  keepBuffer = false,
 ): Promise<BeforeState> {
   const buf = await system.captureScreen();
   const screen = await dhash(buf);
   const region = focus && regionRadius > 0
     ? await regionDhash(buf, focus.x, focus.y, regionRadius)
     : null;
-  return { screen, region, focus: focus ?? null };
+  return { screen, region, focus: focus ?? null, buffer: keepBuffer ? buf : undefined };
 }
 
 /** 纯对比：给定前后指纹生成报告 */
@@ -61,6 +69,10 @@ export interface CombinedEffect {
   region: EffectReport | null;     // 无焦点/禁用时为 null
   scale: 'page-level' | 'element-level' | 'none';
   afterBuffer: Buffer;             // 稳定后的帧（供语义核对等下游消费）
+  afterHash: string;               // 稳定帧指纹（振荡检测已在此消费）
+  oscillation: string | null;      // 振荡告警（屏幕状态在动作间反复回归旧值）
+  /** C-1 意图裁决：期望 kind + 物理规则是否找到证据（未声明期望时 undefined） */
+  intent?: { expected: string; satisfied: boolean; evidence: string };
 }
 
 /** 轮询直到屏幕稳定：返回稳定帧的 buffer + 全屏指纹（同一帧供区域指纹复用） */
@@ -85,10 +97,14 @@ export async function waitForStableFrame(
 /**
  * 动作后统一入口：自适应等待稳定帧，然后双尺度对比。
  * 决策矩阵：全屏变 = page-level；仅区域变 = element-level；都没变 = none（盲点）。
+ * C-1：传入 expectation 时，物理规则引擎在双尺度之后追加意图裁决（L2 证据阶梯）。
+ *   物理规则命中 ⇒ intent.satisfied 为裁决结论（可与 detected 分歧 —— 变了但不是预期的变化）；
+ *   规则不适用/未启用 ⇒ intent 标注 not-applicable，行为回退纯双尺度（零回归）。
  */
 export async function settleAndVerify(
   before: BeforeState,
   opts: SettleOptions,
+  expectation?: IntentExpectation | null,
 ): Promise<CombinedEffect> {
   let afterBuf: Buffer;
   let afterScreen: string;
@@ -115,7 +131,44 @@ export async function settleAndVerify(
     ? 'page-level'
     : region?.effect_detected ? 'element-level' : 'none';
 
-  return { detected, screen, region, scale, afterBuffer: afterBuf };
+  // 振荡检测（第六轮）：稳定帧指纹顺手入环，零额外截图
+  const oscillation = oscillationTracker.observe(afterScreen);
+
+  // ── C-1 意图裁决（L2 物理证据）：带着预期找证据，而非盲目找不同 ──
+  let intent: CombinedEffect['intent'];
+  if (expectation && before.buffer) {
+    const rules = getEnabledPhysicsRules(opts.physicsRules ?? '');
+    const rule = rules.get(expectation.kind);
+    if (rule) {
+      let verdict: PhysicsVerdict;
+      try {
+        verdict = await rule.check({
+          beforeBuf: before.buffer,
+          afterBuf,
+          focus: before.focus,
+          regionRadius: opts.regionRadius,
+        });
+      } catch (e: any) {
+        verdict = { satisfied: false, evidence: `physics rule error: ${e.message}`, notApplicable: true };
+      }
+      intent = {
+        expected: expectation.kind,
+        satisfied: verdict.satisfied,
+        evidence: verdict.notApplicable
+          ? `rule not applicable (${verdict.evidence}); fell back to dual-scale verdict`
+          : verdict.evidence,
+      };
+    } else {
+      // 语义/委托类期望或规则被 config 裁剪：不裁决，交给 L0/L1/L3 既有通道
+      intent = {
+        expected: expectation.kind,
+        satisfied: detected,
+        evidence: 'no physics rule for this kind; verdict delegated to dual-scale detection',
+      };
+    }
+  }
+
+  return { detected, screen, region, scale, afterBuffer: afterBuf, afterHash: afterScreen, oscillation, intent };
 }
 
 /** 兼容旧签名：立即取全屏对比（不等待） */

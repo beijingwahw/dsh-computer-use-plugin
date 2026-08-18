@@ -2,11 +2,14 @@
 // 突破三的工具面：行动重放。日志中的动作序列 = 可执行的宏。
 // confirm:true 显式确认（防误触发真实桌面操作）；步数上限由配置约束；
 // click_element 依赖运行时元素缓存，重放时显式跳过并说明原因。
+// B-4：返回值统一走 toolResult 工厂（反幻觉锚点全覆盖）。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { journal, JournalEntry } from '../journal';
+import { journal } from '../journal';
+import type { JournalEntry } from '../journal';
 import { sleep } from '../actionVerifier';
+import { toolOk, toolErr, toolActionRequired } from '../toolResult';
 
 export function createReplayActionsTool(config: Config) {
   return defineTool({
@@ -25,14 +28,18 @@ export function createReplayActionsTool(config: Config) {
     },
     async execute(args) {
       if (!config.enableJournal) {
-        return `[Error]: Journal is disabled (enableJournal=false). Nothing to replay.`;
+        return toolErr(
+          'Replay unavailable.',
+          'Journal is disabled (enableJournal=false). Nothing to replay.',
+          'Enable the journal in config to record and replay actions.',
+        );
       }
       if (args.confirm !== true) {
-        return JSON.stringify({
-          status: 'ACTION_REQUIRED',
-          state_anchor: { current_state: 'Replay is a real-world side-effect operation.' },
-          next_step: 'Set confirm=true to execute the replay, or inspect the plan first via the dry-run report.',
-        }, null, 2);
+        return toolActionRequired(
+          'replay-needs-confirm',
+          { current_state: 'Replay is a real-world side-effect operation.' },
+          'Set confirm=true to execute the replay, or inspect the plan first via the dry-run report.',
+        );
       }
 
       const all = journal.list();
@@ -40,9 +47,19 @@ export function createReplayActionsTool(config: Config) {
       const to = Math.min(all.length - 1, args.to_step ?? all.length - 1);
       const steps = all.slice(from, to + 1);
 
-      if (steps.length === 0) return `[System]: No replayable actions in range [${from}, ${to}].`;
+      if (steps.length === 0) {
+        return toolOk(
+          `No replayable actions in range [${from}, ${to}].`,
+          { range: { from, to }, journal_length: all.length },
+          'Adjust from_step/to_step, or perform the actions manually — the journal may be empty or the range is out of bounds.',
+        );
+      }
       if (steps.length > config.replayMaxSteps) {
-        return `[Error]: ${steps.length} steps exceed replayMaxSteps (${config.replayMaxSteps}). Narrow the range.`;
+        return toolErr(
+          'Replay rejected.',
+          `${steps.length} steps exceed replayMaxSteps (${config.replayMaxSteps}).`,
+          'Narrow the from_step/to_step range and retry in batches.',
+        );
       }
 
       const log: string[] = [];
@@ -52,8 +69,11 @@ export function createReplayActionsTool(config: Config) {
         await sleep(150); // 步间微歇，给 UI 响应时间
       }
 
-      return `[System]: Replayed ${steps.length} action(s).\n${log.join('\n')}\n` +
-        `[Next Step]: Call 'take_screenshot' to verify the final state.`;
+      return toolOk(
+        `Replayed ${steps.length} action(s).`,
+        { replayed_steps: steps.length, detail: log },
+        "Call 'take_screenshot' to verify the final state matches the expected outcome.",
+      );
     },
   });
 }

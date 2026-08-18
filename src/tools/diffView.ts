@@ -52,7 +52,7 @@ export function createDiffViewTool() {
         const overlaid = await renderDiffOverlay(afterBuf, diff.regions);
         const compressed = await sharp(overlaid).jpeg({ quality: 80 }).toBuffer();
         const base64 = `data:image/jpeg;base64,${compressed.toString('base64')}`;
-        const { currentId } = contextManager.addScreenshot(base64);
+        const { currentId } = await contextManager.addScreenshot(base64);
 
         const regionLines = diff.regions.slice(0, 8).map(r =>
           `- Δ${r.index}: bbox=(${r.bbox_normalized.x0.toFixed(2)},${r.bbox_normalized.y0.toFixed(2)})-(${r.bbox_normalized.x1.toFixed(2)},${r.bbox_normalized.y1.toFixed(2)}) center=(${r.center.x.toFixed(3)}, ${r.center.y.toFixed(3)}) size=${r.tiles_changed}`,

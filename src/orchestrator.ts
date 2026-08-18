@@ -4,6 +4,8 @@
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。
 import { planTasks, SubTask, ChatFn } from './planner';
 
+export type { ChatFn } from './planner';
+
 // Actor 人格纪律（来自「Actor 纪元」地层）：四步 ReAct 含独立的「排雷」步骤；
 // 状态协议与 orchestrator 的 includes 嗅探隔着抽象层握手；反越权负面禁令锁死职责边界。
 export const ACTOR_SYSTEM_PROMPT = `

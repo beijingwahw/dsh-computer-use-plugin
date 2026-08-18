@@ -1,4 +1,8 @@
 node_modules/
-dist/
+# dist/ 不再忽略：构建产物必须入库（git 依赖安装时不执行构建脚本，
+# package.json main 指向的 dist/index.js 必须随仓库存在）
 *.log
 .DS_Store
+# 运行时产物（doctor CLI 自检输出），不入库
+doctor-memory.json
+doctor-report.json
