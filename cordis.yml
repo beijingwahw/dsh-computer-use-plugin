@@ -29,3 +29,6 @@
         # ─── 第二轮优化创新 ───
         stableScreenDistance: 3     # 变化门控：指纹距离<=3 视为屏幕未变
         adaptiveSettle: true        # 自适应稳定等待（动画期不误判）
+        # ─── 第三轮创新 ───
+        regionVerifyRadius: 0.15    # 区域验证半径（屏幕比例），0 禁用
+        focusMaxAgeMs: 30000        # 焦点有效期：点击后多久内输入可复用其坐标

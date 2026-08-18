@@ -122,6 +122,10 @@ export function apply(ctx: Context, config: Config) {
         required: true,
         description: 'The complex user request.',
       },
+      time_budget_sec: {
+        type: 'number', required: false,
+        description: 'Optional wall-clock budget in seconds. On expiry the orchestrator returns partial results with a [TIMEOUT] marker.',
+      },
     },
     output: {
       schema: { type: 'string' },
@@ -139,7 +143,7 @@ export function apply(ctx: Context, config: Config) {
         return '[FAILED] Actor loop is not wired to the DSH agents service yet (developer preview).';
       };
 
-      return await runOrchestrator(args.userRequest, actorFn, chat);
+      return await runOrchestrator(args.userRequest, actorFn, chat, args.time_budget_sec ? args.time_budget_sec * 1000 : undefined);
     },
   }));
 

@@ -38,6 +38,36 @@ export function hammingDistance(a: string, b: string): number {
   return dist;
 }
 
+/**
+ * 区域指纹（第三轮创新的地基）：以归一化坐标为中心裁剪正方形邻域再取 dHash。
+ * 动机：全屏指纹对局部小变化（光标出现/短文本输入）不敏感 —— 64 位里只有几位翻转，
+ * 相似度仍 >0.99，会被误判为「没点中」。区域指纹把变化放大：同一变化在小区块里
+ * 占比极高，距离陡增。双尺度互补：全屏管「页面级跳转」，区域管「元素级反馈」。
+ */
+export async function regionDhash(
+  buffer: Buffer,
+  cxPct: number,
+  cyPct: number,
+  radiusPct = 0.15,
+  hashSize = 8,
+): Promise<string> {
+  const meta = await sharp(buffer).metadata();
+  const W = meta.width!, H = meta.height!;
+  const cx = Math.round(cxPct * W);
+  const cy = Math.round(cyPct * H);
+  const rx = Math.max(8, Math.round(radiusPct * W));
+  const ry = Math.max(8, Math.round(radiusPct * H));
+  const left = Math.max(0, cx - rx);
+  const top = Math.max(0, cy - ry);
+  const width = Math.min(W - left, rx * 2);
+  const height = Math.min(H - top, ry * 2);
+
+  const crop = await sharp(buffer)
+    .extract({ left, top, width, height })
+    .toBuffer();
+  return dhash(crop, hashSize);
+}
+
 /** 相似度 0~1：1 - distance/64 */
 export function similarity(a: string, b: string): number {
   return 1 - hammingDistance(a, b) / HASH_BITS;

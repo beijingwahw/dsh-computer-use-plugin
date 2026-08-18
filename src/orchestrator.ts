@@ -35,7 +35,10 @@ export async function runOrchestrator(
   userPrompt: string,
   actorFn: ActorFn,
   chat?: ChatFn,
+  timeBudgetMs?: number,
 ): Promise<string> {
+  const startAt = Date.now();
+
   // 1. 调用 Planner 拆解任务
   const subTasks = await planTasks(userPrompt, chat);
 
@@ -48,6 +51,15 @@ export async function runOrchestrator(
 
   // 2. 循环执行子任务
   for (const task of subTasks) {
+    // 预算感知：在子任务边界检查时钟 —— 长任务的优雅降级，而非无限烧钱
+    if (timeBudgetMs && Date.now() - startAt > timeBudgetMs) {
+      const elapsed = Math.round((Date.now() - startAt) / 1000);
+      results.push(`[TIMEOUT] Time budget of ${Math.round(timeBudgetMs / 1000)}s exhausted after ${elapsed}s. ` +
+        `${subTasks.length - results.length} task(s) skipped.`);
+      console.warn(`[Orchestrator] Time budget exhausted. Aborting with partial results.`);
+      break;
+    }
+
     console.log(`[Orchestrator] Executing Task #${task.id}: ${task.action}`);
 
     // 3. 将子任务交给 Actor 执行（依赖注入：编排器不关心 Actor 如何实现）
@@ -55,7 +67,7 @@ export async function runOrchestrator(
     results.push(`Task #${task.id} (${task.action}): ${result}`);
 
     // 4. fail-fast 容错：后续步骤建立在失败步骤的前提上，中止是最理性的选择
-    if (result.includes('[FAILED]')) {
+    if (result.includes('[FAILED]') || result.includes('[TIMEOUT]')) {
       console.warn(`[Orchestrator] Task #${task.id} failed. Aborting plan.`);
       break;
     }

@@ -4,7 +4,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { captureStateHash, settleAndReport } from '../actionVerifier';
+import { captureBefore, settleAndVerify } from '../actionVerifier';
+import { focusTracker } from '../focusTracker';
 
 export function createTypeTextTool(config: Config) {
   return defineTool({
@@ -21,13 +22,17 @@ export function createTypeTextTool(config: Config) {
         required: false,
         description: 'Set to true to select all and clear existing text before typing. Default is false.',
       },
+      expected_change: {
+        type: 'string', required: false,
+        description: 'What should appear if typing succeeds? e.g., "the typed text shows in the input field".',
+      },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const { text, clearFirst = false } = args;
+      const { text, clearFirst = false, expected_change } = args;
 
       // 前哨闸门：工具参数是被模型控制的输入面，防注入恶意长文本
       if (text.length > config.maxTextLength) {
@@ -35,21 +40,25 @@ export function createTypeTextTool(config: Config) {
       }
 
       try {
-        // 效果验证：输入理应改变画面（焦点框/文字出现）；疑似无变化 ⇒ 可能没有焦点
+        // 效果验证（焦点区域放大）：输入的变化几乎总发生在「最近点击的位置」——
+        // 焦点追踪器把上次点击坐标隐式传给本工具，文字出现这类局部变化
+        // 在全屏指纹里撑不动距离，但在焦点区域指纹里是巨变
         const verify = config.verifyActions && !config.dryRun;
-        const before = verify ? await captureStateHash() : null;
+        const focus = focusTracker.get(config.focusMaxAgeMs);
+        const before = verify ? await captureBefore(focus, config.regionVerifyRadius) : null;
 
         await system.typeText(text, clearFirst);
 
         let effect = null;
         if (before) {
-          effect = await settleAndReport(before, {
+          effect = await settleAndVerify(before, {
             adaptive: config.adaptiveSettle,
             settleMs: config.actionSettleMs,
             threshold: config.noopSimilarityThreshold,
+            regionRadius: config.regionVerifyRadius,
           });
         }
-        const noopSuspected = effect && !effect.effect_detected;
+        const noopSuspected = effect && !effect.detected;
 
         return JSON.stringify({
           status: 'SUCCESS',
@@ -61,13 +70,18 @@ export function createTypeTextTool(config: Config) {
             cleared_existing: clearFirst,
             input_state: clearFirst ? 'Replaced all previous content' : 'Appended to existing content',
             effect: effect ? {
-              detected: effect.effect_detected,
-              similarity_pct: effect.similarity_pct,
+              detected: effect.detected,
+              scale: effect.scale,
+              screen_similarity_pct: effect.screen.similarity_pct,
+              region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
+              verified_around_focus: effect.region ? true : false,
             } : 'verification-off',
+            expected_change: expected_change || undefined,
           },
           next_step: noopSuspected
-            ? 'WARNING: The screen barely changed — the input may have NO focus. Click the input field first, then retype.'
-            : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field.",
+            ? 'WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.'
+            : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field." +
+              (expected_change ? ` Confirm: "${expected_change}".` : ''),
         }, null, 2);
 
       } catch (error: any) {

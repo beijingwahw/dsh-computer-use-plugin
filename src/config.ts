@@ -49,6 +49,11 @@ export interface Config {
   stableScreenDistance: number;
   /** 自适应稳定等待：轮询至屏幕稳定再验证（动画期不误判）；false 则固定 actionSettleMs */
   adaptiveSettle: boolean;
+  // ─── 第三轮创新 ───
+  /** 区域验证半径（屏幕宽度比例）；聚焦动作点邻域指纹，放大局部反馈；0 = 禁用 */
+  regionVerifyRadius: number;
+  /** 焦点有效期(ms)：点击后多久内 type_text 可复用其坐标做区域验证 */
+  focusMaxAgeMs: number;
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -73,4 +78,6 @@ export const Config: Schema<Config> = Schema.object({
   dryRun: Schema.boolean().default(false).description('Dry-run: log actions without executing'),
   stableScreenDistance: Schema.number().default(3).description('Change-gate: dHash distance <= this = screen unchanged'),
   adaptiveSettle: Schema.boolean().default(true).description('Poll until screen settles before verifying effects'),
+  regionVerifyRadius: Schema.number().default(0.15).description('Region-verify radius as screen fraction; 0 = off'),
+  focusMaxAgeMs: Schema.number().default(30000).description('Focus validity window for region verification'),
 });

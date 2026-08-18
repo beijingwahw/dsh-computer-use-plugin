@@ -4,7 +4,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { captureStateHash, settleAndReport } from '../actionVerifier';
+import { captureBefore, settleAndVerify } from '../actionVerifier';
+import { focusTracker } from '../focusTracker';
 
 export function createDragMouseTool(config: Config) {
   return defineTool({
@@ -35,20 +36,26 @@ export function createDragMouseTool(config: Config) {
         const startPixel = { x: Math.round(startX * size.width), y: Math.round(startY * size.height) };
         const endPixel = { x: Math.round(endX * size.width), y: Math.round(endY * size.height) };
 
-        // 效果验证：拖拽必然移动画面内容；疑似无变化 ⇒ 可能没抓住目标
-        const before = config.verifyActions && !config.dryRun ? await captureStateHash() : null;
+        // 效果验证（双尺度）：起点区域是「被抓取物」原来的位置，拖拽后必然剧变；
+        // 终点登记为新焦点，供后续输入类动作的区域验证使用
+        const verify = config.verifyActions && !config.dryRun;
+        const before = verify
+          ? await captureBefore({ x: startX, y: startY }, config.regionVerifyRadius)
+          : null;
 
         await system.dragMouse(startPixel, endPixel);
+        focusTracker.set(endX, endY);
 
         let effect = null;
         if (before) {
-          effect = await settleAndReport(before, {
+          effect = await settleAndVerify(before, {
             adaptive: config.adaptiveSettle,
             settleMs: config.actionSettleMs,
             threshold: config.noopSimilarityThreshold,
+            regionRadius: config.regionVerifyRadius,
           });
         }
-        const noopSuspected = effect && !effect.effect_detected;
+        const noopSuspected = effect && !effect.detected;
 
         return JSON.stringify({
           status: 'SUCCESS',
@@ -58,12 +65,14 @@ export function createDragMouseTool(config: Config) {
             absolute_pixels: { start: startPixel, end: endPixel },
             screen_resolution: `${size.width}x${size.height}`,
             effect: effect ? {
-              detected: effect.effect_detected,
-              similarity_pct: effect.similarity_pct,
+              detected: effect.detected,
+              scale: effect.scale,
+              screen_similarity_pct: effect.screen.similarity_pct,
+              region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
             } : 'verification-off',
           },
           next_step: noopSuspected
-            ? 'WARNING: The screen barely changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
+            ? 'WARNING: Neither the screen nor the start region changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
             : "MANDATORY: Call 'take_screenshot' to verify the drag result.",
         }, null, 2);
 

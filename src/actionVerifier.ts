@@ -1,23 +1,47 @@
 // src/actionVerifier.ts
-// 行为效果验证引擎（突破一）+ 第二轮创新：自适应稳定等待。
-// 固定 sleep 的问题：动画/加载中取指纹，把「还在动」误判为「产生了效果」。
-// 自适应策略：轮询整屏指纹，直到连续两次几乎相同（屏幕稳定）或超时 —— 验证窗口
-// 自动对齐 UI 的真实节奏，快页面不等 400ms，慢页面等到 settleMs*4。
+// 行为效果验证引擎。三轮演进：
+//   R1 盲点检测（全屏 dHash 前后对比）
+//   R2 自适应稳定等待（轮询至屏幕稳定，动画期不误判）
+//   R3 双尺度验证（全屏 + 区域指纹）+ 焦点区域放大局部变化
+// 判定矩阵：全屏变化 = 页面级效果；仅区域变化 = 元素级效果（光标出现/文字输入）；
+// 两者皆未变 = 疑似无效操作（盲点）。
 import { system } from './system';
-import { dhash, hammingDistance, similarity } from './perceptualHash';
+import { dhash, regionDhash, hammingDistance, similarity } from './perceptualHash';
 
 export const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 export interface EffectReport {
-  effect_detected: boolean;  // true = 画面发生真实变化
+  effect_detected: boolean;  // true = 发生真实变化
   similarity_pct: number;    // 前后相似度（越高越可能没点中）
   distance: number;          // 汉明距离原始值
 }
 
-/** 取当前整屏状态指纹 */
-export async function captureStateHash(): Promise<string> {
+export interface SettleOptions {
+  adaptive: boolean;
+  settleMs: number;
+  threshold: number;
+  /** 区域验证半径（归一化屏幕比例）；0 = 禁用区域验证 */
+  regionRadius: number;
+}
+
+/** 动作前状态：全屏指纹 + 可选的区域指纹（同一帧截屏，区域由 focus 决定） */
+export interface BeforeState {
+  screen: string;
+  region: string | null;
+  focus: { x: number; y: number } | null;
+}
+
+/** 动作前快照：一次性取全屏 buffer，分别算全屏/区域指纹 */
+export async function captureBefore(
+  focus?: { x: number; y: number } | null,
+  regionRadius = 0,
+): Promise<BeforeState> {
   const buf = await system.captureScreen();
-  return dhash(buf);
+  const screen = await dhash(buf);
+  const region = focus && regionRadius > 0
+    ? await regionDhash(buf, focus.x, focus.y, regionRadius)
+    : null;
+  return { screen, region, focus: focus ?? null };
 }
 
 /** 纯对比：给定前后指纹生成报告 */
@@ -31,36 +55,70 @@ export function reportEffect(before: string, after: string, noopThreshold: numbe
   };
 }
 
-/** 轮询直到屏幕稳定（相邻两次指纹距离<=1），超时返回最新指纹 */
-export async function waitForStableScreen(pollMs: number, maxWaitMs: number): Promise<string> {
+export interface CombinedEffect {
+  detected: boolean;               // 全屏 OR 区域任一检测到变化
+  screen: EffectReport;
+  region: EffectReport | null;     // 无焦点/禁用时为 null
+  scale: 'page-level' | 'element-level' | 'none';
+}
+
+/** 轮询直到屏幕稳定：返回稳定帧的 buffer + 全屏指纹（同一帧供区域指纹复用） */
+export async function waitForStableFrame(
+  pollMs: number,
+  maxWaitMs: number,
+): Promise<{ buffer: Buffer; hash: string }> {
   const start = Date.now();
-  let prev = await captureStateHash();
+  let prevBuf = await system.captureScreen();
+  let prevHash = await dhash(prevBuf);
   while (Date.now() - start < maxWaitMs) {
     await sleep(pollMs);
-    const cur = await captureStateHash();
-    if (hammingDistance(prev, cur) <= 1) return cur;
-    prev = cur;
+    const buf = await system.captureScreen();
+    const hash = await dhash(buf);
+    if (hammingDistance(prevHash, hash) <= 1) return { buffer: buf, hash };
+    prevBuf = buf;
+    prevHash = hash;
   }
-  return prev;
+  return { buffer: prevBuf, hash: prevHash };
 }
 
-export interface SettleOptions {
-  adaptive: boolean;
-  settleMs: number;
-  threshold: number;
-}
+/**
+ * 动作后统一入口：自适应等待稳定帧，然后双尺度对比。
+ * 决策矩阵：全屏变 = page-level；仅区域变 = element-level；都没变 = none（盲点）。
+ */
+export async function settleAndVerify(
+  before: BeforeState,
+  opts: SettleOptions,
+): Promise<CombinedEffect> {
+  let afterBuf: Buffer;
+  let afterScreen: string;
 
-/** 动作后统一入口：adaptive 轮询至稳定；fixed 原固定等待。返回效果报告 */
-export async function settleAndReport(before: string, opts: SettleOptions): Promise<EffectReport> {
-  if (!opts.adaptive) {
+  if (opts.adaptive) {
+    const stable = await waitForStableFrame(150, opts.settleMs * 4);
+    afterBuf = stable.buffer;
+    afterScreen = stable.hash;
+  } else {
     await sleep(opts.settleMs);
-    return reportEffect(before, await captureStateHash(), opts.threshold);
+    afterBuf = await system.captureScreen();
+    afterScreen = await dhash(afterBuf);
   }
-  const after = await waitForStableScreen(150, opts.settleMs * 4);
-  return reportEffect(before, after, opts.threshold);
+
+  const screen = reportEffect(before.screen, afterScreen, opts.threshold);
+  let region: EffectReport | null = null;
+  if (before.region && before.focus && opts.regionRadius > 0) {
+    const afterRegion = await regionDhash(afterBuf, before.focus.x, before.focus.y, opts.regionRadius);
+    region = reportEffect(before.region, afterRegion, opts.threshold);
+  }
+
+  const detected = screen.effect_detected || (region?.effect_detected ?? false);
+  const scale: CombinedEffect['scale'] = screen.effect_detected
+    ? 'page-level'
+    : region?.effect_detected ? 'element-level' : 'none';
+
+  return { detected, screen, region, scale };
 }
 
-/** 兼容旧签名：立即对比（不再内部等待） */
+/** 兼容旧签名：立即取全屏对比（不等待） */
 export async function verifyEffect(before: string, noopThreshold: number): Promise<EffectReport> {
-  return reportEffect(before, await captureStateHash(), noopThreshold);
+  const buf = await system.captureScreen();
+  return reportEffect(before, await dhash(buf), noopThreshold);
 }
