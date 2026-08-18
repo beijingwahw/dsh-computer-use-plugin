@@ -4,6 +4,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
+import { captureStateHash, verifyEffect, sleep } from '../actionVerifier';
 
 export function createTypeTextTool(config: Config) {
   return defineTool({
@@ -34,7 +35,18 @@ export function createTypeTextTool(config: Config) {
       }
 
       try {
+        // 效果验证：输入理应改变画面（焦点框/文字出现）；疑似无变化 ⇒ 可能没有焦点
+        const verify = config.verifyActions && !config.dryRun;
+        const before = verify ? await captureStateHash() : null;
+
         await system.typeText(text, clearFirst);
+
+        let effect = null;
+        if (before) {
+          await sleep(config.actionSettleMs);
+          effect = await verifyEffect(before, config.noopSimilarityThreshold);
+        }
+        const noopSuspected = effect && !effect.effect_detected;
 
         return JSON.stringify({
           status: 'SUCCESS',
@@ -45,8 +57,14 @@ export function createTypeTextTool(config: Config) {
             char_count: text.length,
             cleared_existing: clearFirst,
             input_state: clearFirst ? 'Replaced all previous content' : 'Appended to existing content',
+            effect: effect ? {
+              detected: effect.effect_detected,
+              similarity_pct: effect.similarity_pct,
+            } : 'verification-off',
           },
-          next_step: "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field.",
+          next_step: noopSuspected
+            ? 'WARNING: The screen barely changed — the input may have NO focus. Click the input field first, then retype.'
+            : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field.",
         }, null, 2);
 
       } catch (error: any) {

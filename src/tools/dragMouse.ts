@@ -2,9 +2,11 @@
 // 四拍时序（移->按->移->放）下沉 system.dragMouse；本层负责校验与换算锚点。
 // 修复原版：Button 未导入的编译错误；四个坐标各自独立校验与换算。
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import type { Config } from '../config';
 import { system } from '../system';
+import { captureStateHash, verifyEffect, sleep } from '../actionVerifier';
 
-export function createDragMouseTool() {
+export function createDragMouseTool(config: Config) {
   return defineTool({
     name: 'drag_mouse',
     description:
@@ -33,7 +35,17 @@ export function createDragMouseTool() {
         const startPixel = { x: Math.round(startX * size.width), y: Math.round(startY * size.height) };
         const endPixel = { x: Math.round(endX * size.width), y: Math.round(endY * size.height) };
 
+        // 效果验证：拖拽必然移动画面内容；疑似无变化 ⇒ 可能没抓住目标
+        const before = config.verifyActions && !config.dryRun ? await captureStateHash() : null;
+
         await system.dragMouse(startPixel, endPixel);
+
+        let effect = null;
+        if (before) {
+          await sleep(config.actionSettleMs);
+          effect = await verifyEffect(before, config.noopSimilarityThreshold);
+        }
+        const noopSuspected = effect && !effect.effect_detected;
 
         return JSON.stringify({
           status: 'SUCCESS',
@@ -42,8 +54,14 @@ export function createDragMouseTool() {
             normalized: { start: { x: startX, y: startY }, end: { x: endX, y: endY } },
             absolute_pixels: { start: startPixel, end: endPixel },
             screen_resolution: `${size.width}x${size.height}`,
+            effect: effect ? {
+              detected: effect.effect_detected,
+              similarity_pct: effect.similarity_pct,
+            } : 'verification-off',
           },
-          next_step: "MANDATORY: Call 'take_screenshot' to verify the drag result.",
+          next_step: noopSuspected
+            ? 'WARNING: The screen barely changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
+            : "MANDATORY: Call 'take_screenshot' to verify the drag result.",
         }, null, 2);
 
       } catch (error: any) {

@@ -6,6 +6,7 @@ import { registerBoundsGuard } from './boundsGuard';
 import { registerCircuitBreakerGuard } from './circuitBreakerGuard';
 import { registerAuditGuard } from './auditGuard';
 import { registerPopupGuard } from './popupGuard';
+import { registerJournalGuard } from '../journal';
 
 export { updatePopupState, getPopupState } from './popupGuard';
 
@@ -14,4 +15,6 @@ export function registerAllGuards(ctx: Context, config: Config): void {
   registerCircuitBreakerGuard(ctx, config.maxConsecutiveFailures);
   registerAuditGuard(ctx);
   registerPopupGuard(ctx);
+  // 行动日志观察者（突破三）：记录一切动作类调用，供审计与重放
+  if (config.enableJournal) registerJournalGuard(ctx, config);
 }

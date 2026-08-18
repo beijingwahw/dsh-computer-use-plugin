@@ -25,10 +25,21 @@ export interface DisplayInfo {
   width: number; height: number;
 }
 
+// 干跑标志：true 时动作类调用只记录不执行（截图保持真实，观察链路不受影响）
+let dryRun = false;
+
+/** 所有动作方法的干跑闸门 */
+function guardDryRun(action: string, detail: unknown): boolean {
+  if (!dryRun) return false;
+  console.log(`[dry-run] ${action}`, detail);
+  return true;
+}
+
 export const system = {
   /** 应用插件配置。鼠标速度等人性化参数在此注入（来自「双手纪元」的模块级副作用，改为显式配置） */
   configure(config: Config) {
     mouse.config.mouseSpeed = config.mouseSpeed;
+    dryRun = config.dryRun;
   },
 
   /** 屏幕截取：screenshot-desktop 返回 PNG Buffer */
@@ -67,12 +78,14 @@ export const system = {
   async clickMouse(x: number, y: number, button: string = 'left'): Promise<void> {
     const btn = btnMap[button];
     if (!btn) throw new Error(`Unknown mouse button: ${button}`);
+    if (guardDryRun('clickMouse', { x, y, button })) return;
     await mouse.move([{ x, y }]);
     await mouse.click(btn);
   },
 
   /** 键盘输入：clearFirst 跨平台全选-删除时序（来自「双手纪元」） */
   async typeText(text: string, clearFirst: boolean = false): Promise<void> {
+    if (guardDryRun('typeText', { text: text.substring(0, 30), clearFirst })) return;
     if (clearFirst) {
       // Windows/Linux 用 Ctrl+A，Mac 用 Cmd+A；全选必须先释放再按 Backspace（时序细节）
       const isMac = process.platform === 'darwin';
@@ -87,6 +100,7 @@ export const system = {
 
   /** 拖拽四拍时序：移->按->移->放，每拍 await（来自 dragMouse 地层） */
   async dragMouse(start: { x: number; y: number }, end: { x: number; y: number }): Promise<void> {
+    if (guardDryRun('dragMouse', { start, end })) return;
     await mouse.move([{ x: start.x, y: start.y }]);
     await mouse.pressButton(Button.LEFT);
     await mouse.move([{ x: end.x, y: end.y }]);
@@ -95,6 +109,7 @@ export const system = {
 
   /** 修复原版「四方向全部 scrollDown」的 bug：按方向分派 */
   async scroll(direction: 'up' | 'down' | 'left' | 'right', amount: number): Promise<void> {
+    if (guardDryRun('scroll', { direction, amount })) return;
     switch (direction) {
       case 'up': await mouse.scrollUp(amount); break;
       case 'down': await mouse.scrollDown(amount); break;
@@ -108,6 +123,7 @@ export const system = {
    * 「全部识别或全部拒绝」的原子语义（来自 pressHotkey 地层）。
    */
   async pressHotkey(keys: string[]): Promise<void> {
+    if (guardDryRun('pressHotkey', { keys })) return;
     const mapped = keys.map(k => keyMap[k.toLowerCase()]).filter(Boolean);
     if (mapped.length !== keys.length) {
       throw new Error(`Unrecognized key names in combination: [${keys.join(', ')}]`);

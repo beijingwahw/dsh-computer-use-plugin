@@ -6,6 +6,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from './config';
 import { system } from './system';
 import { contextManager } from './contextManager';
+import { uiMemory } from './uiMemory';
+import { journal } from './journal';
 import { buildAllTools } from './tools';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards';
 import { runOrchestrator, ACTOR_SYSTEM_PROMPT, ChatFn as PlannerChatFn } from './orchestrator';
@@ -98,6 +100,7 @@ export function apply(ctx: Context, config: Config) {
   // 1. 配置注入系统层与上下文层（一切魔法数字由 cordis.yml 决定）
   system.configure(config);
   contextManager.configure(config.maxImageCount);
+  uiMemory.configure(config.uiMemoryCapacity);
 
   // 2. 注入 System Prompt（可选服务，优雅降级）
   tryInjectPrompt(ctx);
@@ -159,6 +162,8 @@ export function apply(ctx: Context, config: Config) {
     console.log('[Vision Plugin] Unloaded, cleaning up system resources...');
     return () => {
       contextManager.reset();      // 清空截图滑动窗口
+      uiMemory.reset();            // 清空场景记忆（可选保留跨会话记忆：删除此行）
+      journal.reset();             // 清空行动日志
       updatePopupState(false);     // 复位弹窗传感状态
     };
   });

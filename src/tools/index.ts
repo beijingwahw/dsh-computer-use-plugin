@@ -14,15 +14,20 @@ import { switchTabTool } from './switchTab';
 import { switchWindowTool } from './switchWindow';
 import { createClickElementTool } from './clickElement';
 import { createExtractUiVisionTool } from './extractUiVision';
+import { createZoomInspectTool } from './zoomInspect';
+import { createRememberUiTool, createRecallUiTool } from './uiMemoryTools';
+import { createReplayActionsTool } from './replayActions';
 
 export function buildAllTools(config: Config) {
   const tools = [
     createTakeScreenshotTool(config),
-    createClickMouseTool(),
+    createClickMouseTool(config),
     createTypeTextTool(config),
     createScrollPageTool(),
     createPressHotkeyTool(),
-    createDragMouseTool(),
+    createDragMouseTool(config),
+    // 突破四：二阶段精定位（coarse -> zoom -> precise）
+    createZoomInspectTool(config),
     dismissPopupTool,
     switchTabTool,
     switchWindowTool,
@@ -33,6 +38,14 @@ export function buildAllTools(config: Config) {
 
   // 混合模式：本地视觉模型精确定位
   if (config.localVisionApi) tools.push(createExtractUiVisionTool(config));
+
+  // 突破二：场景式 UI 记忆
+  if (config.enableUIMemory) {
+    tools.push(createRememberUiTool(), createRecallUiTool());
+  }
+
+  // 突破三：行动重放（宏）
+  if (config.enableJournal) tools.push(createReplayActionsTool(config));
 
   return tools;
 }

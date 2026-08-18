@@ -7,6 +7,18 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { onToolPre, onToolPost } from './hooks';
 
+/** 把恢复提示附加到结果字符串：锚点 JSON 注入 recovery_hint 字段；非 JSON 则换行追加 */
+function appendHint(result: string, hint: string): string {
+  try {
+    const obj = JSON.parse(result);
+    if (obj && typeof obj === 'object') {
+      obj.recovery_hint = hint;
+      return JSON.stringify(obj, null, 2);
+    }
+  } catch { /* 前缀协议字符串，走下方追加 */ }
+  return `${result}\n[${hint}]`;
+}
+
 export function registerCircuitBreakerGuard(ctx: Context, maxFailures: number): void {
   let recentFailures = 0;
 
@@ -20,12 +32,23 @@ export function registerCircuitBreakerGuard(ctx: Context, maxFailures: number): 
     return next();
   });
 
-  // 2. 执行后：按字符串契约统计成败
+  // 2. 执行后：按字符串契约统计成败；第 1/2 次失败注入递进式恢复提示（waterfall 允许改写透传值）
   onToolPost(ctx, async (_toolCall, result, next) => {
     if (typeof result === 'string') {
-      if (result.includes('[Error]') || result.includes('"status": "FAILED"')) {
+      const failed = result.includes('[Error]') || result.includes('"status": "FAILED"');
+      const succeeded = result.includes('[System]') || result.includes('"status": "SUCCESS"');
+
+      if (failed) {
         recentFailures++;
-      } else if (result.includes('[System]') || result.includes('"status": "SUCCESS"')) {
+        // 递进式恢复策略：第一次失败教「放大精定位」，第二次教「换模态」
+        if (recentFailures === 1 || recentFailures === 2) {
+          const hint = recentFailures === 1
+            ? "Recovery hint: call 'zoom_inspect' around the target to refine coordinates before retrying."
+            : 'Recovery hint: switch modality — try keyboard navigation via press_hotkey (tab/enter), ' +
+              "or scroll_page if the target may be off-screen. Also try recall_ui for remembered locations.";
+          return next(appendHint(result, hint));
+        }
+      } else if (succeeded) {
         recentFailures = 0; // 成功即重置
       }
     }

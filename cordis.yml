@@ -15,3 +15,14 @@
         maxTextLength: 1000         # 单次输入上限
         enableElementIdMode: false  # 混合 ID 寻址模式（需无障碍 Provider）
         localVisionApi: ''          # 本地视觉模型，如 http://127.0.0.1:8000/parse_gui
+        # ─── 世界级升级 ───
+        verifyActions: true         # dHash 前后对比，检测盲点（点了没反应）
+        actionSettleMs: 400         # 动作后等待 UI 响应再取指纹
+        noopSimilarityThreshold: 0.97
+        autoRemember: true          # 验证生效的点击自动写入 UI 记忆
+        enableUIMemory: true        # remember_ui / recall_ui 工具
+        uiMemoryCapacity: 200
+        enableJournal: true         # 行动日志 + replay_actions
+        journalPath: ''             # JSONL 落盘路径，留空仅内存
+        replayMaxSteps: 100
+        dryRun: false               # 干跑：只记录不执行，截图真实

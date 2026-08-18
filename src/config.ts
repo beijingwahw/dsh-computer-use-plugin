@@ -23,6 +23,27 @@ export interface Config {
   enableElementIdMode: boolean;
   /** 本地视觉模型地址（如 http://127.0.0.1:8000/parse_gui），留空禁用（来自「混合架构纪元」） */
   localVisionApi: string;
+  // ─── 世界级升级新增 ───
+  /** 行为效果验证：动作前后 dHash 对比，检测盲点（点了没反应）（突破一） */
+  verifyActions: boolean;
+  /** 动作后等待 UI 响应的沉淀时间(ms)，再取 after 指纹 */
+  actionSettleMs: number;
+  /** 相似度高于此值判定为疑似无效操作（0~1） */
+  noopSimilarityThreshold: number;
+  /** 验证生效且带 target_description 的点击自动写入 UI 记忆（突破二） */
+  autoRemember: boolean;
+  /** 启用场景式 UI 记忆（remember_ui / recall_ui 工具） */
+  enableUIMemory: boolean;
+  /** UI 记忆容量（条） */
+  uiMemoryCapacity: number;
+  /** 启用行动日志与重放（突破三） */
+  enableJournal: boolean;
+  /** 日志 JSONL 落盘路径，留空仅内存 */
+  journalPath: string;
+  /** 单次重放步数上限 */
+  replayMaxSteps: number;
+  /** 干跑模式：动作类系统调用只记录不执行，截图仍真实（提示词调试/演示） */
+  dryRun: boolean;
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -35,4 +56,14 @@ export const Config: Schema<Config> = Schema.object({
   maxTextLength: Schema.number().default(1000).description('Max chars per type_text call'),
   enableElementIdMode: Schema.boolean().default(false).description('Enable element-ID addressing (needs accessibility provider)'),
   localVisionApi: Schema.string().default('').description('Local vision model endpoint, empty = disabled'),
+  verifyActions: Schema.boolean().default(true).description('dHash before/after effect verification'),
+  actionSettleMs: Schema.number().default(400).description('Wait ms after action before after-hash'),
+  noopSimilarityThreshold: Schema.number().default(0.97).description('Similarity above this = likely no-op'),
+  autoRemember: Schema.boolean().default(true).description('Auto-save verified clicks to UI memory'),
+  enableUIMemory: Schema.boolean().default(true).description('Enable remember_ui / recall_ui tools'),
+  uiMemoryCapacity: Schema.number().default(200).description('UI memory capacity'),
+  enableJournal: Schema.boolean().default(true).description('Enable action journal & replay'),
+  journalPath: Schema.string().default('').description('JSONL journal path, empty = memory only'),
+  replayMaxSteps: Schema.number().default(100).description('Max steps per replay'),
+  dryRun: Schema.boolean().default(false).description('Dry-run: log actions without executing'),
 });

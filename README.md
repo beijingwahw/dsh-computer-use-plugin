@@ -15,12 +15,29 @@
 - **全量桌面操作**：截图、点击、输入、滚动、快捷键、拖拽、标签页/窗口切换、弹窗处理
 - **可插拔混合模式**：可选接入本地视觉模型（OmniParser 类）与无障碍 Provider 获得精确坐标
 
+## 世界级突破：四大自研引擎
+
+针对纯视觉 CUA Agent 的四个真实失败模式，各以一个引擎对症击破：
+
+| 失败模式 | 引擎 | 机制 |
+| --- | --- | --- |
+| **盲点**：点击落空却以为成功 | 行为效果验证（`perceptualHash` + `actionVerifier`） | 动作前后各取一次整屏 dHash 指纹，汉明距离对比；相似度 > 0.97 判定疑似无效操作，锚点直接告警并引导 `zoom_inspect` 复位 |
+| **坐标幻觉**：全屏估坐标误差大 | 二阶段定位（`zoom_inspect`） | 裁剪目标邻域放大重绘 2 倍密度细网格，锚点附带 `crop_bounds` 与映射公式 `full_x = x0 + fx*(x1-x0)`，微观定位精确映射回全屏 |
+| **无跨会话记忆**：每次从零找按钮 | 场景式 UI 记忆（`remember_ui` / `recall_ui`） | 验证生效的点击自动沉淀为 landmark；自然语言召回（中英混合分词 + 重合系数 + 成功次数加成 + 时间衰减），召回值仅作先验、强制截图复核 |
+| **不可复现**：成功路径无法固化 | 行动日志与重放（`journal` + `replay_actions`） | post-execute 观察者记录全部动作 JSONL（可落盘）；`replay_actions` 按 confirm 显式确认后逐步重放，成功操作序列即刻变成可执行宏 |
+
+配套增强：
+
+- **递进式恢复提示**：熔断守卫升级 —— 第 1 次失败注入「zoom 精定位」建议，第 2 次注入「换模态（键盘导航/滚动/记忆召回）」建议，第 3 次熔断冷静一轮
+- **干跑模式**（`dryRun: true`）：动作类系统调用只记录不执行、截图保持真实 —— 提示词调试与演示的零风险沙箱
+- **置信度自报**：`click_mouse.confidence < 0.6` 时主动建议先 `zoom_inspect`，把模型的不确定性显式化
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
 | --- | --- | --- |
 | `take_screenshot` | 截屏 + SoM 网格/准星叠加 + 压缩 + 滑动窗口 + 弹窗传感 | `region` |
-| `click_mouse` | 归一化坐标点击，返回三坐标换算锚点 | `x`, `y`, `button` |
+| `click_mouse` | 归一化坐标点击，内置 dHash 效果验证 + 自动记忆 | `x`, `y`, `button`, `confidence?`, `target_description?` |
 | `type_text` | 焦点处输入文本，支持跨平台一键清空 | `text`, `clearFirst` |
 | `scroll_page` | 四方向滚动 | `direction`, `amount` |
 | `press_hotkey` | 组合键（键位白名单，防注入） | `keys` (数组) |
@@ -30,6 +47,9 @@
 | `click_element` | 按 ID 点击（需开启元素模式，短时缓存防 ID 漂移） | `id` |
 | `extract_ui_vision` | 本地视觉模型精确提取（可选） | 无 |
 | `start_complex_task` | Planner-Actor 编排引擎 | `userRequest` |
+| `zoom_inspect` | 区域裁剪放大 + 细网格，二阶段精定位 | `x`, `y`, `half_size?` |
+| `remember_ui` / `recall_ui` | 场景式 UI 记忆写入 / 自然语言召回 | `description`,`x`,`y` / `query` |
+| `replay_actions` | 重放日志中的动作序列（宏） | `confirm`, `from_step?`, `to_step?` |
 
 ## 快速开始
 
