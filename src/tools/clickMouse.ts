@@ -6,6 +6,7 @@ import type { Config } from '../config';
 import { system } from '../system';
 import { captureBefore, settleAndVerify, CombinedEffect } from '../actionVerifier';
 import { focusTracker } from '../focusTracker';
+import { semanticConfirm, SemanticConfirm } from '../textReader';
 import { uiMemory } from '../uiMemory';
 
 export function createClickMouseTool(config: Config) {
@@ -30,13 +31,17 @@ export function createClickMouseTool(config: Config) {
         type: 'string', required: false,
         description: 'What visual change do you EXPECT if the click succeeds? e.g., "a dropdown expands", "input gains focus". Used to verify the effect semantically.',
       },
+      expected_text: {
+        type: 'string', required: false,
+        description: 'Text you EXPECT to appear near the click point if it succeeds (requires enableOcr). The system OCR-verifies it automatically.',
+      },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const { x, y, button = 'left', confidence, target_description, expected_change } = args;
+      const { x, y, button = 'left', confidence, target_description, expected_change, expected_text } = args;
 
       // 双保险校验（Guard 已在前线，工具自查兜底）
       if (x < 0 || x > 1 || y < 0 || y > 1) {
@@ -77,6 +82,17 @@ export function createClickMouseTool(config: Config) {
           memoryNote = ` Landmark #${lm.id} saved.`;
         }
 
+        // ── 语义核对（第四轮）：OCR 检查预期文字是否出现在点击点邻域 ──
+        // 像素验证回答「有没有变化」，语义核对回答「变化是不是预期的内容」
+        let semantic: SemanticConfirm | 'ocr-unavailable' | null = null;
+        if (expected_text && config.enableOcr && effect?.detected) {
+          semantic = await semanticConfirm(
+            effect.afterBuffer, x, y,
+            Math.max(config.regionVerifyRadius * 1.5, 0.2),
+            expected_text, config.ocrLang,
+          ) ?? 'ocr-unavailable';
+        }
+
         // ── 自适应下一步指引：双尺度判定 + 预期核对 ──
         const noopSuspected = effect && !effect.detected;
         const lowConfidence = typeof confidence === 'number' && confidence < 0.6;
@@ -89,6 +105,10 @@ export function createClickMouseTool(config: Config) {
         }
         if (!noopSuspected && expected_change) {
           nextStep += ` Then CONFIRM your expectation: "${expected_change}" — if it did NOT happen, treat this as a partial failure.`;
+        }
+        if (semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed) {
+          nextStep = `SEMANTIC MISMATCH: expected text "${expected_text}" was NOT found near the click point. ` +
+            `Treat this click as FAILED even though pixels changed — re-examine with diff_view / take_screenshot.`;
         }
 
         return JSON.stringify({
@@ -105,6 +125,11 @@ export function createClickMouseTool(config: Config) {
               region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
             } : 'verification-off',
             expected_change: expected_change || undefined, // 预期锚定：模型行动前声明的预期
+            semantic: semantic
+              ? (semantic === 'ocr-unavailable'
+                ? 'ocr-unavailable'
+                : { expected_text: expected_text, confirmed: semantic.confirmed, region_text_snippet: semantic.snippet })
+              : undefined,
           },
           memory: memoryNote || undefined,
           next_step: nextStep,

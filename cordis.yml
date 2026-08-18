@@ -32,3 +32,6 @@
         # ─── 第三轮创新 ───
         regionVerifyRadius: 0.15    # 区域验证半径（屏幕比例），0 禁用
         focusMaxAgeMs: 30000        # 焦点有效期：点击后多久内输入可复用其坐标
+        # ─── 第四轮创新 ───
+        enableOcr: false            # 本地 OCR（find_text/read_text/语义核对），语言包首次需联网
+        ocrLang: eng                # 'eng' 或 'chi_sim+eng'

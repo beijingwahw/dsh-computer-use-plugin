@@ -6,6 +6,7 @@ import type { Config } from '../config';
 import { system } from '../system';
 import { captureBefore, settleAndVerify } from '../actionVerifier';
 import { focusTracker } from '../focusTracker';
+import { semanticConfirm, SemanticConfirm } from '../textReader';
 
 export function createTypeTextTool(config: Config) {
   return defineTool({
@@ -60,6 +61,18 @@ export function createTypeTextTool(config: Config) {
         }
         const noopSuspected = effect && !effect.detected;
 
+        // ── 语义自证（第四轮）：OCR 核对「输入的文字真的上屏了」──
+        // 无需模型传参：把 typed 内容的前 40 字符作为预期文本，在焦点邻域核对。
+        // 「打字进了错误的输入框 / 输入法吞字 / 焦点丢失」三类事故在此现形
+        let typedConfirmed: SemanticConfirm | 'ocr-unavailable' | null = null;
+        if (config.enableOcr && focus && effect?.detected) {
+          typedConfirmed = await semanticConfirm(
+            effect.afterBuffer, focus.x, focus.y,
+            Math.max(config.regionVerifyRadius * 1.5, 0.2),
+            text.slice(0, 40), config.ocrLang,
+          ) ?? 'ocr-unavailable';
+        }
+
         return JSON.stringify({
           status: 'SUCCESS',
           action: 'Text typed successfully.',
@@ -77,11 +90,18 @@ export function createTypeTextTool(config: Config) {
               verified_around_focus: effect.region ? true : false,
             } : 'verification-off',
             expected_change: expected_change || undefined,
+            typed_semantic: typedConfirmed
+              ? (typedConfirmed === 'ocr-unavailable'
+                ? 'ocr-unavailable'
+                : { confirmed: typedConfirmed.confirmed, region_text_snippet: typedConfirmed.snippet })
+              : undefined,
           },
           next_step: noopSuspected
             ? 'WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.'
-            : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field." +
-              (expected_change ? ` Confirm: "${expected_change}".` : ''),
+            : (typedConfirmed && typedConfirmed !== 'ocr-unavailable' && !typedConfirmed.confirmed
+              ? 'SEMANTIC MISMATCH: the typed text was NOT found in the focus region — it may have gone to the WRONG field or been swallowed by an IME. Verify with take_screenshot and retype if needed.'
+              : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field." +
+                (expected_change ? ` Confirm: "${expected_change}".` : '')),
         }, null, 2);
 
       } catch (error: any) {

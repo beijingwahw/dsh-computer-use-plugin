@@ -54,6 +54,11 @@ export interface Config {
   regionVerifyRadius: number;
   /** 焦点有效期(ms)：点击后多久内 type_text 可复用其坐标做区域验证 */
   focusMaxAgeMs: number;
+  // ─── 第四轮创新 ───
+  /** 启用本地 OCR（tesseract.js）：read_text / find_text 工具 + 语义核对。语言包首次使用需联网下载 */
+  enableOcr: boolean;
+  /** OCR 语言，如 'eng'、'chi_sim+eng' */
+  ocrLang: string;
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -80,4 +85,6 @@ export const Config: Schema<Config> = Schema.object({
   adaptiveSettle: Schema.boolean().default(true).description('Poll until screen settles before verifying effects'),
   regionVerifyRadius: Schema.number().default(0.15).description('Region-verify radius as screen fraction; 0 = off'),
   focusMaxAgeMs: Schema.number().default(30000).description('Focus validity window for region verification'),
+  enableOcr: Schema.boolean().default(false).description('Enable local OCR (read_text/find_text + semantic verification)'),
+  ocrLang: Schema.string().default('eng').description('OCR language, e.g. eng / chi_sim+eng'),
 });

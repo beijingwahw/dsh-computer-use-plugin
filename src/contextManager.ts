@@ -72,6 +72,11 @@ class ContextManager {
     return this.history.filter(h => h.base64).length;
   }
 
+  /** 最近 n 张仍在窗口内的图片（旧→新），供差分等下游消费 */
+  public recentImages(n: number): Array<{ id: number; base64: string }> {
+    return this.history.filter(h => h.base64).slice(-n).map(h => ({ id: h.id, base64: h.base64 }));
+  }
+
   /**
    * 投影为模型线缆格式（Anthropic 多模态 content block）。
    * 存储模型与视图模型分离；for-of 保序输出 -> 降级占位符留在历史位置，时间线永不断裂。

@@ -17,6 +17,8 @@ import { createExtractUiVisionTool } from './extractUiVision';
 import { createZoomInspectTool } from './zoomInspect';
 import { createRememberUiTool, createRecallUiTool } from './uiMemoryTools';
 import { createReplayActionsTool } from './replayActions';
+import { createReadTextTool, createFindTextTool } from './textTools';
+import { createDiffViewTool } from './diffView';
 
 export function buildAllTools(config: Config) {
   const tools = [
@@ -28,6 +30,8 @@ export function buildAllTools(config: Config) {
     createDragMouseTool(config),
     // 突破四：二阶段精定位（coarse -> zoom -> precise）
     createZoomInspectTool(config),
+    // 第四轮创新：视觉差分（what-changed-where，纯 sharp 无额外依赖）
+    createDiffViewTool(),
     dismissPopupTool,
     switchTabTool,
     switchWindowTool,
@@ -46,6 +50,11 @@ export function buildAllTools(config: Config) {
 
   // 突破三：行动重放（宏）
   if (config.enableJournal) tools.push(createReplayActionsTool(config));
+
+  // 第四轮创新：文字感知（OCR 定位与读取）
+  if (config.enableOcr) {
+    tools.push(createReadTextTool(config), createFindTextTool(config));
+  }
 
   return tools;
 }

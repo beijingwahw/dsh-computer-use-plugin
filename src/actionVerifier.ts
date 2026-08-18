@@ -60,6 +60,7 @@ export interface CombinedEffect {
   screen: EffectReport;
   region: EffectReport | null;     // 无焦点/禁用时为 null
   scale: 'page-level' | 'element-level' | 'none';
+  afterBuffer: Buffer;             // 稳定后的帧（供语义核对等下游消费）
 }
 
 /** 轮询直到屏幕稳定：返回稳定帧的 buffer + 全屏指纹（同一帧供区域指纹复用） */
@@ -114,7 +115,7 @@ export async function settleAndVerify(
     ? 'page-level'
     : region?.effect_detected ? 'element-level' : 'none';
 
-  return { detected, screen, region, scale };
+  return { detected, screen, region, scale, afterBuffer: afterBuf };
 }
 
 /** 兼容旧签名：立即取全屏对比（不等待） */

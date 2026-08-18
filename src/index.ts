@@ -8,6 +8,7 @@ import { system } from './system';
 import { contextManager } from './contextManager';
 import { uiMemory } from './uiMemory';
 import { journal } from './journal';
+import { disposeOcr } from './textReader';
 import { buildAllTools } from './tools';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards';
 import { runOrchestrator, ACTOR_SYSTEM_PROMPT, ChatFn as PlannerChatFn } from './orchestrator';
@@ -169,6 +170,7 @@ export function apply(ctx: Context, config: Config) {
       uiMemory.reset();            // 清空场景记忆（可选保留跨会话记忆：删除此行）
       journal.reset();             // 清空行动日志
       updatePopupState(false);     // 复位弹窗传感状态
+      void disposeOcr();           // 终止 OCR worker（语言数据有磁盘缓存，重载后即用）
     };
   });
 
