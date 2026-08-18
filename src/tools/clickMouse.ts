@@ -4,7 +4,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { captureStateHash, verifyEffect, sleep, EffectReport } from '../actionVerifier';
+import { captureStateHash, settleAndReport, EffectReport } from '../actionVerifier';
 import { uiMemory } from '../uiMemory';
 
 export function createClickMouseTool(config: Config) {
@@ -51,14 +51,18 @@ export function createClickMouseTool(config: Config) {
 
         let effect: EffectReport | null = null;
         if (before) {
-          await sleep(config.actionSettleMs); // 给 UI 响应的沉淀时间
-          effect = await verifyEffect(before, config.noopSimilarityThreshold);
+          // 自适应稳定等待：轮询至屏幕稳定再对比，动画期不再误判
+          effect = await settleAndReport(before, {
+            adaptive: config.adaptiveSettle,
+            settleMs: config.actionSettleMs,
+            threshold: config.noopSimilarityThreshold,
+          });
         }
 
-        // ── 自动记忆：验证生效 + 模型给了描述 ⇒ 写入场景记忆 ──
+        // ── 自动记忆：验证生效 + 模型给了描述 ⇒ 写入场景记忆（含当时整屏指纹） ──
         let memoryNote = '';
         if (effect?.effect_detected && config.autoRemember && target_description) {
-          const lm = uiMemory.remember(target_description, x, y);
+          const lm = uiMemory.remember(target_description, x, y, undefined, before ?? undefined);
           memoryNote = ` Landmark #${lm.id} saved.`;
         }
 

@@ -6,6 +6,7 @@ import { registerBoundsGuard } from './boundsGuard';
 import { registerCircuitBreakerGuard } from './circuitBreakerGuard';
 import { registerAuditGuard } from './auditGuard';
 import { registerPopupGuard } from './popupGuard';
+import { registerRepeatActionGuard } from './repeatActionGuard';
 import { registerJournalGuard } from '../journal';
 
 export { updatePopupState, getPopupState } from './popupGuard';
@@ -15,6 +16,8 @@ export function registerAllGuards(ctx: Context, config: Config): void {
   registerCircuitBreakerGuard(ctx, config.maxConsecutiveFailures);
   registerAuditGuard(ctx);
   registerPopupGuard(ctx);
+  // 防死循环（第二轮创新）：原样重试无效动作 ⇒ 拦截并给出换策略指引
+  registerRepeatActionGuard(ctx);
   // 行动日志观察者（突破三）：记录一切动作类调用，供审计与重放
   if (config.enableJournal) registerJournalGuard(ctx, config);
 }

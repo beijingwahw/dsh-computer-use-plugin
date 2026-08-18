@@ -4,7 +4,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { captureStateHash, verifyEffect, sleep } from '../actionVerifier';
+import { captureStateHash, settleAndReport } from '../actionVerifier';
 
 export function createDragMouseTool(config: Config) {
   return defineTool({
@@ -42,8 +42,11 @@ export function createDragMouseTool(config: Config) {
 
         let effect = null;
         if (before) {
-          await sleep(config.actionSettleMs);
-          effect = await verifyEffect(before, config.noopSimilarityThreshold);
+          effect = await settleAndReport(before, {
+            adaptive: config.adaptiveSettle,
+            settleMs: config.actionSettleMs,
+            threshold: config.noopSimilarityThreshold,
+          });
         }
         const noopSuspected = effect && !effect.effect_detected;
 

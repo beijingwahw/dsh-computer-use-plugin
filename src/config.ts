@@ -44,6 +44,11 @@ export interface Config {
   replayMaxSteps: number;
   /** 干跑模式：动作类系统调用只记录不执行，截图仍真实（提示词调试/演示） */
   dryRun: boolean;
+  // ─── 第二轮优化创新 ───
+  /** 变化门控：与窗口内最新指纹汉明距离 <= 此值 ⇒ 判定屏幕未变，不重截图（省 Token/省管线） */
+  stableScreenDistance: number;
+  /** 自适应稳定等待：轮询至屏幕稳定再验证（动画期不误判）；false 则固定 actionSettleMs */
+  adaptiveSettle: boolean;
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -66,4 +71,6 @@ export const Config: Schema<Config> = Schema.object({
   journalPath: Schema.string().default('').description('JSONL journal path, empty = memory only'),
   replayMaxSteps: Schema.number().default(100).description('Max steps per replay'),
   dryRun: Schema.boolean().default(false).description('Dry-run: log actions without executing'),
+  stableScreenDistance: Schema.number().default(3).description('Change-gate: dHash distance <= this = screen unchanged'),
+  adaptiveSettle: Schema.boolean().default(true).description('Poll until screen settles before verifying effects'),
 });

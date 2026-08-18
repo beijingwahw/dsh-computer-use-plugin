@@ -4,6 +4,7 @@
 // recall 用自然语言召回历史位置先验 —— 注意先验≠事实，锚点强制要求截图复核。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { uiMemory } from '../uiMemory';
+import { contextManager } from '../contextManager';
 
 export function createRememberUiTool() {
   return defineTool({
@@ -49,7 +50,9 @@ export function createRecallUiTool() {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const hits = uiMemory.recall(args.query, 5);
+      // 场景感知召回：用当前窗口内最新截图的指纹做场景匹配加成
+      const currentScene = contextManager.lastImageRecord()?.hash;
+      const hits = uiMemory.recall(args.query, 5, currentScene);
       if (hits.length === 0) {
         return `[System]: No matching landmarks. Locate the element visually via take_screenshot / zoom_inspect.`;
       }

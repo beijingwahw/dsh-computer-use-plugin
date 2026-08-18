@@ -26,3 +26,6 @@
         journalPath: ''             # JSONL 落盘路径，留空仅内存
         replayMaxSteps: 100
         dryRun: false               # 干跑：只记录不执行，截图真实
+        # ─── 第二轮优化创新 ───
+        stableScreenDistance: 3     # 变化门控：指纹距离<=3 视为屏幕未变
+        adaptiveSettle: true        # 自适应稳定等待（动画期不误判）

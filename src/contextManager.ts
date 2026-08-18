@@ -7,6 +7,7 @@ export interface ScreenshotRecord {
   id: number;
   timestamp: number;
   base64: string; // 仅最新几张保留图片数据；置空即「已降级」（空字符串天然 falsy）
+  hash?: string; // 整屏 dHash 指纹（元数据，不占图片位）：变化门控与场景匹配的事实源
   textSummary?: string; // 旧截图降级后的文本描述
 }
 
@@ -32,12 +33,12 @@ class ContextManager {
    * 添加新截图并执行降级清理。
    * 返回 { currentId, message }：currentId 供状态锚点引用，message 直接喂给模型。
    */
-  public addScreenshot(base64: string): { currentId: number; message: string } {
+  public addScreenshot(base64: string, hash?: string): { currentId: number; message: string } {
     // Date.now() 一值三用：唯一且单调递增的 id、timestamp、以及「id 升序 = 时间序」
     // 的隐含保证 —— 后文 find 取首个有图记录即最旧图，排序算法被彻底省略。
     const newId = Date.now();
 
-    this.history.push({ id: newId, timestamp: newId, base64 });
+    this.history.push({ id: newId, timestamp: newId, base64, hash });
 
     // 不变量恢复式驱逐：反复问「图片数还超标吗」，而非计算该驱逐几张。
     // 即便未来一次 push 多张，这段逻辑无需修改依然正确。
@@ -59,6 +60,16 @@ class ContextManager {
       currentId: newId,
       message: `Screenshot #${newId} captured successfully.${evictedMessage}`,
     };
+  }
+
+  /** 变化门控支持：最近一张仍在窗口内的图片记录（降级后无 base64 的不算） */
+  public lastImageRecord(): ScreenshotRecord | undefined {
+    return [...this.history].reverse().find(h => h.base64);
+  }
+
+  /** Token 仪表盘：当前窗口内真实图片数 */
+  public imageCount(): number {
+    return this.history.filter(h => h.base64).length;
   }
 
   /**

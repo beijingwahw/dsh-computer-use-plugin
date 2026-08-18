@@ -9,8 +9,9 @@ import { system } from '../system';
 import { addVisualOverlay } from '../visualOverlay';
 import { contextManager } from '../contextManager';
 import { detectPopupHeuristic } from '../popupDetector';
-import { updatePopupState } from '../guards/popupGuard';
+import { updatePopupState, getPopupState } from '../guards/popupGuard';
 import { extractInteractiveElements, UIElement } from '../uiExtractor';
+import { dhash, hammingDistance } from '../perceptualHash';
 
 export function createTakeScreenshotTool(config: Config) {
   return defineTool({
@@ -26,6 +27,10 @@ export function createTakeScreenshotTool(config: Config) {
         required: false,
         description: 'Optional. The specific region to capture (e.g., "full", "active_window"). Defaults to "full".',
       },
+      force: {
+        type: 'boolean', required: false,
+        description: 'Bypass change-gating and always capture a fresh image. Default false.',
+      },
     },
     output: {
       schema: { type: 'string' },
@@ -40,6 +45,29 @@ export function createTakeScreenshotTool(config: Config) {
         // 1. 捕获原始屏幕
         const rawBuffer = await system.captureScreen();
         const rawMeta = await sharp(rawBuffer).metadata();
+
+        // ── 变化门控（change-gated screenshots）：指纹与窗口内最新一张几乎相同
+        //    ⇒ 屏幕未变，跳过整条压缩/入窗管线，返回缓存引用锚点。
+        //    省 Token（不占窗口图片位）、省 CPU（不做管线）；弹窗状态沿用上次传感。
+        const rawHash = await dhash(rawBuffer);
+        if (!args?.force) {
+          const last = contextManager.lastImageRecord();
+          if (last?.hash && hammingDistance(last.hash, rawHash) <= config.stableScreenDistance) {
+            return JSON.stringify({
+              status: 'SUCCESS',
+              unchanged: true,
+              state_anchor: {
+                same_as_screenshot: last.id,
+                popup_detected: getPopupState(),
+                context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
+                change_gate: `screen identical to #${last.id} (dHash distance <= ${config.stableScreenDistance})`,
+              },
+              next_step: 'Screen is UNCHANGED since the referenced screenshot. Reuse it for grounding; ' +
+                'do NOT re-capture. If you expected a change, the previous action had no effect — see its effect report.',
+            }, null, 2);
+          }
+        }
+        // 门控未命中：rawHash 随记录入库，供下次门控与场景记忆使用
 
         // 2. 多屏感知：当前操作的是哪块屏、其坐标系原点在哪
         const display = await system.getActiveDisplay();
@@ -70,9 +98,9 @@ export function createTakeScreenshotTool(config: Config) {
           .toBuffer();
         const compressedMeta = await sharp(compressedBuffer).metadata();
 
-        // 6. 存入滑动窗口；驱逐通告原样透传给模型（上下文收缩全透明）
+        // 6. 存入滑动窗口（携带指纹）；驱逐通告原样透传给模型（上下文收缩全透明）
         const base64Image = `data:image/jpeg;base64,${compressedBuffer.toString('base64')}`;
-        const { currentId, message } = contextManager.addScreenshot(base64Image);
+        const { currentId, message } = contextManager.addScreenshot(base64Image, rawHash);
 
         // 7. 弹窗传感：每次观察顺便更新全局弹窗状态，popupGuard 据此拦截盲操作
         const hasPopup = await detectPopupHeuristic(compressedBuffer);
@@ -95,6 +123,8 @@ export function createTakeScreenshotTool(config: Config) {
             region,
             visual_overlay: `${config.gridDivisions}x${config.gridDivisions} SoM Grid + Crosshair` +
               (elements.length ? ' + Element Boxes' : ''),
+            // Token 仪表盘：模型随时知道上下文图片预算的余量
+            context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
             // 图层图例（来自「视觉纪元」的图文双通道教学）：教模型「怎么读」这张图
             overlay_legend: [
               `Blue lines: a ${config.gridDivisions}x${config.gridDivisions} grid. Count cells to estimate normalized coordinates (0.0-1.0).`,

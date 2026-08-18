@@ -3,12 +3,14 @@
 // 滑动窗口只记得「最近几张图」；本模块让 Agent 拥有跨任务的位置记忆：
 // 「上次在 VS Code 里，设置按钮在 (0.93, 0.04)」—— 成功点击过的目标被记为
 // landmark，之后用自然语言召回，直接获得高置信坐标先验（仍需截图验证）。
-// 检索打分 = 文本重合度 + 成功次数加成 + 时间衰减，全部本地零成本。
+// 检索打分 = 文本重合度 + 成功次数加成 + 时间衰减 + 场景指纹匹配加成，全部本地零成本。
+import { similarity } from './perceptualHash';
 
 export interface Landmark {
   id: number;
   description: string;            // 模型对目标的自然语言描述
   appHint?: string;               // 可选的应用/上下文线索
+  sceneHash?: string;             // 记忆形成时的整屏指纹：场景匹配加成的事实源
   normalized: { x: number; y: number };
   successCount: number;           // 该位置被验证成功的次数
   lastUsedAt: number;
@@ -44,8 +46,8 @@ class UIMemory {
     this.landmarks = [];
   }
 
-  /** 记录（或强化）一个 landmark：同描述就近复用，成功次数 +1 */
-  remember(description: string, x: number, y: number, appHint?: string): Landmark {
+  /** 记录（或强化）一个 landmark：同描述就近复用，成功次数 +1；sceneHash 记录当时场景 */
+  remember(description: string, x: number, y: number, appHint?: string, sceneHash?: string): Landmark {
     const existing = this.landmarks.find(l =>
       l.description.toLowerCase() === description.toLowerCase() &&
       Math.abs(l.normalized.x - x) < 0.02 && Math.abs(l.normalized.y - y) < 0.02,
@@ -53,6 +55,7 @@ class UIMemory {
     if (existing) {
       existing.successCount++;
       existing.lastUsedAt = Date.now();
+      existing.sceneHash = sceneHash ?? existing.sceneHash; // 场景指纹滚动更新
       return existing;
     }
 
@@ -60,6 +63,7 @@ class UIMemory {
       id: this.nextId++,
       description,
       appHint,
+      sceneHash,
       normalized: { x, y },
       successCount: 1,
       lastUsedAt: Date.now(),
@@ -76,10 +80,11 @@ class UIMemory {
   }
 
   /**
-   * 召回 top-k：score = overlap + 0.05*min(successCount,6) + 时间衰减加成。
-   * 返回值可直接作为 click_mouse 的坐标先验。
+   * 召回 top-k：score = overlap + 0.05*min(successCount,6) + 时间衰减 + 场景匹配加成。
+   * currentSceneHash 与 landmark 形成时同场景（相似度>=0.9）⇒ +0.3 强加成 ——
+   * 「还是那个界面」时，历史坐标的置信度显著更高。
    */
-  recall(query: string, k = 5): Array<Landmark & { score: number }> {
+  recall(query: string, k = 5, currentSceneHash?: string): Array<Landmark & { score: number }> {
     const qTokens = tokenize(query);
     const now = Date.now();
     return this.landmarks
@@ -88,8 +93,12 @@ class UIMemory {
         const text = overlapCoefficient(qTokens, lTokens);
         const trust = 0.05 * Math.min(l.successCount, 6);
         const ageH = (now - l.lastUsedAt) / 3_600_000;
-        const recency = 0.1 * Math.exp(-ageH / 24); // 一天衰减到 ~37%
-        return { ...l, score: Math.round((text + trust + recency) * 1000) / 1000 };
+        const recency = 0.1 * Math.exp(-ageH / 24);
+        let sceneBonus = 0;
+        if (currentSceneHash && l.sceneHash && similarity(currentSceneHash, l.sceneHash) >= 0.9) {
+          sceneBonus = 0.3;
+        }
+        return { ...l, score: Math.round((text + trust + recency + sceneBonus) * 1000) / 1000 };
       })
       .filter(l => l.score > 0.05)
       .sort((a, b) => b.score - a.score)
