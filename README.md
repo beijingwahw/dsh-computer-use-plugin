@@ -143,7 +143,7 @@ Node.js >= 18（推荐 22）与 pnpm。原生依赖（`sharp` / `@nut-tree/nut-j
 
 ### 2. 安装插件
 
-DSH 插件源（名称 + 来源）：
+推荐的安装方式：
 
 ```
 dsh plugin add beijingwahw/dsh-computer-use-plugin --profile web
