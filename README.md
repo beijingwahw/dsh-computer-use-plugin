@@ -146,7 +146,7 @@ Node.js >= 18（推荐 22）与 pnpm。原生依赖（`sharp` / `@nut-tree/nut-j
 DSH 插件源（名称 + 来源）：
 
 ```
-dsh-computer-use-plugin github:beijingwahw/dsh-computer-use-plugin
+dsh plugin add beijingwahw/dsh-computer-use-plugin --profile web
 ```
 
 以 pnpm 为例安装（git 依赖）：
