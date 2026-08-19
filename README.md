@@ -1,4 +1,4 @@
-# 中文
+# 基于 DeepSeek Harness (DSH) 构建的 Computer Use 插件
 
 **中文** | **[English](#english)**
 
