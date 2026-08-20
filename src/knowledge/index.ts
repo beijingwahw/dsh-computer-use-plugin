@@ -11,16 +11,23 @@
 // 零侵入红线：不修改任何既有文件 —— 与 D-5（sandbox）/ D-6（orchestration）并存为第七器官。
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { InMemoryKnowledgeBase } from './knowledgeBase';
+import { InMemoryKnowledgeBase, CONTENT_MAX_CHARS } from './knowledgeBase';
 import { KnowledgePipelineOrchestrator } from './pipeline';
-import { StubVisionStation, StubDecisionStation, StubExecutionStation } from './stations';
+import { StubVisionStation, ReflexiveDecisionStation, StubExecutionStation } from './stations';
 import { DoctorVerdictBridge, toD7Intent } from './adapters';
 import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events';
 import type { IntentPayload, PipelineConfig } from './contracts';
+import {
+  D7PhysicalHostPort,
+  type D7PhysicalHostPortOpts,
+} from '../physicalExecution';
 
-export { InMemoryKnowledgeBase, distillInjection } from './knowledgeBase';
+export { InMemoryKnowledgeBase, distillInjection, CONTENT_MAX_CHARS } from './knowledgeBase';
 export { KnowledgePipelineOrchestrator } from './pipeline';
-export { StubVisionStation, StubDecisionStation, StubExecutionStation, createCapabilitySceneSource } from './stations';
+export {
+  StubVisionStation, StubDecisionStation, StubExecutionStation,
+  ReflexiveDecisionStation, createCapabilitySceneSource,
+} from './stations';
 export { DoctorVerdictBridge, toD7Intent, translateVerdict } from './adapters';
 export type {
   AttentionEnvelope, D7StationKind, KnowledgeBase, KnowledgeEntry, KnowledgeInjection, KnowledgeQuery,
@@ -46,6 +53,9 @@ const KNOWLEDGE_DOCTRINE =
 
 /** 网格缺省（独立常量：PipelineConfig.regionGrid 是可选字段，避免 undefined 域泄漏） */
 const DEFAULT_REGION_GRID = { cols: 2, rows: 2 } as const;
+
+/** knowledge_query 工具面内容预览预算（Token 纪律 —— 对话流只见截断预览，全量走知识库） */
+const QUERY_PREVIEW_MAX_CHARS = 80;
 
 /** D-7 配置缺省（cordis.yml 覆盖；防卡顿铁律的结构缺省：knowledgeTimeout=50ms）。
  *  stationTokenBudgets（P1-2 config-driven）：预算治理入配置域。
@@ -92,9 +102,20 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
   const rawHost = (ctx as any).get?.('dsh.host-executor') as
     | { execute?: (action: any) => Promise<any> }
     | undefined;
-  const host = rawHost?.execute
-    ? (rawHost as { execute: NonNullable<typeof rawHost.execute> })
-    : null;
+  // 批次 D：默认实现切换 —— 外部 dsh.host-executor 缺席时，
+  // 启用 D7PhysicalHostPort（D-5 微服务默认执行路径），彻底抛弃 nut-js。
+  // 启动哲学：懒启动（第一次 execute() 才 spawn Python，构造器不阻塞）。
+  let d7MicroserviceHost: D7PhysicalHostPort | null = null;
+  let host: { execute: (action: any) => Promise<any> } | null = null;
+  if (rawHost?.execute) {
+    host = rawHost as { execute: NonNullable<typeof rawHost.execute> };
+  } else {
+    const msOpts = (config as any)?.physicalService as Partial<D7PhysicalHostPortOpts> | undefined;
+    d7MicroserviceHost = new D7PhysicalHostPort(msOpts);
+    host = d7MicroserviceHost;
+    console.log('[Knowledge] D-5 physical microservice host armed (lazy start on first execute) — ' +
+      'goodbye nut-js.');
+  }
 
   const rawVision = (ctx as any).get?.('dsh.vision.station') as
     | { perceive?: (req: any) => Promise<any[]> }
@@ -115,13 +136,23 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
       });
       console.log('[Knowledge] capability scene source wired (L1 a11y > L2 OCR — fallback layer).');
     } catch {
-      console.log('[Knowledge] capability scene source unavailable (native deps absent) — honest degradation.');
+      console.log('[Knowledge] capability scene source unavailable (native deps absent).');
     }
   }
+  // 感知回退链末节：D-5 微服务躯体的感知面（getUiTree 反双盲漏斗）。
+  // capability 源也缺席（无 a11y / 无 OCR 的 headless 环境）⇒ 同一物理躯体顶上 ——
+  // 感知与执行第一次跑在同一 Python 进程上（双端口躯体，零二次 spawn）。
+  if (!sceneSource && d7MicroserviceHost) {
+    sceneSource = d7MicroserviceHost;
+    console.log('[Knowledge] D-5 microservice scene source wired (dual-port body: perceive + execute).');
+  }
 
-  // ── 工位接线（桩纪元：端口缺席 = 诚实降级；index.ts 是唯一接线点）──
+  // ── 工位接线（index.ts 是唯一接线点）──
   const vision = new StubVisionStation({ source: sceneSource });
-  const decision = new StubDecisionStation({ chat });
+  // 决策纪元切换：反射决策工位 —— chat 在场走 LLM（大脑），缺席走脊髓反射弧 +
+  // 免疫抑制（error-pattern 高置信 ⇒ 手在陷阱前停住）。桩纪元的「无 LLM 即恒
+  // NeedGrounding」终结：无大模型也有真实、确定、可审计的决策智能。
+  const decision = new ReflexiveDecisionStation({ chat });
   const execution = new StubExecutionStation({ host });
 
   // ── D-4 判决回执桥（P0-4）：事件方言缓存 → 验收结算门（subject = `${intentId}:${seq}`）──
@@ -164,7 +195,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
   ctx.tools.register(defineTool({
     name: 'knowledge_query',
     description: KNOWLEDGE_DOCTRINE + ' Query the tacit-knowledge base before deciding. ' +
-      'Returns compact entries (id, category, confidence, content<=80 chars) — never full dumps.',
+      `Returns compact entries (id, category, confidence, content<=${QUERY_PREVIEW_MAX_CHARS} chars) — never full dumps.`,
     parameters: {
       scene_description: { type: 'string', required: true, description: 'Current scene summary (what is on screen).' },
       intent_description: { type: 'string', required: true, description: 'What the organism is trying to do.' },
@@ -184,7 +215,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
         status: 'SUCCESS',
         entries: r.value.entries.map(e => ({
           id: e.id, category: e.category, confidence: e.confidence,
-          content: e.content.slice(0, 80),
+          content: e.content.slice(0, QUERY_PREVIEW_MAX_CHARS),
         })),
         latency_ms: r.value.latencyMs,
         strategy: r.value.strategy,
@@ -195,10 +226,10 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
   ctx.tools.register(defineTool({
     name: 'knowledge_insert',
     description: 'Insert a manual tacit-knowledge entry (category taxonomy: ui-pattern | shortcut | ' +
-      'system-quirk | business-rule | error-pattern | workflow | preference; confidence 0-1; content<=500 chars).',
+      `system-quirk | business-rule | error-pattern | workflow | preference; confidence 0-1; content<=${CONTENT_MAX_CHARS} chars).`,
     parameters: {
       category: { type: 'string', required: true, description: 'Knowledge category (see taxonomy).' },
-      content: { type: 'string', required: true, description: 'Knowledge content, <=500 chars.' },
+      content: { type: 'string', required: true, description: `Knowledge content, <=${CONTENT_MAX_CHARS} chars.` },
       scenario: { type: 'string', required: true, description: 'Scenario where this knowledge applies.' },
       confidence: { type: 'number', required: true, description: 'Confidence in [0,1] — out-of-domain is rejected, never clamped.' },
       intent_ref: { type: 'string', required: false, description: 'Optional originating intent id.' },
@@ -247,14 +278,27 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
   console.log(chat
     ? '[Knowledge] D-1 cognition chat channel detected — decision station armed.'
     : '[Knowledge] D-1 cognition chat channel absent — decisions degrade to need-grounding (honest).');
-  console.log(host
-    ? '[Knowledge] Host executor detected — execution station armed.'
-    : '[Knowledge] Host executor absent — executions degrade to host-error (honest).');
+  if (rawHost?.execute) {
+    console.log('[Knowledge] External host-executor detected — execution station armed (delegating).');
+  } else if (d7MicroserviceHost) {
+    console.log('[Knowledge] D-5 microservice host armed (lazy start) — goodbye nut-js.');
+  } else {
+    console.log('[Knowledge] Host executor absent — executions degrade to host-error (honest).');
+  }
 
   // ── 可逆注册：一切资源登记清理（Cordis 注册即效果模型）──
   ctx.effect(() => {
     console.log('[Knowledge] Unloading, rolling back resources...');
-    return () => {
+    return async () => {
+      // 批次 D：D-5 微服务关停（SIGTERM → 3s → SIGKILL，原子性：即使后续代码报错也保证执行）
+      if (d7MicroserviceHost) {
+        try {
+          await d7MicroserviceHost.dispose();
+          console.log('[Knowledge] D-5 physical microservice shut down cleanly.');
+        } catch (e: any) {
+          console.warn(`[Knowledge] D-5 microservice dispose degraded: ${e?.message ?? String(e)}`);
+        }
+      }
       const r = orchestrator.dispose(); // 知识库归零 + 编排器状态回滚
       if (!r.ok) console.warn(`[Knowledge] dispose degraded: ${r.error.message}`);
       verdictBridge.reset(); // 判决桥归零：回执缓存 + 挂账等待室零残留

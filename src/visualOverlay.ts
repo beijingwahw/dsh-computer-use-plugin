@@ -2,7 +2,8 @@
 // SoM (Set-of-Mark) 视觉辅助层。用 sharp 在向量域组装 SVG、光栅域只合成一次。
 // 融合补全原版两大缺失：readme 承诺的 10x10 网格与绿色十字准星（原代码注释「此处省略」）；
 // 修复地层 bug：<text> 空标签导致编号不可见。
-import sharp from 'sharp';
+// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+import { getSharp } from './_legacyDeps';
 
 export interface OverlayElement {
   id: number | string;
@@ -23,6 +24,7 @@ export async function addVisualOverlay(
   imageBuffer: Buffer,
   options: OverlayOptions = {},
 ): Promise<Buffer> {
+  const sharp = await getSharp();
   const metadata = await sharp(imageBuffer).metadata();
   const width = metadata.width!;
   const height = metadata.height!;

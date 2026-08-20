@@ -14,12 +14,14 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { PipelineOrchestratorImpl } from './pipeline';
 import { SANDBOX_EVENTS, COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events';
 import type { DoctorVerdictPayload } from '../doctorEvents';
+import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts';
 import type { AttemptRecord, IntentPayload, PipelineConfig, PipelineReport } from './contracts';
 import type { SandboxAction } from '../sandbox/types';
 
 export { PipelineOrchestratorImpl } from './pipeline';
 export { DefaultVisionStation, DefaultDecisionStation, DefaultExecutionStation } from './stations';
 export { createStructuredFromUiExtractor, createTraditionalFromOcr } from './visionAdapters';
+export { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts';
 export type {
   PipelineConfig, PipelineOrchestrator, PipelineReport, PipelineVerdict,
   IntentPayload, AttemptRecord, ScenePatch, UIElement, AtomicAction, ExecutionResult,
@@ -213,8 +215,8 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
     description: PIPELINE_DOCTRINE + ' Run the four-station pipeline (vision→decision→execution→verification) '
       + 'for a goal. Returns compact numbers only (verdict, attempts, token usage); full evidence goes to reportPath.',
     parameters: {
-      goal: { type: 'string', required: true, description: 'Abstract goal (<=160 chars, e.g. "sign in to the portal").' },
-      success_criteria: { type: 'string', required: false, description: 'Verifiable completion criteria (<=200 chars).' },
+      goal: { type: 'string', required: true, description: `Abstract goal (<=${GOAL_MAX_CHARS} chars, e.g. "sign in to the portal").` },
+      success_criteria: { type: 'string', required: false, description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).` },
       budget_ms: { type: 'number', required: false, description: 'Optional wall-clock budget for the whole pipeline.' },
     },
     output: { schema: { type: 'string' }, render: (_a: any, v: any) => [{ type: 'text', text: v }] },
@@ -222,8 +224,8 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
       try {
         const intent: IntentPayload = {
           id: `intent-tool-${Date.now().toString(36)}`,
-          goal: String(args.goal ?? '').slice(0, 160),
-          successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, 200) : undefined,
+          goal: String(args.goal ?? '').slice(0, GOAL_MAX_CHARS),
+          successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
           budgetMs: isPositiveFinite(args.budget_ms) ? args.budget_ms : undefined,
           source: 'user',
         };
@@ -340,8 +342,8 @@ function normalizeIntent(payload: any): IntentPayload | null {
   if (typeof payload.id === 'string' && typeof payload.goal === 'string' && payload.goal) {
     return {
       id: payload.id,
-      goal: String(payload.goal).slice(0, 160),
-      successCriteria: payload.successCriteria ? String(payload.successCriteria).slice(0, 200) : undefined,
+      goal: String(payload.goal).slice(0, GOAL_MAX_CHARS),
+      successCriteria: payload.successCriteria ? String(payload.successCriteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
       budgetMs: isPositiveFinite(payload.budgetMs) ? payload.budgetMs : undefined,
       source: payload.source === 'cognition' ? 'cognition' : 'user',
       planVersion: payload.planVersion,
@@ -353,7 +355,7 @@ function normalizeIntent(payload: any): IntentPayload | null {
     const goal = `execute ${chain.actions.length}-step action chain (${chain.actions.map((a: any) => a.kind).slice(0, 5).join('→')}${chain.actions.length > 5 ? '…' : ''})`;
     return {
       id: `intent-from-${chain.id}`,
-      goal: goal.slice(0, 160),
+      goal: goal.slice(0, GOAL_MAX_CHARS),
       successCriteria: undefined,
       budgetMs: isPositiveFinite(chain.budgetMs) ? chain.budgetMs : undefined,
       source: 'cognition',

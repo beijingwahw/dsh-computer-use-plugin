@@ -82,7 +82,7 @@ class ContextManager {
             relevance = Math.max(0.2, cosine(embed(record.textSummary), this.taskQueryCache.vec));
         }
         // 时间衰减：半衰期 5 分钟 —— 「刚看过」的记忆天然更鲜活
-        const ageMin = (now - record.timestamp) / 60_000;
+        const ageMin = (now - record.timestamp) / 60000;
         const recency = Math.exp(-ageMin / 5);
         return Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
     }

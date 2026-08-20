@@ -4,13 +4,14 @@
 //   find_text  — 文字→坐标定位：带文字标签的元素获得精确 ground truth，
 //                彻底消灭「按按钮文字估坐标」的幻觉源
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import sharp from 'sharp';
+import { getSharp } from '../_legacyDeps.js';
 import { system } from '../system.js';
 import { readText } from '../textReader.js';
 /** 截一张无叠加层的干净屏（OCR 不受网格线干扰），降采样到 OCR 友好宽度 */
 async function cleanShot() {
     const raw = await system.captureScreen();
-    return sharp(raw).resize({ width: 1600 }).jpeg({ quality: 85 }).toBuffer();
+    const sharp = await getSharp();
+    return sharp(raw).resize(1600).jpeg({ quality: 85 }).toBuffer();
 }
 export function createReadTextTool(config) {
     return defineTool({
@@ -37,6 +38,7 @@ export function createReadTextTool(config) {
                     if (args.x < 0 || args.x > 1 || args.y < 0 || args.y > 1 || half <= 0 || half > 0.5) {
                         return `[Error]: Invalid region. x/y in 0.0-1.0, half_size in (0, 0.5].`;
                     }
+                    const sharp = await getSharp();
                     const meta = await sharp(shot).metadata();
                     const W = meta.width, H = meta.height;
                     const left = Math.max(0, Math.round((args.x - half) * W));
@@ -44,7 +46,7 @@ export function createReadTextTool(config) {
                     const width = Math.min(W - left, Math.round(half * 2 * W));
                     const height = Math.min(H - top, Math.round(half * 2 * H));
                     // 区域裁剪 + 放大：OCR 对小文字的准确率关键
-                    target = await sharp(shot).extract({ left, top, width, height }).resize({ width: 1400 }).toBuffer();
+                    target = await sharp(shot).extract({ left, top, width, height }).resize(1400).toBuffer();
                     cropNote = `region_center=(${args.x}, ${args.y}) half=${half}`;
                 }
                 const { text } = await readText(target, config.ocrLang);

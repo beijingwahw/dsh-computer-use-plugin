@@ -6,14 +6,17 @@
 //   2. read_text：区域文字读取（用文本替代截图，Token 数量级下降）
 //   3. semanticConfirm：动作后自动核对「预期文字是否出现」
 // 依赖 tesseract.js（语言数据首次使用时按需下载，故 enableOcr 默认关闭）。
-import { createWorker } from 'tesseract.js';
-import sharp from 'sharp';
+//
+// 批次 E 迁移：sharp / tesseract.js 不再作为 dependencies 强绑定，此处改为懒动态导入。
+// 推荐替代：D-5 微服务 adapter.getUiTree({ funnelCeiling: 'L2' })。
+import { getSharp, getTesseract, } from './_legacyDeps.js';
 let workerPromise = null;
 let workerLang = '';
 async function getWorker(lang) {
     if (!workerPromise || workerLang !== lang) {
         workerLang = lang;
-        workerPromise = createWorker(lang).catch(e => {
+        const tess = await getTesseract();
+        workerPromise = tess.createWorker(lang).catch(e => {
             workerPromise = null; // 失败后允许重试（网络恢复时）
             throw e;
         });
@@ -34,6 +37,7 @@ const normalize = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
 export async function readText(buffer, lang = 'eng') {
     const worker = await getWorker(lang);
     const { data } = await worker.recognize(buffer);
+    const sharp = await getSharp();
     const meta = await sharp(buffer).metadata();
     const W = meta.width, H = meta.height;
     // tesseract v5 的词级输出结构随版本有差异，防御性兼容 words / lines.words
@@ -59,6 +63,7 @@ export async function readText(buffer, lang = 'eng') {
  */
 export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected, lang = 'eng') {
     try {
+        const sharp = await getSharp();
         const meta = await sharp(fullBuf).metadata();
         const W = meta.width, H = meta.height;
         const left = Math.max(0, Math.round((cxPct - radiusPct) * W));
@@ -70,7 +75,7 @@ export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected
         // 放大到 1200 宽再识别：小区域文字的准确率关键
         const crop = await sharp(fullBuf)
             .extract({ left, top, width, height })
-            .resize({ width: 1200 })
+            .resize(1200)
             .toBuffer();
         const { text } = await readText(crop, lang);
         const hay = normalize(text);

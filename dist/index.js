@@ -16,6 +16,7 @@ import { buildAllTools } from './tools/index.js';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards/index.js';
 import { onToolPost } from './guards/hooks.js';
 import { runOrchestrator, ACTOR_SYSTEM_PROMPT } from './orchestrator.js';
+import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts.js';
 import { emitCognitionPlanReady, mintIntentPlanReady, COGNITION_PLAN_READY_EVENT, } from './cognitionEvents.js';
 import { wireDoctorVerdictChannel } from './doctorChannel.js';
 export { Config } from './config.js';
@@ -203,11 +204,11 @@ export async function apply(ctx, config) {
         parameters: {
             goal: {
                 type: 'string', required: true,
-                description: 'Abstract goal (<=160 chars, e.g. "sign in to the portal").',
+                description: `Abstract goal (<=${GOAL_MAX_CHARS} chars, e.g. "sign in to the portal").`,
             },
             success_criteria: {
                 type: 'string', required: false,
-                description: 'Verifiable completion criteria (<=200 chars).',
+                description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).`,
             },
             budget_ms: {
                 type: 'number', required: false,
@@ -219,7 +220,7 @@ export async function apply(ctx, config) {
             render: (_args, value) => [{ type: 'text', text: value }],
         },
         async execute(args) {
-            const goal = String(args.goal ?? '').slice(0, 160);
+            const goal = String(args.goal ?? '').slice(0, GOAL_MAX_CHARS);
             if (!goal)
                 return JSON.stringify({ status: 'FAILED', reason: 'goal is required' });
             const intent = mintIntentPlanReady({

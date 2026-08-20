@@ -133,7 +133,7 @@ class Coordinator {
             return this.current();
         a.report = {
             taskId, status,
-            findings: findings.slice(0, 2000), // 报告预算：防长文反噬主上下文
+            findings: findings.slice(0, 2000),
             confidence: Math.max(0, Math.min(1, confidence)),
             stepsUsed: a.stepsUsed,
         };

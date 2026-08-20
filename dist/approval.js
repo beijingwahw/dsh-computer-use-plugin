@@ -1,5 +1,5 @@
 const pending = new Map();
-const TTL_MS = 120_000;
+const TTL_MS = 120000;
 function newToken() {
     return 'APR-' + Math.random().toString(36).slice(2, 10).toUpperCase();
 }

@@ -1,3 +1,4 @@
+import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts.js';
 /** D-1 发射、D-5/D-6/D-7 消费 —— 事件名（事件名与载荷不可分，同归 D-1 主权） */
 export const COGNITION_PLAN_READY_EVENT = 'cognition/plan-ready';
 /** D-1 规划器版本（世界模型溯源 —— 载荷 planVersion 字段的缺省铸造源） */
@@ -11,8 +12,8 @@ export const COGNITION_PLAN_VERSION = 'd1-planner/1';
 export function mintIntentPlanReady(input) {
     return {
         id: input.id,
-        goal: input.goal.slice(0, 160),
-        successCriteria: input.successCriteria?.slice(0, 200),
+        goal: input.goal.slice(0, GOAL_MAX_CHARS),
+        successCriteria: input.successCriteria?.slice(0, SUCCESS_CRITERIA_MAX_CHARS),
         budgetMs: isPositiveFinite(input.budgetMs) ? input.budgetMs : undefined,
         source: 'cognition',
         planVersion: COGNITION_PLAN_VERSION,

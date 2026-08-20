@@ -4,18 +4,21 @@
 // dHash 把整屏缩到 9x8 灰度并比较水平相邻像素，对鼠标箭头这类微小局部变化
 // 天然鲁棒（下采样后几乎不改变指纹），而菜单弹出/页面切换等真实 UI 变化
 // 会产生大汉明距离 —— 这正好是「操作是否产生效果」的理想判据。
-import sharp from 'sharp';
+// 批次 E 迁移：sharp 从 dependencies 移除，改为懒动态导入（_legacyDeps.getSharp）。
+import { getSharp } from './_legacyDeps.js';
 const HASH_BITS = 64; // 8x8 有效比较位
 /**
  * 计算图像 dHash 指纹，返回 64 位 '0'/'1' 字符串。
  * 缩放到 (hashSize+1) x hashSize：每行比较左右相邻像素，右 > 左 记 1。
  */
 export async function dhash(buffer, hashSize = 8) {
-    const { data, info } = await sharp(buffer)
+    const sharp = await getSharp();
+    const res = await sharp(buffer)
         .grayscale()
         .resize(hashSize + 1, hashSize, { fit: 'fill' })
         .raw()
         .toBuffer({ resolveWithObject: true });
+    const { data, info } = res;
     let bits = '';
     for (let row = 0; row < info.height; row++) {
         for (let col = 0; col < info.width - 1; col++) {
@@ -43,6 +46,7 @@ export function hammingDistance(a, b) {
  * 占比极高，距离陡增。双尺度互补：全屏管「页面级跳转」，区域管「元素级反馈」。
  */
 export async function regionDhash(buffer, cxPct, cyPct, radiusPct = 0.15, hashSize = 8) {
+    const sharp = await getSharp();
     const meta = await sharp(buffer).metadata();
     const W = meta.width, H = meta.height;
     const cx = Math.round(cxPct * W);

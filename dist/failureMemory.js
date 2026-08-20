@@ -12,7 +12,7 @@ class FailureMemory {
     capacity = 30;
     record(query, approach, symptom, sceneHash) {
         // 近重复去重：同查询+同路径 5 分钟内不重复记录
-        const dup = this.records.find(r => r.query === query && r.approach === approach && Date.now() - r.at < 300_000);
+        const dup = this.records.find(r => r.query === query && r.approach === approach && Date.now() - r.at < 300000);
         if (dup) {
             dup.at = Date.now();
             return dup;

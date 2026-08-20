@@ -202,14 +202,14 @@ export function createClickMouseTool(config) {
                         screen_resolution: `${size.width}x${size.height}`,
                         effect: effect ? {
                             detected: effect.detected,
-                            scale: effect.scale, // page-level / element-level / none
+                            scale: effect.scale,
                             screen_similarity_pct: effect.screen.similarity_pct,
                             region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
                             // C-1 意图裁决：期望 kind + 物理证据（与 detected 分歧 = 高级幻觉警报）
                             intent: effect.intent ?? undefined,
                         } : 'verification-off',
-                        expected_change: expected_change || undefined, // 预期锚定：模型行动前声明的预期
-                        sensitive_focus: sensitive || undefined, // 风险闸门：焦点已标记为凭据区
+                        expected_change: expected_change || undefined,
+                        sensitive_focus: sensitive || undefined,
                         semantic: semantic
                             ? (semantic === 'ocr-unavailable'
                                 ? 'ocr-unavailable'

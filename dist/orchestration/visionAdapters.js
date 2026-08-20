@@ -59,7 +59,7 @@ export function createTraditionalFromOcr(opts) {
         const result = await readText(buffer, lang);
         const words = result.words.map(w => ({
             role: 'text',
-            name: w.text.slice(0, 20), // D-3 LABEL_MAX 先例：元素名 ≤20 字符
+            name: w.text.slice(0, 20),
             rect: {
                 x: w.bbox_normalized.x0,
                 y: w.bbox_normalized.y0,

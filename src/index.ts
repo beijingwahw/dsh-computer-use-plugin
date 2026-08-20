@@ -21,6 +21,7 @@ import { buildAllTools } from './tools';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards';
 import { onToolPost } from './guards/hooks';
 import { runOrchestrator, ACTOR_SYSTEM_PROMPT, ChatFn as PlannerChatFn } from './orchestrator';
+import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts';
 import {
   emitCognitionPlanReady, mintIntentPlanReady, COGNITION_PLAN_READY_EVENT,
 } from './cognitionEvents';
@@ -247,11 +248,11 @@ export async function apply(ctx: Context, config: Config) {
     parameters: {
       goal: {
         type: 'string', required: true,
-        description: 'Abstract goal (<=160 chars, e.g. "sign in to the portal").',
+        description: `Abstract goal (<=${GOAL_MAX_CHARS} chars, e.g. "sign in to the portal").`,
       },
       success_criteria: {
         type: 'string', required: false,
-        description: 'Verifiable completion criteria (<=200 chars).',
+        description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).`,
       },
       budget_ms: {
         type: 'number', required: false,
@@ -263,7 +264,7 @@ export async function apply(ctx: Context, config: Config) {
       render: (_args: any, value: any) => [{ type: 'text', text: value }],
     },
     async execute(args: any) {
-      const goal = String(args.goal ?? '').slice(0, 160);
+      const goal = String(args.goal ?? '').slice(0, GOAL_MAX_CHARS);
       if (!goal) return JSON.stringify({ status: 'FAILED', reason: 'goal is required' });
       const intent = mintIntentPlanReady({
         id: `intent-d1-${Date.now().toString(36)}`,

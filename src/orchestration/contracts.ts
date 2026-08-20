@@ -100,12 +100,18 @@ export interface PerceptionRequest {
 
 // ─── 2. 意图域：流水线的唯一入口语义 ───
 
+/** 抽象意图字符预算（IntentPayload.goal 立法值 —— 各铸造点结构截断，不靠自觉） */
+export const GOAL_MAX_CHARS = 160;
+
+/** 完成判据字符预算（IntentPayload.successCriteria 立法值 —— 决策工位终止判断依据） */
+export const SUCCESS_CRITERIA_MAX_CHARS = 200;
+
 /** 抽象意图（D-1 认知引擎规划 / 造物主手书）——id 经 IdGenerator 铸造（kind='intent'） */
 export interface IntentPayload {
   id: string;
-  /** 抽象意图 ≤160 字符（信封构造器截断——结构保证，不靠自觉） */
+  /** 抽象意图 ≤GOAL_MAX_CHARS 字符（信封构造器截断——结构保证，不靠自觉） */
   goal: string;
-  /** 可验证完成判据 ≤200 字符（决策工位的终止判断依据） */
+  /** 可验证完成判据 ≤SUCCESS_CRITERIA_MAX_CHARS 字符（决策工位的终止判断依据） */
   successCriteria?: string;
   /** 时间预算（步边界检查时钟——现世方言） */
   budgetMs?: number;

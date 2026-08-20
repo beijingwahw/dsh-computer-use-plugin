@@ -3,7 +3,7 @@
 export function toD7Intent(intent) {
     return {
         id: intent.id,
-        description: intent.goal.slice(0, 160), // D-7 description 预算 = D-6 goal 预算（≤160）
+        description: intent.goal.slice(0, 160),
         previousResults: undefined, // D-6 方言无此维 —— 诚实缺席，绝不伪造
     };
 }

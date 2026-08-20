@@ -4,7 +4,8 @@
 // dHash 把整屏缩到 9x8 灰度并比较水平相邻像素，对鼠标箭头这类微小局部变化
 // 天然鲁棒（下采样后几乎不改变指纹），而菜单弹出/页面切换等真实 UI 变化
 // 会产生大汉明距离 —— 这正好是「操作是否产生效果」的理想判据。
-import sharp from 'sharp';
+// 批次 E 迁移：sharp 从 dependencies 移除，改为懒动态导入（_legacyDeps.getSharp）。
+import { getSharp } from './_legacyDeps';
 
 const HASH_BITS = 64; // 8x8 有效比较位
 
@@ -13,11 +14,13 @@ const HASH_BITS = 64; // 8x8 有效比较位
  * 缩放到 (hashSize+1) x hashSize：每行比较左右相邻像素，右 > 左 记 1。
  */
 export async function dhash(buffer: Buffer, hashSize = 8): Promise<string> {
-  const { data, info } = await sharp(buffer)
+  const sharp = await getSharp();
+  const res = await sharp(buffer)
     .grayscale()
     .resize(hashSize + 1, hashSize, { fit: 'fill' })
     .raw()
     .toBuffer({ resolveWithObject: true });
+  const { data, info } = res as any;
 
   let bits = '';
   for (let row = 0; row < info.height; row++) {
@@ -51,6 +54,7 @@ export async function regionDhash(
   radiusPct = 0.15,
   hashSize = 8,
 ): Promise<string> {
+  const sharp = await getSharp();
   const meta = await sharp(buffer).metadata();
   const W = meta.width!, H = meta.height!;
   const cx = Math.round(cxPct * W);

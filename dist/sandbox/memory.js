@@ -118,7 +118,7 @@ export class MuscleMemoryStore {
                 fingerprintSimilarity(query.currentSceneFingerprint, entry.entrySceneFingerprint) >= SCENE_SIMILARITY_GATE) {
                 scene = W_SCENE_BONUS;
             }
-            const ageH = (now - entry.lastRehearsedAt) / 3_600_000;
+            const ageH = (now - entry.lastRehearsedAt) / 3600000;
             const recency = W_RECENCY * Math.exp(-ageH / RECENCY_HALF_LIFE_H);
             hits.push({ entry, score: Math.max(text, 0) * reliability + scene + recency });
         }

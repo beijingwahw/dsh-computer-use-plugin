@@ -13,13 +13,21 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { distillInjection } from './knowledgeBase.js';
+import { InMemoryWorldModel, transitionActionKey } from './worldModel.js';
+import { InMemoryKnowledgeBase } from './knowledgeBase.js';
+import { KnowledgePersistence } from './persistence.js';
+import { MetricsLedger } from './metrics.js';
 import { emitKnowledgeAttempt, emitKnowledgeLearned, emitKnowledgeRunEnd, } from './events.js';
 import { sandboxLog } from '../sandbox/log.js';
-/** 工位 Token 预算缺省（P1-2 config-driven：本表仅为 PipelineConfig.stationTokenBudgets
- *  缺席时的回退缺省 —— 预算治理主权在配置域，configure 校验后不再有第二个常量源） */
-const DEFAULT_STATION_TOKEN_BUDGETS = { vision: 0, decision: 2000, execution: 0 };
+import { validatePipelineConfig, DEFAULT_REGION_GRID } from './configValidator.js';
+import { P } from './params.js';
 /** 防爆环上限（结构保险丝：任何纪元的最大决策轮数） */
 const MAX_ROUNDS = 1000;
+/**
+ * L3 升级阈值（预测编码铁律：惊讶计费器）—— 认知参数，收编 params.ts。
+ * 形式推导：bits = −log₂p，3 bits ⇔ 预期概率 ≤12.5%；
+ * 「3 不是 2 或 4」由校准基准的分离带测量定标（熟悉底噪 vs 新世界信号）。
+ */
 /** D-7 链段入账（P1-5 可观测性对齐：复用 sandboxLog append-only 哈希链，
  *  kind 前缀 'knowledge-'）。旁路义务：落盘失败由 SandboxLog 内部吞错，
  *  绝不阻断流水线；同步段原子（chainTip 读写无竞态）。 */
@@ -42,61 +50,22 @@ function summarizeScene(scene) {
 export class KnowledgePipelineOrchestrator {
     cfg = null;
     deps = null;
+    /** 世界模型（wire 时铸造 —— 缺席注入 ⇒ 内建实例；跨 run 存活：经验不因一次 run 归零） */
+    worldModel = null;
     reportDir = '';
+    persistence = null;
+    metrics = null;
     reportCounter = 0; // 报告文件名防碰撞序号（同 intent 同毫秒不互相覆盖）
     /**
      * 运行层可重配方法（D-7 修正案 / 验收修复项 #2）：Result 降级，严禁 throw。
-     * 校验域外拒绝（对齐 makeScore 哲学），首个错误即返回 —— field 精确定位。
+     * 校验 + 缺省归一化收口于 configValidator（纯函数守卫模块）——
+     * 域外拒绝（对齐 makeScore 哲学），首个错误即返回，field 精确定位。
      */
     configure(config) {
-        if (!config || typeof config !== 'object') {
-            return { ok: false, error: { field: 'config', reason: 'config must be an object' } };
-        }
-        const t = config.timeout;
-        if (!t || !Number.isFinite(t.overall) || t.overall <= 0) {
-            return { ok: false, error: { field: 'timeout.overall', reason: `must be a positive finite number, got ${t?.overall}` } };
-        }
-        if (!Number.isFinite(t.perStep) || t.perStep <= 0) {
-            return { ok: false, error: { field: 'timeout.perStep', reason: `must be a positive finite number, got ${t?.perStep}` } };
-        }
-        if (!Number.isFinite(t.perPerception) || t.perPerception <= 0) {
-            return { ok: false, error: { field: 'timeout.perPerception', reason: `must be a positive finite number, got ${t?.perPerception}` } };
-        }
-        const rp = config.retryPolicy;
-        if (!rp || !Number.isInteger(rp.maxRetries) || rp.maxRetries < 0) {
-            return { ok: false, error: { field: 'retryPolicy.maxRetries', reason: `must be a non-negative integer, got ${rp?.maxRetries}` } };
-        }
-        if (!Number.isFinite(rp.backoffMs) || rp.backoffMs < 0) {
-            return { ok: false, error: { field: 'retryPolicy.backoffMs', reason: `must be a non-negative finite number, got ${rp?.backoffMs}` } };
-        }
-        if (!Number.isFinite(rp.maxBackoffMs) || rp.maxBackoffMs < rp.backoffMs) {
-            return { ok: false, error: { field: 'retryPolicy.maxBackoffMs', reason: `must be >= backoffMs (${rp?.backoffMs}), got ${rp?.maxBackoffMs}` } };
-        }
-        if (!Number.isFinite(config.knowledgeTimeout) || config.knowledgeTimeout <= 0) {
-            return { ok: false, error: { field: 'knowledgeTimeout', reason: `must be a positive finite number (anti-stall guard), got ${config.knowledgeTimeout}` } };
-        }
-        if (!Number.isInteger(config.knowledgeMaxResults) || config.knowledgeMaxResults < 1) {
-            return { ok: false, error: { field: 'knowledgeMaxResults', reason: `must be an integer >= 1, got ${config.knowledgeMaxResults}` } };
-        }
-        if (!Number.isInteger(config.knowledgeMaxChars) || config.knowledgeMaxChars < 1 || config.knowledgeMaxChars > 300) {
-            return { ok: false, error: { field: 'knowledgeMaxChars', reason: `must be an integer in [1,300] (injection summary budget), got ${config.knowledgeMaxChars}` } };
-        }
-        const g = config.regionGrid;
-        if (g && (!Number.isInteger(g.cols) || g.cols < 1 || !Number.isInteger(g.rows) || g.rows < 1)) {
-            return { ok: false, error: { field: 'regionGrid', reason: `cols/rows must be integers >= 1, got ${JSON.stringify(g)}` } };
-        }
-        // P1-2 工位 Token 预算域执法：非负整数；execution 恒 0（零模型肌肉的类型层
-        // 延伸 —— 域外拒绝，绝不 clamp 掩埋）
-        const tb = config.stationTokenBudgets ?? DEFAULT_STATION_TOKEN_BUDGETS;
-        if (!Number.isInteger(tb.vision) || tb.vision < 0 ||
-            !Number.isInteger(tb.decision) || tb.decision < 0 ||
-            !Number.isInteger(tb.execution) || tb.execution < 0) {
-            return { ok: false, error: { field: 'stationTokenBudgets', reason: `vision/decision/execution must be non-negative integers, got ${JSON.stringify(tb)}` } };
-        }
-        if (tb.execution !== 0) {
-            return { ok: false, error: { field: 'stationTokenBudgets.execution', reason: `execution is zero-model muscle and must stay 0, got ${tb.execution}` } };
-        }
-        this.cfg = { ...config, regionGrid: g ?? { cols: 2, rows: 2 }, stationTokenBudgets: tb };
+        const r = validatePipelineConfig(config);
+        if (!r.ok)
+            return r;
+        this.cfg = r.value;
         return { ok: true, value: undefined };
     }
     /** 工位注入（加载层方言：throw 合法 —— 站点缺席即拒绝出生，由 apply 收口） */
@@ -107,7 +76,22 @@ export class KnowledgePipelineOrchestrator {
             throw new Error('[KnowledgePipeline] all stations plus knowledge base and verdict bridge are required');
         }
         this.deps = deps;
+        this.worldModel = deps.worldModel ?? new InMemoryWorldModel();
         this.reportDir = opts?.reportDir ?? '';
+        // 反遗忘接线：stateDir 在场 ⇒ wire 时水合旧脑（旁路义务：水合失败 ⇒ warn +
+        // 空脑开局 —— 记忆的缺席不该让机器人失能，但必须被听见）
+        if (opts?.stateDir) {
+            this.persistence = new KnowledgePersistence(opts.stateDir);
+            if (deps.knowledge instanceof InMemoryKnowledgeBase && this.worldModel instanceof InMemoryWorldModel) {
+                const r = this.persistence.load(deps.knowledge, this.worldModel);
+                if (!r.ok)
+                    console.warn(`[KnowledgePipeline] state hydrate degraded: ${r.error.message}`);
+            }
+            else {
+                console.warn('[KnowledgePipeline] stateDir set but organs are not in-memory snapshots — skipping hydrate');
+            }
+        }
+        this.metrics = opts?.metricsPath ? new MetricsLedger(opts.metricsPath) : null;
     }
     /** 运行层入口（契约：永不抛错）。意外 = 结构化 failed 报告，交 D-4 裁决 */
     async run(intent) {
@@ -126,6 +110,16 @@ export class KnowledgePipelineOrchestrator {
             let seq = 0;
             let feedback;
             let lastSceneSummary = ''; // 并行语义：检索的 sceneDescription 只能用上一轮场景
+            // ── 预测编码回路状态（惊讶计费器）──
+            const worldModel = this.worldModel; // wire 铸造，跨 run 存活（run 内非空 —— 见顶部守卫）
+            let pendingTransition = null;
+            let escalateL3 = false; // 上轮到达意外 ⇒ 本轮动用贵眼睛（L1/L2 免费看熟悉，L3 付费看意外）
+            // ── 认知仪表盘计数器（证据先于修辞：每轮的感知/成本/经验命中如实入账）──
+            let roundsTotal = 0;
+            let l3Rounds = 0;
+            let knowledgeRounds = 0;
+            // ── 消融执法（科学义务）：'always' 恒开 / 'never' 恒关 / 'surprise' 计费器独裁 ──
+            const ablation = cfg.ablation ?? { disableKnowledge: false, l3Policy: 'surprise' };
             for (let round = 0; round < MAX_ROUNDS; round++) {
                 // overall 时钟：预算耗尽 ⇒ verdict='timeout'（部分轨迹保留）
                 if (Date.now() - startedAt > cfg.timeout.overall) {
@@ -134,21 +128,53 @@ export class KnowledgePipelineOrchestrator {
                     break;
                 }
                 // ── 并行双触发：感知 + 隐知识检索（数据流三段论 #2 —— 防卡顿铁律）──
+                roundsTotal += 1;
+                const forceL3 = ablation.l3Policy === 'always'
+                    ? true
+                    : ablation.l3Policy === 'never' ? false : escalateL3;
+                if (forceL3)
+                    l3Rounds += 1;
                 const visionEnv = {
                     station: 'vision',
                     payload: {
-                        grid: cfg.regionGrid ?? { cols: 2, rows: 2 },
-                        forceL3: false, // 桩纪元：L3 花钱权未开（NeedGrounding 批准回路是留白）
+                        grid: cfg.regionGrid ?? DEFAULT_REGION_GRID,
+                        // 惊讶计费器：预测误差是 L3 的唯一合法开火权（d7HostPort 将其译为
+                        // funnelCeiling='L3' —— 每一次 VLM 开销都有惊讶背书，入链可审计）
+                        forceL3,
                         snapshotId: undefined,
                     },
                     tokenBudget: cfg.stationTokenBudgets.vision,
                 };
                 const [scene, injection] = await Promise.all([
                     this.withTimeout(deps.vision.perceive(visionEnv), cfg.timeout.perPerception, []),
-                    this.queryKnowledgeGuarded(intent, lastSceneSummary),
+                    ablation.disableKnowledge
+                        ? Promise.resolve(null) // 消融：无隐知识模式（检索侧断电）
+                        : this.queryKnowledgeGuarded(intent, lastSceneSummary),
                 ]);
+                if (injection)
+                    knowledgeRounds += 1;
                 knowledgeUsed = injection ?? knowledgeUsed;
                 lastSceneSummary = summarizeScene(scene);
+                // ── 预测编码回路：到达场景定型；待结算转移先惊讶后学习 ──
+                // 顺序即语义：surprise 在 observe 之前（误差是学习信号 —— 先测误差，再入账）。
+                // 看不见（typeOf=null）⇒ 转移悬置（失明轮丢信息是感知的诚实代价，绝不虚构定型）。
+                const currentTypeId = worldModel.typeOf(scene);
+                if (currentTypeId && pendingTransition) {
+                    const sr = worldModel.surprise(pendingTransition.fromTypeId, pendingTransition.actionKey, currentTypeId);
+                    if (sr.ok) {
+                        const observed = worldModel.observe(pendingTransition.fromTypeId, pendingTransition.actionKey, currentTypeId, pendingTransition.success);
+                        if (observed.ok) {
+                            escalateL3 = sr.value.novel || sr.value.bits >= P.L3_ESCALATION_BITS;
+                            logKnowledge('world-transition', {
+                                intentId: intent.id, seq: pendingTransition.seq,
+                                from: pendingTransition.fromTypeId, action: pendingTransition.actionKey,
+                                to: currentTypeId, bits: sr.value.bits, novel: sr.value.novel,
+                                evidence: sr.value.evidence, l3Escalated: escalateL3,
+                            });
+                        }
+                    }
+                    pendingTransition = null; // 结算即清（一次性 —— 转移是证据不是滚动债务）
+                }
                 // ── 决策（信封铸造权：intent + scene + 隐知识注入 ≤300 字符，无截图字节）──
                 const decisionCtx = {
                     intent,
@@ -193,6 +219,15 @@ export class KnowledgePipelineOrchestrator {
                     totalDurationMs: Date.now() - startedAt,
                 };
                 outcomes.push(outcome);
+                // ── 预测编码回路：本动作的转移挂账（下轮感知到达时结算 —— 成败已知，去向待察）──
+                if (currentTypeId) {
+                    pendingTransition = {
+                        fromTypeId: currentTypeId,
+                        actionKey: transitionActionKey(action),
+                        seq,
+                        success: result.status === 'success',
+                    };
+                }
                 const settlement = deps.verdictBridge.trySettle(seq, outcome);
                 if (settlement) {
                     this.learnSettled(settlement);
@@ -237,6 +272,8 @@ export class KnowledgePipelineOrchestrator {
             verdict ??= 'failed';
             terminalReason ||= `no progress possible after ${outcomes.length} outcome(s)`;
             this.settlePending(intent.id); // P0-4 终局冲账：本 intent 的挂账在此结算学习
+            const consolidation = this.consolidateKnowledge(intent.id, outcomes.length); // 神经纪元：run-end 入睡（旁路）
+            this.checkpointState(intent.id, verdict, { roundsTotal, l3Rounds, knowledgeRounds, executions: outcomes.length }, consolidation, startedAt); // 反遗忘 + 仪表盘
             return this.finalReport(intent, verdict, terminalReason, outcomes, knowledgeUsed, startedAt);
         }
         catch (e) {
@@ -253,6 +290,7 @@ export class KnowledgePipelineOrchestrator {
             const r = this.deps?.knowledge.dispose();
             this.deps = null;
             this.cfg = null;
+            this.worldModel = null;
             this.reportDir = '';
             if (r && !r.ok)
                 return { ok: false, error: r.error };
@@ -277,6 +315,76 @@ export class KnowledgePipelineOrchestrator {
             return;
         for (const settlement of this.deps.verdictBridge.settleAll(intentId)) {
             this.learnSettled(settlement);
+        }
+    }
+    /**
+     * 睡眠整合（神经纪元）：run-end 冲账结算完成后触发 —— 情景记忆聚类蒸馏为
+     * 语义记忆（海马体→皮层）。旁路义务：整合失败/缺席（接口未实现）只记链，
+     * 绝不击穿流水线；「做梦」是资产增值，不是主路债务。
+     * 消融执法：disableKnowledge ⇒ 不做梦（对照组的睡眠也该被消融 —— 否则
+     * 「关知识」的对照组仍在偷偷进化，实验就是假的）。
+     */
+    consolidateKnowledge(intentId, outcomeCount) {
+        if (!this.deps?.knowledge.consolidate)
+            return 0; // 可选能力缺席 ⇒ 诚实跳过
+        if (this.cfg?.ablation?.disableKnowledge)
+            return 0; // 消融：睡眠断电
+        try {
+            const r = this.deps.knowledge.consolidate();
+            if (!r.ok) {
+                logKnowledge('knowledge-internal-fault', {
+                    intentId, phase: 'consolidate', field: r.error.field, reason: r.error.reason,
+                });
+                return 0;
+            }
+            logKnowledge('knowledge-consolidated', {
+                intentId, outcomeCount,
+                episodes: r.value.episodes, clusters: r.value.clusters,
+                consolidated: r.value.consolidated, episodedDecayed: r.value.episodedDecayed,
+                durationMs: r.value.durationMs,
+            });
+            return r.value.consolidated;
+        }
+        catch {
+            // 违约抛错：旁路义务，静默降级 —— 睡眠失败不影响清醒时的成绩
+            return 0;
+        }
+    }
+    /**
+     * run-end 检查点（证据先于修辞的落账面）：
+     *   1. 仪表盘：一行 RunMetricRecord 追加 JSONL（旁路义务）
+     *   2. 反遗忘：两器官原子落盘（旁路义务 —— 落盘失败绝不击穿 run 报告）
+     */
+    checkpointState(intentId, verdict, counters, consolidated, startedAt) {
+        try {
+            const wmStats = this.worldModel instanceof InMemoryWorldModel ? this.worldModel.stats() : { types: 0, observations: 0 };
+            const kbCount = this.deps?.knowledge instanceof InMemoryKnowledgeBase
+                ? this.deps.knowledge.snapshot().length : 0;
+            if (this.metrics) {
+                this.metrics.record({
+                    ts: Date.now(),
+                    intentId,
+                    verdict,
+                    rounds: counters.roundsTotal,
+                    executions: counters.executions,
+                    durationMs: Date.now() - startedAt,
+                    l3Rounds: counters.l3Rounds,
+                    knowledgeRounds: counters.knowledgeRounds,
+                    knowledgeEntries: kbCount,
+                    worldTypes: wmStats.types,
+                    worldObservations: wmStats.observations,
+                    consolidated,
+                });
+            }
+            if (this.persistence && this.deps?.knowledge instanceof InMemoryKnowledgeBase &&
+                this.worldModel instanceof InMemoryWorldModel) {
+                const r = this.persistence.save(this.deps.knowledge, this.worldModel);
+                if (!r.ok)
+                    logKnowledge('knowledge-internal-fault', { intentId, phase: 'persist', reason: r.error.message.slice(0, 160) });
+            }
+        }
+        catch {
+            // 检查点整体旁路：仪表盘/落盘的缺席不该让认知失能
         }
     }
     /**
@@ -352,6 +460,8 @@ export class KnowledgePipelineOrchestrator {
      *  learnFromOutcome 失败/违约只静默（学习绝不能杀死执行报告）。
      *  学习历史入链（P1-5）：每笔 auto-learn 都是防篡改账本上的一行。 */
     learnSettled(settlement) {
+        if (this.cfg?.ablation?.disableKnowledge)
+            return; // 消融：学习断电（对照组不进化）
         try {
             const r = this.deps?.knowledge.learnFromOutcome(settlement.outcome);
             if (r && !r.ok) {
@@ -395,7 +505,7 @@ export class KnowledgePipelineOrchestrator {
             verdict,
             outcomes,
             knowledgeUsed,
-            terminalReason: terminalReason.slice(0, 120), // Token 纪律：对话流只进这一行
+            terminalReason: terminalReason.slice(0, 120),
             reportPath: this.persistReport(intent.id, verdict, { outcomes, startedAt, knowledgeUsed }),
             chainTip: sandboxLog.tip, // P1-5：报告锚定链尖端（D-6 同方言，D-4 审计定位）
         };

@@ -38,7 +38,11 @@ export type SandboxLogKind =
   | 'knowledge-attempt'
   | 'knowledge-learned'
   | 'knowledge-internal-fault'
-  | 'knowledge-run-end';
+  | 'knowledge-run-end'
+  // ── D-7 神经纪元（睡眠整合：海马体→皮层的 run-end 蒸馏报告）──
+  | 'knowledge-consolidated'
+  // ── D-7 预测编码纪元（世界模型：转移结算 + 惊讶计费 —— L3 花钱权的审计面）──
+  | 'world-transition';
 
 export interface SandboxLogEntry {
   ts: number;

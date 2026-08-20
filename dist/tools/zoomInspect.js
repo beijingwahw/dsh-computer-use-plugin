@@ -4,7 +4,7 @@
 // 让模型在小图上做精细定位，再把「裁剪框内坐标」映射回全屏归一化坐标系。
 // 锚点中直接给出映射公式与裁剪框边界 —— 坐标换算的 ground truth 随图附带。
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import sharp from 'sharp';
+import { getSharp } from '../_legacyDeps.js';
 import { system } from '../system.js';
 import { addVisualOverlay } from '../visualOverlay.js';
 import { contextManager } from '../contextManager.js';
@@ -33,6 +33,7 @@ export function createZoomInspectTool(config) {
             }
             try {
                 const rawBuffer = await system.captureScreen();
+                const sharp = await getSharp();
                 const meta = await sharp(rawBuffer).metadata();
                 const W = meta.width, H = meta.height;
                 // 裁剪框（像素域，越界夹取）与归一化边界（模型映射用）
@@ -42,7 +43,7 @@ export function createZoomInspectTool(config) {
                 const bottom = Math.min(H, Math.round((y + half_size) * H));
                 const crop = await sharp(rawBuffer)
                     .extract({ left, top, width: right - left, height: bottom - top })
-                    .resize({ width: config.compressWidth }) // 放大到全宽，小目标变大目标
+                    .resize(config.compressWidth) // 放大到全宽，小目标变大目标
                     .toBuffer();
                 // 细网格：相对全屏网格加密一倍，微观定位
                 const overlayed = await addVisualOverlay(crop, { gridDivisions: config.gridDivisions * 2 });

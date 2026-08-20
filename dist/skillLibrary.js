@@ -107,8 +107,8 @@ class SkillLibrary {
         // 容量驱逐：可靠度 × 新近度 综合最低者出局
         if (this.skills.length > this.capacity) {
             const now = Date.now();
-            this.skills.sort((a, b) => ((b.successCount / b.attemptCount) * Math.exp(-(now - b.lastUsedAt) / 7_200_000)) -
-                ((a.successCount / a.attemptCount) * Math.exp(-(now - a.lastUsedAt) / 7_200_000)));
+            this.skills.sort((a, b) => ((b.successCount / b.attemptCount) * Math.exp(-(now - b.lastUsedAt) / 7200000)) -
+                ((a.successCount / a.attemptCount) * Math.exp(-(now - a.lastUsedAt) / 7200000)));
             this.skills = this.skills.slice(0, this.capacity);
         }
         this.save();
@@ -144,7 +144,7 @@ class SkillLibrary {
             if (currentSceneHash && s.entrySceneHash && similarity(currentSceneHash, s.entrySceneHash) >= 0.9) {
                 scene = 0.3;
             }
-            const ageH = (now - s.lastUsedAt) / 3_600_000;
+            const ageH = (now - s.lastUsedAt) / 3600000;
             const recency = 0.1 * Math.exp(-ageH / 72);
             return {
                 ...s, score: Math.round((text + 0.3 * reliability + scene + recency) * 1000) / 1000,
@@ -221,7 +221,7 @@ class SkillLibrary {
         const skill = {
             id: this.nextId++,
             name: `syn-${this.nextSynthId++}`,
-            description: query, // 合成技能的触发描述 = 原始查询（下次同型任务直接命中）
+            description: query,
             entrySceneHash: genes[0].entrySceneHash,
             steps: merged,
             successCount: 0,

@@ -44,6 +44,15 @@ export interface KnowledgeEntry {
   updatedAt: number;
   usageCount: number;
   intentRef?: string;
+  /**
+   * 亲证时间戳（核证接地纪元）：本条目最后一次被直接观察证实的时刻。
+   * 缺席 = 传闻（hearsay —— 他人转述/手工种子，从未亲证 ⇒ 信任 0）；
+   * 在场 = 亲证（信任 = 置信度 × 亲证因子，随时间衰减；复证/探针刷新）。
+   * 与 updatedAt 分工：updatedAt 是最后一次「触碰」（强化即刷新），
+   * verifiedAt 只被直接观察刷新（学到的成败、探针结果）—— 两个时钟，
+   * 两个问题：「记忆还新鲜吗」（updatedAt）vs「我的亲证还有效吗」（verifiedAt）。
+   */
+  verifiedAt?: number;
 }
 
 export interface KnowledgeQuery {
@@ -66,15 +75,51 @@ export interface KnowledgeInjection {
   categories: KnowledgeCategory[];
   maxConfidence: number;
   sources: Array<{ type: 'manual' | 'auto-learn'; ref: string }>;
+  /**
+   * 结构化证据片段（神经纪元立法）：与 summary 同源同序（同一轮鸡尾酒旋转的
+   * 单一真相）—— summary 供 LLM/Token 预算路径消费，fragments 供前额叶仿真
+   * 决策做逐候选证据评估（语义相似度 × 置信度）。可选字段：旧实现缺席时
+   * 决策工位诚实降级（无证据 ⇒ 无仿真，绝不解析 summary 反推结构）。
+   */
+  fragments?: ReadonlyArray<{
+    category: KnowledgeCategory;
+    content: string;
+    confidence: number;
+    /**
+     * 亲证时间戳（核证接地纪元）：与条目同源透传 —— 信任评估（trustOf）
+     * 的输入。缺席 = 传闻（信任 0）；在场 = 亲证（信任 = 置信度 × 衰减）。
+     */
+    verifiedAt?: number;
+  }>;
 }
 
 export interface KnowledgeError { field: string; reason: string; }
+
+/** 睡眠整合战报（海马体→皮层：情景记忆 → 语义记忆的蒸馏报告） */
+export interface ConsolidationReport {
+  /** 参与聚类的 auto-learn 条目数 */
+  episodes: number;
+  /** 形成的语义簇数（≥ MIN_CLUSTER_SIZE 的簇才蒸馏） */
+  clusters: number;
+  /** 蒸馏出的语义条目数（已入库，source='auto-learn'） */
+  consolidated: number;
+  /** 被皮层化后衰减的原始情景条目数（情景让位语义 —— 证据不销毁，只降温） */
+  episodedDecayed: number;
+  /** 整合耗时（ms）—— 睡眠预算的可观测面 */
+  durationMs: number;
+}
 
 // ─── 6. V1 灵魂：隐知识行为引擎（四大核心动作，异常诚实）───
 export interface KnowledgeBase {
   query(query: KnowledgeQuery): Result<KnowledgeResult, KnowledgeError>;
   insert(entry: Omit<KnowledgeEntry, 'id' | 'updatedAt' | 'usageCount'>): Result<string, KnowledgeError>;
   learnFromOutcome(outcome: ExecutionOutcome): Result<void, KnowledgeError>;
+  /**
+   * 睡眠整合（神经纪元可选能力）：情景记忆（逐条 outcome 学习）聚类蒸馏为
+   * 语义记忆（跨场景泛化模式）。可选方法 —— 实现者缺席时调用方诚实降级
+   * （无睡眠 ≠ 无记忆，只是无泛化）。
+   */
+  consolidate?(): Result<ConsolidationReport, KnowledgeError>;
   dispose(): Result<void, Error>;
 }
 
@@ -192,6 +237,24 @@ export interface PipelineConfig {
   /** 工位 Token 预算（P1-2 config-driven 铁律：预算治理入配置域，缺省见插件 DEFAULT_CONFIG；
    *  桩纪元语义：vision 无 L3 通道恒不消耗；execution 零模型肌肉恒 0 —— 域外拒绝） */
   stationTokenBudgets?: { vision: number; decision: number; execution: number };
+  /**
+   * 消融开关（科学义务）：每层可独立关闭 —— 主张要有数字，数字要能复现。
+   * 流水线侧执法（检索/学习/L3 计费）；决策工位内部层级（反射/仿真）由
+   * ReflexiveDecisionOpts 的同名额舌执法 —— 消融矩阵由基准组合两侧。
+   */
+  ablation?: AblationConfig;
+}
+
+/**
+ * 消融配置（证据先于修辞的执法面）：
+ *   disableKnowledge — 关隐知识（检索 + 学习 + 睡眠整合全停）：证明「经验」的贡献
+ *   l3Policy         — L3 计费策略：'surprise'（惊讶计费器，缺省）| 'always'（恒开：
+ *                      成本上限对照组）| 'never'（恒关：成本下限对照组）
+ * （决策工位的 disableReflex / disableDeliberation 见 stations.ts —— 工位内主权）
+ */
+export interface AblationConfig {
+  disableKnowledge?: boolean;
+  l3Policy?: 'surprise' | 'always' | 'never';
 }
 
 export interface PipelineOrchestrator {
@@ -200,4 +263,52 @@ export interface PipelineOrchestrator {
   /** 运行层：永不 throw —— 任何工位故障结构化捕获入报告 */
   run(intent: IntentPayload): Promise<PipelineReport>;
   dispose(): Result<void, Error>;
+}
+
+// ─── 14. 预测编码基底：世界模型（预测式智能体纪元）───
+// 理论根基：预测处理理论（Predictive Processing）—— 皮层是预测机器；
+// 感知 = 预测误差最小化；行动 = 主动推理；学习 = 预测误差更新模型。
+// 世界模型把 GUI 当作可预测的动力系统：屏幕有类型（类型学），
+// 动作有后果（动力学），意外可度量（预测误差 = 惊讶，单位比特）。
+
+/** 状态转移预测（世界模型的前向输出：给定类型与动作 ⇒ 未来分布） */
+export interface TransitionPrediction {
+  /** 下一屏幕类型分布（概率降序） */
+  nextTypes: Array<{ typeId: string; prob: number }>;
+  /** 该转移的历史成功率 */
+  successProb: number;
+  /** 支撑本预测的观察数（证据经济学：无证据的预测不值钱） */
+  evidence: number;
+}
+
+/**
+ * 预测误差报告（惊讶 —— 一切认知预算的定价依据）。
+ * bits = -log2 P(actual | model)：预期概率越低，惊讶越大。
+ * novel = 模型从未见过此转移（真新颖 ≠ 意料之外的熟悉 —— 前者升注意，
+ * 后者只是小概率事件重演）。
+ */
+export interface SurpriseReport {
+  bits: number;
+  novel: boolean;
+  evidence: number;
+}
+
+/**
+ * 世界模型（屏幕类型学 + 接口动力学 + 预测误差）。
+ * 类型指认即注册（typeOf 有副作用 —— 会员计数增长）；场景不可见 ⇒ null
+ * （「看不见」是 fault 不是真空，绝不铸造幽灵类型）。
+ */
+export interface WorldModel {
+  /** 屏幕定型：元素签名与既有类型匹配（语义相似 ≥ 阈值）或铸造新类型 */
+  typeOf(scene: ScenePatch[]): string | null;
+  /** 观察一次状态转移（先 surprise 后 observe —— 误差是学习信号，顺序即语义） */
+  observe(
+    fromTypeId: string, actionKey: string, toTypeId: string, success: boolean,
+  ): Result<void, KnowledgeError>;
+  /** 前向预测：无历史 ⇒ null（诚实的无知，不是均匀分布的伪装） */
+  predict(fromTypeId: string, actionKey: string): Result<TransitionPrediction | null, KnowledgeError>;
+  /** 预测误差（Laplace 平滑；无历史 ⇒ novel=true） */
+  surprise(
+    fromTypeId: string, actionKey: string, actualTypeId: string,
+  ): Result<SurpriseReport, KnowledgeError>;
 }

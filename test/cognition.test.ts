@@ -4,13 +4,19 @@
 // 每个用例锁死一项认知能力的最小可信性，防退化回「找不同游戏高手」。
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import sharp from 'sharp';
+import { getSharp, type SharpLike } from '../src/_legacyDeps.ts';
 import { embed, cosine } from '../src/semanticHash.ts';
 import { parseExpectation, getEnabledPhysicsRules } from '../src/intent.ts';
 import { skillLibrary } from '../src/skillLibrary.ts';
 import { journal } from '../src/journal.ts';
 import { contextManager } from '../src/contextManager.ts';
 import { swarm } from '../src/swarm.ts';
+
+let _sharp: SharpLike | null = null;
+async function requireSharp(): Promise<SharpLike> {
+  if (!_sharp) _sharp = await getSharp();
+  return _sharp;
+}
 
 // ─── 地基：semanticHash ───
 
@@ -52,15 +58,23 @@ test('C-1: 物理规则表 —— 空清单=全部启用，清单=裁剪', () =>
   assert.ok(clipped.has('toggle_on') && !clipped.has('input_focus'));
 });
 
-test('C-1: toggle_on 物理 —— 对勾出现（邻域细节增多）被判成功', async () => {
+test('C-1: toggle_on 物理 —— 对勾出现（邻域细节增多）被判成功', async (t) => {
+  // 批次 E 迁移：sharp 默认不装 —— 老 D-1 物理规则 sharp fixture 用例标记 SKIP
+  let s: SharpLike;
+  try {
+    s = await requireSharp();
+  } catch (e: any) {
+    t.skip(`[batch-E] sharp not installed — ${e?.message?.slice(0, 240) ?? ''}`);
+    return;
+  }
   // 合成测试帧：白底，before 无对勾，after 中心多了黑色对勾线条
   const W = 200, H = 200;
   const beforeSvg = `<svg width="${W}" height="${H}"><rect width="100%" height="100%" fill="white"/></svg>`;
   const afterSvg = `<svg width="${W}" height="${H}">` +
     `<rect width="100%" height="100%" fill="white"/>` +
     `<path d="M 80 100 L 95 115 L 120 85" stroke="black" stroke-width="6" fill="none"/></svg>`;
-  const beforeBuf = await sharp(Buffer.from(beforeSvg)).png().toBuffer();
-  const afterBuf = await sharp(Buffer.from(afterSvg)).png().toBuffer();
+  const beforeBuf = await s(Buffer.from(beforeSvg)).png().toBuffer();
+  const afterBuf = await s(Buffer.from(afterSvg)).png().toBuffer();
 
   const rule = getEnabledPhysicsRules('').get('toggle_on')!;
   const verdict = await rule.check({

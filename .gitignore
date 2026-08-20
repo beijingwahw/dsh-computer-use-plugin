@@ -6,3 +6,6 @@ node_modules/
 # 运行时产物（doctor CLI 自检输出），不入库
 doctor-memory.json
 doctor-report.json
+# Python 构建/缓存产物
+__pycache__/
+*.egg-info/

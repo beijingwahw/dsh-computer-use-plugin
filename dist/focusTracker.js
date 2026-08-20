@@ -5,7 +5,7 @@ export const focusTracker = {
         focus = { x, y, at: Date.now(), sensitive };
     },
     /** 读取未过期的焦点；过期或不存在返回 null */
-    get(maxAgeMs = 30_000) {
+    get(maxAgeMs = 30000) {
         if (!focus)
             return null;
         if (Date.now() - focus.at > maxAgeMs)
@@ -13,7 +13,7 @@ export const focusTracker = {
         return { x: focus.x, y: focus.y };
     },
     /** 焦点是否为敏感区（凭据输入将被人机协同闸门拦截） */
-    isSensitive(maxAgeMs = 30_000) {
+    isSensitive(maxAgeMs = 30000) {
         if (!focus || !focus.sensitive)
             return false;
         return Date.now() - focus.at <= maxAgeMs;

@@ -7,12 +7,14 @@
 // 翻译规则（DiagnosisReport → 载荷）是 D-4 内部主权，不在此处立法。
 /** doctor/verdict 事件名（事件名与载荷不可分，同归 D-4 主权） */
 export const DOCTOR_VERDICT_EVENT = 'doctor/verdict';
+/** Score 域上界（0-100 名义分的立法值 —— 域执法者：makeScore 唯一铸造点） */
+export const SCORE_MAX = 100;
 /**
  * 唯一合法铸造点：域外拒绝而非截断（150 分是 bug，clamp 会掩埋它）。
  * 永不抛错 —— 非法输入返回 null，由调用方走 Result 降级路径（异常诚实铁律）。
  */
 export function makeScore(raw) {
-    return Number.isFinite(raw) && raw >= 0 && raw <= 100 ? raw : null;
+    return Number.isFinite(raw) && raw >= 0 && raw <= SCORE_MAX ? raw : null;
 }
 /** 分数消费侧守门：跨事件/持久化边界重铸；非法即降级（不信任何越界而来的 brand 声明） */
 export function remintScore(raw, fallback) {

@@ -1,0 +1,235 @@
+import { faultPatches, dispatchElementsToGrid } from '../knowledge/stations.js';
+import { createPhysicalExecution, PhysicalActionRouterImpl, CapabilityCache, syncCapabilityFromHealth, } from './index.js';
+import { PhysicalServiceManager, } from './serviceManager.js';
+/** 翻译层：orchestration ExecutionFailureKind → knowledge failure kind */
+function translateFailureKind(kind) {
+    switch (kind) {
+        case 'gate-rejected': return 'gate-rejected';
+        case 'host-error': return 'host-error';
+        case 'timeout': return 'timeout';
+        case 'timed-out': return 'timed-out';
+        case 'sandbox-degraded': return 'sandbox-degraded';
+        case 'cancelled': return 'cancelled';
+        default: return 'host-error';
+    }
+}
+/**
+ * D7PhysicalHostPort —— D-7 工位直连 D-5 物理微服务的双端口躯体：
+ *   execute（HostExecutePort）→ 动作执行（批次 D 默认实现切换，取代 nut-js）
+ *   perceive（SceneSourcePort）→ 真实感知（getUiTree 反双盲漏斗 → ScenePatch[]）
+ * 同一躯体两副面孔：执行与感知共享同一 Python 进程 / 密钥 / capability 缓存 ——
+ * 感知-决策-执行闭环第一次跑在同一物理基础之上。
+ *
+ * 生命周期：
+ *   const host = new D7PhysicalHostPort();
+ *   const station = new StubExecutionStation({ host });  // 立即可用
+ *   station.execute(env);  // 懒启动 Python，首次稍慢（1-3s）
+ *   host.perceive(req);    // 同一躯体：懒启动复用，零二次 spawn
+ *   await host.dispose();  // 进程退出时优雅关停
+ *
+ * 注意：dispose 未被自动调用，需要 Cordis ctx.effect 或测试手动调。
+ *       若调用方忘记，FinalizationRegistry 兜底（见 _finalizer）。
+ */
+class D7PhysicalHostPort {
+    name = 'd5-microservice-host';
+    opts;
+    mgr;
+    _capability;
+    adapter = null;
+    router = null;
+    screenSize = null;
+    seqCounter = 0;
+    initPromise = null;
+    disposed = false;
+    static _finalizer = new FinalizationRegistry((holdings) => {
+        // GC 兜底：若调用方忘记 dispose，FinalizationRegistry 尽量关停子进程
+        void holdings.mgr.dispose().catch(() => { });
+    });
+    constructor(opts = {}) {
+        this.opts = opts;
+        this.mgr = new PhysicalServiceManager(opts.service ?? {});
+        this._capability = new CapabilityCache();
+        // holdings 必须 != target（FinalizationRegistry 约束）—— 传一个独立容器对象
+        D7PhysicalHostPort._finalizer.register(this, { mgr: this.mgr }, this);
+    }
+    /**
+     * 执行原子动作（HostExecutePort 接口）。
+     *
+     * 首次调用会触发：spawn Python → 健康探活 → 构造 adapter → 构造 router → 探活 capability 同步。
+     * 启动失败 / 运行失败一律诚实返回 failure，永不抛错。
+     */
+    async execute(action) {
+        if (this.disposed) {
+            return {
+                status: 'failure',
+                failure: { kind: 'host-error', detail: 'D7PhysicalHostPort already disposed' },
+            };
+        }
+        try {
+            const router = await this._ensureInitialized();
+            const seq = ++this.seqCounter;
+            // 剥离 rationale（执行工位物理上看不见规划理由 —— 类型层已隔离，这里是保险）
+            const sandboxAction = { kind: action.kind, args: action.args ?? {} };
+            const result = await router.dispatch(sandboxAction, seq);
+            // 翻译：orchestration ExecutionResult → knowledge ExecutionResult (Omit)
+            if (result.failure) {
+                return {
+                    status: 'failure',
+                    failure: {
+                        kind: translateFailureKind(result.failure.kind),
+                        detail: result.failure.detail,
+                    },
+                };
+            }
+            return { status: 'success' };
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return {
+                status: 'failure',
+                failure: { kind: 'host-error', detail: `D7PhysicalHostPort execute threw: ${msg}` },
+            };
+        }
+    }
+    /** 显式 pre-warm：提前启动 Python 微服务，避免首个动作的冷启动延迟 */
+    async prewarm() {
+        if (this.disposed)
+            return { ok: false, error: 'already disposed' };
+        try {
+            await this._ensureInitialized();
+            return { ok: true };
+        }
+        catch (e) {
+            return { ok: false, error: e.message ?? String(e) };
+        }
+    }
+    /**
+     * 感知端口（SceneSourcePort 契约）：屏幕 → ScenePatch[]。
+     *
+     * 通道：D-5 getUiTree 反双盲漏斗（L1 结构树 > L2 OCR；forceL3 语义授权 ⇒ 开 L3）。
+     * 坐标翻译：Python 端像素 rect → 归一化（÷ 屏幕尺寸，尺寸来自 health 单次缓存）。
+     * 异常诚实：任何故障 ⇒ fault 补丁（形状与 capability 源统一），绝不抛错毒化流水线。
+     */
+    async perceive(req) {
+        try {
+            await this._ensureInitialized();
+            if (!this.screenSize)
+                await this._syncScreenSize();
+            if (!this.adapter)
+                throw new Error('adapter not ready after init');
+            if (!this.screenSize) {
+                return faultPatches(req.grid, 'screen size unavailable (health screen probe failed)');
+            }
+            const r = await this.adapter.getUiTree({ funnelCeiling: req.forceL3 ? 'L3' : 'L2' });
+            if (!r.ok) {
+                return faultPatches(req.grid, `getUiTree failed (${r.error.kind}): ${r.error.detail}`);
+            }
+            return this._translateTree(r.value, req);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return faultPatches(req.grid, `D7PhysicalHostPort perceive fault: ${msg}`);
+        }
+    }
+    /** UiTreeResult → ScenePatch[]（像素 → 归一化 + 网格分派公用律） */
+    _translateTree(tree, req) {
+        if (tree.fault && tree.elements.length === 0) {
+            return faultPatches(req.grid, `ui funnel fault (${tree.fault.source}): ${tree.fault.detail}`);
+        }
+        const { width: w, height: h } = this.screenSize;
+        const els = tree.elements.map(e => ({
+            role: e.role,
+            name: e.name.slice(0, 20),
+            rect: {
+                x: e.rect.x / w, y: e.rect.y / h,
+                width: e.rect.width / w, height: e.rect.height / h,
+            },
+        }));
+        const depth = tree.funnel_depth === 'L2' ? 'L2' : 'L1';
+        return dispatchElementsToGrid(els, req.grid, depth, depth === 'L1' ? 'L1-tree' : 'L2-ocr');
+    }
+    /** 屏幕尺寸缓存（health 单次探测；失败保持 null ⇒ perceive 诚实 fault） */
+    async _syncScreenSize() {
+        if (!this.adapter)
+            return;
+        const health = await this.adapter.health();
+        if (health.ok && !('error' in health.value.screen)) {
+            this.screenSize = { width: health.value.screen.width, height: health.value.screen.height };
+        }
+    }
+    /** 当前是否已完成初始化（router 可路由） */
+    get initialized() { return this.router !== null; }
+    /** 暴露 capability cache —— 外部可查询当前路由策略 */
+    get capability() { return this._capability; }
+    /** 暴露 service manager（测试可观察 pid） */
+    get manager() { return this.mgr; }
+    /** 优雅关停：router.reset()（若有）→ Python SIGTERM → 临时文件清理（幂等） */
+    async dispose() {
+        if (this.disposed)
+            return;
+        this.disposed = true;
+        D7PhysicalHostPort._finalizer.unregister(this);
+        try {
+            this.adapter?.reset?.();
+        }
+        catch { /* noop：reset 失败不阻断关停 */ }
+        this.router = null;
+        this.adapter = null;
+        this.screenSize = null;
+        await this.mgr.dispose();
+    }
+    async _ensureInitialized() {
+        if (this.router)
+            return this.router;
+        if (this.initPromise) {
+            await this.initPromise;
+            if (this.router)
+                return this.router;
+            throw new Error('D7PhysicalHostPort init failed (router still null)');
+        }
+        this.initPromise = this._doInitialize();
+        await this.initPromise;
+        if (!this.router)
+            throw new Error('D7PhysicalHostPort init failed silently');
+        return this.router;
+    }
+    async _doInitialize() {
+        // 1. 启动 Python 微服务
+        const start = await this.mgr.start();
+        if (!start.ok) {
+            throw new Error(`PhysicalServiceManager.start failed (${start.error?.kind}): ${start.error?.detail}`);
+        }
+        // 2. 构造 adapter
+        const cfg = {
+            baseUrl: start.baseUrl,
+            timeoutMs: this.opts.adapter?.timeoutMs ?? 5000,
+            keyPath: start.keyPath,
+            tokenTtlSeconds: this.opts.adapter?.tokenTtlSeconds ?? 60,
+            enableAuth: this.opts.adapter?.enableAuth ?? true,
+            ...(this.opts.adapter ?? {}),
+        };
+        const adapter = createPhysicalExecution(cfg);
+        const init = await adapter.init();
+        if (!init.ok) {
+            await this.mgr.dispose();
+            throw new Error(`adapter.init failed (${init.error.kind}): ${init.error.detail}`);
+        }
+        this.adapter = adapter;
+        // 3. 构造 router
+        this.router = new PhysicalActionRouterImpl(adapter, this._capability);
+        // 4. (可选) 启动期探活 + 同步 capability 与屏幕尺寸（perceive 端口的归一化基准）
+        if (this.opts.syncCapabilityOnStartup !== false) {
+            try {
+                const health = await adapter.health();
+                if (health.ok) {
+                    syncCapabilityFromHealth(this._capability, health.value);
+                    if (!('error' in health.value.screen)) {
+                        this.screenSize = { width: health.value.screen.width, height: health.value.screen.height };
+                    }
+                }
+            }
+            catch { /* 不阻断：capability cache 懒同步也 OK */ }
+        }
+    }
+}
+export { D7PhysicalHostPort };

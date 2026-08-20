@@ -7,6 +7,7 @@
 //   IntentPayload 双方言来自 orchestration/contracts（D-6）与 knowledge/contracts（D-7）。
 import type { Context } from '@deepseek-ai/cordis';
 import type { ActionChain } from './sandbox/types';
+import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts';
 import type { IntentPayload as OrchestrationIntentPayload } from './orchestration/contracts';
 import type { IntentPayload as KnowledgeIntentPayload } from './knowledge/contracts';
 
@@ -54,8 +55,8 @@ export function mintIntentPlanReady(input: {
 }): OrchestrationIntentPayload {
   return {
     id: input.id,
-    goal: input.goal.slice(0, 160),
-    successCriteria: input.successCriteria?.slice(0, 200),
+    goal: input.goal.slice(0, GOAL_MAX_CHARS),
+    successCriteria: input.successCriteria?.slice(0, SUCCESS_CRITERIA_MAX_CHARS),
     budgetMs: isPositiveFinite(input.budgetMs) ? input.budgetMs : undefined,
     source: 'cognition',
     planVersion: COGNITION_PLAN_VERSION,

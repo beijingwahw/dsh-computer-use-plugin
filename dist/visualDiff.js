@@ -3,10 +3,12 @@
 // 模型自己对比两张整屏截图既费 Token 又容易看漏；本引擎在像素层直接算出
 // 「哪些区域变了」：降采样 → 逐像素差 → 分块聚合 → 连通域合并 → 变化区域清单。
 // 输出归一化坐标的变化框，可叠加红框渲染成差分图 —— 模型一眼看到变化在哪。
-import sharp from 'sharp';
+// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+import { getSharp } from './_legacyDeps.js';
 const DIFF_WIDTH = 480; // 差分分辨率：够定位，无需高清
 const PIXEL_THRESHOLD = 70; // RGB 三通道差之和超此值算变化（容忍 JPEG 噪声）
 export async function computeDiffRegions(beforeBuf, afterBuf, tileCols = 16) {
+    const sharp = await getSharp();
     const afterMeta = await sharp(afterBuf).metadata();
     const W = DIFF_WIDTH;
     const H = Math.max(1, Math.round(W * (afterMeta.height / afterMeta.width)));
@@ -78,6 +80,7 @@ export async function computeDiffRegions(beforeBuf, afterBuf, tileCols = 16) {
 }
 /** 把变化区域以红色虚线框 + Δ编号 渲染到 after 图上（差分可视化） */
 export async function renderDiffOverlay(afterBuf, regions) {
+    const sharp = await getSharp();
     const meta = await sharp(afterBuf).metadata();
     const W = meta.width, H = meta.height;
     const boxes = regions.slice(0, 12).map(r => {

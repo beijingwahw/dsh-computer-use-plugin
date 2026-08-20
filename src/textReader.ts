@@ -6,8 +6,12 @@
 //   2. read_text：区域文字读取（用文本替代截图，Token 数量级下降）
 //   3. semanticConfirm：动作后自动核对「预期文字是否出现」
 // 依赖 tesseract.js（语言数据首次使用时按需下载，故 enableOcr 默认关闭）。
-import { createWorker, type Worker } from 'tesseract.js';
-import sharp from 'sharp';
+//
+// 批次 E 迁移：sharp / tesseract.js 不再作为 dependencies 强绑定，此处改为懒动态导入。
+// 推荐替代：D-5 微服务 adapter.getUiTree({ funnelCeiling: 'L2' })。
+import {
+  getSharp, getTesseract, type TesseractWorkerLike,
+} from './_legacyDeps';
 
 export interface OcrWord {
   text: string;
@@ -21,13 +25,14 @@ export interface OcrResult {
   words: OcrWord[];
 }
 
-let workerPromise: Promise<Worker> | null = null;
+let workerPromise: Promise<TesseractWorkerLike> | null = null;
 let workerLang = '';
 
-async function getWorker(lang: string): Promise<Worker> {
+async function getWorker(lang: string): Promise<TesseractWorkerLike> {
   if (!workerPromise || workerLang !== lang) {
     workerLang = lang;
-    workerPromise = createWorker(lang).catch(e => {
+    const tess = await getTesseract();
+    workerPromise = tess.createWorker(lang).catch(e => {
       workerPromise = null; // 失败后允许重试（网络恢复时）
       throw e;
     });
@@ -48,6 +53,7 @@ const normalize = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').tr
 export async function readText(buffer: Buffer, lang = 'eng'): Promise<OcrResult> {
   const worker = await getWorker(lang);
   const { data } = await worker.recognize(buffer);
+  const sharp = await getSharp();
   const meta = await sharp(buffer).metadata();
   const W = meta.width!, H = meta.height!;
 
@@ -89,6 +95,7 @@ export async function semanticConfirm(
   lang = 'eng',
 ): Promise<SemanticConfirm | null> {
   try {
+    const sharp = await getSharp();
     const meta = await sharp(fullBuf).metadata();
     const W = meta.width!, H = meta.height!;
     const left = Math.max(0, Math.round((cxPct - radiusPct) * W));
@@ -100,7 +107,7 @@ export async function semanticConfirm(
     // 放大到 1200 宽再识别：小区域文字的准确率关键
     const crop = await sharp(fullBuf)
       .extract({ left, top, width, height })
-      .resize({ width: 1200 })
+      .resize(1200)
       .toBuffer();
 
     const { text } = await readText(crop, lang);

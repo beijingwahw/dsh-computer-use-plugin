@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  InMemoryKnowledgeBase, distillInjection,
+  InMemoryKnowledgeBase, distillInjection, trustOf,
 } from '../src/knowledge/knowledgeBase.ts';
 import {
   StubVisionStation, StubDecisionStation, StubExecutionStation,
@@ -19,8 +19,8 @@ import {
   emitKnowledgeAttempt, emitKnowledgeRunEnd,
 } from '../src/knowledge/events.ts';
 import type {
-  AtomicAction, ExecutionOutcome, ExecutionResult, KnowledgeBase, KnowledgeResult,
-  PipelineConfig, Result,
+  AtomicAction, ExecutionOutcome, ExecutionResult, KnowledgeBase, KnowledgeEntry,
+  KnowledgeResult, PipelineConfig, Result,
 } from '../src/knowledge/contracts.ts';
 
 // ─── 验收修复项 #1：契约层四类型在场（编译期执法；此处运行期烟测再导出完整性）───
@@ -91,12 +91,12 @@ test('D-7 knowledgeBase: content ≤500 铸造点截断 + query keyword 命中 +
   const r = kb.query({ sceneDescription: '', intentDescription: 'overflow test please' });
   assert.ok(r.ok);
   assert.equal(r.value.entries.length, 1);
-  assert.equal(r.value.strategy, 'keyword');
+  assert.equal(r.value.strategy, 'hybrid'); // 免疫纪元：keyword + 语义双通道
   assert.equal(r.value.entries[0].usageCount, 1); // 检索即使用
 
   const miss = kb.query({ sceneDescription: 'unrelated', intentDescription: 'different domain entirely' });
   assert.ok(miss.ok);
-  assert.equal(miss.value.entries.length, 0);
+  assert.equal(miss.value.entries.length, 0); // 语义地板执法：n-gram 噪声不误命中
 });
 
 test('D-7 knowledgeBase: learnFromOutcome 双蒸馏（failure→error-pattern / success→workflow）', () => {
@@ -266,8 +266,11 @@ test('D-7 pipeline: 失败重试路由 —— 重试耗尽 ⇒ failed（outcomes
   assert.equal(report.outcomes.length, VALID_CONFIG.retryPolicy.maxRetries + 1); // 1 + 2 重试
   assert.ok(report.terminalReason.includes('retries exhausted'));
   // P0-4 验收门：无 D-4 回执 ⇒ 三笔 outcome 全部挂账 pending，run-end 冲账结算后
-  // 逐笔学习（error-pattern ×3，settledBy='run-end' —— 学习不因沉默而缺席）
-  assert.equal(kb.snapshot().filter(e => e.category === 'error-pattern').length, 3);
+  // 逐笔学习。免疫纪元：同场景同失败结论 ⇒ 复证合并为单条强化 error-pattern
+  // （抗体滴度升高而非新造抗体 ×3 —— 学习不因沉默而缺席，库不因重复而膨胀）
+  const errors = kb.snapshot().filter(e => e.category === 'error-pattern');
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].confidence > 0.3, '三次复证 ⇒ 置信度高于单次初值 0.3');
 });
 
 test('D-7 pipeline: cancelled 直达 aborted —— 绝不入重试循环', async () => {
@@ -316,4 +319,306 @@ test('D-7 events: 发射函数永不抛错（throwing emit 被吞 —— 旁路�
   emitKnowledgeAttempt(emit, { intentId: 'i', seq: 1, actionKind: 'noop', status: 'failure', failureKind: 'host-error' });
   assert.equal(seen[0][0], 'knowledge/attempt');
   assert.deepEqual(seen[0][1], { intentId: 'i', seq: 1, actionKind: 'noop', status: 'failure', failureKind: 'host-error' });
+});
+
+// ─── 知识免疫系统（Knowledge Immune System）───
+// 与 D-4 QualityDoctor 的架构对仗：D-4 免疫代码缺陷，D-7 免疫经验腐烂。
+// 四机制各有独立执法点测试 —— 防其借尸还魂。
+
+test('免疫 #1 遗忘曲线：老知识置信度衰减 ⇒ minConfidence 过滤 + 排序让位', () => {
+  const kb = new InMemoryKnowledgeBase();
+  // 控制变量：同文本同置信度 ⇒ keyword/语义双通道严格同分，唯一差量是时间
+  kb.insert({ category: 'shortcut', content: 'freeze header row first', scenario: 'browser tabs', confidence: 0.8, source: 'manual' });
+  kb.insert({ category: 'shortcut', content: 'freeze header row first', scenario: 'browser tabs', confidence: 0.8, source: 'manual' });
+  // 时间旅行（snapshot 外泄引用是测试后门）：首条退回 10 个半衰期 ⇒ 有效置信度 ~0.0008
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  const [stale, fresh] = kb.snapshot();
+  stale.updatedAt = Date.now() - 10 * THIRTY_DAYS_MS;
+
+  // 过滤执法：老条目有效置信度跌破门槛 ⇒ 只剩新条目
+  const filtered = kb.query({ sceneDescription: 'browser tabs', intentDescription: 'tabs', minConfidence: 0.5 });
+  assert.ok(filtered.ok);
+  assert.equal(filtered.value.entries.length, 1);
+  assert.equal(filtered.value.entries[0].id, fresh.id, '老知识被遗忘曲线过滤');
+
+  // 排序执法：无门槛时老条目仍可命中（留痕），但同分下排在新知识之后
+  const both = kb.query({ sceneDescription: 'browser tabs', intentDescription: 'tabs' });
+  assert.ok(both.ok);
+  assert.equal(both.value.entries[0].id, fresh.id, '同分 ⇒ 有效置信度定序：新的在前');
+  assert.equal(both.value.entries[1].id, stale.id, '老知识留痕但让位');
+});
+
+test('免疫 #2 复证强化：同场景同结论再现 ⇒ 单条目滴度升高（不新建）', () => {
+  const kb = new InMemoryKnowledgeBase();
+  const intent = { id: 'i-r', description: 'close the dialog' };
+  const action: AtomicAction = { kind: 'click_mouse', args: { x: 0.9, y: 0.1 }, rationale: 'r' };
+  const fail: ExecutionResult = { action, status: 'failure', durationMs: 5, failure: { kind: 'host-error', detail: 'button moved' } };
+  assert.ok(kb.learnFromOutcome({ intent, action, result: fail, retryCount: 0, totalDurationMs: 10 }).ok);
+  assert.ok(kb.learnFromOutcome({ intent, action, result: fail, retryCount: 1, totalDurationMs: 20 }).ok);
+
+  const errors = kb.snapshot().filter(e => e.category === 'error-pattern');
+  assert.equal(errors.length, 1, '复证 = 抗体滴度升高，绝不新造重复抗体');
+  assert.ok(errors[0].confidence > 0.3, `强化后 > 初值 0.3，实际 ${errors[0].confidence}`);
+  assert.ok(errors[0].confidence < 1, '渐近 1 绝不越界');
+});
+
+test('免疫 #2 反证衰减：同场景结论反转 ⇒ 旧条目减半下沉 + 新结论在场（双留痕）', () => {
+  const kb = new InMemoryKnowledgeBase();
+  const intent = { id: 'i-c', description: 'open the portal' };
+  const action: AtomicAction = { kind: 'click_mouse', args: { x: 0.5, y: 0.5 }, rationale: 'r' };
+  const fail: ExecutionResult = { action, status: 'failure', durationMs: 5, failure: { kind: 'host-error', detail: 'not found' } };
+  const win: ExecutionResult = { action, status: 'success', durationMs: 5 };
+  assert.ok(kb.learnFromOutcome({ intent, action, result: fail, retryCount: 0, totalDurationMs: 10 }).ok);
+  assert.ok(kb.learnFromOutcome({ intent, action, result: win, retryCount: 0, totalDurationMs: 10 }).ok);
+
+  const errors = kb.snapshot().filter(e => e.category === 'error-pattern');
+  const workflows = kb.snapshot().filter(e => e.category === 'workflow');
+  assert.equal(errors.length, 1, '旧结论留痕（证据绝不销毁）');
+  assert.equal(workflows.length, 1, '新结论在场（代表当前世界）');
+  assert.ok(Math.abs(errors[0].confidence - 0.15) < 1e-9, `反证 ⇒ 0.3×0.5=0.15，实际 ${errors[0].confidence}`);
+});
+
+// ─── 核证接地（verified grounding 纪元）：信任生命周期 ───
+// 亲证铸造三律：复证 ⇒ verifiedAt 刷新 / 反证 ⇒ 不动（证伪不是证实）/
+// 新铸 ⇒ 生而亲证。信任 = 置信度 × 0.5^(age/30天)（trustOf 纯函数）。
+
+test('核证接地 信任生命周期：传闻=0 / 亲证=now / 强化刷新 / 反证不刷新', () => {
+  const kb = new InMemoryKnowledgeBase();
+  const DAY = 24 * 60 * 60 * 1000;
+
+  // ① 传闻：manual 种子（verifiedAt 缺席）⇒ 信任 0 —— 没被亲证过的证据不配压制到死
+  assert.ok(kb.insert({
+    category: 'error-pattern', content: 'delete item broken', scenario: 'record cleanup',
+    confidence: 0.55, source: 'manual',
+  }).ok);
+  assert.equal(trustOf(0.55, undefined, Date.now()), 0, '传闻 ⇒ 信任 0');
+  assert.equal(trustOf(0, Date.now(), Date.now()), 0, '零置信亲证 ⇒ 信任 0（置信度仍是要素）');
+
+  // ② 新铸亲证：learnFromOutcome 失败 ⇒ auto-learn 条目生而亲证（verifiedAt 在场）
+  const intent = { id: 'i-v', description: 'record cleanup' };
+  const action: AtomicAction = { kind: 'click_mouse', args: { x: 0.4, y: 0.4 }, rationale: 'r' };
+  const fail: ExecutionResult = { action, status: 'failure', durationMs: 5, failure: { kind: 'host-error', detail: 'broken' } };
+  const before = Date.now();
+  assert.ok(kb.learnFromOutcome({ intent, action, result: fail, retryCount: 0, totalDurationMs: 10 }).ok);
+  let errors = kb.snapshot().filter(e => e.category === 'error-pattern');
+  assert.equal(errors.length, 2, 'manual 传闻种子 + auto-learn 亲证条目并存（双留痕）');
+  const learned = errors.find(e => e.source === 'auto-learn')!;
+  assert.ok(learned, '失败学习条目在场');
+  assert.ok(learned.verifiedAt !== undefined, '自体学习生而亲证（verifiedAt 在场）');
+  assert.ok(learned.verifiedAt! >= before && learned.verifiedAt! <= Date.now(), '亲证时间 = 学习时刻');
+  const freshTrust = trustOf(learned.confidence, learned.verifiedAt, Date.now());
+  assert.ok(Math.abs(freshTrust - learned.confidence) < 1e-9, '新鲜亲证 ⇒ 信任 = 置信度');
+
+  // ③ 衰减形状（纯函数时间旅行）：30 天一个半衰期，45 天 = conf × 0.5^1.5
+  assert.ok(Math.abs(trustOf(0.7, 0, 30 * DAY) - 0.35) < 1e-9, '30 天 ⇒ 信任减半');
+  assert.ok(Math.abs(trustOf(0.7, 0, 45 * DAY) - 0.7 * Math.pow(0.5, 1.5)) < 1e-9, '45 天 ⇒ conf×0.5^1.5');
+  assert.ok(Math.abs(trustOf(0.7, Date.now(), Date.now() - DAY) - 0.7) < 1e-9, '未来时间戳 ⇒ age 钳 0，信任不超发');
+
+  // ④ 复证刷新：再次失败 ⇒ verifiedAt 前移（又一次直接观察证实 —— 亲证保鲜）
+  const vBefore = learned.verifiedAt!;
+  assert.ok(kb.learnFromOutcome({ intent, action, result: fail, retryCount: 1, totalDurationMs: 10 }).ok);
+  errors = kb.snapshot().filter(e => e.category === 'error-pattern');
+  const refreshed = errors.find(e => e.source === 'auto-learn')!;
+  assert.ok(refreshed.verifiedAt !== undefined && refreshed.verifiedAt! >= vBefore, '复证 ⇒ 亲证刷新（信任时钟重置）');
+
+  // ⑤ 反证不刷新：成功 outcome ⇒ confidence 下沉，verifiedAt 不动（证伪不是证实）
+  const win: ExecutionResult = { action, status: 'success', durationMs: 5 };
+  const confBefore = refreshed.confidence;
+  const vStable = refreshed.verifiedAt!;
+  assert.ok(kb.learnFromOutcome({ intent, action, result: win, retryCount: 0, totalDurationMs: 10 }).ok);
+  errors = kb.snapshot().filter(e => e.category === 'error-pattern');
+  const disconfirmed = errors.find(e => e.source === 'auto-learn')!;
+  assert.ok(disconfirmed.confidence < confBefore, '反证 ⇒ 置信度下沉');
+  assert.equal(disconfirmed.verifiedAt, vStable, '证伪不是证实 ⇒ 亲证不刷新');
+});
+
+test('核证接地 fragments 透传：distillInjection 携带 verifiedAt（信任评估的证据面）', () => {
+  const kb = new InMemoryKnowledgeBase();
+  // 传闻（manual 无 verifiedAt）与亲证（auto-learn 带 verifiedAt）并存
+  kb.insert({
+    category: 'error-pattern', content: 'delete item broken', scenario: 'record cleanup',
+    confidence: 0.55, source: 'manual',
+  });
+  kb.insert({
+    category: 'workflow', content: 'clear log after erasing records', scenario: 'record cleanup',
+    confidence: 0.8, source: 'auto-learn', verifiedAt: 12345,
+  });
+  const r = kb.query({ sceneDescription: 'record cleanup', intentDescription: 'erase records' });
+  assert.ok(r.ok);
+  const inj = distillInjection(r.value, 300);
+  assert.ok(inj && inj.fragments, '蒸馏产物携带结构化 fragments');
+  const hearsay = inj!.fragments!.find(f => f.content.includes('delete item'));
+  const proven = inj!.fragments!.find(f => f.content.includes('clear log'));
+  assert.ok(hearsay, '传闻 fragment 在场');
+  assert.ok(proven, '亲证 fragment 在场');
+  assert.equal(hearsay!.verifiedAt, undefined, '传闻缺席透传（缺席即语义）');
+  assert.equal(proven!.verifiedAt, 12345, '亲证时间戳透传到 fragments');
+});
+
+test('核证接地 快照往返：verifiedAt 持久化保真 + 域外拒绝 + 旧快照自然降级', () => {
+  const kb = new InMemoryKnowledgeBase();
+  kb.insert({
+    category: 'workflow', content: 'proven path', scenario: 's',
+    confidence: 0.8, source: 'auto-learn', verifiedAt: 777,
+  });
+  const snap = JSON.parse(JSON.stringify(kb.exportSnapshot())); // 序列化往返（真落盘语义）
+
+  // 保真：新实例水合 ⇒ verifiedAt 原样在场
+  const kb2 = new InMemoryKnowledgeBase();
+  assert.ok(kb2.restoreSnapshot(snap).ok);
+  const restored = kb2.snapshot().find(e => e.content === 'proven path');
+  assert.equal(restored?.verifiedAt, 777, '亲证时间戳跨进程保真');
+
+  // 旧快照兼容：verifiedAt 缺席 ⇒ 传闻身份（缺席本身就是语义，不是错误）
+  const legacy = JSON.parse(JSON.stringify(snap));
+  delete legacy.entries[0].verifiedAt;
+  const kb3 = new InMemoryKnowledgeBase();
+  assert.ok(kb3.restoreSnapshot(legacy).ok, '旧纪元快照（无 verifiedAt）自然降级为传闻');
+  assert.equal(kb3.snapshot()[0].verifiedAt, undefined);
+
+  // 域外拒绝：verifiedAt 非法类型 ⇒ 整体拒绝（绝不半水合）
+  const bad = JSON.parse(JSON.stringify(snap));
+  bad.entries[0].verifiedAt = 'yesterday';
+  const kb4 = new InMemoryKnowledgeBase();
+  const r = kb4.restoreSnapshot(bad);
+  assert.ok(!r.ok, 'verifiedAt 非数字 ⇒ 快照整体拒绝');
+  assert.equal((r as { error: { field: string } }).error.field, 'snapshot.entries');
+});
+
+test('免疫 #3 hybrid 语义通道：零重合词的场景零样本命中（「整理数据」→「筛选数据」）', () => {
+  const kb = new InMemoryKnowledgeBase();
+  kb.insert({
+    category: 'workflow', content: '整理数据前先冻结首行', scenario: 'spreadsheet 整理数据 clean up',
+    confidence: 0.9, source: 'manual',
+  });
+  // 查询词与条目零重合（keyword 通道 0 分）—— 只能靠语义向量通道命中
+  const r = kb.query({ sceneDescription: 'spreadsheet', intentDescription: '筛选数据 filter rows' });
+  assert.ok(r.ok);
+  assert.equal(r.value.strategy, 'hybrid');
+  assert.equal(r.value.entries.length, 1, 'n-gram 语义泛化：无重合词仍命中老员工直觉');
+  // 反向保证：语义地板拦住真不相关的查询
+  const miss = kb.query({ sceneDescription: 'kitchen', intentDescription: 'cooking recipe pasta' });
+  assert.ok(miss.ok);
+  assert.equal(miss.value.entries.length, 0);
+});
+
+// ─── 睡眠整合（海马体→皮层）：情景记忆 → 语义记忆的蒸馏执法 ───
+// 生物学对应：海马体快速记录的逐条经历，在睡眠中回放、聚类、抽象为皮层的
+// 概括性知识 —— 「这三次点击都失败」变成「此类弹窗的确定按钮是陷阱」。
+
+test('睡眠整合 #1 基础流：≥3 条语义相近情景 ⇒ 蒸馏语义记忆 + 原情景皮层化衰减', () => {
+  const kb = new InMemoryKnowledgeBase();
+  // 三次经历措辞不同但同一主题（save dialog 陷阱）—— 海马体的三条情景记忆
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'close the save dialog', confidence: 0.4, source: 'auto-learn' });
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'close save dialog popup', confidence: 0.4, source: 'auto-learn' });
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'dismiss the save dialog', confidence: 0.4, source: 'auto-learn' });
+  // 一条无关情景（不同主题 —— 语义零相交，不应入簇）
+  kb.insert({ category: 'workflow', content: 'sort data ascending', scenario: 'sort spreadsheet by date', confidence: 0.6, source: 'auto-learn' });
+
+  const r = kb.consolidate();
+  assert.ok(r.ok);
+  assert.equal(r.value.episodes, 4, '全部 4 条 auto-learn 参与聚类资格检查');
+  assert.equal(r.value.clusters, 1, '只有 save-dialog 簇成规模');
+  assert.equal(r.value.consolidated, 1);
+  assert.equal(r.value.episodedDecayed, 3);
+
+  const snap = kb.snapshot();
+  const semantic = snap.filter(e => e.content.startsWith('consolidated pattern from 3 episodes'));
+  assert.equal(semantic.length, 1, '蒸馏出恰好一条语义记忆');
+  assert.equal(semantic[0].category, 'error-pattern', '多数类别获胜');
+  // 共识置信度：mean(0.4) + 0.1×√3 ≈ 0.573 —— 多源复证比单源断言更可信
+  assert.ok(semantic[0].confidence > 0.4, `共识 ${semantic[0].confidence} 应高于单源 0.4`);
+
+  // 原情景皮层化衰减 ×0.5（让位不销毁：证据留痕，只是不再占据检索前排）
+  const decayed = snap.filter(e => e.content === 'confirm button is broken');
+  assert.equal(decayed.length, 3);
+  assert.ok(decayed.every(e => Math.abs(e.confidence - 0.2) < 1e-9),
+    `皮层化衰减到 0.2，实际 ${decayed.map(e => e.confidence).join(',')}`);
+  // 簇外旁观情景零影响
+  const bystander = snap.find(e => e.content === 'sort data ascending');
+  assert.ok(bystander && Math.abs(bystander.confidence - 0.6) < 1e-9, '簇外情景置信度不动');
+});
+
+test('睡眠整合 #2 幂等：重复入睡不再增殖（皮层化条目与语义产物双守卫）', () => {
+  const kb = new InMemoryKnowledgeBase();
+  for (const sc of ['close the save dialog', 'close save dialog popup', 'dismiss the save dialog']) {
+    kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: sc, confidence: 0.4, source: 'auto-learn' });
+  }
+  const first = kb.consolidate();
+  assert.ok(first.ok && first.value.consolidated === 1);
+
+  const second = kb.consolidate();
+  assert.ok(second.ok);
+  assert.equal(second.value.clusters, 0, '已皮层化条目不再参与聚类');
+  assert.equal(second.value.consolidated, 0, '二次入睡零蒸馏');
+  // 语义记忆总量守恒：仍然只有 1 条（不会滚雪球增殖）
+  assert.equal(kb.snapshot().filter(e => e.content.startsWith('consolidated pattern')).length, 1);
+});
+
+test('睡眠整合 #3 低于阈值：两条重合是巧合不是模式（<3 不蒸馏）', () => {
+  const kb = new InMemoryKnowledgeBase();
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'close the save dialog', confidence: 0.4, source: 'auto-learn' });
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'close save dialog popup', confidence: 0.4, source: 'auto-learn' });
+
+  const r = kb.consolidate();
+  assert.ok(r.ok);
+  assert.equal(r.value.episodes, 2);
+  assert.equal(r.value.consolidated, 0);
+  // 情景保持原置信度（不成熟的模式不折损原始证据）
+  assert.ok(kb.snapshot().every(e => Math.abs(e.confidence - 0.4) < 1e-9));
+});
+
+test('睡眠整合 #4 跨场景泛化：三个不同 app 的同类陷阱 ⇒ 一条泛化语义记忆', () => {
+  const kb = new InMemoryKnowledgeBase();
+  // 三个不同场景（word/excel/ppt）经历同一陷阱 —— 语义向量跨场景聚拢，
+  // 零样本把「三个 app 的三次事故」抽象为「save dialog 的 ok 按钮陷阱」
+  kb.insert({ category: 'error-pattern', content: 'ok button overlaps cancel', scenario: 'word app save dialog', confidence: 0.5, source: 'auto-learn' });
+  kb.insert({ category: 'error-pattern', content: 'ok button overlaps cancel', scenario: 'excel app save dialog', confidence: 0.5, source: 'auto-learn' });
+  kb.insert({ category: 'error-pattern', content: 'ok button overlaps cancel', scenario: 'ppt app save dialog', confidence: 0.5, source: 'auto-learn' });
+
+  const r = kb.consolidate();
+  assert.ok(r.ok);
+  assert.equal(r.value.consolidated, 1, '跨场景三情景蒸馏为一条泛化记忆');
+  const semantic = kb.snapshot().find(e => e.content.startsWith('consolidated pattern from 3 episodes'));
+  assert.ok(semantic, '语义记忆在场');
+  // 共识：mean(0.5) + 0.1×√3 ≈ 0.673
+  assert.ok(Math.abs(semantic.confidence - 0.673) < 0.001, `实际 ${semantic.confidence}`);
+  // 蒸馏后的语义记忆可被零样本检索命中（泛化知识进入工作记忆）
+  const q = kb.query({ sceneDescription: 'save dialog', intentDescription: 'ok button overlaps cancel' });
+  assert.ok(q.ok);
+  assert.ok(q.value.entries.some(e => e.content.startsWith('consolidated pattern')),
+    '语义记忆应可检索');
+});
+
+test('睡眠整合 #5 类别冲突消解：混合簇（2×error-pattern + 1×workflow）⇒ 多数票定类别', () => {
+  const kb = new InMemoryKnowledgeBase();
+  // 同一语义簇内类别分歧：两次失败 + 一次成功 —— 冲突由多数票消解
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'close the save dialog', confidence: 0.4, source: 'auto-learn' });
+  kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: 'close save dialog popup', confidence: 0.4, source: 'auto-learn' });
+  kb.insert({ category: 'workflow', content: 'confirm button is broken', scenario: 'dismiss the save dialog', confidence: 0.6, source: 'auto-learn' });
+
+  const r = kb.consolidate();
+  assert.ok(r.ok && r.value.consolidated === 1);
+  const semantic = kb.snapshot().find(e => e.content.startsWith('consolidated pattern'))!;
+  assert.equal(semantic.category, 'error-pattern', '2:1 多数票 ⇒ error-pattern 获胜');
+  // 共识：mean(0.4667) + 0.1×√3 ≈ 0.64
+  assert.ok(Math.abs(semantic.confidence - 0.64) < 0.001, `实际 ${semantic.confidence}`);
+});
+
+test('免疫 #4 类别鸡尾酒：同类扎堆的检索结果 ⇒ 蒸馏摘要按类别轮转（组合推理）', () => {
+  const mk = (i: number, category: KnowledgeEntry['category']): KnowledgeEntry => ({
+    id: `e${i}`, category, content: `fragment-${i}`, scenario: 's',
+    confidence: 0.9, source: 'manual' as const, updatedAt: 0, usageCount: 0,
+  });
+  // 排序结果同类扎堆：3×ui-pattern 打头，system-quirk / error-pattern 垫底
+  const injection = distillInjection({
+    entries: [mk(1, 'ui-pattern'), mk(2, 'ui-pattern'), mk(3, 'ui-pattern'), mk(4, 'system-quirk'), mk(5, 'error-pattern')],
+    latencyMs: 1, strategy: 'hybrid',
+  }, 300);
+  assert.ok(injection);
+  // 轮转序：ui-pattern → system-quirk → error-pattern → ui-pattern → ui-pattern
+  const order = injection.summary.match(/\[(\w[\w-]*)\]/g) ?? [];
+  assert.deepEqual(order, ['[ui-pattern]', '[system-quirk]', '[error-pattern]', '[ui-pattern]', '[ui-pattern]'],
+    '注入摘要先铺满类别多样性，再回填同类 —— 组合推理优于复读');
+  assert.equal(injection.categories.length, 3);
 });

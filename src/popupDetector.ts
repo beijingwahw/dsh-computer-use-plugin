@@ -6,7 +6,8 @@
 //       命中词表任一词即确认。与几何互补：横幅类弹窗（顶部条）几何必漏、语义能抓。
 // 融合判据：geometric OR semantic —— 弹窗检测的使命是宁可误报拦截，不可漏报放行
 // （popupGuard 拦截后模型只需多看一眼截图，代价有界；漏报则盲操作直接失败）。
-import sharp from 'sharp';
+// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+import { getSharp } from './_legacyDeps';
 import { readText } from './textReader';
 
 function avg(nums: number[]): number {
@@ -26,6 +27,7 @@ function centerRegion(w: number, h: number, fraction = 0.4) {
 
 export async function detectPopupHeuristic(imageBuffer: Buffer): Promise<boolean> {
   try {
+    const sharp = await getSharp();
     const meta = await sharp(imageBuffer).metadata();
     const w = meta.width!;
     const h = meta.height!;
@@ -36,12 +38,12 @@ export async function detectPopupHeuristic(imageBuffer: Buffer): Promise<boolean
     const [globalStats, centerStats] = await Promise.all([
       sharp(imageBuffer).stats(),
       sharp(imageBuffer).extract(region).stats(),
-    ]);
+    ]) as [{ channels: Array<{ stdev: number; mean: number }> }, { channels: Array<{ stdev: number; mean: number }> }];
 
-    const gStd = avg(globalStats.channels.map(c => c.stdev));
-    const cStd = avg(centerStats.channels.map(c => c.stdev));
-    const gMean = avg(globalStats.channels.map(c => c.mean));
-    const cMean = avg(centerStats.channels.map(c => c.mean));
+    const gStd = avg(globalStats.channels.map((c: { stdev: number }) => c.stdev));
+    const cStd = avg(centerStats.channels.map((c: { stdev: number }) => c.stdev));
+    const gMean = avg(globalStats.channels.map((c: { mean: number }) => c.mean));
+    const cMean = avg(centerStats.channels.map((c: { mean: number }) => c.mean));
 
     // 中央更均匀（方差显著低于全局）且更亮（弹窗多为高亮底色）-> 判定为弹窗
     return cStd < gStd * 0.55 && cMean > gMean * 1.15;
@@ -77,6 +79,7 @@ async function detectPopupSemantic(
 ): Promise<string[]> {
   if (keywords.length === 0) return [];
   try {
+    const sharp = await getSharp();
     const meta = await sharp(imageBuffer).metadata();
     const w = meta.width!, h = meta.height!;
     if (w < 32 || h < 32) return [];
@@ -84,7 +87,7 @@ async function detectPopupSemantic(
     // 放大到 1200 宽再识别：小字命中率的关键（与 textReader.semanticConfirm 同律）
     const crop = await sharp(imageBuffer)
       .extract(centerRegion(w, h, 0.6))
-      .resize({ width: 1200 })
+      .resize(1200)
       .toBuffer();
 
     const { text } = await readText(crop, ocrLang);

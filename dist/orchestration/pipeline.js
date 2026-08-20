@@ -148,7 +148,7 @@ export class PipelineOrchestratorImpl {
                     payload: {
                         intentRef: intent.id,
                         regions,
-                        funnelCeiling: 'L2', // 缺省授权 L2；L3 仅经 NeedGrounding → 本中枢显式批准
+                        funnelCeiling: 'L2',
                         deadlineMs: cfg.perceptionDeadlineMs,
                     },
                     tokenBudget: cfg.stationTokenBudgets.vision,

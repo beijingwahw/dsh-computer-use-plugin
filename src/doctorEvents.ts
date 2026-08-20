@@ -25,12 +25,15 @@ export type DoctorVerdict = 'approved' | 'rejected' | 'needs_review';
  */
 export type Score = number & { readonly _brand: 'score' };
 
+/** Score 域上界（0-100 名义分的立法值 —— 域执法者：makeScore 唯一铸造点） */
+export const SCORE_MAX = 100;
+
 /**
  * 唯一合法铸造点：域外拒绝而非截断（150 分是 bug，clamp 会掩埋它）。
  * 永不抛错 —— 非法输入返回 null，由调用方走 Result 降级路径（异常诚实铁律）。
  */
 export function makeScore(raw: number): Score | null {
-  return Number.isFinite(raw) && raw >= 0 && raw <= 100 ? (raw as Score) : null;
+  return Number.isFinite(raw) && raw >= 0 && raw <= SCORE_MAX ? (raw as Score) : null;
 }
 
 /** 分数消费侧守门：跨事件/持久化边界重铸；非法即降级（不信任何越界而来的 brand 声明） */

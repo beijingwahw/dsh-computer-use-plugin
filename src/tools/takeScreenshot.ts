@@ -2,8 +2,9 @@
 // 皇冠工具：七世地层融合的最终形态。
 // 管线：截屏 -> 多屏感知 -> SoM 网格+准星(+元素框) -> 压缩 -> 滑动窗口 -> 弹窗传感 -> 状态锚点。
 // 修复：screenshot_id 契约误用、updatePopupState 导入断裂、detectPopupHeuristic 未定义。
+// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import sharp from 'sharp';
+import { getSharp } from '../_legacyDeps';
 import type { Config } from '../config';
 import { system } from '../system';
 import { addVisualOverlay } from '../visualOverlay';
@@ -46,6 +47,7 @@ export function createTakeScreenshotTool(config: Config) {
         }
         // 1. 捕获原始屏幕
         const rawBuffer = await system.captureScreen();
+        const sharp = await getSharp();
         const rawMeta = await sharp(rawBuffer).metadata();
 
         // ── 变化门控（change-gated screenshots）：指纹与窗口内最新一张几乎相同

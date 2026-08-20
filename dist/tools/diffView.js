@@ -3,7 +3,7 @@
 // 对比窗口内最近两张截图，输出：红框差分图（变化在哪一目了然）+
 // 变化区域清单（归一化坐标 + 面积排序）。模型不再需要自己肉眼对比两张整屏。
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import sharp from 'sharp';
+import { getSharp } from '../_legacyDeps.js';
 import { contextManager } from '../contextManager.js';
 import { computeDiffRegions, renderDiffOverlay } from '../visualDiff.js';
 function decodeDataUrl(base64) {
@@ -43,6 +43,7 @@ export function createDiffViewTool() {
                 }
                 // 差分图：最新截图 + 红框标注，入窗成为新的观察基准
                 const overlaid = await renderDiffOverlay(afterBuf, diff.regions);
+                const sharp = await getSharp();
                 const compressed = await sharp(overlaid).jpeg({ quality: 80 }).toBuffer();
                 const base64 = `data:image/jpeg;base64,${compressed.toString('base64')}`;
                 const { currentId } = await contextManager.addScreenshot(base64);

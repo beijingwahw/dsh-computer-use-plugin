@@ -1,9 +1,11 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { PipelineOrchestratorImpl } from './pipeline.js';
 import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events.js';
+import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts.js';
 export { PipelineOrchestratorImpl } from './pipeline.js';
 export { DefaultVisionStation, DefaultDecisionStation, DefaultExecutionStation } from './stations.js';
 export { createStructuredFromUiExtractor, createTraditionalFromOcr } from './visionAdapters.js';
+export { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts.js';
 export const name = 'orchestration-plugin';
 // 可选依赖 '?' 语法：缺席不阻断加载，对应能力诚实降级
 export const inject = ['tools', 'dsh.sandbox?', 'dsh.cognition?', 'dsh.quality-doctor?'];
@@ -159,8 +161,8 @@ export async function apply(ctx, config) {
         description: PIPELINE_DOCTRINE + ' Run the four-station pipeline (vision→decision→execution→verification) '
             + 'for a goal. Returns compact numbers only (verdict, attempts, token usage); full evidence goes to reportPath.',
         parameters: {
-            goal: { type: 'string', required: true, description: 'Abstract goal (<=160 chars, e.g. "sign in to the portal").' },
-            success_criteria: { type: 'string', required: false, description: 'Verifiable completion criteria (<=200 chars).' },
+            goal: { type: 'string', required: true, description: `Abstract goal (<=${GOAL_MAX_CHARS} chars, e.g. "sign in to the portal").` },
+            success_criteria: { type: 'string', required: false, description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).` },
             budget_ms: { type: 'number', required: false, description: 'Optional wall-clock budget for the whole pipeline.' },
         },
         output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
@@ -168,8 +170,8 @@ export async function apply(ctx, config) {
             try {
                 const intent = {
                     id: `intent-tool-${Date.now().toString(36)}`,
-                    goal: String(args.goal ?? '').slice(0, 160),
-                    successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, 200) : undefined,
+                    goal: String(args.goal ?? '').slice(0, GOAL_MAX_CHARS),
+                    successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
                     budgetMs: isPositiveFinite(args.budget_ms) ? args.budget_ms : undefined,
                     source: 'user',
                 };
@@ -284,8 +286,8 @@ function normalizeIntent(payload) {
     if (typeof payload.id === 'string' && typeof payload.goal === 'string' && payload.goal) {
         return {
             id: payload.id,
-            goal: String(payload.goal).slice(0, 160),
-            successCriteria: payload.successCriteria ? String(payload.successCriteria).slice(0, 200) : undefined,
+            goal: String(payload.goal).slice(0, GOAL_MAX_CHARS),
+            successCriteria: payload.successCriteria ? String(payload.successCriteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
             budgetMs: isPositiveFinite(payload.budgetMs) ? payload.budgetMs : undefined,
             source: payload.source === 'cognition' ? 'cognition' : 'user',
             planVersion: payload.planVersion,
@@ -297,7 +299,7 @@ function normalizeIntent(payload) {
         const goal = `execute ${chain.actions.length}-step action chain (${chain.actions.map((a) => a.kind).slice(0, 5).join('→')}${chain.actions.length > 5 ? '…' : ''})`;
         return {
             id: `intent-from-${chain.id}`,
-            goal: goal.slice(0, 160),
+            goal: goal.slice(0, GOAL_MAX_CHARS),
             successCriteria: undefined,
             budgetMs: isPositiveFinite(chain.budgetMs) ? chain.budgetMs : undefined,
             source: 'cognition',

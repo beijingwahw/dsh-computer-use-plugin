@@ -23,7 +23,7 @@ const DEFAULT_MIN_RELIABILITY = 0.5;
 /** 场景同屏门限（对齐 skillLibrary.match 场景加成门限 0.9 —— 算法结构常量） */
 const DEFAULT_SCENE_SIMILARITY = 0.9;
 /** 重放令牌 TTL（对齐宿主 approval 的 120s 方言） */
-const REPLAY_TOKEN_TTL_MS = 120_000;
+const REPLAY_TOKEN_TTL_MS = 120000;
 /** 64 位指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
  *  D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖） */
 function fpSimilarity(a, b) {
@@ -147,8 +147,8 @@ export class SandboxEngineImpl {
                 steps.push({
                     index: i,
                     action,
-                    effectDetected: null, // 该层验证不可用（诚实降级，非 false）
-                    expectationMet: null, // 即使声明了 expect 也无法对照（非 false）
+                    effectDetected: null,
+                    expectationMet: null,
                     latencyMs,
                     note: action.expect
                         ? 'expect declared but verification layers unavailable (simulator epoch pending)'

@@ -7,7 +7,8 @@
 //   输入聚焦 ⇒ 光标邻域微变而大邻域静止
 // 每条规则 ≤30 行纯视觉启发式；规则表数据驱动注册，config 可裁剪（禁止硬编码红线）。
 // 这是从「被动检测变化」到「主动验证意图」的升维：验证器带着预期找证据。
-import sharp from 'sharp';
+// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+import { getSharp } from './_legacyDeps';
 
 /** 平移检测的缩放网格边长（8×8=64 行亮度签名）—— 与 dHash 网格维度同源 */
 const SHIFT_GRID = 64;
@@ -53,14 +54,16 @@ export interface PhysicsRule {
 
 /** 区域统计：均值（亮度）与标准差（细节丰富度/对比度） */
 async function regionStats(buf: Buffer, region: { left: number; top: number; width: number; height: number }) {
-  const stats = await sharp(buf).extract(region).stats();
-  const mean = stats.channels.reduce((n, c) => n + c.mean, 0) / stats.channels.length;
-  const stdev = stats.channels.reduce((n, c) => n + c.stdev, 0) / stats.channels.length;
+  const sharp = await getSharp();
+  const stats = await sharp(buf).extract(region).stats() as { channels: Array<{ mean: number; stdev: number }> };
+  const mean = stats.channels.reduce((n: number, c: { mean: number }) => n + c.mean, 0) / stats.channels.length;
+  const stdev = stats.channels.reduce((n: number, c: { stdev: number }) => n + c.stdev, 0) / stats.channels.length;
   return { mean, stdev };
 }
 
 /** 以归一化点为中心的像素裁剪框（越界夹取） */
 async function focusRegion(buf: Buffer, x: number, y: number, radius: number) {
+  const sharp = await getSharp();
   const meta = await sharp(buf).metadata();
   const W = meta.width!, H = meta.height!;
   const rx = Math.max(8, Math.round(radius * W));
@@ -116,6 +119,7 @@ const menuExpand: PhysicsRule = {
   kind: 'menu_expand',
   async check(ctx) {
     if (!ctx.focus) return { satisfied: false, evidence: 'no focus point', notApplicable: true };
+    const sharp = await getSharp();
     const afterMeta = await sharp(ctx.afterBuf).metadata();
     const W = afterMeta.width!, H = afterMeta.height!;
     const cx = ctx.focus.x * W, cy = ctx.focus.y * H;
@@ -155,10 +159,12 @@ const menuCollapse: PhysicsRule = {
  * 正 shift = after 内容相对 before 下移；负 = 上移。这是滚动/拖拽的纯视觉签名。
  */
 async function detectShift(ctx: PhysicsContext): Promise<number> {
+  const sharp = await getSharp();
   const rowMeans = async (buf: Buffer) => {
-    const { data, info } = await sharp(buf)
+    const res = await sharp(buf)
       .grayscale().resize(SHIFT_GRID, SHIFT_GRID, { fit: 'fill' }).raw()
       .toBuffer({ resolveWithObject: true });
+    const { data, info } = res as any;
     const rows: number[] = [];
     for (let y = 0; y < info.height; y++) {
       let s = 0;

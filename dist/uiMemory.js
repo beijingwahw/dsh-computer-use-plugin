@@ -91,7 +91,7 @@ class UIMemory {
             const lTokens = tokenize(l.description + ' ' + (l.appHint ?? ''));
             const text = overlapCoefficient(qTokens, lTokens);
             const trust = 0.05 * Math.min(l.successCount, 6);
-            const ageH = (now - l.lastUsedAt) / 3_600_000;
+            const ageH = (now - l.lastUsedAt) / 3600000;
             const recency = 0.1 * Math.exp(-ageH / 24);
             let sceneBonus = 0;
             if (currentSceneHash && l.sceneHash && similarity(currentSceneHash, l.sceneHash) >= 0.9) {

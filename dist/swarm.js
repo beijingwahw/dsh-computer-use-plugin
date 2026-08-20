@@ -25,7 +25,7 @@ class Swarm {
     crystals = new Map();
     drifts = [];
     endpoint = '';
-    syncIntervalMs = 300_000;
+    syncIntervalMs = 300000;
     crystalCapacity = 500;
     driftCapacity = 200;
     timer = null;
@@ -126,7 +126,7 @@ class Swarm {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body,
-            signal: AbortSignal.timeout(5_000),
+            signal: AbortSignal.timeout(5000),
         })
             .then(() => { this.lastSyncAt = Date.now(); })
             .catch(() => { });

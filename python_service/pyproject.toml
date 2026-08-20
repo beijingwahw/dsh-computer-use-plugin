@@ -1,0 +1,58 @@
+# D-5 物理执行微服务 —— 依赖声明（PEP 621）
+# 造物主：本服务是 Node.js 端的物理躯体，所有键鼠/截屏/UI 树读取在此发生。
+
+[project]
+name = "dsh-physical"
+version = "0.1.0"
+description = "D-5 Physical Execution Microservice (FastAPI + UDS + Cap Token)"
+requires-python = ">=3.10"
+readme = { text = "D-5 physical execution microservice.", content-type = "text/plain" }
+
+dependencies = [
+    # Web 框架
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+
+    # 物理操作
+    "pyautogui>=0.9.54",       # 键鼠跨平台
+    "pillow>=10.0",            # 图像处理
+    "numpy>=1.24",              # 图像数组（shm 通道必备）
+
+    # L1 无障碍树（平台分治）
+    "pygetwindow>=0.0.9; sys_platform == 'win32'",
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+    "python-xlib>=0.33; sys_platform == 'linux'",
+
+    # L2 OCR
+    "rapidocr-onnxruntime>=1.3.0",
+
+    # L3 本地 VLM（可选，缺省走 stub）
+    # "llama-cpp-python>=0.2.55",  # 按需启用，注释以保依赖最小
+
+    # 工具
+    "httpx>=0.27",              # 远程 VLM 兜底
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[project.scripts]
+dsh-physical = "dsh_physical.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dsh_physical*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
