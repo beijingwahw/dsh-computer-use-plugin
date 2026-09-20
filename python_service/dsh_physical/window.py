@@ -122,13 +122,18 @@ class WindowManager:
         if not shutil.which("osascript"):
             raise PhysicalError(ErrorKind.WINDOW_UNAVAILABLE, "osascript not found")
 
-        # AppleScript：遍历所有进程的窗口，找标题包含 keyword 的
+        # J 纪元修正 AppleScript 注入防护（旧实现两处错误）：
+        #   1. f-string 先插值原始 keyword，再 replace('"{keyword}"', ...) —— 占位符
+        #      已不存在，replace 恒 no-op，原始 keyword（可含引号/括号）直接注入脚本；
+        #   2. 转义顺序反了 —— 先替换引号再替换反斜杠，会把第一步引入的反斜杠再翻倍。
+        # 正确做法：先转义反斜杠、再转义引号，然后把转义后的值直接插进脚本。
+        safe_keyword = keyword.replace("\\", "\\\\").replace('"', '\\"')
         script = f'''
         tell application "System Events"
             set frontmostApp to ""
             repeat with proc in (every process whose background only is false)
                 repeat with w in windows of proc
-                    if name of w contains "{keyword}" then
+                    if name of w contains "{safe_keyword}" then
                         set frontmost of proc to true
                         perform action "AXRaise" of w
                         return name of proc & "|" & name of w
@@ -138,9 +143,6 @@ class WindowManager:
             return ""
         end tell
         '''
-        # 安全转义 keyword（防止 AppleScript 注入）
-        safe_keyword = keyword.replace('"', '\\"').replace("\\", "\\\\")
-        script = script.replace('"{keyword}"', f'"{safe_keyword}"')
 
         proc = await asyncio.create_subprocess_exec(
             "osascript", "-e", script,

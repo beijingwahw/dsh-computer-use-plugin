@@ -81,8 +81,12 @@ class Coordinator {
             const id = (spec.id ?? '').trim() || `agent-${++this.idSeq}`;
             if (this.agents.some(a => a.spec.id === id))
                 continue; // 去重：同代号不重生
+            // maxSteps 域执法：缺席/非有限数回退 10（与 roundSteps 缺省同量级）——
+            // Math.max(1, undefined) === NaN 会让步数预算比较恒 false（预算静默失效）
+            const rawMax = typeof spec.maxSteps === 'number' && Number.isFinite(spec.maxSteps)
+                ? Math.floor(spec.maxSteps) : 10;
             const state = {
-                spec: { ...spec, id, maxSteps: Math.max(1, spec.maxSteps) },
+                spec: { ...spec, id, maxSteps: Math.max(1, rawMax) },
                 status: 'pending',
                 stepsUsed: 0,
                 focus: {

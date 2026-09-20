@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as pathResolve } from 'node:path';
+import { resolvePythonBin } from './pythonBin.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** 计算 Python 服务根目录（从本文件物理路径相对推导） */
 function defaultPythonRoot() {
@@ -114,7 +115,11 @@ export class PhysicalServiceManager {
             };
         }
         this._started = true;
-        // 1. 密钥文件（缺省 = 临时生成随机）
+        // 1. 密钥文件（缺省 = 临时生成随机）。重生路径（进程崩溃后再 start）先清理
+        // 上一轮的临时密钥/mmap 目录 —— 否则旧目录被覆盖引用后永久泄漏在 tmp 里
+        if (this._started && !this.isRunning) {
+            this._cleanupLocal();
+        }
         if (this.opts.keyPath) {
             this._keyPath = this.opts.keyPath;
         }
@@ -130,8 +135,8 @@ export class PhysicalServiceManager {
         else {
             this._mmapDir = mkdtempSync(join(tmpdir(), 'dsh-physical-mmap-'));
         }
-        // 3. 端口：尝试 opts.tcpPort → 递增 3 次
-        let port = this.opts.tcpPort ?? 8421;
+        // 3. 端口（单一端口，无自动重试 —— 占用时由探活超时如实暴露）
+        const port = this.opts.tcpPort ?? 8421;
         const transport = this.opts.screenshotTransport ?? 'mmap-file';
         const pythonRoot = this.opts.pythonServiceRoot ?? defaultPythonRoot();
         // 4. spawn
@@ -147,7 +152,7 @@ export class PhysicalServiceManager {
             DSH_PHYSICAL_L3_BACKEND: 'stub',
             ...(this.opts.env ?? {}),
         };
-        const proc = spawn('python3', ['-m', 'dsh_physical'], {
+        const proc = spawn(resolvePythonBin(), ['-m', 'dsh_physical'], {
             cwd: pythonRoot,
             env,
             stdio: ['ignore', 'pipe', 'pipe'],

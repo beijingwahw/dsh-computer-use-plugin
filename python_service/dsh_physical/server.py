@@ -8,8 +8,10 @@
   5. ``create_app()`` 创建 FastAPI 实例，挂载中间件
   6. ``uvicorn.run()`` 启动（uds 或 tcp）
 
-中间件栈（顺序从外到内）：
-  1. ``unhandled_exception_middleware``：兜底（理论不可达的最后一道墙）
+中间件栈（执行顺序从外到内 —— Starlette 语义：**后注册者在最外层**）：
+  1. ``unhandled_exception_middleware``：兜底（最后注册 = 最外层，
+     连 auth/logging 自身的异常也能转 200+failure —— J 纪元修正：
+     旧注册序把它放在最内层，中间件自己的异常会漏成真 500）
   2. ``auth_middleware``：三层纵深认证（UDS+PID+Cap Token）
   3. ``request_logging_middleware``：请求/响应日志（telemetry 喂料）
 """
@@ -28,8 +30,7 @@ from fastapi.responses import JSONResponse
 from . import routes, shm as shm_module
 from .auth import (
     ALL_CAPS, ENDPOINT_CAPABILITY, attest_pid, check_and_consume_nonce,
-    chmod_uds_file, ensure_key, get_peer_pid_linux, init_uds_file,
-    parse_token,
+    chmod_uds_file, ensure_key, init_uds_file, parse_token,
 )
 from .config import AppConfig, load_config_from_env
 from .errors import ErrorKind, failure, success, unhandled_exception_middleware
@@ -93,27 +94,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         docs_url=None if config.server.allow_external else "/docs",
     )
 
-    # ─── 中间件 1：兜底（理论不可达的最后一道墙）───
-    @app.middleware("http")
-    async def _unhandled(request: Request, call_next):
-        return await unhandled_exception_middleware(request, call_next)
+    # ─── 中间件注册（Starlette：后注册者最外层）───
+    # 注册序 = logging → auth → unhandled ⇒ 执行序（外→内）= unhandled → auth → logging。
 
-    # ─── 中间件 2：认证（三层纵深）───
+    # ─── 中间件：请求日志（telemetry 喂料；最内层）───
+    @app.middleware("http")
+    async def logging_middleware(request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        # 简单 stderr 日志（生产可换结构化日志）
+        print(
+            f"[dsh-physical] {request.method} {request.url.path} "
+            f"-> {response.status_code} ({elapsed_ms}ms)",
+            file=sys.stderr,
+        )
+        return response
+
+    # ─── 中间件：认证（三层纵深）───
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        # 健康检查 / mint_token / openapi 不需认证
+        # 健康检查 / openapi 不需认证
         path = request.url.path
         if path in config.auth.allow_no_token_endpoints or path.startswith("/docs") or path in ("/openapi.json", "/favicon.ico"):
             return await call_next(request)
 
-        # Layer 1: UDS 信任（已由文件权限收口，此处的 transport 检查仅是冗余防御）
-        # Layer 2: PID Attestation（Linux）
-        peer_pid: int | None = None
-        if config.auth.enable_pid_attestation and sys.platform == "linux":
-            # ASGI scope 拿不到 socket；通过 X-Peer-Pid header 透传（由 uvicorn 中间件补）
-            # 退而求其次：校验 X-Cap-Token 中的 pid 与环境变量 DSH_PHYSICAL_TRUSTED_PID 比对
-            # 完整实现需要自定义 uvicorn socket handler；此处保留 Layer 3 主力
-            pass
+        # Layer 1: 传输绑定（TCP 只听 127.0.0.1 / UDS 0600，见 config + run()）
+        # Layer 2: PID Attestation —— 传输层 SO_PEERCRED 未实现（见 auth.py 头注），
+        #           仅在 Layer 3 验签后对 payload.pid 做 /proc 存在性/白名单校验。
 
         # Layer 3: Capability Token
         token = request.headers.get("X-Cap-Token", "")
@@ -138,31 +146,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 ),
             )
 
-        # Nonce 防重放
+        # Nonce 防重放（exp 直接取自 parse_token —— J 纪元修正：
+        # 旧实现手工二次 base64 解码 payload，双解析浪费且易漂移）
         nonce = request.headers.get("X-Request-Id", "")
-        if nonce:
-            # 解析 token 的 exp（重新 parse 一次以拿 exp；略低效但简单）
-            # 实际生产可缓存；此处仅作示范
-            try:
-                import base64
-                import json as _json
-
-                payload_b64 = token.split(".")[0]
-                pad = "=" * (-len(payload_b64) % 4)
-                payload = _json.loads(base64.urlsafe_b64decode(payload_b64 + pad))
-                exp = int(payload.get("exp", 0))
-                if not check_and_consume_nonce(nonce, exp):
-                    return JSONResponse(
-                        status_code=200,
-                        content=failure(
-                            ErrorKind.UNAUTHORIZED,
-                            "nonce already consumed (replay attack?)",
-                            latency_ms=0,
-                        ),
-                    )
-            except Exception:
-                # nonce 解析失败不影响主流程（向后兼容）
-                pass
+        if nonce and not check_and_consume_nonce(nonce, auth_result.exp):
+            return JSONResponse(
+                status_code=200,
+                content=failure(
+                    ErrorKind.UNAUTHORIZED,
+                    "nonce already consumed (replay attack?)",
+                    latency_ms=0,
+                ),
+            )
 
         # 端点能力校验
         capability = _match_capability(path, request.method)
@@ -194,19 +189,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         return await call_next(request)
 
-    # ─── 中间件 3：请求日志（telemetry 喂料）───
+    # ─── 中间件：兜底（最后注册 = 最外层；连 auth/logging 的异常也兜住）───
     @app.middleware("http")
-    async def logging_middleware(request: Request, call_next):
-        started = time.perf_counter()
-        response = await call_next(request)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        # 简单 stderr 日志（生产可换结构化日志）
-        print(
-            f"[dsh-physical] {request.method} {request.url.path} "
-            f"-> {response.status_code} ({elapsed_ms}ms)",
-            file=sys.stderr,
-        )
-        return response
+    async def _unhandled(request: Request, call_next):
+        return await unhandled_exception_middleware(request, call_next)
 
     # ─── 路由挂载 ──
     app.include_router(routes.router)

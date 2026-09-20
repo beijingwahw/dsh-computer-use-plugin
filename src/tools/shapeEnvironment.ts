@@ -19,16 +19,16 @@ export function createShapeEnvironmentTool() {
         description: "One of: 'capabilities' | 'apply' | 'restore' | 'undo_log'",
       },
       kind: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'apply only: raise_window | maximize_window | move_window | set_zoom | set_contrast',
       },
       title_hint: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'apply only (window-level): keyword of the target window title, e.g. "Chrome".',
       },
-      x: { type: 'number', required: false, description: 'apply only (move_window): target x in pixels.' },
-      y: { type: 'number', required: false, description: 'apply only (move_window): target y in pixels.' },
-      level: { type: 'number', required: false, description: 'apply only (set_zoom): zoom percentage, e.g. 125.' },
+      x: { type: 'number', description: 'apply only (move_window): target x in pixels.' },
+      y: { type: 'number', description: 'apply only (move_window): target y in pixels.' },
+      level: { type: 'number', description: 'apply only (set_zoom): zoom percentage, e.g. 125.' },
     },
     output: {
       schema: { type: 'string' },

@@ -10,9 +10,18 @@
   L2-ocr   ─┘
 
 规则：
-  1. L1 + L2 一致（元素位置重合 ≥ 80%）→ 直接采纳，**L3 不调用**（80% 场景免费）
-  2. L1 + L2 冲突（位置不重合或元素集合差异大）→ L3 仲裁（仅冲突场景付费）
+  1. L1 + L2 一致（逐元素 IoU ≥ 0.3 匹配后冲突占比 < 20%）→ 直接采纳，
+     **L3 不调用**（多数常规场景免费）
+  2. L1 + L2 冲突（位置不匹配或元素集合差异大）→ L3 仲裁（仅冲突场景付费）
   3. L1/L2 完全缺席 → L3 兜底
+
+坐标契约（J 纪元统一 —— 本服务唯一的输出坐标方言）：
+  - ``UIElement.rect`` 一律是**全屏归一化坐标 [0,1]**（与 D-6 contracts 对齐）
+  - L1 原生像素坐标 → ÷ 屏幕尺寸归一化（需 screen_size）
+  - L2 OCR 的 bbox 是**裁剪图内像素** → 映射回全屏像素再归一化
+    （旧实现直接输出裁剪内像素，region 裁剪时坐标系整体漂移）
+  - L3 VLM 的输出是**图内归一化** → 经 region 复合映射到全屏归一化
+    （旧实现直接透传，被 Node 端再次 ÷ 屏幕尺寸 = 双重缩小）
 
 L3 实现分层：
   - ``local-llama``：本地 VLM（llama.cpp + Qwen-VL）
@@ -40,7 +49,10 @@ from .errors import ErrorKind, PhysicalError
 
 @dataclass
 class UIElement:
-    """单个 UI 元素（与 D-6 ``contracts.ts:48`` 严格对齐）。"""
+    """单个 UI 元素（与 D-6 ``contracts.ts`` 严格对齐）。
+
+    ``rect``：全屏归一化 [0,1]（J 纪元统一坐标方言 —— 见模块头注）。
+    """
 
     source: Literal["L1-tree", "L2-ocr", "L3-vlm"] | None
     role: str  # 开集词汇：'input' | 'button' | 'link' | ...
@@ -56,6 +68,51 @@ class UIElement:
             "state": self.state,
             "rect": self.rect,
         }
+
+
+# ─── 坐标归一化辅助（J 纪元统一坐标方言）───
+
+
+def _normalize_px_rect(rect_px: dict, screen_size: tuple[int, int]) -> dict:
+    """像素 rect → 全屏归一化 rect（越界钳制到 [0,1]）。"""
+    sw, sh = screen_size
+    if sw <= 0 or sh <= 0:
+        raise ValueError(f"invalid screen size: {screen_size}")
+    x = min(max(rect_px["x"] / sw, 0.0), 1.0)
+    y = min(max(rect_px["y"] / sh, 0.0), 1.0)
+    w = min(max(rect_px["width"] / sw, 0.0), 1.0 - x)
+    h = min(max(rect_px["height"] / sh, 0.0), 1.0 - y)
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
+def _center_in_region(cx: float, cy: float, region: dict | None) -> bool:
+    """元素中心是否落在查询 region 内。
+
+    半开区间 [x0, x1) + 右/下界 ≥1 的边缘闭合例外 —— 与 D-6
+    ``dispatchElementsToGrid`` / ``visionAdapters.centerInRegion`` 同方言：
+    防止中心恰在格线上的元素被所有分区漏掉。
+    """
+    if not region:
+        return True
+    x0, y0 = float(region["x"]), float(region["y"])
+    x1, y1 = x0 + float(region["width"]), y0 + float(region["height"])
+    in_x = (x0 <= cx < x1) or (x1 >= 1.0 and cx <= x1)
+    in_y = (y0 <= cy < y1) or (y1 >= 1.0 and cy <= y1)
+    return in_x and in_y
+
+
+def _compose_region_rect(rect_img_norm: dict, region: dict | None) -> dict:
+    """图内归一化 rect（L3 VLM 输出）→ 全屏归一化（经 region 复合映射）。"""
+    if not region:
+        return rect_img_norm
+    rx, ry = float(region["x"]), float(region["y"])
+    rw, rh = float(region["width"]), float(region["height"])
+    return {
+        "x": rx + rect_img_norm["x"] * rw,
+        "y": ry + rect_img_norm["y"] * rh,
+        "width": rect_img_norm["width"] * rw,
+        "height": rect_img_norm["height"] * rh,
+    }
 
 
 @dataclass
@@ -106,8 +163,12 @@ class L1TreeBackend:
             }.get(sys.platform, "disabled")
         return backend
 
-    async def extract(self, region: dict | None) -> tuple[list[UIElement], str | None]:
-        """提取 UI 元素。
+    async def extract(
+        self,
+        region: dict | None,
+        screen_size: tuple[int, int] | None = None,
+    ) -> tuple[list[UIElement], str | None]:
+        """提取 UI 元素（像素坐标 → 全屏归一化 + region 中心过滤）。
 
         返回 ``(elements, fault_detail)``：``fault_detail`` 非 None 表示该层失败。
         永不抛错 —— 一切异常转 ``fault_detail``。
@@ -115,15 +176,39 @@ class L1TreeBackend:
         if self._impl == "disabled":
             return [], "L1 backend disabled"
 
+        if screen_size is None:
+            # 像素坐标无法归一化（screen_size 缺席）—— 诚实 fault 而非
+            # 输出像素坐标毒化下游（Node 端契约是归一化）
+            return [], "L1 screen size unavailable (cannot normalize pixel rects)"
+
         try:
+            raw: list[UIElement] = []
+            fault: str | None = None
             if self._impl == "quartz":
-                return await self._extract_quartz(region)
+                raw, fault = await self._extract_quartz(region)
             elif self._impl == "uiautomation":
-                return await self._extract_uiautomation(region)
+                raw, fault = await self._extract_uiautomation(region)
             elif self._impl == "xlib":
-                return await self._extract_xlib(region)
+                raw, fault = await self._extract_xlib(region)
             else:
                 return [], f"unknown L1 backend: {self._impl}"
+            if fault or not raw:
+                return [], fault
+
+            # 像素 → 全屏归一化；region 过滤按归一化中心（J 纪元：region 参数
+            # 旧实现三层后端全部忽略 —— 全屏提取不过滤，分区扫描时每元素
+            # 重复出现在每个 region 的返回里）
+            elements: list[UIElement] = []
+            for e in raw:
+                try:
+                    e.rect = _normalize_px_rect(e.rect, screen_size)
+                except (KeyError, TypeError, ValueError):
+                    continue  # 畸形 rect：跳过该元素而非整层失败
+                cx = e.rect["x"] + e.rect["width"] / 2
+                cy = e.rect["y"] + e.rect["height"] / 2
+                if _center_in_region(cx, cy, region):
+                    elements.append(e)
+            return elements, None
         except Exception as e:  # noqa: BLE001
             return [], f"{type(e).__name__}: {e}"
 
@@ -243,10 +328,15 @@ class L2OCRBackend:
                 f"rapidocr import failed: {e}. pip install rapidocr-onnxruntime",
             ) from e
 
-    async def extract(self, image_bytes: bytes | None) -> tuple[list[UIElement], str | None]:
-        """对图像做 OCR，返回元素列表。
+    async def extract(
+        self,
+        image_bytes: bytes | None,
+        region: dict | None = None,
+        screen_size: tuple[int, int] | None = None,
+    ) -> tuple[list[UIElement], str | None]:
+        """对图像做 OCR，返回元素列表（bbox 映射回全屏归一化坐标）。
 
-        ``image_bytes``：PNG/JPEG 字节；为 ``None`` 表示无图（L1 已成功则跳过 L2）。
+        ``image_bytes``：PNG/JPEG 字节（region 裁剪后的图）；``None`` 表示无图。
         返回 ``(elements, fault_detail)``。
         """
         if self.backend == "disabled":
@@ -265,12 +355,25 @@ class L2OCRBackend:
             import io
 
             img = Image.open(io.BytesIO(image_bytes))
+            img_w, img_h = img.size
             arr = np.array(img)
 
             loop = asyncio.get_running_loop()
             result, _ = await loop.run_in_executor(None, self._engine, arr)
             if result is None:
                 return [], None  # OCR 成功但无文本
+
+            # J 纪元坐标统一：OCR bbox 是（可能的）裁剪图内像素 —— 先映射回
+            # 全屏像素（box 原点 = region 像素偏移），再归一化。
+            # region 缺席时裁剪图 == 全屏，图自身尺寸即屏幕尺寸。
+            if region:
+                if screen_size is None:
+                    return [], "L2 screen size unavailable (cannot map cropped bbox to full screen)"
+                sw, sh = screen_size
+                off_x, off_y = float(region["x"]) * sw, float(region["y"]) * sh
+            else:
+                sw, sh = img_w, img_h
+                off_x = off_y = 0.0
 
             elements: list[UIElement] = []
             for box, text, score in result:
@@ -281,11 +384,20 @@ class L2OCRBackend:
                 ys = [p[1] for p in box]
                 x, y = min(xs), min(ys)
                 w, h = max(xs) - x, max(ys) - y
+                if sw <= 0 or sh <= 0:
+                    continue
+                try:
+                    rect = _normalize_px_rect(
+                        {"x": off_x + x, "y": off_y + y, "width": w, "height": h},
+                        (int(sw), int(sh)),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
                 elements.append(UIElement(
                     source="L2-ocr",
                     role="text",
                     name=text[:20],
-                    rect={"x": float(x), "y": float(y), "width": float(w), "height": float(h)},
+                    rect=rect,
                 ))
             return elements, None
         except Exception as e:  # noqa: BLE001
@@ -380,9 +492,12 @@ class L3VLMBackend:
         l1_elements: list[UIElement],
         l2_elements: list[UIElement],
         question: str = "list all interactive UI elements with their positions",
+        region: dict | None = None,
     ) -> tuple[list[UIElement], str | None]:
         """L3 仲裁入口。
 
+        ``region``：J 纪元新增 —— VLM 输出的图内归一化坐标经 region 复合
+        映射到全屏归一化（与 L1/L2 同一方言），消灭跨层坐标漂移。
         返回 ``(elements, fault_detail)``；``fault_detail`` 非 None 表示 L3 失败。
         """
         backend = self.config.l3_backend
@@ -397,15 +512,15 @@ class L3VLMBackend:
 
         try:
             if backend == "local-llama":
-                return await self._local_llama(image_bytes, question)
+                return await self._local_llama(image_bytes, question, region)
             elif backend == "remote-doubao":
-                return await self._remote_doubao(image_bytes, question)
+                return await self._remote_doubao(image_bytes, question, region)
             else:
                 return [], f"unknown L3 backend: {backend}"
         except Exception as e:  # noqa: BLE001
             return [], f"{type(e).__name__}: {e}"
 
-    async def _local_llama(self, image_bytes: bytes, question: str) -> tuple[list[UIElement], str | None]:
+    async def _local_llama(self, image_bytes: bytes, question: str, region: dict | None) -> tuple[list[UIElement], str | None]:
         """本地 llama.cpp + Qwen-VL。"""
         try:
             from llama_cpp import Llama  # type: ignore[import-not-found]
@@ -441,17 +556,20 @@ class L3VLMBackend:
                 return resp["choices"][0]["message"]["content"]
 
             text = await loop.run_in_executor(None, _chat)
-            # VLM 返回自然语言 → 解析元素（简化：返回原始文本作为单一元素）
+            # VLM 返回自然语言 → 解析元素（简化：返回原始文本作为单一元素；
+            # rect 为整幅输入图 —— 经 region 复合映射后即"该次查询视野"的诚实占位）
             return [UIElement(
                 source="L3-vlm",
                 role="vlm-text",
                 name=text[:20],
-                rect={"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+                rect=_compose_region_rect(
+                    {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}, region
+                ),
             )], None
         except Exception as e:  # noqa: BLE001
             return [], f"local llama failed: {e}"
 
-    async def _remote_doubao(self, image_bytes: bytes, question: str) -> tuple[list[UIElement], str | None]:
+    async def _remote_doubao(self, image_bytes: bytes, question: str, region: dict | None) -> tuple[list[UIElement], str | None]:
         """远程 doubao-vision API（神经纪元：结构化元素提取）。
 
         视觉皮层升级：不再回单一全屏文本块，而是要求 VLM 输出结构化 JSON
@@ -500,7 +618,13 @@ class L3VLMBackend:
                 data = resp.json()
 
             text = data["choices"][0]["message"]["content"]
-            return _parse_vlm_elements(text)
+            elements, fault = _parse_vlm_elements(text)
+            # J 纪元坐标统一：图内归一化 → 全屏归一化（region 复合）。
+            # 旧实现直接透传 —— Node 端 d7HostPort 再 ÷ 屏幕尺寸 = 双重缩小。
+            if fault is None:
+                for e in elements:
+                    e.rect = _compose_region_rect(e.rect, region)
+            return elements, fault
         except Exception as e:  # noqa: BLE001
             return [], f"remote doubao failed: {e}"
 
@@ -588,21 +712,24 @@ class UIFunnel:
         screenshot_bytes: bytes | None = None,
         region: dict | None = None,
         funnel_ceiling: str = "L3",
+        screen_size: tuple[int, int] | None = None,
     ) -> FunnelResult:
         """执行漏斗：L1 → L2 → 仲裁 → L3（按需）。
 
         ``funnel_ceiling``：``'L1'`` 只跑 L1；``'L2'`` 跑到 L2；``'L3'`` 全跑（缺省）。
+        ``screen_size``：``(width, height)`` 像素 —— L1 像素坐标归一化与
+        L2 裁剪内 bbox 回映射的分母；缺席时 L1/L2（带 region）诚实降级 fault。
         """
         captured_at = int(time.time() * 1000)
 
         # ── L1 ──
-        l1_elements, l1_fault = await self.l1.extract(region)
+        l1_elements, l1_fault = await self.l1.extract(region, screen_size)
 
         # ── L2（ceiling >= 'L2' 时跑）──
         l2_elements: list[UIElement] = []
         l2_fault: str | None = None
         if funnel_ceiling in ("L2", "L3"):
-            l2_elements, l2_fault = await self.l2.extract(screenshot_bytes)
+            l2_elements, l2_fault = await self.l2.extract(screenshot_bytes, region, screen_size)
 
         # ── 仲裁：L1+L2 一致则不调 L3 ──
         if self.config.arbitration_enabled and l1_elements and l2_elements:
@@ -637,6 +764,7 @@ class UIFunnel:
         # ── L3 调用 ──
         l3_elements, l3_fault = await self.l3.arbitrate(
             screenshot_bytes, l1_elements, l2_elements,
+            region=region,
         )
 
         # ── 终局 ──

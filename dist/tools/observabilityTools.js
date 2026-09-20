@@ -134,7 +134,7 @@ export function createVerifyJournalTool() {
             'OK = the recorded history is provably intact. A broken index means the log was modified ' +
             'after the fact — treat everything after that point as untrusted.',
         parameters: {
-            tail: { type: 'number', required: false, description: 'Also show the last N entries (default 5).' },
+            tail: { type: 'number', description: 'Also show the last N entries (default 5).' },
         },
         output: {
             schema: { type: 'string' },
@@ -143,7 +143,8 @@ export function createVerifyJournalTool() {
         async execute(args) {
             const v = journal.verify();
             const n = Math.min(Math.max(args.tail ?? 5, 0), 20);
-            const tail = journal.list().slice(-n).map((e, i) => `${i + 1}. ${e.tool} ${e.status}${e.effect_detected === false ? ' (no effect)' : ''} ${e.hash?.slice(0, 12) ?? ''}`);
+            // n=0 必须显式给空数组：slice(-0) === slice(0) 会倾倒整个日志（上限 1000 条）
+            const tail = (n === 0 ? [] : journal.list().slice(-n)).map((e, i) => `${i + 1}. ${e.tool} ${e.status}${e.effect_detected === false ? ' (no effect)' : ''} ${e.hash?.slice(0, 12) ?? ''}`);
             return JSON.stringify({
                 status: v.ok ? 'SUCCESS' : 'FAILED',
                 state_anchor: {

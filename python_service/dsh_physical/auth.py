@@ -5,15 +5,16 @@ Layer 1: Transport Binding
   - TCP 仅绑定 127.0.0.1，绝不开 0.0.0.0
 
 Layer 2: PID Attestation（Linux 独有）
-  - UDS 连接接受后用 ``SO_PEERPID`` 取对端 PID
-  - 读 ``/proc/<PID>/exe`` 拿可执行路径
-  - 路径哈希须在白名单（仅允许 ``node`` 与 dsh 进程）
+  - 校验 token payload.pid 对应的 ``/proc/<PID>/exe`` 存在性
+  - 二进制哈希白名单（``_NODE_BINARY_HASHES``）非空时升级为严格身份校验
+  - 传输层 SO_PEERCRED 取对端 PID 需自定义 uvicorn handler —— 本纪元留白，
+    由 Layer 1（传输绑定）+ Layer 3（HMAC token）承担主力
 
 Layer 3: Capability Token（细粒度能力位图）
   - HMAC-SHA256 签名的 base64 payload
   - 携带 ``pid``、``exp``、``caps`` 三字段
   - 单 token 60s TTL + 一次性 nonce（防重放）
-  - 校验：HMAC 正确 + 未过期 + 端点 ∈ caps + payload.pid == SO_PEERPID
+  - 校验：HMAC 正确 + 未过期 + 端点 ∈ caps
 
 异常诚实：本模块所有公开方法永不抛错；失败一律返回 ``AuthResult`` 失败臂。
 """
@@ -25,7 +26,6 @@ import hmac
 import json
 import os
 import secrets
-import socket
 import stat
 import sys
 import time
@@ -49,6 +49,8 @@ ALL_CAPS: tuple[Capability, ...] = (
 )
 
 # 端点 → 所需 capability 映射（路由层据此校验）
+# 注：``/v1/shm/<name>`` 的 DELETE 由 ``server._match_capability`` 的
+# startswith 分支匹配（路径含具体名字，字面量键永不命中 —— J 纪元移除失效条目）。
 ENDPOINT_CAPABILITY: dict[str, Capability] = {
     "/v1/click_mouse": "click",
     "/v1/type_text": "type",
@@ -58,18 +60,23 @@ ENDPOINT_CAPABILITY: dict[str, Capability] = {
     "/v1/take_screenshot": "screenshot",
     "/v1/get_ui_tree": "ui_tree",
     "/v1/switch_window": "switch_window",
-    "/v1/shm/{name}": "shm_delete",  # DELETE 方法
 }
 
 
 @dataclass(frozen=True)
 class AuthResult:
-    """认证结果 —— 镜像 D-7 Result<T> 双臂结构。"""
+    """认证结果 —— 镜像 D-7 Result<T> 双臂结构。
+
+    ``exp``：token 过期时刻（unix 秒）。J 纪元新增 —— nonce 防重放需要
+    每个 nonce 的存活上界，旧实现为此在中间件里手工二次 base64 解码
+    payload；现在 parse_token 一次解析全程携带。
+    """
 
     ok: bool
     pid: int | None = None
     caps: tuple[Capability, ...] = ()
     reason: str = ""
+    exp: int = 0
 
 
 # ─── HMAC 密钥管理（启动期一次性生成，落盘 0600）───
@@ -177,7 +184,7 @@ def parse_token(key: bytes, token: str) -> AuthResult:
     if not isinstance(pid, int):
         return AuthResult(ok=False, reason="payload.pid is not int")
 
-    return AuthResult(ok=True, pid=pid, caps=caps)
+    return AuthResult(ok=True, pid=pid, caps=caps, exp=exp)
 
 
 # ─── PID Attestation（Layer 2，Linux 独有）───
@@ -194,21 +201,6 @@ def _hash_binary(path: str) -> str | None:
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
         return h.hexdigest()
-    except OSError:
-        return None
-
-
-def get_peer_pid_linux(sock: socket.socket) -> int | None:
-    """通过 ``SO_PEERPID`` 取对端 PID（仅 Linux）。
-
-    失败返回 ``None`` —— 调用方降级到 Layer 1+3 即可，不抛错。
-    """
-    if sys.platform != "linux":
-        return None
-    try:
-        # SO_PEERPID = 2 (Linux 内核 5.0+)
-        pid = sock.getsockopt(socket.SOL_SOCKET, 2, 4)
-        return int.from_bytes(pid, byteorder="little") or None
     except OSError:
         return None
 

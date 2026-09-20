@@ -24,11 +24,10 @@ export function createTakeScreenshotTool(config) {
             // 'active_window' 暂以全屏实现，锚点中如实标注
             region: {
                 type: 'string',
-                required: false,
                 description: 'Optional. The specific region to capture (e.g., "full", "active_window"). Defaults to "full".',
             },
             force: {
-                type: 'boolean', required: false,
+                type: 'boolean',
                 description: 'Bypass change-gating and always capture a fresh image. Default false.',
             },
         },

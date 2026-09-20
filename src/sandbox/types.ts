@@ -31,6 +31,13 @@ export type SandboxActionKind =
   | 'click_mouse' | 'type_text' | 'scroll_page' | 'press_hotkey'
   | 'drag_mouse' | 'switch_tab' | 'switch_window' | 'dismiss_popup' | 'noop';
 
+/** 动作词汇表运行时集合（类型的唯一运行时镜像 —— 解析边界执法用，
+ *  防 LLM 输出的未知 kind 经 as 断言混入执行域） */
+export const SANDBOX_ACTION_KINDS: ReadonlySet<string> = new Set<SandboxActionKind>([
+  'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
+  'drag_mouse', 'switch_tab', 'switch_window', 'dismiss_popup', 'noop',
+]);
+
 /** 预期效果声明（对齐宿主四层验证栈的 L4 预期锚定层） */
 export interface ExpectedEffect {
   scale: 'page-level' | 'element-level' | 'text-level';

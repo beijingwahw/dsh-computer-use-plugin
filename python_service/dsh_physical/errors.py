@@ -98,8 +98,15 @@ def safe_call(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R | dict
         try:
             result = await func(*args, **kwargs)
             latency_ms = int((time.perf_counter() - started) * 1000)
-            # 若被装饰函数自己返回了完整信封（含 latency_ms 字段），透传不重算
-            if isinstance(result, dict) and "latency_ms" in result and "status" in result:
+            # 若被装饰函数自己返回了完整信封则透传不重算。
+            # J 纪元收紧判据：旧式仅查 "status"+"latency_ms" 两键在场 ——
+            # 业务数据恰含同名字段时会被误判成信封。现在 additionally 要求
+            # status 取值在信封词表内。
+            if (
+                isinstance(result, dict)
+                and result.get("status") in ("success", "failure")
+                and "latency_ms" in result
+            ):
                 if result["latency_ms"] == 0:
                     result["latency_ms"] = latency_ms
                 return result

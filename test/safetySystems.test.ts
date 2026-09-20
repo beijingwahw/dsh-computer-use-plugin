@@ -14,9 +14,11 @@ beforeEach(() => {
 
 // ─── 一次性审批令牌 ───
 
-test('approval: 令牌一次性（用后即焚）', () => {
+test('approval: 令牌一次性（用后即焚；J 纪元：须先 grant）', () => {
   const pa = approval.request('send email to Alice');
   assert.ok(pa.token.startsWith('APR-'));
+  assert.equal(approval.validate(pa.token), false, '未授予的令牌不可放行（请求≠同意）');
+  approval.grant(pa.token, true);
   assert.equal(approval.consume(pa.token), true);  // 第一次：有效
   assert.equal(approval.consume(pa.token), false); // 第二次：已焚毁
 });

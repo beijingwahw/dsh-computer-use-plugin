@@ -62,9 +62,11 @@ export async function microFetch<T>(
   try {
     signal = AbortSignal.timeout(timeout);
   } catch {
-    // 旧 Node fallback：手动 AbortController
+    // 旧 Node fallback：手动 AbortController（J 纪元：timer unref ——
+    // 主路径 AbortSignal.timeout 不会阻止进程退出，fallback 不该有差别）
     const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), timeout);
+    const t = setTimeout(() => ctrl.abort(), timeout);
+    t.unref?.();
     signal = ctrl.signal;
   }
 

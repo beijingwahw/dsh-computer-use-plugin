@@ -156,7 +156,7 @@ export async function apply(ctx, config) {
                 description: 'The complex user request.',
             },
             time_budget_sec: {
-                type: 'number', required: false,
+                type: 'number',
                 description: 'Optional wall-clock budget in seconds. On expiry the orchestrator returns partial results with a [TIMEOUT] marker.',
             },
         },
@@ -209,11 +209,11 @@ export async function apply(ctx, config) {
                 description: `Abstract goal (<=${GOAL_MAX_CHARS} chars, e.g. "sign in to the portal").`,
             },
             success_criteria: {
-                type: 'string', required: false,
+                type: 'string',
                 description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).`,
             },
             budget_ms: {
-                type: 'number', required: false,
+                type: 'number',
                 description: 'Optional wall-clock budget for the whole pipeline run.',
             },
         },

@@ -68,8 +68,10 @@ async function _getNutJS(): Promise<NutJSApi> {
     _nutJS = api;
     return api;
   } catch (e: any) {
+    // J 纪元：保留原始根因（对齐 _legacyDeps 的 .cause 纪律 —— 排障不丢线索）
     _nutJSError = legacyError('@nut-tree/nut-js',
       'Mouse/keyboard actions now route through D-5 Python microservice by default.');
+    _nutJSError.cause = e;
     throw _nutJSError;
   }
 }
@@ -101,7 +103,10 @@ async function _getKey(keyName: string): Promise<any> {
     ctrl: 'LeftControl', cmd: 'LeftSuper', alt: 'LeftAlt', shift: 'LeftShift',
     enter: 'Enter', tab: 'Tab', space: 'Space', backspace: 'Backspace',
     delete: 'Delete', esc: 'Escape',
+    // J 纪元：补齐 f6-f10（与 Python 端 _KEY_MAP 双向同步 —— 白名单缺段
+    // 会让这些键在两端都永远不可用）
     f1: 'F1', f2: 'F2', f3: 'F3', f4: 'F4', f5: 'F5',
+    f6: 'F6', f7: 'F7', f8: 'F8', f9: 'F9', f10: 'F10',
     f11: 'F11', f12: 'F12',
     a: 'A', c: 'C', v: 'V', z: 'Z',
   };

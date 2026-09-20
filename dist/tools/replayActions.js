@@ -15,8 +15,8 @@ export function createReplayActionsTool(config) {
             'successful action sequence, e.g., re-opening the same workflow. Requires confirm=true.',
         parameters: {
             confirm: { type: 'boolean', required: true, description: 'Must be explicitly true to execute.' },
-            from_step: { type: 'number', required: false, description: '0-based start index in the journal. Default 0.' },
-            to_step: { type: 'number', required: false, description: '0-based end index (inclusive). Default: latest.' },
+            from_step: { type: 'number', description: '0-based start index in the journal. Default 0.' },
+            to_step: { type: 'number', description: '0-based end index (inclusive). Default: latest.' },
         },
         output: {
             schema: { type: 'string' },
@@ -27,11 +27,14 @@ export function createReplayActionsTool(config) {
                 return toolErr('Replay unavailable.', 'Journal is disabled (enableJournal=false). Nothing to replay.', 'Enable the journal in config to record and replay actions.');
             }
             if (args.confirm !== true) {
-                return toolActionRequired('replay-needs-confirm', { current_state: 'Replay is a real-world side-effect operation.' }, 'Set confirm=true to execute the replay, or inspect the plan first via the dry-run report.');
+                return toolActionRequired('Replay awaiting explicit confirmation.', 'replay-needs-confirm', { current_state: 'Replay is a real-world side-effect operation.' }, 'Set confirm=true to execute the replay, or inspect the plan first via the dry-run report.');
             }
             const all = journal.list();
+            // J 纪元修正：to_step 补下界钳制 —— 旧实现只有上界 min(len-1)，
+            // to_step=-5 时 slice(0, -4) 静默选中「除最后 4 条外的全部」并重放，
+            // 与钳制 from 的初衷自相矛盾。
             const from = Math.max(0, args.from_step ?? 0);
-            const to = Math.min(all.length - 1, args.to_step ?? all.length - 1);
+            const to = Math.max(from, Math.min(all.length - 1, args.to_step ?? all.length - 1));
             const steps = all.slice(from, to + 1);
             if (steps.length === 0) {
                 return toolOk(`No replayable actions in range [${from}, ${to}].`, { range: { from, to }, journal_length: all.length }, 'Adjust from_step/to_step, or perform the actions manually — the journal may be empty or the range is out of bounds.');
@@ -54,9 +57,12 @@ export async function replayOne(entry) {
     const a = entry.args ?? {};
     try {
         switch (entry.tool) {
-            case 'click_mouse':
-                await system.clickMouse(a.x * (await system.getScreenSize()).width, a.y * (await system.getScreenSize()).height, a.button ?? 'left');
+            case 'click_mouse': {
+                // 尺寸只取一次：两次独立异步读在分辨率切换间隙会用不同比例映射 x/y
+                const s = await system.getScreenSize();
+                await system.clickMouse(a.x * s.width, a.y * s.height, a.button ?? 'left');
                 return 'clicked';
+            }
             case 'type_text':
                 await system.typeText(a.text ?? '', a.clearFirst ?? false);
                 return 'typed';
@@ -74,8 +80,14 @@ export async function replayOne(entry) {
             case 'switch_tab':
                 await system.pressHotkey(a.direction === 'previous' ? ['ctrl', 'shift', 'tab'] : ['ctrl', 'tab']);
                 return 'tab switched';
+            case 'switch_window':
+                await system.switchWindowByTitle(String(a.titleKeyword ?? ''));
+                return 'window switched';
             case 'click_element':
                 return 'SKIPPED (element-ID tools depend on runtime cache; replay with click_mouse coordinates instead)';
+            case 'dismiss_popup':
+                // 纯模型侧恢复指令（无机械动作）—— 宏里是无害占位，不作为失败计
+                return 'OK (model-side recovery instruction; nothing to execute)';
             default:
                 return `SKIPPED (unsupported for replay: ${entry.tool})`;
         }

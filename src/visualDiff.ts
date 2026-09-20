@@ -136,6 +136,8 @@ const PERSIST_RING = 6;       // 观测史容量（最近 6 次 diff）
 const PERSIST_WINDOW = 3;     // 寿命判定窗口（最近 3 次观测）
 const PERSIST_MIN_LIFE = 2;   // 寿命门槛：窗口内出现 ≥2 次 ⇒ 持续
 const KEY_GRID = 12;          // 中心量化网格（12×12 —— 抖动容忍 vs 定位分辨的平衡）
+/** I-4 迁徙半径（归一化坐标）：≤0.10 的位移视为同一特征的移动（约 1.2 格） */
+const MIGRATE_RADIUS = 0.10;
 
 /** 区域 → 量化键（中心坐标的网格量化 —— ±1/24 内的抖动同键） */
 export function regionKey(r: Pick<DiffRegion, 'center'>): string {
@@ -205,7 +207,7 @@ export function classifyPersistence(
     // I-4 迁徙链接：与窗口内 persistent 特征的传输匹配（距离 + 质量比守恒）
     const migrated = window.some(obs =>
       obs.persistent.some(p =>
-        Math.hypot(p.center.x - r.center.x, p.center.y - r.center.y) <= 0.10 &&
+        Math.hypot(p.center.x - r.center.x, p.center.y - r.center.y) <= MIGRATE_RADIUS &&
         (() => { const ratio = r.tiles_changed / p.mass; return ratio >= 0.5 && ratio <= 2; })(),
       ));
     verdict.set(r.index, migrated ? 'persistent' : 'transient');
@@ -221,9 +223,6 @@ interface RichObservation {
 
 /** 内部富观测史（与键环同容量同窗口 —— 双轨合一的存储面） */
 const richRing: RichObservation[] = [];
-
-/** I-4 迁徙半径（归一化坐标）：≤0.10 的位移视为同一特征的移动（约 1.2 格） */
-const MIGRATE_RADIUS = 0.10;
 
 /**
  * 观测登记：先判后记（本次不自证持续）。verdict 可选注入（diff_view 已算过）；

@@ -20,17 +20,17 @@ export function createSwarmDispatchTool(config) {
                 description: "One of: 'spawn' | 'status' | 'report' | 'arbitrate'",
             },
             specs: {
-                type: 'string', required: false,
+                type: 'string',
                 description: 'spawn only: JSON array of mission briefs, e.g. ' +
                     '[{"id":"scout-a","role":"Competitor A analyst","objective":"Open A\'s pricing page and extract plan prices; deliverable: price list","maxSteps":15}]. ' +
                     'objective MUST be self-contained (readable without the main conversation).',
             },
             findings: {
-                type: 'string', required: false,
+                type: 'string',
                 description: 'report only: the active agent\'s conclusions (facts found, deliverables, blockers).',
             },
             confidence: {
-                type: 'number', required: false,
+                type: 'number',
                 description: 'report only: self-assessed confidence 0.0-1.0 (weights the final arbitration).',
             },
         },

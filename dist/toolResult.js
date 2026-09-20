@@ -41,10 +41,13 @@ export function toolErr(action, error, nextStep) {
  * @param reason    暂停原因标识（irreversible-action / sensitive-field ...）
  * @param anchor    触发暂停的世界状态
  * @param nextStep  用户协同流程指引
+ * J 纪元修正：补 action 字段（可选）—— 另两工厂都有，classifyResult 不读它，
+ * 但消费方（日志/人读）对三工厂形状一致的期望不再被打破。
  */
-export function toolActionRequired(reason, anchor, nextStep) {
+export function toolActionRequired(action, reason, anchor, nextStep) {
     return JSON.stringify({
         status: 'ACTION_REQUIRED',
+        action,
         state_anchor: { reason, ...anchor },
         next_step: nextStep,
     }, null, 2);

@@ -2,12 +2,13 @@
 // 认知升维公共地基：零依赖 subword 哈希嵌入（Skill Embedding / 任务相关度共用）。
 // 原理（fastText 风格的工程极简版）：
 //   分词（复用 uiMemory.tokenize 的中英文分词律）→ 每个词再拆字符 n-gram →
-//   哈希到固定桶空间 → 累加权重 → 归一化。
+//   32 位 FNV-1a 全域哈希做桶键（精确哈希、近零碰撞）→ 累加权重 → 归一化。
 // 效果：「整理数据」与「筛选数据」虽无重合词，但 n-gram（数据/筛选→整理的字符簇）
 //   使向量夹角足够近 —— 零样本泛化的最小可信实现。
 // 工程承诺：零模型下载、零网络、纯 CPU 微秒级、JSON 可序列化（随 checkpoint 存活）。
+// J 纪元修正：删除从未被使用的 `DIMS = 256` 死常量 —— embed() 实际用 32 位
+// FNV-1a 全域做桶键（无 mod 压缩），头注"哈希到固定桶空间"描述的语义从未实现。
 import { tokenize } from './uiMemory.js';
-const DIMS = 256; // 桶空间大小：够区分千级技能，向量仍足够稀疏
 const NGRAM_MIN = 2; // 字符 n-gram 下界（中文 bigram / 英文子词）
 const NGRAM_MAX = 4; // 上界：太长泛化弱，太短碰撞多
 /** FNV-1a：短字符串分布均匀且实现只有几行 —— 哈希界的极简主义 */
@@ -37,21 +38,23 @@ function ngrams(token) {
 export function embed(text) {
     const buckets = new Map();
     for (const token of tokenize(text)) {
-        buckets.set(fnv1a(token), (buckets.get(fnv1a(token)) ?? 0) + 1.0);
+        const tb = fnv1a(token);
+        buckets.set(tb, (buckets.get(tb) ?? 0) + 1.0);
         for (const g of ngrams(token)) {
             const b = fnv1a('§' + g); // 前缀隔离：n-gram 与整词不共桶
             buckets.set(b, (buckets.get(b) ?? 0) + 0.5);
         }
     }
-    let sq = 0;
-    for (const w of buckets.values())
-        sq += w * w;
     const dims = [...buckets.entries()]
         .sort((a, b) => a[0] - b[0]) // 桶号有序：cosine 可走双指针线性合并
         .map(([b, w]) => [b, Math.round(w * 1000) / 1000]);
+    // norm 从取整后的权重计算（与 dims 同源）：保证 cosine(v, v) === 1 精确成立
+    let sq = 0;
+    for (const [, w] of dims)
+        sq += w * w;
     return { dims, norm: Math.sqrt(sq) };
 }
-/** 余弦相似度 0~1（非负权重空间）。任一空向量 ⇒ 0 */
+/** 余弦相似度 0~1（非负权重空间，末端钳制防浮点越界）。任一空向量 ⇒ 0 */
 export function cosine(a, b) {
     if (a.dims.length === 0 || b.dims.length === 0 || a.norm === 0 || b.norm === 0)
         return 0;
@@ -70,5 +73,5 @@ export function cosine(a, b) {
         else
             j++;
     }
-    return dot / (a.norm * b.norm);
+    return Math.min(1, dot / (a.norm * b.norm));
 }

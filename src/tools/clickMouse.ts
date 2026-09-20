@@ -24,40 +24,40 @@ export function createClickMouseTool(config: Config) {
     parameters: {
       x: { type: 'number', required: true, description: 'X coordinate (0.0-1.0)' },
       y: { type: 'number', required: true, description: 'Y coordinate (0.0-1.0)' },
-      button: { type: 'string', required: false, description: 'left, right, or middle' },
+      button: { type: 'string', description: 'left, right, or middle' },
       confidence: {
-        type: 'number', required: false,
+        type: 'number',
         description: 'Your confidence in these coordinates (0.0-1.0). If below 0.6, consider zoom_inspect first.',
       },
       target_description: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'Short description of what you are clicking (e.g., "GitHub 搜索框"). Used for UI memory.',
       },
       expected_change: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'What visual change do you EXPECT if the click succeeds? e.g., "a dropdown expands", "input gains focus". Used to verify the effect semantically.',
       },
       expected_text: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'Text you EXPECT to appear near the click point if it succeeds (requires enableOcr). The system OCR-verifies it automatically.',
       },
       from_memory_id: {
-        type: 'number', required: false,
+        type: 'number',
         description: 'Landmark ID from recall_ui. When provided, the system PRE-VERIFIES locally that the target still looks like it did when remembered — clicks on moved/changed targets are aborted before execution.',
       },
       approval_token: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'One-shot token from request_approval. Required for irreversible targets (send/delete/pay/submit order...).',
       },
       // ── C-1 意图感知验证：声明预期，物理规则引擎带着预期找证据 ──
       expected_effect: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'EXPECTED visual effect if this click succeeds — a kind string or JSON. Kinds: ' +
           'toggle_on (checkmark appears), toggle_off, menu_expand (dropdown opens), menu_collapse, ' +
           'input_focus (caret appears), page_navigate. Example: {"kind":"menu_expand"}',
       },
       reasoning: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'Why you chose this action (one sentence). Recorded into the causal journal for later counterfactual analysis.',
       },
     },
@@ -77,7 +77,9 @@ export function createClickMouseTool(config: Config) {
         );
       }
 
-      // ── 不可逆操作闸门（第六轮 + B-3 两阶段）：危险目标必须持有效令牌 ──
+      // ── 不可逆操作闸门（第六轮 + B-3 两阶段 + J 纪元授予门）：危险目标必须持
+      // **已授予**的有效令牌（grant_approval 落点 approval.grant —— "从未 grant"
+      // 与 "grant=true" 不再等价）。
       // 阶段一 validate：只查不烧 —— 点击若抛异常，令牌仍可用于重试；
       // 阶段二 consume 在动作成功返回前调用（见下方 finally 前的成功路径）。
       const dangerous = config.enableApprovalGate
@@ -89,14 +91,23 @@ export function createClickMouseTool(config: Config) {
           status: 'ACTION_REQUIRED',
           state_anchor: {
             target: target_description,
-            reason: 'irreversible-action',
-            note: 'This target looks irreversible (send/delete/pay/submit...).',
+            reason: approval_token ? 'token-not-granted-or-expired' : 'irreversible-action',
+            note: approval_token
+              ? 'The token exists but the user has not granted it yet (or it expired).'
+              : 'This target looks irreversible (send/delete/pay/submit...).',
           },
           next_step: 'PAUSE: this action needs explicit user approval. Call request_approval with a clear ' +
-            'description, tell the user what you are about to do, wait for their consent, then re-invoke ' +
-            'click_mouse with the returned approval_token. Never proceed without consent.',
+            'description, tell the user what you are about to do, wait for their consent, call ' +
+            'grant_approval(token, true), then re-invoke click_mouse with the returned approval_token. ' +
+            'Never proceed without consent.',
         }, null, 2);
       }
+      // J 纪元（盲区透明化）：审批闸门的危险判定依赖 target_description ——
+      // 描述缺席时闸门物理失明。无法强制（不填描述是模型的自由），但把盲区
+      // 摆到锚点里：模型看得见"这一跳没有被安全网覆盖"。
+      const gateCoverage = config.enableApprovalGate
+        ? (target_description ? 'described' : 'blind-spot (no target_description — approval gate could not judge this click)')
+        : 'gate-disabled';
 
       try {
         const size = await system.getScreenSize();
@@ -169,10 +180,12 @@ export function createClickMouseTool(config: Config) {
         // D-3 量子感知：验证证据喂给状态机（effect=null ⇒ undefined ⇒ 不计数）
         quantum.recordEffect(effect?.detected);
 
-        // ── 自动记忆：验证生效 + 模型给了描述 ⇒ 写入场景记忆（含当时整屏指纹） ──
+        // ── 自动记忆：验证生效 + 模型给了描述 ⇒ 写入场景记忆（含当时整屏指纹）──
+        // regionHash（点击点邻域指纹）随行入库 —— from_memory_id 的 stale-click
+        // 预验依赖它：无 regionHash 的 landmark 只能查存在性，无法比对外观
         let memoryNote = '';
         if (effect?.detected && config.autoRemember && target_description) {
-          const lm = uiMemory.remember(target_description, x, y, undefined, before?.screen);
+          const lm = uiMemory.remember(target_description, x, y, undefined, before?.screen, before?.region ?? undefined);
           memoryNote = ` Landmark #${lm.id} saved.`;
         }
 
@@ -234,15 +247,19 @@ export function createClickMouseTool(config: Config) {
             } : 'verification-off',
             expected_change: expected_change || undefined, // 预期锚定：模型行动前声明的预期
             sensitive_focus: sensitive || undefined,       // 风险闸门：焦点已标记为凭据区
+            // J 纪元：审批网覆盖情况透明化（described / blind-spot / gate-disabled）
+            approval_gate: gateCoverage,
             semantic: semantic
               ? (semantic === 'ocr-unavailable'
                 ? 'ocr-unavailable'
                 : { expected_text: expected_text, confirmed: semantic.confirmed, region_text_snippet: semantic.snippet })
               : undefined,
           },
-          memory: memoryNote || undefined,
-          next_step: nextStep,
-        }, null, 2);
+            memory: memoryNote || undefined,
+            next_step: nextStep,
+            // 预验结果透明化：本次点击是否经过 from_memory_id 外观比对
+            pre_verified: preVerified === undefined ? undefined : { landmark: from_memory_id, appearance_match: true },
+          }, null, 2);
 
       } catch (error: any) {
         // B-3 注：异常路径不烧审批令牌（validate 只查不烧；consume 仅在成功 return 前调用）

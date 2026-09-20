@@ -20,6 +20,12 @@ export interface OverlayOptions {
   elements?: OverlayElement[];
 }
 
+/** XML 文本转义：label 来自外部 UI 数据，含 < & 等字符会破坏 SVG 结构 */
+function escapeXml(s: string): string {
+  return s.replace(/[<>&"']/g, ch =>
+    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' })[ch] ?? ch);
+}
+
 export async function addVisualOverlay(
   imageBuffer: Buffer,
   options: OverlayOptions = {},
@@ -57,7 +63,7 @@ export async function addVisualOverlay(
     const { x, y, width: w, height: h } = el.rect;
     svg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="rgba(0,120,255,0.1)" stroke="#0078FF" stroke-width="2" />`;
     // 标签宽度按文本长度自适应（1 位到 2 位编号的边界都算到了）
-    const text = String(el.label);
+    const text = escapeXml(String(el.label));
     const labelW = text.length * 10 + 10;
     const labelY = Math.max(0, y - 20); // 顶部越界时回落到框内上沿
     svg += `<rect x="${x}" y="${labelY}" width="${labelW}" height="20" fill="#0078FF" />`;

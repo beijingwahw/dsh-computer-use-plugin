@@ -5,14 +5,13 @@
 """
 from __future__ import annotations
 
-import asyncio
-import time
 from typing import Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from . import shm as shm_module
+from .auth import ALL_CAPS
 from .config import AppConfig
 from .errors import ErrorKind, PhysicalError, safe_call, success
 from .input import InputController
@@ -56,17 +55,19 @@ class DragRequest(BaseModel):
     dry_run: bool = False
 
 
-class ScreenshotRequest(BaseModel):
-    format: Literal["png", "jpeg"] = "png"
-    quality: int | None = Field(default=None, ge=0, le=100)
-    region: dict | None = None
-
-
 class RegionSpec(BaseModel):
     x: float = Field(ge=0.0, le=1.0)
     y: float = Field(ge=0.0, le=1.0)
     width: float = Field(gt=0.0, le=1.0)
     height: float = Field(gt=0.0, le=1.0)
+
+
+class ScreenshotRequest(BaseModel):
+    format: Literal["png", "jpeg"] = "png"
+    quality: int | None = Field(default=None, ge=0, le=100)
+    # J 纪元统一：截图 region 与 UiTree 的 RegionSpec 同一强类型校验
+    # （旧实现截图侧是裸 dict，靠 screen._crop_region 手工校验 —— 同概念双轨）
+    region: RegionSpec | None = None
 
 
 class UiTreeRequest(BaseModel):
@@ -124,13 +125,17 @@ async def health() -> dict:
     import platform
 
     input_ctrl: InputController = _get("input")
+    screen_ctrl: ScreenCapture = _get("screen")
     window_ctrl: WindowManager = _get("window")
     config: AppConfig = _get("config")
 
-    # 探测屏幕尺寸（失败也返回，但 screen 字段为空）
+    # J 纪元修正：screen 字段必须与 TS 契约 HealthInfo.screen 对齐
+    # （``{width,height}`` 或 ``{error}``）。旧实现误用 input_ctrl 的
+    # tuple 版本 ``get_screen_size()`` —— 序列化成 ``[w, h]`` 数组，
+    # Node 端 d7HostPort 解出 ``{width: undefined}`` → 归一化产出 NaN 坐标。
     screen_info: dict = {}
     try:
-        screen_info = await input_ctrl.get_screen_size()
+        screen_info = await screen_ctrl.get_screen_size()
     except PhysicalError as e:
         screen_info = {"error": e.detail}
 
@@ -140,7 +145,11 @@ async def health() -> dict:
         "platform": sys.platform,
         "python": platform.python_version(),
         "screen": screen_info,
-        "capabilities": list(_controllers.keys()),
+        # J 纪元修正：capabilities 语义撞名 —— 旧实现返回控制器名列表，
+        # 与 auth.ALL_CAPS 的能力位图语义冲突，误导 Node 端 CapabilityCache。
+        # 现在 capabilities = 能力位图；控制器清单另立 controllers 字段。
+        "capabilities": list(ALL_CAPS),
+        "controllers": list(_controllers.keys()),
         "switch_window_method": window_ctrl.method(),
         "ui_funnel": {
             "l1_tree": "available" if config.funnel.l1_backend != "disabled" else "unavailable",
@@ -229,44 +238,41 @@ async def take_screenshot(req: ScreenshotRequest) -> dict:
 async def get_ui_tree(req: UiTreeRequest) -> dict:
     """UI 树读取 —— 反双盲仲裁漏斗。
 
-    若 ``screenshot`` 缺席，L2/L3 将无法运行（OCR/VLM 需要图像）；
-    漏斗会诚实降级到 L1，并在 fault 中标注。
+    若需要 L2/L3，先经 ``ScreenCapture.capture_png_bytes`` 截屏（J 纪元修正：
+    旧实现内联独立截屏代码 —— 不享受测试合成图降级，异常还被 ``pass`` 静默
+    吞掉，fault 只会谎报下游 "no image bytes for OCR"）。
     """
-    funnel_ctrl: UIFunnel = _get("funnel")
+    import sys
 
-    # 若需要 L2/L3，先截屏（不通过 shm，直接拿 bytes 喂给漏斗）
+    funnel_ctrl: UIFunnel = _get("funnel")
+    screen_ctrl: ScreenCapture = _get("screen")
+
+    region_dict = req.region.model_dump() if req.region else None
+
+    # 若需要 L2/L3，先截屏（走 ScreenCapture 统一路径，含测试降级）
     screenshot_bytes: bytes | None = None
     if req.funnel_ceiling in ("L2", "L3"):
         try:
-            import pyautogui
-            import io
-
-            def _shot() -> bytes:
-                img = pyautogui.screenshot()
-                if req.region:
-                    # 裁剪
-                    iw, ih = img.size
-                    box = (
-                        int(req.region.x * iw),
-                        int(req.region.y * ih),
-                        int((req.region.x + req.region.width) * iw),
-                        int((req.region.y + req.region.height) * ih),
-                    )
-                    img = img.crop(box)
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                return buf.getvalue()
-
-            loop = asyncio.get_running_loop()
-            screenshot_bytes = await loop.run_in_executor(None, _shot)
+            screenshot_bytes, _, _ = await screen_ctrl.capture_png_bytes(region_dict)
+        except PhysicalError as e:
+            # 截屏失败：L1 仍可尝试，L2/L3 降级 —— 但必须留下真实原因
+            print(f"[warn] get_ui_tree screenshot failed: {e.detail}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
-            # 截屏失败：L1 仍可尝试，L2/L3 降级
-            pass
+            print(f"[warn] get_ui_tree screenshot failed: {e}", file=sys.stderr)
+
+    # 全屏尺寸（漏斗坐标归一化的分母；L1 像素坐标换算必需）
+    screen_size: tuple[int, int] | None = None
+    try:
+        size_dict = await screen_ctrl.get_screen_size()
+        screen_size = (int(size_dict["width"]), int(size_dict["height"]))
+    except (PhysicalError, KeyError, TypeError, ValueError):
+        screen_size = None
 
     result = await funnel_ctrl.extract(
         screenshot_bytes=screenshot_bytes,
-        region=req.region.model_dump() if req.region else None,
+        region=region_dict,
         funnel_ceiling=req.funnel_ceiling,
+        screen_size=screen_size,
     )
     return result.to_dict()
 
@@ -293,29 +299,10 @@ async def release_shm(name: str) -> dict:
     return {"released": released, "name": name}
 
 
-# ─── /v1/mint_token：铸造 Cap Token（仅开发/调试使用，生产由 Node 端持有密钥自铸）───
-
-
-@router.post("/mint_token")
-async def mint_token_endpoint(request: Request) -> dict:
-    """铸造 Capability Token（仅当 Node 端没持有密钥时的兜底入口）。
-
-    生产环境强烈建议 Node 端读 ``~/.dsh/physical.key`` 自铸 token，
-    本端点不持有密钥铸造权（信任根在文件系统）。
-    """
-    from .auth import ALL_CAPS, ensure_key, mint_token
-
-    config: AppConfig = _get("config")
-    try:
-        key = ensure_key(config.auth.key_path)
-    except Exception as e:  # noqa: BLE001
-        return {"status": "failure", "error": {"kind": "internal_error", "detail": str(e)}, "latency_ms": 0}
-
-    # 默认签发全能力 token（仅供测试；生产由 Node 端按需签发）
-    body = await request.json() if request.headers.get("content-length") != "0" else {}
-    caps = body.get("caps", list(ALL_CAPS))
-    ttl = body.get("ttl", config.auth.token_ttl_seconds)
-    pid = body.get("pid", 0)  # 测试模式 pid=0；生产由 Node 端填自身 PID
-
-    token = mint_token(key, int(pid), tuple(caps), int(ttl))
-    return {"token": token, "caps": caps, "ttl": ttl}
+# J 纪元移除 ``POST /v1/mint_token`` 端点 —— 它是自举死锁 + 安全洞的组合：
+#   1. 该端点存在的意义是"给没有 token 的客户端铸 token"，却被 auth 中间件
+#      挡住（白名单只有 /v1/health）—— 永远不可达的死代码；
+#   2. 若加入白名单，则任何本地进程都能免密钥铸全能力 token，Layer 3 的
+#      capability 模型形同虚设。
+# 信任根在密钥文件（0600）—— Node 端读密钥自铸（capToken.ts 与 auth.py
+# 字节级镜像），无需服务端铸造入口。

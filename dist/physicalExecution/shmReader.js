@@ -68,6 +68,9 @@ async function acquireFd(path, name) {
         cached.refCount++;
         return [cached.fh, true];
     }
+    // 过期但尚未被 30s GC 收走的条目：替换前关闭旧 fh（否则被覆盖后永无人关闭 ——
+    // 每次 TTL 过期重读泄漏一个 fd）
+    const stale = cached;
     // 新开（不进缓存命中路径，但 open 后入池以备后续读复用）
     let fh;
     try {
@@ -79,23 +82,45 @@ async function acquireFd(path, name) {
         }
         throw makeError('screen_capture_failed', `open ${path} failed: ${e.message}`);
     }
-    _fdCache.set(name, { fh, expiresAt: now + FD_CACHE_TTL_MS, refCount: 1 });
+    _fdCache.set(name, { fh, expiresAt: now + FD_CACHE_TTL_MS, refCount: 1, evictPending: false });
+    if (stale && stale.refCount === 0) {
+        stale.fh.close().catch(() => { });
+    }
+    else if (stale) {
+        // 在飞引用持有旧 fh：新条目已接管缓存键，旧句柄等引用方 releaseFd 后由其关闭
+        stale.evictPending = true;
+    }
     startFdGc();
     return [fh, false];
 }
-/** 归还 FD 到池（引用计数减一；过期则关闭） */
+/** 归还 FD 到池（引用计数减一；驱逐挂起且引用归零 ⇒ 立即关闭） */
 async function releaseFd(name) {
     const entry = _fdCache.get(name);
     if (!entry)
         return;
     entry.refCount = Math.max(0, entry.refCount - 1);
-    // 不立即关闭 —— 让 TTL GC 处理（同一对象可能被再次读）
+    if (entry.refCount === 0 && entry.evictPending) {
+        _fdCache.delete(name);
+        try {
+            await entry.fh.close();
+        }
+        catch { /* close 失败无害 */ }
+        return;
+    }
+    // 其余情形不立即关闭 —— 让 TTL GC 处理（同一对象可能被再次读）
 }
-/** 显式驱逐 FD（截图读完且调用方调 release 时） */
+/** 显式驱逐 FD（截图读完且调用方调 release 时）。
+ *  在飞引用（refCount>0）只标记驱逐：立即关闭会让并发 readShm 以 EBADF
+ *  中途失败 —— 引用归零时由 releaseFd 关闭 */
 async function evictFd(name) {
     const entry = _fdCache.get(name);
     if (!entry)
         return;
+    if (entry.refCount > 0) {
+        entry.evictPending = true;
+        entry.expiresAt = 0; // 不再接受新命中
+        return;
+    }
     _fdCache.delete(name);
     try {
         await entry.fh.close();
@@ -201,12 +226,15 @@ export async function* readShmStreaming(screenshot) {
         }
         return;
     }
+    if (!screenshot.name) {
+        throw makeError('invalid_args', `${screenshot.transport} transport but name is empty`);
+    }
+    if (screenshot.transport !== 'mmap-file' && platform() === 'win32') {
+        throw makeError('invalid_args', 'shm transport not supported on win32 (use mmap-file or base64)');
+    }
     const path = screenshot.transport === 'mmap-file'
         ? screenshot.name
         : resolveShmPath(screenshot.name);
-    if (!path) {
-        throw makeError('invalid_args', 'cannot resolve path for streaming read');
-    }
     if (!existsSync(path)) {
         throw makeError('element_not_found', `shm object ${screenshot.name} not found at ${path}`);
     }
@@ -241,9 +269,4 @@ export async function closeAllFds() {
         _gcTimer = null;
     }
     await Promise.allSettled(entries.map(e => e.fh.close()));
-}
-/** 本地释放兜底 —— Node 端读完后无需本地清理，但可驱逐 FD 缓存条目 */
-export async function releaseLocalShm(name) {
-    await evictFd(name);
-    return true;
 }

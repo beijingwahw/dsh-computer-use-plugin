@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ScreenshotHandle, ScreenshotBatch } from '../src/physicalExecution/screenshotHandle.ts';
+import { resolvePythonBin } from '../src/physicalExecution/pythonBin.ts';
 import type {
   ClickResult, DragResult, HealthInfo, HotkeyResult, PhysicalError,
   PhysicalExecutionAdapter, Result, ScreenshotResult, ScrollResult,
@@ -63,7 +64,7 @@ function seedScreenshot(transport: 'mmap-file' | 'base64', mmapDir: string): {
   proc: ReturnType<typeof spawn>;
   metaPromise: Promise<SeededMeta>;
 } {
-  const proc = spawn('python3', [FIXTURE, transport, mmapDir], {
+  const proc = spawn(resolvePythonBin(), [FIXTURE, transport, mmapDir], {
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   const metaPromise = new Promise<SeededMeta>((resolve, reject) => {

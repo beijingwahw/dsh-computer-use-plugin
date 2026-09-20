@@ -104,6 +104,9 @@ const menuCollapse = {
     kind: 'menu_collapse',
     async check(ctx) {
         const verdict = await menuExpand.check(ctx);
+        // 无焦点等 not-applicable 情形原样传递 —— 反转会把「无法判定」错成「已折叠」
+        if (verdict.notApplicable)
+            return verdict;
         return {
             satisfied: !verdict.satisfied,
             evidence: `menu area ${verdict.satisfied ? 'still changing (not collapsed)' : 'settled (collapsed)'}: ${verdict.evidence}`,

@@ -13,6 +13,12 @@
 //   第四条（对称性）模拟成功是债，模拟降级同罪（simulated rescue 同罪）：
 //     坏配置 + configure 静默降级 = 用降级伪装成功。
 import { randomUUID } from 'crypto';
+/** 动作词汇表运行时集合（类型的唯一运行时镜像 —— 解析边界执法用，
+ *  防 LLM 输出的未知 kind 经 as 断言混入执行域） */
+export const SANDBOX_ACTION_KINDS = new Set([
+    'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
+    'drag_mouse', 'switch_tab', 'switch_window', 'dismiss_popup', 'noop',
+]);
 /**
  * 肌肉记忆可靠度 —— 唯一公式落点（锚定 skillLibrary.ts:182 既有事实）：
  *   reliability = (hostSuccessCount + 1) / (hostReplayCount + 2)   // 加一 Laplace，二值结局

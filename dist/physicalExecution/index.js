@@ -1,7 +1,7 @@
 export { ALL_CAPS } from './contracts.js';
 export { PhysicalExecutionAdapterImpl } from './adapter.js';
 export { PhysicalActionRouterImpl } from './router.js';
-export { readShm, readShmStreaming, evictShmFd, closeAllFds, releaseLocalShm, } from './shmReader.js';
+export { readShm, readShmStreaming, evictShmFd, closeAllFds, } from './shmReader.js';
 export { ensureKey, mintNonce, mintToken, parseToken, } from './capToken.js';
 export { microFetch } from './httpClient.js';
 // 世界级创新：RAII 资源管理 + Capability-Driven Routing

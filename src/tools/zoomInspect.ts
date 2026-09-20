@@ -21,7 +21,7 @@ export function createZoomInspectTool(config: Config) {
       x: { type: 'number', required: true, description: 'Center X of the region (0.0-1.0).' },
       y: { type: 'number', required: true, description: 'Center Y of the region (0.0-1.0).' },
       half_size: {
-        type: 'number', required: false,
+        type: 'number',
         description: 'Half-size of the region as a fraction of screen width/height. Default 0.15.',
       },
     },

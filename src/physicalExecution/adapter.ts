@@ -51,6 +51,13 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     if (!config.baseUrl || !/^(http|http\+unix):\/\//.test(config.baseUrl)) {
       errors.push(`baseUrl must start with http:// or http+unix://, got ${config.baseUrl}`);
     }
+    // J 纪元修正：UDS 显式拒绝 —— Node 内置 fetch（undici）不认 http+unix://，
+    // 契约虽声明支持，实际第一笔请求必抛 TypeError 被归类为 transport_error。
+    // 与其运行时误导，不如加载层诚实拒绝（ServiceManager 默认强制 TCP，
+    // 本路径只影响手写 baseUrl 的调用方）。
+    if (config.baseUrl?.startsWith('http+unix://')) {
+      errors.push('http+unix:// baseUrl is declared in contracts but unsupported by the Node built-in fetch (undici) — use http://127.0.0.1:<port> (ServiceManager default)');
+    }
     if (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0) {
       errors.push(`timeoutMs must be positive finite, got ${config.timeoutMs}`);
     }
@@ -77,9 +84,12 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
       healthCache: null,
     };
 
-    // fire-and-forget 加载密钥（调用方应 await init() 确保就绪；未就绪时 call 内 await 兜底）
+    // fire-and-forget 加载密钥（调用方应 await init() 确保就绪；未就绪时 call 内 await 兜底）。
+    // 挂 no-op catch：无人 await 时（如 configure 后立即 reset）的拒绝不至于
+    // 升级为进程级 unhandled rejection —— init()/call() await 同一 promise 时错误仍如实上抛
     if (config.enableAuth !== false) {
       this.state.keyPromise = this.loadKey();
+      this.state.keyPromise.catch(() => { /* 已处理：见上 */ });
     }
   }
 
@@ -109,13 +119,23 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     }
   }
 
-  /** 启动期探活 —— Result 降级，永不抛错 */
+  /** 启动期探活 —— Result 降级，永不抛错。
+   *  J 纪元修正：兑现 healthCache 与 healthCheckIntervalMs 的存在意义 ——
+   *  旧实现只写不读（配置项也无人消费），每次 health() 都发真实请求。
+   *  现在 TTL 内返回缓存（缺省 30s，capabilityCache 的同步源不必高频探活）；
+   *  失败不缓存（Python 重启后下一次调用立即拿到新事实）。 */
   async health(): Promise<Result<HealthInfo, PhysicalError>> {
     if (!this.state) {
       return {
         ok: false,
         error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
       };
+    }
+
+    const ttl = this.state.config.healthCheckIntervalMs ?? 30_000;
+    const cached = this.state.healthCache;
+    if (cached && Date.now() - cached.fetchedAt < ttl) {
+      return { ok: true, value: cached.info };
     }
 
     // 首次探活时确保 key 就绪（即便失败也不阻断探活 —— health 不强制要求 token）
@@ -297,9 +317,11 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
 
   /** 异步加载 HMAC 密钥（首次 configure 末尾 fire-and-forget 启动） */
   private async loadKey(): Promise<Uint8Array> {
-    if (!this.state) throw new Error('adapter not configured');
-    const key = await ensureKey(this.state.config.keyPath);
-    this.state.key = key;
+    const state = this.state;
+    if (!state) throw new Error('adapter not configured');
+    const key = await ensureKey(state.config.keyPath);
+    // reset() 可能已换掉 state：只写回仍属于自己的 state（否则 TypeError 飞入本 promise）
+    if (this.state === state) this.state.key = key;
     return key;
   }
 

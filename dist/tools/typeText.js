@@ -20,11 +20,10 @@ export function createTypeTextTool(config) {
             },
             clearFirst: {
                 type: 'boolean',
-                required: false,
                 description: 'Set to true to select all and clear existing text before typing. Default is false.',
             },
             expected_change: {
-                type: 'string', required: false,
+                type: 'string',
                 description: 'What should appear if typing succeeds? e.g., "the typed text shows in the input field".',
             },
         },
@@ -83,8 +82,13 @@ export function createTypeTextTool(config) {
                     status: 'SUCCESS',
                     action: 'Text typed successfully.',
                     state_anchor: {
-                        // 回显也做 Token 预算：截断到 50 字符
-                        typed_content: text.substring(0, 50) + (text.length > 50 ? '...' : ''),
+                        // 回显也做 Token 预算：截断到 50 字符。
+                        // J 纪元（防御纵深）：文本自身命中风险词时无论闸门开关一律脱敏 ——
+                        // 旧实现仅在 enableRiskGate=true 的拦截路径不回显，闸门关闭的
+                        // 组合配置下明文密码会进锚点（锚点可能进入日志/遥测）。
+                        typed_content: matchesRiskPatterns(text, config.riskPatterns)
+                            ? '[REDACTED — sensitive content]'
+                            : text.substring(0, 50) + (text.length > 50 ? '...' : ''),
                         char_count: text.length,
                         cleared_existing: clearFirst,
                         input_state: clearFirst ? 'Replaced all previous content' : 'Appended to existing content',

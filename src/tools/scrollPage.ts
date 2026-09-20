@@ -20,7 +20,6 @@ export function createScrollPageTool() {
       },
       amount: {
         type: 'number',
-        required: false,
         description: 'The scroll distance (number of scroll lines). Defaults to 5.',
       },
     },

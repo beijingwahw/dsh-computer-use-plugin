@@ -1,8 +1,10 @@
 import { onToolPre, onToolPost } from './hooks.js';
 import { ACTION_TOOLS } from '../journal.js';
+import { classifyResult } from '../resultContract.js';
 export function registerRepeatActionGuard(ctx) {
     let lastSig = '';
     let pendingSig = '';
+    let pendingTool = '';
     let lastNoEffect = false;
     let repeatCount = 0;
     onToolPre(ctx, async (call, next) => {
@@ -24,19 +26,24 @@ export function registerRepeatActionGuard(ctx) {
             repeatCount = 0;
         }
         pendingSig = sig;
+        pendingTool = call.name;
         return next();
     });
-    onToolPost(ctx, async (_call, result, next) => {
+    onToolPost(ctx, async (call, result, next) => {
         if (typeof result === 'string' && pendingSig) {
+            // J 纪元修正（stale 签名防线）：上一个调用的 post 缺席（工具抛错）时，
+            // 本 post 属于别的工具 —— 签名与结果不配对，宁丢弃勿错配
+            // （旧实现会把上一调用的签名与本结果张冠李戴，lastNoEffect 污染）。
+            if (call.name !== pendingTool) {
+                pendingSig = '';
+                pendingTool = '';
+                return next(result);
+            }
             lastSig = pendingSig;
             pendingSig = '';
-            let noEffect = result.includes('[Error]') || result.includes('"status": "FAILED"');
-            try {
-                const obj = JSON.parse(result);
-                if (obj?.state_anchor?.effect?.detected === false)
-                    noEffect = true; // 盲点也算无效
-            }
-            catch { /* 前缀协议字符串已由 includes 覆盖 */ }
+            pendingTool = '';
+            const c = classifyResult(result);
+            const noEffect = c.status === 'FAILED' || c.noop; // 失败或盲点（SUCCESS 但无效果）
             lastNoEffect = noEffect;
         }
         return next(result);

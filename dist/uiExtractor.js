@@ -18,9 +18,9 @@ export async function extractInteractiveElements(force = false) {
         throw new Error('Accessibility provider not configured. ' +
             'Call setAccessibilityProvider() at plugin startup to enable element-ID mode.');
     }
-    // 缓存命中：ID 不会因重复提取而漂移
+    // 缓存命中：ID 不会因重复提取而漂移（返回副本 —— 调用方原地排序/裁剪不污染缓存）
     if (!force && Date.now() - cacheAt < CACHE_TTL_MS)
-        return cache;
+        return cache.slice();
     const elements = [];
     try {
         const tree = await provider();

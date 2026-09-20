@@ -37,7 +37,11 @@ export async function planTasks(userPrompt, chat) {
         const parsed = JSON.parse(text.slice(start, end + 1));
         if (!Array.isArray(parsed))
             return [];
-        return parsed.filter((t) => t && typeof t.action === 'string');
+        // J 纪元修正：LLM 漏输出 id 时按序号补齐 —— 旧 filter 不校验 id，
+        // orchestrator 会打出 "Task #undefined"（下游 results 格式化失真）。
+        return parsed
+            .filter((t) => t && typeof t.action === 'string')
+            .map((t, i) => ({ ...t, id: typeof t.id === 'number' ? t.id : i + 1 }));
     }
     catch {
         return [];

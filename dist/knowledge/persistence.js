@@ -46,6 +46,7 @@ function readJson(path) {
  * （append-only 的观测记录 —— 历史不可改写，不需要水合回内存）。
  */
 export class KnowledgePersistence {
+    /** 状态目录（只读公开：流水线 wire 的损坏隔离需要定位状态文件） */
     stateDir;
     constructor(stateDir) {
         this.stateDir = stateDir;
@@ -56,13 +57,15 @@ export class KnowledgePersistence {
             mkdirSync(this.stateDir, { recursive: true });
             const saved = [];
             const kbR = atomicWriteJson(join(this.stateDir, KNOWLEDGE_FILE), kb.exportSnapshot());
-            if (!kbR.ok)
-                return kbR;
-            saved.push('knowledge');
+            if (kbR.ok)
+                saved.push('knowledge');
+            // 两器官独立落盘：先到的失败不短路后到的写入（saved 数组如实上报部分成功）
             const wmR = atomicWriteJson(join(this.stateDir, WORLD_MODEL_FILE), wm.exportSnapshot());
-            if (!wmR.ok)
-                return wmR;
-            saved.push('world-model');
+            if (wmR.ok)
+                saved.push('world-model');
+            const firstError = !kbR.ok ? kbR.error : !wmR.ok ? wmR.error : null;
+            if (firstError)
+                return { ok: false, error: firstError };
             return { ok: true, value: { saved } };
         }
         catch (e) {

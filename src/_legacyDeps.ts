@@ -77,6 +77,7 @@ export async function getSharp(): Promise<SharpLike> {
   } catch (e: any) {
     _sharpError = legacyError('sharp',
       'Image resizing/cropping is now handled on the D-5 Python microservice side via Pillow.');
+    _sharpError.cause = e; // 保留原始错误（如原生绑定损坏）—— 排障不丢根因
     throw _sharpError;
   }
 }
@@ -127,6 +128,7 @@ export async function getTesseract(): Promise<TesseractLike> {
   } catch (e: any) {
     _tesseractError = legacyError('tesseract.js',
       'OCR is now provided by the D-5 microservice: adapter.getUiTree({ funnelCeiling: "L2" }).');
+    _tesseractError.cause = e; // 保留原始错误（如包损坏/网络失败）—— 排障不丢根因
     throw _tesseractError;
   }
 }

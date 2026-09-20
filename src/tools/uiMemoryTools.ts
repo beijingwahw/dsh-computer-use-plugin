@@ -21,7 +21,7 @@ export function createRememberUiTool() {
       },
       x: { type: 'number', required: true, description: 'Verified normalized X (0.0-1.0).' },
       y: { type: 'number', required: true, description: 'Verified normalized Y (0.0-1.0).' },
-      app_hint: { type: 'string', required: false, description: 'Optional app/context hint (e.g., "Chrome", "VS Code").' },
+      app_hint: { type: 'string', description: 'Optional app/context hint (e.g., "Chrome", "VS Code").' },
     },
     output: {
       schema: { type: 'string' },

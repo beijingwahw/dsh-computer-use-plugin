@@ -4,6 +4,7 @@
 // 异常诚实（D-7 修正案）：Result 降级严禁 throw；域外拒绝对齐 makeScore 哲学
 // （clamp 会掩埋 bug），首个错误即返回 —— field 精确定位。
 import type { ConfigError, PipelineConfig, Result } from './contracts';
+import { INJECTION_MAX_CHARS } from './knowledgeBase';
 
 /** 工位 Token 预算缺省（P1-2 config-driven：本表仅为 PipelineConfig.stationTokenBudgets
  *  缺席时的回退缺省 —— 预算治理主权在配置域，校验后不再有第二个常量源） */
@@ -46,8 +47,8 @@ export function validatePipelineConfig(config: PipelineConfig): Result<PipelineC
   if (!Number.isInteger(config.knowledgeMaxResults) || config.knowledgeMaxResults < 1) {
     return { ok: false, error: { field: 'knowledgeMaxResults', reason: `must be an integer >= 1, got ${config.knowledgeMaxResults}` } };
   }
-  if (!Number.isInteger(config.knowledgeMaxChars) || config.knowledgeMaxChars < 1 || config.knowledgeMaxChars > 300) {
-    return { ok: false, error: { field: 'knowledgeMaxChars', reason: `must be an integer in [1,300] (injection summary budget), got ${config.knowledgeMaxChars}` } };
+  if (!Number.isInteger(config.knowledgeMaxChars) || config.knowledgeMaxChars < 1 || config.knowledgeMaxChars > INJECTION_MAX_CHARS) {
+    return { ok: false, error: { field: 'knowledgeMaxChars', reason: `must be an integer in [1,${INJECTION_MAX_CHARS}] (injection summary budget), got ${config.knowledgeMaxChars}` } };
   }
   const g = config.regionGrid;
   if (g && (!Number.isInteger(g.cols) || g.cols < 1 || !Number.isInteger(g.rows) || g.rows < 1)) {

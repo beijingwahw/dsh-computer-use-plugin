@@ -24,9 +24,9 @@ export function createReadTextTool(config: Config) {
       'Use this instead of take_screenshot when you only need TEXT content — it costs far fewer tokens. ' +
       'Returned coordinates are full-screen normalized (0.0-1.0).',
     parameters: {
-      x: { type: 'number', required: false, description: 'Optional center X of the region to read (0.0-1.0). Default: full screen.' },
-      y: { type: 'number', required: false, description: 'Optional center Y of the region to read (0.0-1.0).' },
-      half_size: { type: 'number', required: false, description: 'Optional region half-size (fraction). Default 0.25.' },
+      x: { type: 'number', description: 'Optional center X of the region to read (0.0-1.0). Default: full screen.' },
+      y: { type: 'number', description: 'Optional center Y of the region to read (0.0-1.0).' },
+      half_size: { type: 'number', description: 'Optional region half-size (fraction). Default 0.25.' },
     },
     output: {
       schema: { type: 'string' },
@@ -38,6 +38,13 @@ export function createReadTextTool(config: Config) {
 
         let target = shot;
         let cropNote = 'full_screen';
+        // J 纪元修正：单坐标（只传 x 或只传 y）不再被静默忽略 —— 参数语义
+        // 是"区域中心"，半指定即无意义；诚实报错好过全屏兜底（调用方以为
+        // 读的是局部，拿到的是全屏）。
+        if ((args.x !== undefined || args.y !== undefined) &&
+            !(typeof args.x === 'number' && typeof args.y === 'number')) {
+          return `[Error]: Region requires BOTH x and y (got x=${JSON.stringify(args.x)}, y=${JSON.stringify(args.y)}). Omit both for a full-screen read.`;
+        }
         if (typeof args.x === 'number' && typeof args.y === 'number') {
           const half = args.half_size ?? 0.25;
           if (args.x < 0 || args.x > 1 || args.y < 0 || args.y > 1 || half <= 0 || half > 0.5) {
@@ -46,10 +53,14 @@ export function createReadTextTool(config: Config) {
           const sharp = await getSharp();
           const meta = await sharp(shot).metadata();
           const W = meta.width!, H = meta.height!;
+          // 双侧夹取（与 zoomInspect 同律）：x-half < 0 时 left 归 0，但宽度必须
+          // 同时以 x+half 为右界 —— 否则边缘区域实际读取范围比声明的大（漂移 bug）
           const left = Math.max(0, Math.round((args.x - half) * W));
           const top = Math.max(0, Math.round((args.y - half) * H));
-          const width = Math.min(W - left, Math.round(half * 2 * W));
-          const height = Math.min(H - top, Math.round(half * 2 * H));
+          const right = Math.min(W, Math.round((args.x + half) * W));
+          const bottom = Math.min(H, Math.round((args.y + half) * H));
+          const width = Math.max(1, right - left);
+          const height = Math.max(1, bottom - top);
           // 区域裁剪 + 放大：OCR 对小文字的准确率关键
           target = await sharp(shot).extract({ left, top, width, height }).resize(1400).toBuffer();
           cropNote = `region_center=(${args.x}, ${args.y}) half=${half}`;

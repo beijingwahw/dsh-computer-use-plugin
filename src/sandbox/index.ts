@@ -58,9 +58,15 @@ export async function apply(ctx: Context, config: SandboxConfig): Promise<void> 
     });
   });
 
-  // D-4 判决回执：入缓存（双闸门复核 + 重放时刻否决源）
+  // D-4 判决回执：入缓存（双闸门复核 + 重放时刻否决源）+ 与最近排练结果
+  // 配对走 consolidate（肌肉记忆写入路径：passed + approved ⇒ 固化入库）
   onDoctorVerdict(ctx, payload => {
     engine.noteDoctorVerdict(payload);
+    const r = engine.tryConsolidate(payload);
+    if (r.ok && r.value) {
+      console.log(`[Sandbox] Muscle memory consolidated: ${r.value.id} ` +
+        `(${r.value.steps.length} steps, trigger="${r.value.trigger.slice(0, 60)}")`);
+    }
   });
 
   // 宿主管线观察（纯观察透传）：嗅探屏指纹 —— TRUST IS A FINGERPRINT 的镜像源头
@@ -90,7 +96,7 @@ export async function apply(ctx: Context, config: SandboxConfig): Promise<void> 
           + '(kinds: click_mouse|type_text|scroll_page|press_hotkey|drag_mouse|switch_tab|switch_window|dismiss_popup|noop)',
       },
       budget_ms: {
-        type: 'number', required: false,
+        type: 'number',
         description: 'Optional wall-clock budget; on expiry the rehearsal aborts gracefully with partial trajectory.',
       },
     },
@@ -161,7 +167,7 @@ export async function apply(ctx: Context, config: SandboxConfig): Promise<void> 
     parameters: {
       entry_id: { type: 'string', required: true, description: 'Muscle memory entry id.' },
       confirm_token: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'Omit in phase 1 to get a token; include in phase 2 to attempt the replay.',
       },
     },
@@ -214,7 +220,8 @@ export async function apply(ctx: Context, config: SandboxConfig): Promise<void> 
     console.log('[Sandbox] Unloading, rolling back resources...');
     return () => {
       // 持久化资产先行落盘（肌肉记忆的寿命长于会话）；账本随 JSONL 已增量落盘
-      engine.reset(); // 内存态归零：记忆/令牌/判决缓存/观察缓存/账本窗口
+      engine.persistMemory(); // 必须先于 reset（内存态归零后无可存）
+      engine.reset(); // 内存态归零：记忆/令牌/判决缓存/待配对面/观察缓存/账本窗口
       console.log('[Sandbox] Unloaded. Zero residue.');
     };
   });

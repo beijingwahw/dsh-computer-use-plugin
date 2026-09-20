@@ -31,7 +31,7 @@ export { ALL_CAPS } from './contracts.js';
 export { PhysicalExecutionAdapterImpl } from './adapter.js';
 export { PhysicalActionRouterImpl } from './router.js';
 export {
-  readShm, readShmStreaming, evictShmFd, closeAllFds, releaseLocalShm,
+  readShm, readShmStreaming, evictShmFd, closeAllFds,
 } from './shmReader.js';
 export {
   ensureKey, mintNonce, mintToken, parseToken, type CapTokenPayload,

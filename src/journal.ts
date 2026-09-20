@@ -80,6 +80,8 @@ class ActionJournal {
   private chainTip = GENESIS;  // 哈希链尖端：checkpoint 恢复时随行
   private chainBase = GENESIS; // 链基（B-1）：最旧存活条目的「前条哈希」。
   private lastObserved = '';   // C-3：最近观察摘要（[观察]→[行动] 因果桥）
+  /** 磁盘写尾链（J 纪元）：并发 append 的 JSONL 行序与链序保持一致 */
+  private diskTail: Promise<void> = Promise.resolve();
   // 容量驱逐（shift）把被驱逐条的哈希升格为新链基 —— verify 从链基起重放，
   // 存活窗口内任何篡改仍可定位；被驱逐条目的取证职责由磁盘 JSONL 承载。
 
@@ -119,13 +121,18 @@ class ActionJournal {
     }
 
     if (this.filePath) {
-      try {
-        // 目录不存在则创建；追加失败不阻断主流程（日志是旁路义务）
-        await mkdir(path.dirname(this.filePath), { recursive: true });
-        await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
-      } catch (e: any) {
-        console.warn(`[Journal] write failed: ${e.message}`);
-      }
+      // J 纪元修正：磁盘写经尾链串行化 —— 旧实现两个并发 append 各自 await
+      // mkdir 后再 appendFile，完成顺序可倒置：内存哈希链正确，磁盘 JSONL
+      // 行序却可能违反链序（B-1 承诺"被驱逐条的取证职责交磁盘"被架空）。
+      this.diskTail = this.diskTail.then(async () => {
+        try {
+          // 目录不存在则创建；追加失败不阻断主流程（日志是旁路义务）
+          await mkdir(path.dirname(this.filePath), { recursive: true });
+          await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
+        } catch (e: any) {
+          console.warn(`[Journal] write failed: ${e.message}`);
+        }
+      });
     }
   }
 
@@ -226,14 +233,23 @@ class ActionJournal {
    * 思考缺失时如实降级标注 —— 反事实推理的证据质量对模型透明。
    */
   findDecisionPoints(query: CounterfactualQuery = {}): DecisionPoint[] {
+    // 索引空间统一：决策点序号与 replay_actions / save_skill 消费的动作流
+    // （list() 的 ACTION_TOOLS 过滤视图）同一空间。原始 entries 含 MARKER 条目
+    // （AGENT_BEGIN/ENV_SHAPED/SENSE_SHIFT...），直接用其下标会让模型从 what_if
+    // 输出推导的重放区间整体错位（错位量 = 区间内的 marker 数）。
+    const actionIndexOf = new Map<number, number>();
+    let actionCount = 0;
+    this.entries.forEach((e, i) => {
+      if (ACTION_TOOLS.includes(e.tool)) actionIndexOf.set(i, actionCount++);
+    });
     const pool = this.entries
-      .map((entry, index) => ({ entry, index }))
-      .filter(({ index }) => query.sinceIndex === undefined || index >= query.sinceIndex)
+      .map((entry, index) => ({ entry, index, actionIndex: actionIndexOf.get(index) ?? -1 }))
+      .filter(({ actionIndex }) => query.sinceIndex === undefined || actionIndex >= query.sinceIndex)
       .filter(({ entry }) => ACTION_TOOLS.includes(entry.tool))
       .filter(({ entry }) =>
         !query.failedOnly || entry.status === 'FAILED' || entry.effect_detected === false);
 
-    return pool.map(({ entry, index }) => {
+    return pool.map(({ entry, actionIndex }) => {
       const scene = entry.observe;
       // 链上异action：同场景指纹、不同工具/坐标的既往动作及其结局
       const alternatives: CounterfactualAlternative[] = scene
@@ -250,7 +266,7 @@ class ActionJournal {
             }))
         : [];
       return {
-        index,
+        index: actionIndex,
         entry,
         thought: entry.thought ?? null,
         alternatives,

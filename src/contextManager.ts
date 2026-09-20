@@ -132,11 +132,18 @@ class ContextManager {
   private refreshPins(): void {
     if (!this.salienceFocus) return;
     const now = Date.now();
+    // J 纪元修正（钉扎名额泄漏）：先清"已降级仍钉扎"的僵尸名额 ——
+    // 旧实现 pinnedCount 统计全部 history（含 base64 已清空的降级记录），
+    // 但解钉分支只作用于仍有图的候选；安全阀驱逐过一张钉扎图后，
+    // 该名额被永久占用（默认 pinBudget=1 ⇒ 从此任何图都无法再钉扎）。
+    for (const h of this.history) {
+      if (h.pinned && !h.base64) h.pinned = false; // 降级即解钉：钉扎是图像驻留机制
+    }
     const candidates = this.history
       .filter(h => h.base64)
       .map(h => ({ h, s: this.assessSalience(h, now) }))
       .sort((a, b) => b.s - a.s);
-    let pinnedCount = this.history.filter(h => h.pinned).length;
+    let pinnedCount = this.history.filter(h => h.pinned && h.base64).length;
     for (const { h, s } of candidates) {
       if (s >= 0.8 && pinnedCount < this.pinBudget) {
         if (!h.pinned) { h.pinned = true; pinnedCount++; }
@@ -236,6 +243,7 @@ class ContextManager {
       // C-4 潜意识沉淀：驱逐不等于遗忘 —— (指纹, 要旨) 压缩入潜意识池
       this.sinkToSubconscious(victim, legacy || victim.textSummary.slice(0, 60));
       victim.base64 = ''; // 释放内存；置空与谓词翻转原子地同时发生
+      victim.pinned = false; // J 纪元：降级即解钉 —— 钉扎名额随图像一起释放
       evictedMessage += ' (Note: An older screenshot was cleared to prevent context overflow.)';
     }
 

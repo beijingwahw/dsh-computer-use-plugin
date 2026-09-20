@@ -12,7 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { PipelineOrchestratorImpl } from './pipeline';
-import { SANDBOX_EVENTS, COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events';
+import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events';
 import type { DoctorVerdictPayload } from '../doctorEvents';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts';
 import type { AttemptRecord, IntentPayload, PipelineConfig, PipelineReport } from './contracts';
@@ -63,7 +63,10 @@ const MAX_LIVE_REPORTS = 200;
 const MAX_VERDICT_INDEX = 500;
 
 const inflightReports = new Map<string, PipelineReport>();
-const attemptVerdicts = new Map<string, DoctorVerdictPayload>(); // key: `${intentRef}:${seq}`
+const attemptVerdicts = new Map<string, DoctorVerdictPayload>(); // key: verdict.subject（三方言）
+
+/** 进程内序号：同毫秒并发 run 的 intent id 不再碰撞（J 纪元修正） */
+let intentSeq = 0;
 
 /** 有界 Map 写入：重写刷新插入序，超限 FIFO 淘汰最旧键（Map 迭代序 = 插入序） */
 function boundedSet<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
@@ -73,6 +76,54 @@ function boundedSet<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
     const oldest = map.keys().next().value;
     if (oldest === undefined) break;
     map.delete(oldest);
+  }
+}
+
+/** 判决 → 在册报告补写（J 纪元修正）。
+ *  配对方言（按优先序）：
+ *    ① 运行时真方言 —— subject = attempt.result.rehearsalChainId
+ *       （`chain-exec-${intentRef}-${seq}`，执行工位铸造）—— D-4 doctorChannel
+ *       发射的 subject 就是 rehearsal 的 chainId，精确无歧义；
+ *    ② 遗留约定方言 —— subject = `${intentRef}:${seq}`（测试契约保留）。
+ *  旧实现只认 ②，而全库唯一发射方 doctorChannel 用的是 chainId 方言 ⇒
+ *  索引与补写永恒空转。 */
+function backfillVerdict(report: PipelineReport, payload: DoctorVerdictPayload): void {
+  for (const attempt of report.attempts) {
+    if (attempt.result.rehearsalChainId === payload.subject) {
+      attempt.doctorVerdict = payload;
+      return;
+    }
+  }
+  const sep = payload.subject.lastIndexOf(':');
+  if (sep <= 0) return;
+  const intentRef = payload.subject.slice(0, sep);
+  if (intentRef !== report.intentRef) return;
+  const seq = Number(payload.subject.slice(sep + 1));
+  if (!Number.isInteger(seq)) return;
+  const attempt = report.attempts.find(a => a.seq === seq);
+  if (attempt) attempt.doctorVerdict = payload;
+}
+
+/** run 结束后的迟到判决回收：run 在途时到达的判决只进了索引 —— J 纪元补上
+ *  出环回收（终局验收 = 最后一条 attempt 的 doctorVerdict，契约 §7）。
+ *  D-4 否决（rejected）对终局的否决权在此兑现 —— 'rejected' verdict 的唯一
+ *  可达路径（此前七态中两态不可达）。 */
+function reconcileVerdicts(report: PipelineReport): void {
+  const subjects = new Set<string>();
+  for (const a of report.attempts) {
+    if (a.result.rehearsalChainId) subjects.add(a.result.rehearsalChainId);
+    subjects.add(`${report.intentRef}:${a.seq}`);
+  }
+  for (const subject of subjects) {
+    const payload = attemptVerdicts.get(subject);
+    if (payload && !report.attempts.some(a => a.doctorVerdict === payload)) {
+      backfillVerdict(report, payload);
+    }
+  }
+  const last = report.attempts[report.attempts.length - 1];
+  if (last?.doctorVerdict?.verdict === 'rejected' && report.verdict !== 'rejected') {
+    report.verdict = 'rejected';
+    report.terminalReason = `rejected by D-4 doctor verdict (chainTip ${last.doctorVerdict.chainTip})`.slice(0, 120);
   }
 }
 
@@ -188,6 +239,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
         return;
       }
       const report = await orchestrator.run(intent);
+      reconcileVerdicts(report); // J 纪元：在途到达的判决出环回收 + D-4 否决权兑现
       boundedSet(inflightReports, intent.id, report, MAX_LIVE_REPORTS);
       console.log(`[Orchestration] Pipeline ${intent.id}: verdict=${report.verdict} ` +
         `attempts=${report.attempts.length} tokens(v/d/e)=${report.tokenUsage.vision}/${report.tokenUsage.decision}/${report.tokenUsage.execution} ` +
@@ -198,11 +250,15 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
       'set consumePlanReady=true to reclaim — only legal when D-7 is absent).');
   }
 
-  // D-4 判决回执：补写对应 attempt 的 doctorVerdict（异步验收闭环 —— AttemptRecord 全粒度）
+  // D-4 判决回执：索引 + 在册报告补写（异步验收闭环 —— AttemptRecord 全粒度）
   onDoctorVerdict(ctx, (payload: DoctorVerdictPayload) => {
     boundedSet(attemptVerdicts, payload.subject, payload, MAX_VERDICT_INDEX);
-    // subject 约定：pipeline attempt 的 subject = `${intentRef}:${seq}`（D-4 发射侧约定）
-    // 补写：run 结束后落盘的报告不含异步迟到的判决 —— 内存索引供 Trajectory 查询
+    // J 纪元修正：配对按 backfillVerdict 的双方言（rehearsalChainId 精确匹配 +
+    // `${intentRef}:${seq}` 遗留约定）—— 旧实现只认后者，而真实发射方
+    // （doctorChannel）的 subject 是 chainId 方言，补写通道永恒空转。
+    for (const report of inflightReports.values()) {
+      backfillVerdict(report, payload);
+    }
   });
 
   // 宿主管线观察透传（与 D-5 共享同一嗅探源 —— 不重复监听，D-5 已挂 onHostToolPost）
@@ -216,14 +272,14 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
       + 'for a goal. Returns compact numbers only (verdict, attempts, token usage); full evidence goes to reportPath.',
     parameters: {
       goal: { type: 'string', required: true, description: `Abstract goal (<=${GOAL_MAX_CHARS} chars, e.g. "sign in to the portal").` },
-      success_criteria: { type: 'string', required: false, description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).` },
-      budget_ms: { type: 'number', required: false, description: 'Optional wall-clock budget for the whole pipeline.' },
+      success_criteria: { type: 'string', description: `Verifiable completion criteria (<=${SUCCESS_CRITERIA_MAX_CHARS} chars).` },
+      budget_ms: { type: 'number', description: 'Optional wall-clock budget for the whole pipeline.' },
     },
     output: { schema: { type: 'string' }, render: (_a: any, v: any) => [{ type: 'text', text: v }] },
     async execute(args: any) {
       try {
         const intent: IntentPayload = {
-          id: `intent-tool-${Date.now().toString(36)}`,
+          id: `intent-tool-${Date.now().toString(36)}-${++intentSeq}`,
           goal: String(args.goal ?? '').slice(0, GOAL_MAX_CHARS),
           successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
           budgetMs: isPositiveFinite(args.budget_ms) ? args.budget_ms : undefined,
@@ -231,6 +287,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
         };
         if (!intent.goal) return JSON.stringify({ status: 'FAILED', reason: 'goal is required' });
         const report = await orchestrator.run(intent);
+        reconcileVerdicts(report); // J 纪元：在途判决回收 + D-4 否决权兑现
         boundedSet(inflightReports, intent.id, report, MAX_LIVE_REPORTS);
         // 紧凑数字战报（Token 纪律）：全量证据在 reportPath
         return JSON.stringify({

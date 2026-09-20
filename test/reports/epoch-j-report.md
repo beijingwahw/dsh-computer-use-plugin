@@ -1,0 +1,147 @@
+# Epoch J — 工程收敛纪元（Engineering Convergence）
+
+> 第九纪元。前八纪元（B→I）建的是能力；J 纪元还的是债 —— 一次全库逐行审读
+> （20,388 行 TS + 3,032 行 Python + 8,194 行测试）之后，把审读发现的全部
+> 结构性缺陷一次性收敛。方法论不变：每项修复配独立执法测试（epochJ.test.ts，
+> 14 用例），防「借尸还魂」。
+
+## 回归基线
+
+- 基线：273 项 / 266 pass / 0 代码性 fail / 7 skipped（sharp 与 Python 服务缺席的环境项）
+- 终态：**287 项 / 280 pass / 0 fail / 7 skipped**（净增 14 项 J 纪元执法测试，全绿）
+- `tsc --noEmit` 零错误；Python 侧 `compileall` 零错误
+- 3 项既有测试按协议升级有意更新（B-3 审批两例 + safetySystems 审批一例），
+  更新原因见 J-4；其余 267 项零改动通过 —— 零回归承诺兑现
+
+## 致命级修复（四条主链路首次真正打通）
+
+### J-A 物理点击 100% 失败（input.py）
+`_run_in_executor(pa.click, px, py, button=btn, ...)` 旧签名不收 kwargs ⇒
+必抛 `TypeError` 被 `safe_call` 归为 internal_error —— 非 dry-run 点击全灭。
+修复：executor 支持 kwargs（`functools.partial`）。同文件：屏幕尺寸缓存加
+30s TTL（分辨率热插拔不再终身旧值）；drag 的 dry-run 假像素（`int(sx*1000)`）
+改为真实换算或诚实的"无显示仅归一化"回执；键白名单补 f6-f10。
+
+### J-B health 类型错位 → NaN 坐标（routes.py + ui_tree.py + d7HostPort.ts）
+health 误用 input 控制器的 tuple 版 `get_screen_size()`（序列化成 `[w,h]`），
+Node 端 `HealthInfo.screen` 契约是 `{width,height}` ⇒ `undefined` 除法产出
+**NaN 归一化坐标**（静默数据损坏）。修复：health 改用 screen 控制器的 dict
+版本；`capabilities` 语义撞名修正（真能力位图 + `controllers` 分列）。
+
+### J-C 截图共享内存通道（shm.py）
+三处独立缺陷：① `weakref.finalize` 挂在 routes 层的瞬态 handle 上 ——
+CPython 引用计数下 finalizer 在响应前后即 munmap/unlink，Node 端 reopen
+必然 ENOENT（**shm 模式实际不可用**）；② mmap-file 注册表键（短名）与
+`ShmHandle.name`（全路径）不一致 —— DELETE 端点永恒 miss；③ `or/and`
+优先级使 Windows 强制 shm 静默跌落 base64（与文档相反）。
+修复：注册表成为唯一生命周期（移除 weakref）；键 = handle.name 严格一致；
+显式级联降级；double-close 单一出口 + 失败路径回收半成品对象；GC 顺手在
+release 时触发。
+
+### J-D D-5+D-6 组合必败（orchestration/stations.ts）
+D-5 排练 verdict 恒 `degraded`（虚拟屏验证层是声明的留白），而执行工位
+`verdict !== 'passed'` 一刀切拒绝 ⇒ 默认配置（rehearseBeforeExecute=true
+且 D-5 服务在场）下**每个动作都死在预演闸门，流水线恒 failed**。
+修复：`failed`/`aborted` 仍拒（硬反证据/预算耗尽）；`degraded` = 无证据
+⇒ 照常交付，效果验证交宿主，`rehearsed` 不冒领。哲学对齐：「无证据」阻断
+**记忆固化**（D-5 freeze-for-review），不阻断执行。
+
+## 严重级修复
+
+### J-E doctor verdict 三方言配对（orchestration + doctorChannel）
+全库唯一发射方 doctorChannel 的 subject = chainId，而 D-6 按
+`${intentRef}:${seq}` 解析 ⇒ 判决索引/补写/查询永恒空转；`chain-exec-${seq}`
+在并发 run 下还撞号。修复：执行工位编入 `chain-exec-${intentRef}-${seq}`
+并经新契约字段 `ExecutionResult.rehearsalChainId` 回流 AttemptRecord；
+`backfillVerdict` 双方言精确匹配；run 出环后 `reconcileVerdicts` 回收在途
+判决 —— 顺带兑现 **'rejected' verdict 的首次可达**（D-4 否决权）。
+
+### J-F 审批协议升级：grant 是执行的必要条件（approval.ts + 工具层）
+旧协议"从未 grant"与"grant=true"对执行层无区别（validate 只查在场+TTL）——
+同意环节形同虚设。升级：`PendingApproval.granted` + `grant()` 落点；
+validate/consume 双要求已授予。配套：click_mouse 锚点新增 `approval_gate`
+透明化盲区（描述缺席时闸门物理失明 —— 无法强制但必须可见）；
+type_text 回显防御纵深（文本命中风险词时无论闸门开关一律 `[REDACTED]`）。
+**这是本纪元唯一一处有意变更既有测试语义的修复**（3 例更新如上）。
+
+### J-G 安全修复（Python 服务）
+- AppleScript 注入：f-string 先插值后 replace 占位符 = no-op，原始 keyword
+  直接入脚本；转义顺序也反了。修复：先转义反斜杠再转义引号，转义值直接插值。
+- `POST /v1/mint_token` 移除：自举死锁（被 auth 挡住永不可达）+ 安全洞
+  （若入白名单则任何本地进程可免密铸全能力 token）的组合。信任根 = 密钥文件。
+- 中间件洋葱序修正：unhandled 兜底注册到最后 = 最外层（旧序下中间件自身
+  异常漏成真 500）；nonce 防重放复用 `parse_token` 的 exp（删手工双解）；
+  `safe_call` 信封透传判据收紧（status 必须在词表内）。
+
+### J-H swarm 重复计数（swarm.ts）
+注释宣称"增量式"，实现无游标全量遍历，而调用点极多（5 分钟定时器 / 每次
+what_if / checkpoint）⇒ 成功率先验系统性膨胀。修复：WeakSet 身份游标
+（给 journal 条目补 seq 会改哈希域破坏旧链 verify —— 身份游标零迁移成本；
+跨会话残差如实记入注释）。执法测试 J-2：重复 crystalize 零新增 + 增量入账。
+
+### J-I 钉扎名额泄漏（contextManager.ts）
+pinnedCount 统计含已降级记录，解钉只作用于有图候选 ⇒ 安全阀驱逐钉扎图后
+名额永久占用（pinBudget=1 时从此任何图无法钉扎）。修复：降级即解钉（驱逐
+路径 + refreshPins 僵尸清理 + 计数只认有图记录）。执法测试 J-8：驱逐后
+高显著度图仍可钉扎并存续。
+
+### J-K 知识层口径统一（knowledge/*）
+- **Tier 0 压制判据**：从全类别 maxConfidence 改为 error-pattern 条目最大值
+  （与 Tier 2 逐 fragment 判定同口径）—— 高置信 workflow 不再劫持压制（J-4a/b）。
+- escalateL3 去粘性：forceL3 消费后即失能，升级权只由本轮转移结算重新授予
+  （旧实现一次惊讶后 L3 持续计费多轮）。
+- tokenize 统一：KB 检索通道复用 uiMemory 分词（CJK 单字+二元组）——
+  旧私有分词把 CJK 连续串当整体 token，与决策通道不同构，中文 keyword
+  通道几乎必然哑火。
+- hybridScore token 去重（"click click click" 三倍加权消灭）；
+  degraded 痕迹如实标注（不再学成 "succeeded"）；快照水合执法容量上限；
+  损坏状态文件改名隔离（`.corrupt-<ts>`）而非被首个 run-end 无声覆写；
+  主入口接通 stateDir/metricsPath（反遗忘与仪表盘此前在插件运行中休眠）；
+  P 代理 symbol 键防御。
+
+## 中等级修复（择要）
+
+| 修复 | 位置 | 内容 |
+| --- | --- | --- |
+| to_step 下界钳制 | replayActions / skillTools | `to=max(from, min(len-1, to))` —— 负数不再触发 slice 尾部语义铸错技能（J-10） |
+| similarity 长度自适应 | perceptualHash | 分母取实际位长（旧硬编码 64：10 位全异 = 0.84）（J-3） |
+| DIMS 死常量删除 | semanticHash | "256 桶"从未实现（实际 32 位 FNV-1a 全域）—— 注释撒谎级别失真清除 |
+| repeatGuard 契约化 | guards | 嗅探 `'"status": "FAILED"'` 缩进巧合改走 classifyResult（B-2 教义的违例者归队）；stale 签名防线（post 与 pre 工具名对账） |
+| grounding 裁决兑现 | orchestration/pipeline | approveGrounding 实现注释承诺：幻觉 regionId 拒绝、已 L3 拒绝重扫、无 regionId 批准**全网格**（旧恒批准+静默回退左上象限）；L3 结果**并入**场景而非替换（视野不再永久收窄到 1/4 屏）（J-6a/b） |
+| L1 fault 降级断裂 | orchestration/stations | fault 分支不再 `continue` 跳过本区 L2/L3（注释与行为一致化） |
+| 视觉适配器吐错 | visionAdapters | 不再吞错返 []（fault 归因链修复）+ OCR 负缓存（失败窗口内不重复整屏截屏） |
+| 发号器三连 | skillLibrary | checkpoint 携带 nextSynthId；稀疏 ids 下 nextId 取 max+1；recombine 撞签名真实强化（bump 计数） |
+| heal 多行空 catch | qualityDoctor | open 行注释化真实改写（旧 no-op 却计入 totalFixesApplied）（J-9） |
+| doctorChannel 队列 | doctorChannel | busy 期间到达进 FIFO（上限 4）而非直接丢弃 |
+| 物理层门控 | physicalExecution/router | click/drag 坐标缺失/非法 ⇒ gate-rejected（旧静默点屏幕中心/左上角）；switch_tab 全平台 Ctrl+Tab（旧 darwin 用 Cmd+Tab 实际切换应用） |
+| d7HostPort 韧性 | physicalExecution | 初始化失败可重试（旧 rejected promise 永久缓存 = 实例终身瘫痪）；adapter 覆盖项不再覆盖连接事实；`_translateTree` 坐标直通 + depth 忠实映射（L3/empty 不再伪装 L1） |
+| 坐标系统一 | ui_tree.py | 服务输出统一为**全屏归一化**（L1 像素÷屏幕、L2 裁剪内像素回映射、L3 图内归一经 region 复合）—— 三层坐标混用 + Node 端二次缩小一并消灭；L1 region 中心过滤生效（旧三层后端全部忽略 region） |
+| get_ui_tree 复用截屏 | routes.py | 走 ScreenCapture 统一路径（享受测试合成图降级）；截屏失败不再 `pass` 静默 |
+| healthCache 兑现 | adapter.ts | 只写不读的死缓存 + 无人消费的 healthCheckIntervalMs —— TTL 30s 读路径 |
+| UDS 诚实拒绝 | adapter.ts | `http+unix://` 声明支持但 undici fetch 不认 —— 加载层显式拒绝优于运行时误导 |
+| type-only 导入 | skillTools.ts | 接口按值导入在 Node strip-only 运行时必炸（`does not provide an export named 'Skill'`）—— 真实潜伏 bug，epochJ 首次构造该工具时引爆并修复 |
+| 工具 schema 兼容 | 19 个工具文件 | 清扫 50 处 `required: false` —— 严格 schema 编译器（dsh-tools）要求 required 键存在即必须为 true；schemastery 语义缺省即可选，删除冗余键双版本兼容 |
+| 杂项 | journal / cli / planner / system / textTools / config.py / errors.py | JSONL 磁盘写尾链串行化（行序=链序）；doctorCli .catch；planner 漏 id 按序补齐；nut-js 错误保留 .cause；read_text 单坐标诚实报错；Python env 绑定补全（L1/L2/OCR 语言/API-key env 名）+ dataclass/env 缺省对齐 + fail_safe_corner 死字段删除 |
+
+## 方法论注记
+
+- **J 纪元的修复优先级**由「致命 → 严重 → 中等」的三级审读分级驱动；
+  每处修复在代码内携带 `J 纪元修正` 注记（含旧缺陷的机理），git blame
+  之外留下第二层可考古性。
+- **协议升级的测试纪律**：变更既有测试语义时（J-F 审批授予门，3 例），
+  测试名携带纪元标注且断言消息说明新旧协议差异 —— 与 v3.1 参数采纳先例
+  同律：「承重性是向量的高阶函数」，协议变更必须重立执法。
+
+## 诚实边界（本纪元未覆盖 / 已知残差）
+
+1. 跨会话 swarm 结晶仍会重复入账一次（checkpoint 恢复的条目是新对象 ——
+   身份游标的固有边界，已记入代码注释）。
+2. 审批闸门的盲区只能透明化不能根除（target_description 是模型自由
+   参数；锚点 `approval_gate: 'blind-spot'` 是最大可达的诚实）。
+3. D-5 虚拟屏模拟器仍是声明的留白 —— J-D 只是让留白不再阻断执行；
+  verdict 'passed' 依旧不可达，肌肉记忆固化保持 freeze-for-review。
+4. `PipelineVerdict` 的 'escalated' 态仍无赋值路径（D-4 集成的第二阶段）。
+5. Python 侧 PID Attestation 仍是存在性校验（二进制白名单为空集 ——
+   SO_PEERCRED 需自定义 uvicorn handler，留白如旧但文档已如实）。
+6. 本机 Windows 环境未覆盖的路径：UDS 监听、X11 窗口栈、真机基准
+  （realMachine.bench 需 Xvfb）—— 7 项环境 skip 与基线一致。

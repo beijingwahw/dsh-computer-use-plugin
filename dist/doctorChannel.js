@@ -47,19 +47,23 @@ export function translateReportToVerdict(report, subject, chainTip) {
 }
 /**
  * 通道接线（组合根调用一次）：rehearsal-end 到达 ⇒ 惰性装配 ⇒ 自主诊断 ⇒ 回执。
- * 回执沉默的一切路径（装配失败 / 诊断故障 / 并发占用）都是诚实降级 ——
+ * 回执沉默的一切路径（装配失败 / 诊断故障）都是诚实降级 ——
  * D-5 的固化闸门默认 freeze-for-review，绝不因通道故障而放行。
+ * J 纪元修正：busy 期间的到达进小型 FIFO 队列（上限 4，溢出丢最旧并警告）——
+ * 旧实现直接丢弃（连重试都没有），长诊断 + 高频 rehearsal 场景下系统性丢回执，
+ * 对应 D-5 链条永久冻结直到下一次 rehearsal-end。
  */
+const PENDING_RECEIPTS_MAX = 4;
 export function wireDoctorVerdictChannel(ctx, config) {
     let busy = false;
-    ctx.on(SANDBOX_EVENTS.rehearsalEnd, async (p) => {
-        if (!p || typeof p.chainId !== 'string' || typeof p.chainTip !== 'string') {
-            return; // 非法载荷：拒绝回执（沉默 ⇒ 冻结，保守方向）
+    const pendingReceipts = [];
+    const drain = async () => {
+        while (pendingReceipts.length > 0) {
+            const p = pendingReceipts.shift();
+            await runReceipt(p);
         }
-        if (busy) {
-            console.warn(`[DoctorChannel] diagnose in flight — verdict receipt skipped for ${p.chainId} (D-5 freezes for review, honest).`);
-            return;
-        }
+    };
+    const runReceipt = async (p) => {
         busy = true;
         try {
             const cfgErr = await ensureDoctorConfigured(config);
@@ -79,6 +83,21 @@ export function wireDoctorVerdictChannel(ctx, config) {
         finally {
             busy = false;
         }
+    };
+    ctx.on(SANDBOX_EVENTS.rehearsalEnd, async (p) => {
+        if (!p || typeof p.chainId !== 'string' || typeof p.chainTip !== 'string') {
+            return; // 非法载荷：拒绝回执（沉默 ⇒ 冻结，保守方向）
+        }
+        if (busy) {
+            pendingReceipts.push(p);
+            while (pendingReceipts.length > PENDING_RECEIPTS_MAX) {
+                const dropped = pendingReceipts.shift();
+                console.warn(`[DoctorChannel] receipt queue overflow — dropped verdict for ${dropped?.chainId} (D-5 freezes for review, honest).`);
+            }
+            return;
+        }
+        await runReceipt(p);
+        void drain(); // 队列排空（fire-and-forget：drain 内部自持 busy 标志）
     });
     console.log('[DoctorChannel] D-4 verdict receipt channel armed (sandbox/rehearsal-end → doctor/verdict).');
 }

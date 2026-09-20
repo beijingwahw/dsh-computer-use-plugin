@@ -1,3 +1,4 @@
+import { INJECTION_MAX_CHARS } from './knowledgeBase.js';
 /** 工位 Token 预算缺省（P1-2 config-driven：本表仅为 PipelineConfig.stationTokenBudgets
  *  缺席时的回退缺省 —— 预算治理主权在配置域，校验后不再有第二个常量源） */
 const DEFAULT_STATION_TOKEN_BUDGETS = { vision: 0, decision: 2000, execution: 0 };
@@ -37,8 +38,8 @@ export function validatePipelineConfig(config) {
     if (!Number.isInteger(config.knowledgeMaxResults) || config.knowledgeMaxResults < 1) {
         return { ok: false, error: { field: 'knowledgeMaxResults', reason: `must be an integer >= 1, got ${config.knowledgeMaxResults}` } };
     }
-    if (!Number.isInteger(config.knowledgeMaxChars) || config.knowledgeMaxChars < 1 || config.knowledgeMaxChars > 300) {
-        return { ok: false, error: { field: 'knowledgeMaxChars', reason: `must be an integer in [1,300] (injection summary budget), got ${config.knowledgeMaxChars}` } };
+    if (!Number.isInteger(config.knowledgeMaxChars) || config.knowledgeMaxChars < 1 || config.knowledgeMaxChars > INJECTION_MAX_CHARS) {
+        return { ok: false, error: { field: 'knowledgeMaxChars', reason: `must be an integer in [1,${INJECTION_MAX_CHARS}] (injection summary budget), got ${config.knowledgeMaxChars}` } };
     }
     const g = config.regionGrid;
     if (g && (!Number.isInteger(g.cols) || g.cols < 1 || !Number.isInteger(g.rows) || g.rows < 1)) {

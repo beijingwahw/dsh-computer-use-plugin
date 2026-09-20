@@ -52,8 +52,11 @@ test('B-2: 前缀协议回退 —— 历史工具格式与非法输入', () => {
 
 // ─── B-3：两阶段审批令牌 ───
 
-test('B-3: validate 不消费 —— 闸门检查可重复，失败重试不烧令牌', () => {
+test('B-3: validate 不消费 —— 闸门检查可重复，失败重试不烧令牌（J 纪元：须先 grant）', () => {
   const pa = approval.request('send payment of $100');
+  // J 纪元协议升级：请求 ≠ 同意 —— 未 grant 的令牌不可通过任何阶段
+  assert.equal(approval.validate(pa.token), false, '未授予的令牌不得放行');
+  assert.equal(approval.grant(pa.token, true), true);
   // 阶段一可反复校验（pre-action gate 每次进入都查）
   assert.equal(approval.validate(pa.token), true);
   assert.equal(approval.validate(pa.token), true);
@@ -61,8 +64,9 @@ test('B-3: validate 不消费 —— 闸门检查可重复，失败重试不烧�
   assert.equal(approval.consume(pa.token), true);
 });
 
-test('B-3: consume 用后即焚 —— 一次性语义', () => {
+test('B-3: consume 用后即焚 —— 一次性语义（grant=true 前置）', () => {
   const pa = approval.request('delete all records');
+  approval.grant(pa.token, true);
   assert.equal(approval.consume(pa.token), true);
   assert.equal(approval.consume(pa.token), false); // 第二次必败
   assert.equal(approval.validate(pa.token), false);

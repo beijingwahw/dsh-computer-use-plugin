@@ -3,6 +3,7 @@ import { InMemoryKnowledgeBase, CONTENT_MAX_CHARS } from './knowledgeBase.js';
 import { KnowledgePipelineOrchestrator } from './pipeline.js';
 import { StubVisionStation, ReflexiveDecisionStation, StubExecutionStation } from './stations.js';
 import { DoctorVerdictBridge, toD7Intent } from './adapters.js';
+import { DEFAULT_REGION_GRID } from './configValidator.js';
 import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events.js';
 import { D7PhysicalHostPort, } from '../physicalExecution/index.js';
 export { InMemoryKnowledgeBase, distillInjection, CONTENT_MAX_CHARS } from './knowledgeBase.js';
@@ -19,8 +20,6 @@ const KNOWLEDGE_DOCTRINE = 'You are the Tacit-Knowledge Hub — the evolving mem
     'CONTRACT-DRIVEN: only strongly-typed structures cross station boundaries, never prose. ' +
     'HONEST FAILURE: every method returns Result and degrades gracefully — nothing ever throws. ' +
     'CLOSED-LOOP EVOLUTION: every executed outcome feeds back as auto-learned knowledge.';
-/** 网格缺省（独立常量：PipelineConfig.regionGrid 是可选字段，避免 undefined 域泄漏） */
-const DEFAULT_REGION_GRID = { cols: 2, rows: 2 };
 /** knowledge_query 工具面内容预览预算（Token 纪律 —— 对话流只见截断预览，全量走知识库） */
 const QUERY_PREVIEW_MAX_CHARS = 80;
 /** D-7 配置缺省（cordis.yml 覆盖；防卡顿铁律的结构缺省：knowledgeTimeout=50ms）。
@@ -120,7 +119,14 @@ export async function apply(ctx, config) {
             ctx.emit(ev, payload);
         }
         catch { /* 发射失败是旁路义务 */ } },
-    }, { reportDir: config?.reportDir ?? '' });
+    }, {
+        reportDir: config?.reportDir ?? '',
+        // J 纪元修正：接通反遗忘与认知仪表盘 —— 旧实现 WireOptions 的
+        // stateDir/metricsPath 在主入口无任何接线，persistence.ts 与 metrics.ts
+        // 在插件实际运行中休眠（注释宣称"跨会话记忆是认知架构的地基"，但没插电源）。
+        stateDir: config?.stateDir ?? '',
+        metricsPath: config?.metricsPath ?? '',
+    });
     // ── 事件总线接线（与 D-1 的唯一咬合通道：意图投喂 → 流水线主循环入口）──
     // P1-3 仲裁对称立法：D-7 缺省主消费（consumePlanReady=true）；置 false 让渡
     // （意图路由协议改由 D-6 消费的部署拓扑 —— 双端各有一个开关，永不双流水线抢跑）。
@@ -150,8 +156,8 @@ export async function apply(ctx, config) {
         parameters: {
             scene_description: { type: 'string', required: true, description: 'Current scene summary (what is on screen).' },
             intent_description: { type: 'string', required: true, description: 'What the organism is trying to do.' },
-            max_results: { type: 'number', required: false, description: 'Max entries to return (default 5).' },
-            min_confidence: { type: 'number', required: false, description: 'Min confidence filter, 0-1.' },
+            max_results: { type: 'number', description: 'Max entries to return (default 5).' },
+            min_confidence: { type: 'number', description: 'Min confidence filter, 0-1.' },
         },
         output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
         async execute(args) {
@@ -183,7 +189,7 @@ export async function apply(ctx, config) {
             content: { type: 'string', required: true, description: `Knowledge content, <=${CONTENT_MAX_CHARS} chars.` },
             scenario: { type: 'string', required: true, description: 'Scenario where this knowledge applies.' },
             confidence: { type: 'number', required: true, description: 'Confidence in [0,1] — out-of-domain is rejected, never clamped.' },
-            intent_ref: { type: 'string', required: false, description: 'Optional originating intent id.' },
+            intent_ref: { type: 'string', description: 'Optional originating intent id.' },
         },
         output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
         async execute(args) {
@@ -287,7 +293,14 @@ function normalizeIntent(payload) {
     // 既有方言：D-1 的 CognitionPlanReadyPayload.chain（ActionChain）
     if (payload.chain && Array.isArray(payload.chain.actions) && payload.chain.actions.length > 0) {
         const chain = payload.chain;
-        const description = `execute ${chain.actions.length}-step action chain (${chain.actions.map((a) => a.kind).slice(0, 5).join('→')}${chain.actions.length > 5 ? '…' : ''})`;
+        // 逐元素防御：a?.kind 的 null 元素在这里剔除（外部载荷 —— 畸形动作不得
+        // 让异步监听器抛 TypeError 变成 unhandled rejection）
+        const kinds = chain.actions
+            .map((a) => (a && typeof a.kind === 'string' ? a.kind : null))
+            .filter((k) => k !== null);
+        if (kinds.length === 0)
+            return null;
+        const description = `execute ${kinds.length}-step action chain (${kinds.slice(0, 5).join('→')}${kinds.length > 5 ? '…' : ''})`;
         return { id: `intent-from-${chain.id}`, description: description.slice(0, 160) };
     }
     return null;

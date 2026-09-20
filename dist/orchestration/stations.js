@@ -1,3 +1,4 @@
+import { SANDBOX_ACTION_KINDS } from '../sandbox/types.js';
 /**
  * 视觉感知工位默认实现 —— “我只描述，不判断”。
  * 三级漏斗纪律（蓝图铁律）：L1 命中 ⇒ 绝不启动 L2；L2 命中 ⇒ 绝不启动 L3；
@@ -15,13 +16,25 @@ export class DefaultVisionStation {
     }
     async *perceive(env) {
         const req = env.payload;
-        const deadline = req.deadlineMs ?? Number.POSITIVE_INFINITY;
-        const regions = req.regions.length > 0 ? req.regions : [];
+        // deadlineMs 是时长（pipeline 传 config.perceptionDeadlineMs）—— 先换算为绝对
+        // 时刻再与 Date.now() 比较；直接比较会让任何正时长立即「超时」（漏斗全灭）
+        const deadlineAt = req.deadlineMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + req.deadlineMs;
+        // 契约兜底（contracts.ts 立法）：空分区 = 默认全屏网格（1×1 单区）
+        const regions = req.regions.length > 0
+            ? req.regions
+            : [{ id: 'g0x0', x: 0, y: 0, width: 1, height: 1 }];
         for (const region of regions) {
-            if (Date.now() > deadline) {
-                yield this.emptyPatch(region, undefined, 'perception deadline exceeded');
+            if (Date.now() > deadlineAt) {
+                // 超时是 fault（≠ 真空）：归因到授权漏斗深度 —— 丢弃 detail 会让超时
+                // 补丁与真空不可区分（「两种空两种决策」契约被自己的超时路径打破）
+                yield this.emptyPatch(region, req.funnelCeiling, 'perception deadline exceeded');
                 continue;
             }
+            // J 纪元修正：L1/L2 源故障改为「记 fault + 降层继续」。
+            // 旧实现 fault 分支 `continue` 直接跳到下一个分区 —— 当前分区的
+            // L2/L3 被跳过，与注释宣称的「降 L2 继续」矛盾；a11y 持续故障时
+            // L2/OCR 永远不被尝试，区域补丁只带 L1 fault。
+            let degradedFault;
             // L1：结构化层（<1ms 预算域）
             if (this.opts.structured?.isReady()) {
                 const { els, fault } = await this.safeExtract(region, this.opts.structured);
@@ -29,10 +42,8 @@ export class DefaultVisionStation {
                     yield this.patch(region, els, 'L1');
                     continue; // 漏斗短路：L1 命中，绝不启动 L2
                 }
-                if (fault) {
-                    yield this.emptyPatch(region, 'L1', fault);
-                    continue; // L1 源故障：归因入补丁，降 L2 继续（漏斗是容错降级，不是故障终止）
-                }
+                if (fault)
+                    degradedFault = { source: 'L1', detail: fault };
             }
             // L2：传统视觉层（<50ms 预算域）
             if (this.opts.traditional?.isReady()) {
@@ -41,10 +52,8 @@ export class DefaultVisionStation {
                     yield this.patch(region, els, 'L2');
                     continue; // 漏斗短路：L2 命中，绝不启动 L3
                 }
-                if (fault) {
-                    yield this.emptyPatch(region, 'L2', fault);
-                    continue;
-                }
+                if (fault)
+                    degradedFault = degradedFault ?? { source: 'L2', detail: fault };
             }
             // L3：语义层 —— 仅当中枢授权（ceiling='L3'）。工位无权自启（架构保证）
             if (req.funnelCeiling === 'L3' && this.opts.semantic?.isReady() && req.l3Reason) {
@@ -57,7 +66,9 @@ export class DefaultVisionStation {
                 continue;
             }
             // 三层皆空：诚实空补丁。fault 在场 = 源缺席/失败 ≠ 真空（决策工位两种空两种决策）
-            yield this.emptyPatch(region, req.funnelCeiling === 'L3' ? 'L3' : 'L2', this.funnelFaultDetail());
+            yield degradedFault
+                ? this.emptyPatch(region, degradedFault.source, degradedFault.detail)
+                : this.emptyPatch(region, req.funnelCeiling === 'L3' ? 'L3' : 'L2', this.funnelFaultDetail());
         }
     }
     /** 源缺席/全失败的归因文案（诚实：说明哪层缺席，而非笼统 failed） */
@@ -89,7 +100,7 @@ export class DefaultVisionStation {
     // （失败空 ≠ 真空，两种空两种决策），已改为显式 fault 通道。
     async safeExtract(region, src) {
         try {
-            return { els: await src.extract() };
+            return { els: await src.extract(region) };
         }
         catch (e) {
             return { els: [], fault: `L1 source fault: ${e?.message ?? 'extract failed'}` };
@@ -162,6 +173,12 @@ export class DefaultDecisionStation {
                 return { kind: 'need-grounding', regionId: obj.regionId, question: obj.question.slice(0, 120) };
             }
             if (obj?.kind === 'action' && obj.action && typeof obj.action.kind === 'string') {
+                // 解析边界执法（动作词汇表唯一）：未知 kind / 畸形 args 在此拒绝 ——
+                // 否则模型输出经 as 断言直通宿主执行器，失败被误归因为 host-error
+                if (!SANDBOX_ACTION_KINDS.has(obj.action.kind) ||
+                    (obj.action.args !== undefined && (typeof obj.action.args !== 'object' || obj.action.args === null || Array.isArray(obj.action.args)))) {
+                    return { kind: 'need-grounding', question: `decision action rejected (kind '${obj.action.kind}' outside vocabulary or malformed args)` };
+                }
                 const a = obj.action;
                 return { ...a, rationale: String(obj.rationale ?? '').slice(0, 120) };
             }
@@ -183,26 +200,42 @@ export class DefaultExecutionStation {
         this.opts = opts;
     }
     async execute(env) {
-        const { seq, action } = env.payload;
+        const { seq, action, intentRef } = env.payload;
         const startAt = Date.now();
-        const base = { seq, latencyMs: 0, rehearsed: false };
+        const base = { seq, latencyMs: 0, rehearsed: false, rehearsalChainId: undefined };
         // D-5 预演闸门（DRILL, THEN DELIVER —— 沙箱是彩排，宿主是首演）
         if (this.opts.rehearseBeforeExecute && this.opts.sandbox) {
+            // J 纪元修正：chain id 编入 intentRef —— 全库 doctor verdict 的 subject
+            // 即 chainId；旧 id `chain-exec-${seq}` 在并发 run 下必然撞号，回执无法
+            // 精确配对。链 id 经 ExecutionResult.rehearsalChainId 回流 AttemptRecord，
+            // 供 D-4 判决补写按 subject 精确匹配。
+            const chainId = `chain-exec-${intentRef ? `${intentRef}-` : ''}${seq}`;
             try {
                 const o = await this.opts.sandbox.rehearse({
-                    id: `chain-exec-${seq}`, actions: [action], origin: 'manual',
+                    id: chainId, actions: [action], origin: 'manual',
                 });
-                if (o.verdict !== 'passed') {
+                if (o.verdict === 'failed' || o.verdict === 'aborted') {
+                    // 排练**硬失败/中止**（有明确反证据或预算耗尽）⇒ 拒绝交付
                     return {
                         ...base, latencyMs: Date.now() - startAt,
                         effectDetected: null,
+                        rehearsalChainId: chainId,
                         failure: {
                             kind: o.verdict === 'aborted' ? 'timeout' : 'sandbox-degraded',
                             detail: `sandbox rehearsal ${o.verdict} (${o.reportPath})`,
                         },
                     };
                 }
-                base.rehearsed = true;
+                // J 纪元修正：degraded = 排练跑完但验证层缺席（模拟器纪元常态，
+                // D-5 引擎本纪元 verdict 恒 degraded —— 虚拟屏未实现是声明的留白）。
+                // 「无证据」阻断**记忆固化**（D-5 侧 freeze-for-review），但不应阻断
+                // 宿主执行 —— 旧实现 `verdict !== 'passed'` 一刀切，默认配置
+                // （rehearseBeforeExecute=true 且 D-5 服务在场）下每个动作都死在
+                // 预演闸门，流水线恒 failed。诚实形态：排练无法验证时照常交付，
+                // 效果验证交宿主 settleAndVerify，rehearsed 不冒领（仅 passed 置真）。
+                if (o.verdict === 'passed')
+                    base.rehearsed = true;
+                base.rehearsalChainId = chainId;
             }
             catch {
                 // 预演通道故障 = 不可判 ⇒ 诚实降级继续（沙箱缺席不是宿主的错）——

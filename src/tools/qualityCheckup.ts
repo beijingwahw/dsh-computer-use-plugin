@@ -25,23 +25,23 @@ export function createQualityCheckupTool(config: Config): ToolDefinition {
         description: 'diagnose | heal | lessons | self_audit',
       },
       files: {
-        type: 'string', required: false,
+        type: 'string',
         description: '[diagnose] Comma-separated sourceRoot-relative files for incremental audit (omit = full scan).',
       },
       include_chain_audit: {
-        type: 'boolean', required: false,
+        type: 'boolean',
         description: '[diagnose] Include causal-chain legality audit (default true).',
       },
       authorize: {
-        type: 'boolean', required: false,
+        type: 'boolean',
         description: '[heal] Explicit authorization for mechanical fixes. Default false.',
       },
       max_risk: {
-        type: 'string', required: false,
+        type: 'string',
         description: '[heal] "none" (default) or "mechanical". Structural fixes are proposals only, forever.',
       },
       dry_run: {
-        type: 'boolean', required: false,
+        type: 'boolean',
         description: '[heal] Preview patches without writing (default true).',
       },
     },

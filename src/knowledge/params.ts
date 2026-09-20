@@ -81,8 +81,11 @@ export type ParamName = keyof typeof SPECS;
 const overrides = new Map<string, number>();
 
 // 环境变量覆盖（子进程扫值入口）：D7_PARAM_<NAME>=<number>
+// 空/纯空白值忽略（CI 里 `D7_PARAM_X=` 形态常见 —— Number('') === 0 会把参数
+// 静默压成 0，如 VERIFY_TRUST_FLOOR=0 永久打开探针门）
 for (const [k, v] of Object.entries(process.env)) {
   if (!k.startsWith('D7_PARAM_')) continue;
+  if (v === undefined || v.trim() === '') continue;
   const name = k.slice('D7_PARAM_'.length);
   const num = Number(v);
   if (name in SPECS && Number.isFinite(num)) overrides.set(name, num);
@@ -103,7 +106,10 @@ export function resetParams(): void {
 export const P: { readonly [K in keyof typeof SPECS]: number } = new Proxy(
   {} as { readonly [K in keyof typeof SPECS]: number },
   {
-    get(_t, prop: string) {
+    get(_t, prop: string | symbol) {
+      // J 纪元修正：console.log / util.inspect 会以 symbol 键探测代理
+      // （Symbol.toStringTag 等）—— 旧实现直接 throw 污染排障输出。
+      if (typeof prop !== 'string') return undefined;
       const spec = (SPECS as Record<string, ParamSpec | undefined>)[prop];
       if (!spec) throw new Error(`unknown cognitive param: ${prop}（出册常数已内联为模块字面量）`);
       const o = overrides.get(prop);

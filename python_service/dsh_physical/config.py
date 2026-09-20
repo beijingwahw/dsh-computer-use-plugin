@@ -30,12 +30,14 @@ class ServerConfig:
 class AuthConfig:
     """三层纵深认证配置。
 
-    - ``enable_pid_attestation``：Linux 可用 ``SO_PEERPID``，Win/Mac 自动降级到 Layer 1+3
+    - ``enable_pid_attestation``：Linux 可做 /proc 白名单校验，Win/Mac 无此层
+      （J 纪元修正：dataclass 缺省与 env 加载缺省对齐为 ``platform=='linux'``，
+      旧实现两处不一致）
     - ``token_ttl_seconds``：Cap Token 生命周期（60s 缺省）
     - ``key_path``：HMAC 密钥落盘路径，权限 0600
     """
 
-    enable_pid_attestation: bool = True
+    enable_pid_attestation: bool = sys.platform == "linux"
     token_ttl_seconds: int = 60
     key_path: str = str(Path.home() / ".dsh" / "physical.key")
     allow_no_token_endpoints: frozenset[str] = frozenset({"/v1/health"})
@@ -58,7 +60,6 @@ class ActionConfig:
     step_timeout_ms: int = 10_000         # 单步墙钟上限（对齐 D-7 attemptTimeoutMs）
     mouse_move_duration_ms: int = 300     # pyautogui 平滑移动时长
     pause_after_action_ms: int = 50       # 动作后 settle 时间
-    fail_safe_corner: tuple[int, int] = (0, 0)  # pyautogui FAILSAFE 鼠标到角落中止
 
 
 @dataclass(frozen=True)
@@ -169,11 +170,25 @@ def load_config_from_env() -> AppConfig:
     l3_backend_raw = _env("DSH_PHYSICAL_L3_BACKEND", "stub").lower()
     if l3_backend_raw not in {"local-llama", "remote-doubao", "stub", "disabled"}:
         raise ValueError(f"DSH_PHYSICAL_L3_BACKEND invalid: {l3_backend_raw!r}")
+    l1_backend_raw = _env("DSH_PHYSICAL_L1_BACKEND", "auto").lower()
+    if l1_backend_raw not in {"auto", "quartz", "uiautomation", "xlib", "disabled"}:
+        raise ValueError(f"DSH_PHYSICAL_L1_BACKEND invalid: {l1_backend_raw!r}")
+    l2_backend_raw = _env("DSH_PHYSICAL_L2_BACKEND", "rapidocr").lower()
+    if l2_backend_raw not in {"rapidocr", "disabled"}:
+        raise ValueError(f"DSH_PHYSICAL_L2_BACKEND invalid: {l2_backend_raw!r}")
+    # J 纪元补全：l1/l2/ocr_languages/l3 api-key env 此前声明了配置项却无环境变量绑定
+    # （永远 dataclass 默认 —— 配置面撒谎）。现在全部接入，逗号分隔解析语言表。
+    ocr_langs_raw = _env("DSH_PHYSICAL_OCR_LANGUAGES", "en,ch")
+    ocr_languages = [s.strip() for s in ocr_langs_raw.split(",") if s.strip()]
     funnel = FunnelConfig(
         arbitration_enabled=_env_bool("DSH_PHYSICAL_ARBITRATION", True),
+        l1_backend=l1_backend_raw,  # type: ignore[arg-type]
+        l2_backend=l2_backend_raw,  # type: ignore[arg-type]
         l3_backend=l3_backend_raw,  # type: ignore[arg-type]
         l3_model_path=_env("DSH_PHYSICAL_L3_MODEL_PATH", ""),
         l3_remote_endpoint=_env("DSH_PHYSICAL_L3_ENDPOINT", ""),
+        l3_remote_api_key_env=_env("DSH_PHYSICAL_L3_API_KEY_ENV", "DSH_VLM_API_KEY"),
+        ocr_languages=ocr_languages,
     )
 
     # ── window ──

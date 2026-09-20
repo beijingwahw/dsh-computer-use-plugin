@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import platform
 import sys
+import time
 from typing import Literal
 
 from .config import ActionConfig
@@ -63,7 +65,7 @@ _BUTTON_MAP: dict[str, str] = {
 Key = Literal[
     "ctrl", "cmd", "alt", "shift",
     "enter", "tab", "space", "backspace", "delete", "esc",
-    "f1", "f2", "f3", "f4", "f5", "f11", "f12",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
     "a", "c", "v", "z",
 ]
 
@@ -80,6 +82,7 @@ _KEY_MAP: dict[str, str] = {
     "delete": "delete",
     "esc": "esc",
     "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4", "f5": "f5",
+    "f6": "f6", "f7": "f7", "f8": "f8", "f9": "f9", "f10": "f10",
     "f11": "f11", "f12": "f12",
     "a": "a", "c": "c", "v": "v", "z": "z",
 }
@@ -96,9 +99,16 @@ def _get_lock() -> asyncio.Lock:
     return _io_lock
 
 
-async def _run_in_executor(func, *args):
-    """把同步 pyautogui 调用丢到线程池，避免阻塞事件循环。"""
+async def _run_in_executor(func, *args, **kwargs):
+    """把同步 pyautogui 调用丢到线程池，避免阻塞事件循环。
+
+    支持 kwargs（经 ``functools.partial`` 绑定）—— J 纪元修复：
+    旧签名 ``(*args)`` 使 ``pa.click(x, y, button=...)`` 必抛 TypeError，
+    真实点击路径 100% 失败（被 ``safe_call`` 误归为 internal_error）。
+    """
     loop = asyncio.get_running_loop()
+    if kwargs:
+        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
     return await loop.run_in_executor(None, func, *args)
 
 
@@ -111,28 +121,38 @@ class InputController:
     所有方法异步；运行层永不抛错（异常由 ``safe_call`` 转失败响应）。
     """
 
+    # 屏幕尺寸缓存带 TTL：分辨率热插拔 / 显示器切换后坐标换算不会
+    # 终身停留在旧值（J 纪元修复：旧实现首次缓存后永不失效）。
+    SCREEN_SIZE_TTL_S = 30.0
+
     def __init__(self, config: ActionConfig) -> None:
         self.cfg = config
         self._dry_run = False
         self._screen_size: tuple[int, int] | None = None
+        self._screen_size_at: float = 0.0
 
     def set_dry_run(self, dry: bool) -> None:
         self._dry_run = dry
 
     async def get_screen_size(self) -> tuple[int, int]:
-        """获取屏幕尺寸（缓存首次结果，避免重复系统调用）。"""
-        if self._screen_size is None:
+        """获取屏幕尺寸（TTL 缓存，防系统调用抖动也防分辨率漂移）。"""
+        now = time.monotonic()
+        if self._screen_size is None or now - self._screen_size_at > self.SCREEN_SIZE_TTL_S:
             try:
                 pa = _get_pyautogui()
                 size = await _run_in_executor(lambda: pa.size())
                 self._screen_size = (int(size.width), int(size.height))
+                self._screen_size_at = now
             except PhysicalError:
-                raise  # 透传受控错误
+                # 受控失败：保留旧缓存（若有）—— 比崩溃诚实，比误算保守
+                if self._screen_size is None:
+                    raise
             except Exception as e:  # noqa: BLE001
-                raise PhysicalError(
-                    ErrorKind.SCREEN_CAPTURE_FAILED,
-                    f"cannot detect screen size: {e}",
-                ) from e
+                if self._screen_size is None:
+                    raise PhysicalError(
+                        ErrorKind.SCREEN_CAPTURE_FAILED,
+                        f"cannot detect screen size: {e}",
+                    ) from e
         return self._screen_size
 
     def _normalize_to_pixel(self, x: float, y: float) -> tuple[int, int]:
@@ -282,13 +302,29 @@ class InputController:
             ) from e
 
         if self._dry_run:
+            # J 纪元修复：旧实现用 int(sx*1000) 伪造像素（把 1000 当屏幕宽高）。
+            # 诚实回执：有显示则给真实像素换算；无显示则只回归一化坐标并注明。
+            try:
+                await self.get_screen_size()
+                spx0, spy0 = self._normalize_to_pixel(sx, sy)
+                epx0, epy0 = self._normalize_to_pixel(ex, ey)
+                pixels: dict = {
+                    "start_pixel": {"x": spx0, "y": spy0},
+                    "end_pixel": {"x": epx0, "y": epy0},
+                }
+            except PhysicalError:
+                pixels = {
+                    "start_pixel": None,
+                    "end_pixel": None,
+                    "note": "dry-run without display; only normalized coords echoed",
+                }
             return {
-                "start_pixel": {"x": int(sx * 1000), "y": int(sy * 1000)},
-                "end_pixel": {"x": int(ex * 1000), "y": int(ey * 1000)},
+                **pixels,
+                "start": {"x": sx, "y": sy},
+                "end": {"x": ex, "y": ey},
             }
 
-        size = await self.get_screen_size()
-        self._screen_size = size  # 确保 _normalize_to_pixel 有数据
+        await self.get_screen_size()
         spx, spy = self._normalize_to_pixel(sx, sy)
         epx, epy = self._normalize_to_pixel(ex, ey)
 

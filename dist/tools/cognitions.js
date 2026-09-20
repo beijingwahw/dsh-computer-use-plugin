@@ -15,11 +15,11 @@ export function createWhatIfTool() {
             'Use this when stuck in a loop or after repeated failures — do not brute-force retry.',
         parameters: {
             failed_only: {
-                type: 'boolean', required: false,
+                type: 'boolean',
                 description: 'Only examine FAILED / no-effect entries. Default true.',
             },
             since_step: {
-                type: 'number', required: false,
+                type: 'number',
                 description: 'Only examine journal entries from this index onwards. Default: all.',
             },
         },

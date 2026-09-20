@@ -50,10 +50,22 @@ export function betaReliability(successCount, attemptCount) {
     const hw = 1.96 * Math.sqrt((alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1)));
     return { mean, hw };
 }
+/** 递归键排序的稳定字符串化：replacer 数组只在顶层过滤键、嵌套对象的键
+ *  会被整层丢弃（JSON.stringify({a:{x:1}}, ['a']) → {"a":{}}）——
+ *  drag_mouse 这类嵌套 args 会全部坍缩成同一符号。排序保证键序无关性。 */
+function canonicalStringify(v) {
+    if (Array.isArray(v))
+        return `[${v.map(canonicalStringify).join(',')}]`;
+    if (v && typeof v === 'object') {
+        const keys = Object.keys(v).sort();
+        return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalStringify(v[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(v) ?? 'null';
+}
 /** F-1 符号化：args → 稳定短哈希（FNV-1a —— semanticHash 同源密码学原语） */
 function hashArgs(args) {
     let h = 0x811c9dc5;
-    const s = JSON.stringify(args, Object.keys(args).sort());
+    const s = canonicalStringify(args);
     for (let i = 0; i < s.length; i++) {
         h ^= s.charCodeAt(i);
         h = Math.imul(h, 0x01000193);
@@ -107,7 +119,10 @@ class SkillLibrary {
             const data = JSON.parse(readFileSync(this.filePath, 'utf8'));
             if (Array.isArray(data.skills)) {
                 this.skills = data.skills;
-                this.nextId = data.nextId ?? this.skills.length + 1;
+                // J 纪元修正（nextId 撞号）：历史档案经历过容量驱逐后 ids 稀疏，
+                // `length + 1` 可能小于 max(id)+1 ⇒ 新技能撞旧 id。取两者最大值。
+                const maxId = this.skills.reduce((m, s) => Math.max(m, Number(s.id) || 0), 0);
+                this.nextId = Math.max(data.nextId ?? 0, maxId + 1);
                 this.nextSynthId = data.nextSynthId ?? this.nextSynthId;
             }
             console.log(`[Skill] Loaded ${this.skills.length} skill(s) from ${this.filePath}`);
@@ -291,8 +306,10 @@ class SkillLibrary {
                 if (other === hit)
                     return false;
                 const axesB = other._axes;
-                const ge = axesB.text >= axesA.text && axesB.rel >= axesA.rel && axesB.rec >= axesA.recency;
-                const gt = axesB.text > axesA.text || axesB.rel > axesA.rel || axesB.rec > axesA.recency;
+                // 轴名对齐 _axes 的 { text, rel, rec } —— 此前误写 axesA.recency
+                // （undefined），比较恒 false 导致 pareto_optimal 恒 true
+                const ge = axesB.text >= axesA.text && axesB.rel >= axesA.rel && axesB.rec >= axesA.rec;
+                const gt = axesB.text > axesA.text || axesB.rel > axesA.rel || axesB.rec > axesA.rec;
                 return ge && gt;
             });
             return { hit, dominated };
@@ -367,8 +384,14 @@ class SkillLibrary {
         });
         const sig = stepSignature(merged);
         const existing = this.skills.find(s => stepSignature(s.steps) === sig);
-        if (existing)
-            return { skill: existing, plan }; // 重组结果撞已有技能 = 强化而非新建
+        // J 纪元修正：注释宣称"撞已有技能 = 强化"，旧实现直接 return 不 bump 计数 ——
+        // 所谓强化并不发生。对齐 induce 的去重路径（attemptCount/successCount/lastUsedAt）。
+        if (existing) {
+            existing.attemptCount++;
+            existing.successCount++;
+            existing.lastUsedAt = Date.now();
+            return { skill: existing, plan };
+        }
         const skill = {
             id: this.nextId++,
             name: `syn-${this.nextSynthId++}`,
@@ -402,14 +425,19 @@ class SkillLibrary {
         return this.skills.find(x => x.id === id);
     }
     /** checkpoint 序列化：与磁盘 JSON 同构（skills + 发号器进度） */
+    /** checkpoint 序列化 —— J 纪元修正：补齐 nextSynthId（磁盘 save 有、
+     *  快照没有 ⇒ 崩溃恢复后合成技能重复命名 syn-1，模型可见面撞名）。 */
     dump() {
-        return { skills: this.skills, nextId: this.nextId };
+        return { skills: this.skills, nextId: this.nextId, nextSynthId: this.nextSynthId };
     }
     restore(data) {
         if (!data?.skills)
             return;
         this.skills = data.skills;
-        this.nextId = data.nextId ?? (this.skills.at(-1)?.id ?? 0) + 1;
+        // 同 load 的撞号防线：ids 稀疏档案下 at(-1).id+1 不保证大于 max(id)+1
+        const maxId = this.skills.reduce((m, s) => Math.max(m, Number(s.id) || 0), 0);
+        this.nextId = Math.max(data.nextId ?? 0, (this.skills.at(-1)?.id ?? 0) + 1, maxId + 1);
+        this.nextSynthId = data.nextSynthId ?? this.nextSynthId;
     }
     list() {
         return [...this.skills].sort((a, b) => b.lastUsedAt - a.lastUsedAt);

@@ -59,6 +59,19 @@ export class PhysicalActionRouterImpl {
         switch (action.kind) {
             case 'click_mouse': {
                 const args = action.args ?? {};
+                // J 纪元修正（诚实话义前置）：x/y 缺失/非法时旧实现静默缺省 0.5 ——
+                // 畸形 args 不会报错而是点击屏幕中心（真实点击！）。域外拒绝：
+                // 指针动作必须有显式坐标，gate-rejected 先于物理执行。
+                if (!Number.isFinite(Number(args?.x)) || !Number.isFinite(Number(args?.y))) {
+                    return {
+                        ok: false,
+                        error: {
+                            kind: PhysicalErrorKind.INVALID_ARGS,
+                            detail: 'click_mouse requires finite normalized x/y (got ' +
+                                `${JSON.stringify(args?.x)}, ${JSON.stringify(args?.y)} — refusing to click screen center by default)`,
+                        },
+                    };
+                }
                 return this.adapter.clickMouse({
                     x: num(args.x, 0.5),
                     y: num(args.y, 0.5),
@@ -68,8 +81,17 @@ export class PhysicalActionRouterImpl {
             }
             case 'type_text': {
                 const args = action.args ?? {};
+                if (typeof args.text !== 'string') {
+                    return {
+                        ok: false,
+                        error: {
+                            kind: PhysicalErrorKind.INVALID_ARGS,
+                            detail: `type_text requires a string text (got ${typeof args.text})`,
+                        },
+                    };
+                }
                 return this.adapter.typeText({
-                    text: typeof args.text === 'string' ? args.text : '',
+                    text: args.text,
                     clearFirst: bool(args.clear_first ?? args.clearFirst),
                     dryRun: bool(args.dry_run),
                 });
@@ -91,6 +113,20 @@ export class PhysicalActionRouterImpl {
                 const args = action.args ?? {};
                 const start = args.start ?? { x: args.startX, y: args.startY };
                 const end = args.end ?? { x: args.endX, y: args.endY };
+                // J 纪元修正：drag 坐标缺失/非法时旧实现静默缺省 0 —— 点到屏幕左上角。
+                // 与 click 同律域外拒绝（指针动作必须显式给坐标）。
+                for (const [label, pt] of [['start', start], ['end', end]]) {
+                    if (!Number.isFinite(Number(pt?.x)) || !Number.isFinite(Number(pt?.y))) {
+                        return {
+                            ok: false,
+                            error: {
+                                kind: PhysicalErrorKind.INVALID_ARGS,
+                                detail: `drag_mouse requires finite normalized ${label}.x/y (got ` +
+                                    `${JSON.stringify(pt?.x)}, ${JSON.stringify(pt?.y)})`,
+                            },
+                        };
+                    }
+                }
                 return this.adapter.dragMouse({
                     start: { x: num(start?.x, 0), y: num(start?.y, 0) },
                     end: { x: num(end?.x, 0), y: num(end?.y, 0) },
@@ -98,9 +134,10 @@ export class PhysicalActionRouterImpl {
                 });
             }
             case 'switch_tab': {
-                // 降级为 Ctrl+Tab（Mac 上 Cmd+Tab 切换应用，Ctrl+Tab 切换标签页）
-                const mod = process.platform === 'darwin' ? 'cmd' : 'ctrl';
-                return this.adapter.pressHotkey({ keys: [mod, 'tab'] });
+                // J 纪元修正：所有平台统一 Ctrl+Tab —— 注释自己写明"Cmd+Tab 切换
+                // 应用、Ctrl+Tab 切换标签页"，旧代码却在 darwin 选 cmd（switch_tab
+                // 实际切换应用，与动作名相悖；主流浏览器在 macOS 同样支持 Ctrl+Tab）。
+                return this.adapter.pressHotkey({ keys: ['ctrl', 'tab'] });
             }
             case 'switch_window': {
                 const args = action.args ?? {};
@@ -144,8 +181,7 @@ export class PhysicalActionRouterImpl {
                 // 降级为 Esc
                 return this.adapter.pressHotkey({ keys: ['esc'] });
             }
-            case 'noop':
-                return { ok: true, value: undefined };
+            // noop 在 dispatch() 入口已提前返回 —— 永不抵达此处（不可达分支已移除）
             default:
                 return {
                     ok: false,

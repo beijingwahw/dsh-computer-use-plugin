@@ -131,22 +131,28 @@ class D7PhysicalHostPort {
             return faultPatches(req.grid, `D7PhysicalHostPort perceive fault: ${msg}`);
         }
     }
-    /** UiTreeResult → ScenePatch[]（像素 → 归一化 + 网格分派公用律） */
+    /** UiTreeResult → ScenePatch[]（坐标直通 + 网格分派公用律）。
+     *  J 纪元坐标统一：Python 漏斗（ui_tree.py）现在输出**全屏归一化**坐标 ——
+     *  本端不再除以屏幕尺寸（旧实现：L1/L2 像素 ÷ 屏幕 = 正确；但 L3 VLM 的
+     *  归一化坐标被二次缩小，region 裁剪时 L2 的裁剪内像素也整体漂移）。
+     *  同时 funnel_depth 忠实映射（旧实现把 'L3' 与 'empty' 都压成 'L1'/
+     *  'L1-tree' —— 伪造溯源标签，违背 source 是诚实降级载体的契约）。 */
     _translateTree(tree, req) {
         if (tree.fault && tree.elements.length === 0) {
             return faultPatches(req.grid, `ui funnel fault (${tree.fault.source}): ${tree.fault.detail}`);
         }
-        const { width: w, height: h } = this.screenSize;
         const els = tree.elements.map(e => ({
             role: e.role,
             name: e.name.slice(0, 20),
-            rect: {
-                x: e.rect.x / w, y: e.rect.y / h,
-                width: e.rect.width / w, height: e.rect.height / h,
-            },
+            rect: { x: e.rect.x, y: e.rect.y, width: e.rect.width, height: e.rect.height },
         }));
-        const depth = tree.funnel_depth === 'L2' ? 'L2' : 'L1';
-        return dispatchElementsToGrid(els, req.grid, depth, depth === 'L1' ? 'L1-tree' : 'L2-ocr');
+        if (tree.funnel_depth === 'empty' && els.length === 0) {
+            // 诚实空：与 fault 分派共用空补丁方言（elements: [] + funnelDepth 'empty'）
+            return dispatchElementsToGrid([], req.grid, 'L1', 'L1-tree');
+        }
+        const depth = tree.funnel_depth === 'L3' ? 'L3' : tree.funnel_depth === 'L2' ? 'L2' : 'L1';
+        const source = depth === 'L3' ? 'L3-vlm' : depth === 'L2' ? 'L2-ocr' : 'L1-tree';
+        return dispatchElementsToGrid(els, req.grid, depth, source);
     }
     /** 屏幕尺寸缓存（health 单次探测；失败保持 null ⇒ perceive 诚实 fault） */
     async _syncScreenSize() {
@@ -182,12 +188,24 @@ class D7PhysicalHostPort {
         if (this.router)
             return this.router;
         if (this.initPromise) {
-            await this.initPromise;
+            try {
+                await this.initPromise;
+            }
+            catch (e) {
+                // J 纪元修正：初始化失败可重试 —— 旧实现 rejected promise 永久缓存，
+                // 此后每次 execute/perceive/prewarm 都 await 同一 rejected promise，
+                // 实例永久失效（Python 临时起不来 = 终身瘫痪，只能 dispose 重建）。
+                this.initPromise = null;
+                throw e;
+            }
             if (this.router)
                 return this.router;
             throw new Error('D7PhysicalHostPort init failed (router still null)');
         }
-        this.initPromise = this._doInitialize();
+        this.initPromise = this._doInitialize().catch(e => {
+            this.initPromise = null; // 失败即清：下次调用重新初始化
+            throw e;
+        });
         await this.initPromise;
         if (!this.router)
             throw new Error('D7PhysicalHostPort init failed silently');
@@ -199,14 +217,17 @@ class D7PhysicalHostPort {
         if (!start.ok) {
             throw new Error(`PhysicalServiceManager.start failed (${start.error?.kind}): ${start.error?.detail}`);
         }
-        // 2. 构造 adapter
+        // 2. 构造 adapter。
+        //    J 纪元修正：覆盖项放前面、连接事实放后面 —— 旧实现把
+        //    `...(this.opts.adapter ?? {})` 放最后，调用方误传 baseUrl/keyPath
+        //    会覆盖掉 manager 给出的真实连接信息（密钥不匹配 ⇒ unauthorized）。
         const cfg = {
+            ...(this.opts.adapter ?? {}),
             baseUrl: start.baseUrl,
             timeoutMs: this.opts.adapter?.timeoutMs ?? 5000,
             keyPath: start.keyPath,
             tokenTtlSeconds: this.opts.adapter?.tokenTtlSeconds ?? 60,
             enableAuth: this.opts.adapter?.enableAuth ?? true,
-            ...(this.opts.adapter ?? {}),
         };
         const adapter = createPhysicalExecution(cfg);
         const init = await adapter.init();

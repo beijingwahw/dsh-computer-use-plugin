@@ -7,8 +7,9 @@ const CATEGORIES = [
 ];
 /** 知识内容预算（契约立法值 —— KnowledgeEntry.content ≤500 字符；D-7 工具面文案同源引用） */
 export const CONTENT_MAX_CHARS = 500;
-/** 注入摘要预算上限（契约立法值 —— KnowledgeInjection.summary ≤300 字符） */
-const INJECTION_MAX_CHARS = 300;
+/** 注入摘要预算上限（契约立法值 —— KnowledgeInjection.summary ≤300 字符；
+ *  configValidator 的 knowledgeMaxChars 域上界同源引用 —— 单一事实源） */
+export const INJECTION_MAX_CHARS = 300;
 /** 库容量上限（防无限膨胀：超限驱逐最低使用度的 auto-learn 条目 —— manual 永不驱逐） */
 const MAX_ENTRIES = 1000;
 // ─── 算法形状字面量（出册常数 —— 校准无可行区间，值即设计，非调参旋钮）───
@@ -41,10 +42,11 @@ const STABILITY_GROWTH = 1.6;
 /** E-1 稳定性封顶（365 天）：一年不复证的记忆无论如何加固都让位 —— 世界会变，
  *  间隔效应不能把旧知识变成永恒（封顶是诚实性约束，不是性能参数）。 */
 const HALF_LIFE_CAP_MS = 365 * 24 * 60 * 60 * 1000;
-/** 分词（检索通道共用：连续字母/数字/CJK 串；无停用词表 —— 留白） */
-function tokenize(text) {
-    return text.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]+/g) ?? [];
-}
+/** 分词（J 纪元统一）：复用 `../uiMemory` 的 tokenize（拉丁词 + CJK 单字 + 二元组）。
+ *  旧实现私有一份「CJK 连续串整体」的分词 —— 与决策工位（reflexArc/deliberate
+ *  经 uiMemory.tokenize）不同构：同一个中文词在两通道被切成不同粒度，KB 的
+ *  keyword 通道（长串 includes 精确匹配）在中文场景几乎必然哑火，只剩语义通道兜底。 */
+import { tokenize } from '../uiMemory.js';
 /** 遗忘曲线（纯函数）：c × 0.5^(age/半衰期)。age=0 ⇒ 原值；越老越冷。
  *  E-1 间隔重复：半衰期逐条目化 —— 条目自带 halfLifeMs（复证增长），
  *  缺席回退 30 天基线（旧档/未复证自然降级，零迁移成本）；封顶 365 天。 */
@@ -162,6 +164,14 @@ export class InMemoryKnowledgeBase {
         const queryVec = embed(text);
         const minConfidence = query.minConfidence ?? 0;
         const maxResults = query.maxResults ?? 5;
+        // 域执法（与 insert 同律 —— 域外拒绝，不钳制）：NaN/负数经 slice/filter
+        // 静默产出错误结果集（NaN ⇒ 恒空；负数 ⇒ 从尾部截断）
+        if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
+            return { ok: false, error: { field: 'minConfidence', reason: `minConfidence must be in [0,1], got ${minConfidence} (domain rejection, no clamp)` } };
+        }
+        if (!Number.isInteger(maxResults) || maxResults < 1) {
+            return { ok: false, error: { field: 'maxResults', reason: `maxResults must be a positive integer, got ${maxResults} (domain rejection, no clamp)` } };
+        }
         const ranked = [...this.entries.values()]
             // 遗忘曲线执法点：过滤与排序均用有效置信度 —— 老知识自然让位
             .map(e => ({ entry: e, eff: decay(e.confidence, e.updatedAt, startedAt, e.halfLifeMs) }))
@@ -178,12 +188,15 @@ export class InMemoryKnowledgeBase {
             value: { entries: ranked.map(r => r.entry), latencyMs: Date.now() - startedAt, strategy: 'hybrid' },
         };
     }
-    /** hybrid 双通道评分（纯函数视角）：keyword 命中主导 + 语义 cosine 补零样本泛化 */
+    /** hybrid 双通道评分（纯函数视角）：keyword 命中主导 + 语义 cosine 补零样本泛化。
+     *  J 纪元修正：query tokens 先 Set 去重 —— 旧实现对重复 token 逐个 +1
+     *  （"click click click" 获得 3 倍加权），与 reflexArc/deliberate 的
+     *  Set 去重口径不一致。 */
     hybridScore(entry, tokens, queryVec) {
         let hits = 0;
         if (tokens.length > 0) {
             const haystack = `${entry.scenario} ${entry.content}`.toLowerCase();
-            for (const t of tokens)
+            for (const t of new Set(tokens))
                 if (haystack.includes(t))
                     hits += 1;
         }
@@ -290,9 +303,13 @@ export class InMemoryKnowledgeBase {
         }
         if (reinforced)
             return { ok: true, value: undefined }; // 抗体已有：滴度升高即完成学习
+        // J 纪元修正：degraded（效果未验证）的痕迹如实标注 —— 旧实现把
+        // "completed with degraded verification" 学成 "succeeded"，语义有损。
+        const degradedNote = !failed && outcome.result.status === 'degraded'
+            ? ' [degraded — effect unverified]' : '';
         const content = failed
             ? `action ${outcome.action.kind} failed (${outcome.result.failure?.kind ?? 'unclassified'}): ${outcome.result.failure?.detail ?? outcome.result.status}`
-            : `action ${outcome.action.kind} succeeded for intent "${outcome.intent.description.slice(0, 80)}" (retries: ${outcome.retryCount})`;
+            : `action ${outcome.action.kind} succeeded${degradedNote} for intent "${outcome.intent.description.slice(0, 80)}" (retries: ${outcome.retryCount})`;
         const r = this.insert({
             category,
             content,
@@ -433,6 +450,11 @@ export class InMemoryKnowledgeBase {
         if (!Array.isArray(s.entries)) {
             return { ok: false, error: { field: 'snapshot.entries', reason: 'entries must be an array' } };
         }
+        // J 纪元修正：快照水合执法容量上限 —— 旧实现绕过 MAX_ENTRIES（insert 才
+        // 执法），一个 5000 条的合法结构快照会完整入账挤爆记忆预算。
+        if (s.entries.length > MAX_ENTRIES) {
+            return { ok: false, error: { field: 'snapshot.entries', reason: `snapshot carries ${s.entries.length} entries, capacity is ${MAX_ENTRIES} (domain rejection, no silent truncation)` } };
+        }
         // 全量预检（先验后写：任一条目非法 ⇒ 整体拒绝，绝不部分水合）
         const idSet = new Set();
         for (const e of s.entries) {
@@ -464,6 +486,22 @@ export class InMemoryKnowledgeBase {
             if (entry.halfLifeMs !== undefined &&
                 (typeof entry.halfLifeMs !== 'number' || !Number.isFinite(entry.halfLifeMs) || entry.halfLifeMs <= 0)) {
                 return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" halfLifeMs must be a positive finite number when present` } };
+            }
+            // 剩余簿记字段域执法（外部 JSON 完整性 —— 与 insert 铸造点同律）：
+            // updatedAt 非有限数会让 decay() 产出 NaN（条目静默不可见）；source 词表外
+            // 条目不可被驱逐（eviction 只驱逐 auto-learn）⇒ 可锁死库容；scenario 缺失
+            // 让语义向量铸造成空串（检索通道失明）
+            if (entry.source !== 'manual' && entry.source !== 'auto-learn' && entry.source !== 'import') {
+                return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" has unknown source "${JSON.stringify(entry.source)}"` } };
+            }
+            if (typeof entry.updatedAt !== 'number' || !Number.isFinite(entry.updatedAt)) {
+                return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" updatedAt must be a finite number` } };
+            }
+            if (typeof entry.usageCount !== 'number' || !Number.isFinite(entry.usageCount) || entry.usageCount < 0) {
+                return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" usageCount must be a non-negative finite number` } };
+            }
+            if (typeof entry.scenario !== 'string' || !entry.scenario.trim()) {
+                return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" scenario must be non-empty string` } };
             }
         }
         // 换脑：清空旧内容后整批入账

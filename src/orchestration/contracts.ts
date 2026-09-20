@@ -170,6 +170,9 @@ export interface ExecutionOrder {
   /** 流水线序号（单调递增；ExecutionResult.seq 与 AttemptRecord.seq 皆引用此值 ——
    *  同一事实，唯一名字，双名即漂移温床） */
   seq: number;
+  /** 所属意图（J 纪元新增）：执行工位编入预演链 id `chain-exec-${intentRef}-${seq}`，
+   *  消灭并发 run 下 `chain-exec-${seq}` 的撞号 —— doctor verdict 按 subject 精确配对的前提 */
+  intentRef?: string;
   /** rationale 已在信封构造时剥离（入审计链）——执行工位物理上看不见规划理由
    *  （注意力隔离的类型层执法：不是「不许看」，是类型上没有这个字段） */
   action: SandboxAction;
@@ -192,6 +195,9 @@ export interface ExecutionResult {
   latencyMs: number;
   /** 经 D-5 沙箱预演的动作标记（DRILL, THEN DELIVER 的流水线证据） */
   rehearsed: boolean;
+  /** 本尝试的预演链 id（J 纪元新增）：= doctor verdict 的 subject ——
+   *  D-4 回执按此精确配对到 AttemptRecord（不再依赖 `${intentRef}:${seq}` 约定猜测） */
+  rehearsalChainId?: string;
   failure?: { kind: ExecutionFailureKind; detail: string };
 }
 

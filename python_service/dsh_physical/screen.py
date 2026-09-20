@@ -65,28 +65,9 @@ class ScreenCapture:
 
         # 在线程池中跑 PIL（避免阻塞事件循环）
         loop = asyncio.get_running_loop()
+        img = await loop.run_in_executor(None, self._capture_image, region)
 
-        def _capture_to_bytes() -> tuple[bytes, int, int]:
-            # pyautogui.screenshot 是同步调用
-            try:
-                import pyautogui
-
-                img = pyautogui.screenshot()
-            except Exception as e:  # noqa: BLE001
-                # 测试降级：DSH_PHYSICAL_TEST_SCREEN=1 时返回合成图（无显示环境集成测试用）
-                if os.environ.get("DSH_PHYSICAL_TEST_SCREEN") == "1":
-                    img = self._synthetic_test_image()
-                else:
-                    raise PhysicalError(
-                        ErrorKind.SCREEN_CAPTURE_FAILED,
-                        f"pyautogui.screenshot failed: {e}",
-                    ) from e
-
-            # 裁剪
-            if region:
-                img = self._crop_region(img, region)
-
-            # 转 PNG / JPEG 字节
+        def _encode() -> tuple[bytes, int, int]:
             buf = io.BytesIO()
             if format == "jpeg":
                 # JPEG 不支持 RGBA → 转 RGB
@@ -94,17 +75,12 @@ class ScreenCapture:
                     img = img.convert("RGB")
                 q = quality if quality is not None else self.cfg.jpeg_quality
                 img.save(buf, format="JPEG", quality=q, optimize=True)
-                mime_format = "JPEG"
             else:
                 img.save(buf, format="PNG", optimize=True)
-                mime_format = "PNG"
-
             return buf.getvalue(), img.width, img.height
 
         try:
-            image_bytes, width, height = await loop.run_in_executor(None, _capture_to_bytes)
-        except PhysicalError:
-            raise  # 透传受控错误
+            image_bytes, width, height = await loop.run_in_executor(None, _encode)
         except Exception as e:  # noqa: BLE001
             raise PhysicalError(
                 ErrorKind.SCREEN_CAPTURE_FAILED,
@@ -119,6 +95,48 @@ class ScreenCapture:
             format=format.upper(),
             config=self.cfg,
         )
+
+    async def capture_png_bytes(self, region: dict | None = None) -> tuple[bytes, int, int]:
+        """截屏为 PNG 字节（J 纪元新增 —— 供 get_ui_tree 复用同一截屏路径）。
+
+        旧实现里 get_ui_tree 内联了一份独立截屏代码：不走本类 ⇒ 不享受
+        ``DSH_PHYSICAL_TEST_SCREEN`` 合成图降级，且异常被静默 ``pass`` 吞掉。
+        """
+        loop = asyncio.get_running_loop()
+        img = await loop.run_in_executor(None, self._capture_image, region)
+
+        def _encode() -> tuple[bytes, int, int]:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            return buf.getvalue(), img.width, img.height
+
+        try:
+            return await loop.run_in_executor(None, _encode)
+        except Exception as e:  # noqa: BLE001
+            raise PhysicalError(
+                ErrorKind.SCREEN_CAPTURE_FAILED,
+                f"image encode failed: {e}",
+            ) from e
+
+    def _capture_image(self, region: dict | None) -> Image.Image:
+        """同步截屏（线程池内执行）：真实截屏 → 测试降级 → 裁剪。"""
+        try:
+            import pyautogui
+
+            img = pyautogui.screenshot()
+        except Exception as e:  # noqa: BLE001
+            # 测试降级：DSH_PHYSICAL_TEST_SCREEN=1 时返回合成图（无显示环境集成测试用）
+            if os.environ.get("DSH_PHYSICAL_TEST_SCREEN") == "1":
+                img = self._synthetic_test_image()
+            else:
+                raise PhysicalError(
+                    ErrorKind.SCREEN_CAPTURE_FAILED,
+                    f"pyautogui.screenshot failed: {e}",
+                ) from e
+
+        if region:
+            img = self._crop_region(img, region)
+        return img
 
     def _crop_region(self, img: Image.Image, region: dict) -> Image.Image:
         """裁剪归一化 region → 像素坐标 box。"""

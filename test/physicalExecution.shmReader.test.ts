@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { readShm, readShmStreaming, closeAllFds } from '../src/physicalExecution/shmReader.ts';
+import { resolvePythonBin } from '../src/physicalExecution/pythonBin.ts';
 import type { ScreenshotResult } from '../src/physicalExecution/contracts.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +33,7 @@ function seedScreenshot(transport: 'mmap-file' | 'base64', mmapDir: string): {
   proc: ReturnType<typeof spawn>;
   metaPromise: Promise<SeededMeta>;
 } {
-  const proc = spawn('python3', [FIXTURE, transport, mmapDir], {
+  const proc = spawn(resolvePythonBin(), [FIXTURE, transport, mmapDir], {
     stdio: ['pipe', 'pipe', 'inherit'],
   });
 

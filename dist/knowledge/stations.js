@@ -2,6 +2,7 @@ import { tokenize } from '../uiMemory.js';
 import { embed, cosine } from '../semanticHash.js';
 import { trustOf } from './knowledgeBase.js';
 import { P } from './params.js';
+import { SANDBOX_ACTION_KINDS } from '../sandbox/types.js';
 // ─── 网格分区铸造（'g{col}x{row}' —— D-6 坐标同一性方案复刻，跨轮稳定）───
 function gridRegions(grid) {
     const regions = [];
@@ -30,29 +31,32 @@ export function faultPatches(grid, detail) {
 }
 /** 感知分派公用件：归一化元素（中心落区即入区）→ 网格分区补丁。
  *  capability 源（本机 a11y/OCR）与 D-5 微服务源（远端 UI 树）共用同一分派律 ——
- *  'g{col}x{row}' 坐标同一性方言跨源稳定。 */
+ *  'g{col}x{row}' 坐标同一性方言跨源稳定。
+ *  分派语义：半开区间 [x0, x1) —— 中心恰落在格线上归属右侧分区（最右/最下
+ *  边缘夹回末区）。双闭区间会把居中元素（中心恰为 0.5）重复派进两个分区，
+ *  破坏 reflexArc 的最优/次优区分与 deliberate 的亚军比较。 */
 export function dispatchElementsToGrid(els, grid, depth, sourceLabel) {
     const capturedAt = Date.now();
-    const patches = [];
-    for (let col = 0; col < grid.cols; col++) {
-        for (let row = 0; row < grid.rows; row++) {
-            const region = {
-                id: `g${col}x${row}`,
-                x: col / grid.cols, y: row / grid.rows, width: 1 / grid.cols, height: 1 / grid.rows,
-            };
-            const inRegion = els.filter(e => e.rect.x + e.rect.width / 2 >= region.x &&
-                e.rect.x + e.rect.width / 2 <= region.x + region.width &&
-                e.rect.y + e.rect.height / 2 >= region.y &&
-                e.rect.y + e.rect.height / 2 <= region.y + region.height);
-            patches.push({
-                region,
-                elements: inRegion.map(e => ({ source: sourceLabel, ...e })),
-                funnelDepth: inRegion.length > 0 ? depth : 'empty',
-                capturedAt,
-            });
-        }
+    const byRegion = new Map();
+    for (const e of els) {
+        const col = Math.max(0, Math.min(grid.cols - 1, Math.floor((e.rect.x + e.rect.width / 2) * grid.cols)));
+        const row = Math.max(0, Math.min(grid.rows - 1, Math.floor((e.rect.y + e.rect.height / 2) * grid.rows)));
+        const id = `g${col}x${row}`;
+        const bucket = byRegion.get(id);
+        if (bucket)
+            bucket.push(e);
+        else
+            byRegion.set(id, [e]);
     }
-    return patches;
+    return gridRegions(grid).map(region => {
+        const inRegion = byRegion.get(region.id) ?? [];
+        return {
+            region,
+            elements: inRegion.map(e => ({ source: sourceLabel, ...e })),
+            funnelDepth: inRegion.length > 0 ? depth : 'empty',
+            capturedAt,
+        };
+    });
 }
 /**
  * 能力回退场景源（P1-4）：'dsh.vision.station' 外部服务缺席时，用插件自身
@@ -194,7 +198,14 @@ export class StubDecisionStation {
                 return { reason: obj.reason.slice(0, 120), focus: String(obj.focus ?? 'full-scene').slice(0, 120) };
             }
             if (obj?.type === 'action' && obj.action && typeof obj.action.kind === 'string') {
-                const action = obj.action;
+                const candidate = obj.action;
+                // 解析边界执法：kind 必须在动作词汇表内、args 必须是普通对象 ——
+                // 模型输出的未知 kind / 畸形 args 在此拒绝，而非流入宿主执行器
+                if (!SANDBOX_ACTION_KINDS.has(candidate.kind) ||
+                    (candidate.args !== undefined && (typeof candidate.args !== 'object' || candidate.args === null || Array.isArray(candidate.args)))) {
+                    return { reason: `decision action rejected (kind '${candidate.kind}' outside vocabulary or malformed args)`, focus: 'full-scene' };
+                }
+                const action = candidate;
                 return { ...action, rationale: String(obj.rationale ?? '').slice(0, 120) };
             }
         }
@@ -304,12 +315,24 @@ export class ReflexiveDecisionStation {
     /** 免疫压制评估（Tier 0）：error-pattern 在场且置信度达阈值 ⇒ 压制。
      *  返回压制接地理由（NeedGrounding）；未压制 ⇒ null。
      *  判据保持原始 confidence（信任只门控接地，不动压制 —— 保守设计：
-     *  传闻压制仍发生，但接地前必须核证）。 */
+     *  传闻压制仍发生，但接地前必须核证）。
+     *  J 纪元修正：置信度口径 = **error-pattern 条目的最大值**（与 Tier 2
+     *  前额叶逐 fragment 判 `f.confidence ≥ suppressAt` 同口径）。旧判据用
+     *  全类别 maxConfidence —— 一条 0.9 的 workflow + 一条 0.1 的
+     *  error-pattern 也会触发压制，压制语义被无关类别劫持。
+     *  fragments 缺席（旧方言/预算截断）回退 kc.maxConfidence（保守：
+     *  宁可压制不可踩坑）。 */
     assessSuppression(ctx) {
         const kc = ctx.knowledgeContext;
-        if (kc && kc.categories.includes('error-pattern') && kc.maxConfidence >= this.suppressAt) {
+        if (!kc || !kc.categories.includes('error-pattern'))
+            return null;
+        const errorFragments = kc.fragments?.filter(f => f.category === 'error-pattern') ?? [];
+        const errorConf = errorFragments.length > 0
+            ? Math.max(...errorFragments.map(f => f.confidence))
+            : kc.maxConfidence;
+        if (errorConf >= this.suppressAt) {
             return {
-                reason: `reflex suppressed by error-pattern (conf ${kc.maxConfidence.toFixed(2)} ≥ ${this.suppressAt}) — known trap, rerouting`,
+                reason: `reflex suppressed by error-pattern (conf ${errorConf.toFixed(2)} ≥ ${this.suppressAt}) — known trap, rerouting`,
                 focus: 'knowledge',
             };
         }
@@ -515,6 +538,16 @@ export class StubExecutionStation {
         }
         try {
             const r = await this.opts.host.execute(action);
+            // 外部注入执行端口（dsh.host-executor）的返回是外部数据：status 词表外或
+            // 缺失 ⇒ 按契约违约处理（host-error），不得把垃圾值伪装成 degraded 完成
+            if (!r || (r.status !== 'success' && r.status !== 'failure' && r.status !== 'degraded')) {
+                return {
+                    action,
+                    status: 'failure',
+                    durationMs: Date.now() - startedAt,
+                    failure: { kind: 'host-error', detail: `host executor returned invalid result (status=${JSON.stringify(r?.status)})` },
+                };
+            }
             return { action, ...r, durationMs: Date.now() - startedAt };
         }
         catch (e) {

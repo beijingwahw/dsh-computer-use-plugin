@@ -13,9 +13,9 @@ export const DEFAULT_DANGER_PATTERNS =
   'send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,' +
   'confirm,确认订单,format,格式化,erase,抹掉,uninstall,卸载,reset,重置,清空,withdraw,提现,transfer,转账';
 
-/** 解析逗号分隔的风险词配置 */
-export function parseRiskPatterns(csv: string): string[] {
-  return (csv || DEFAULT_RISK_PATTERNS)
+/** 解析逗号分隔的风险词配置（空串回退 fallback） */
+export function parseRiskPatterns(csv: string, fallback: string = DEFAULT_RISK_PATTERNS): string[] {
+  return (csv || fallback)
     .split(',')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
@@ -59,9 +59,6 @@ export function matchesRiskPatterns(text: string, csv: string): boolean {
 export function matchesDangerPatterns(text: string, csv: string): boolean {
   if (!text) return false;
   const hay = normalizeForRisk(text);
-  return (csv || DEFAULT_DANGER_PATTERNS)
-    .split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean)
+  return parseRiskPatterns(csv, DEFAULT_DANGER_PATTERNS)
     .some(p => hay.includes(normalizeForRisk(p)));
 }

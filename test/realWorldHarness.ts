@@ -13,6 +13,7 @@ import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AtomicAction, ExecutionResult, ScenePatch } from '../src/knowledge/contracts.ts';
+import { resolvePythonBin } from '../src/physicalExecution/pythonBin.ts';
 import { dispatchElementsToGrid } from '../src/knowledge/stations.ts';
 
 export const DISPLAY = ':77';
@@ -61,7 +62,7 @@ export async function startRealWorld(): Promise<RealWorld> {
     }
     // 状态文件必须清空：残留文件会让「等新世界就绪」立即假通过（窗口未 map 竞态）
     try { rmSync(statePath); } catch { /* not exist */ }
-    app = spawn('python3', [APP, statePath], {
+    app = spawn(resolvePythonBin(), [APP, statePath], {
       env: { ...process.env, DISPLAY },
       stdio: 'ignore',
       detached: true, // 独立进程组（killApp 用 -pid 杀全组）

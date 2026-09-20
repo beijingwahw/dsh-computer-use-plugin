@@ -29,15 +29,18 @@ let workerPromise: Promise<TesseractWorkerLike> | null = null;
 let workerLang = '';
 
 async function getWorker(lang: string): Promise<TesseractWorkerLike> {
-  if (!workerPromise || workerLang !== lang) {
-    workerLang = lang;
-    const tess = await getTesseract();
-    workerPromise = tess.createWorker(lang).catch(e => {
-      workerPromise = null; // 失败后允许重试（网络恢复时）
-      throw e;
-    });
-  }
-  return workerPromise;
+  if (workerPromise && workerLang === lang) return workerPromise;
+  workerLang = lang;
+  const prev = workerPromise;
+  // 同步占位：并发首次调用共享同一个创建中的 worker（否则会各建一个，泄漏其一）
+  const creating = getTesseract().then(tess => tess.createWorker(lang));
+  workerPromise = creating;
+  creating.catch(() => {
+    if (workerPromise === creating) workerPromise = null; // 失败后允许重试（网络恢复时）
+  });
+  // 语言切换：新 worker 接班后终止旧 worker（否则旧实例存活到 disposeOcr）
+  if (prev) { try { (await prev).terminate(); } catch { /* already dead */ } }
+  return creating;
 }
 
 /** 生命周期清理：插件卸载时终止 OCR worker（DSH 注册即效果模型的良好公民） */

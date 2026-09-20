@@ -35,6 +35,12 @@ const DEFAULT_MIN_RELIABILITY = 0.5;
 const DEFAULT_SCENE_SIMILARITY = 0.9;
 /** 重放令牌 TTL（对齐宿主 approval 的 120s 方言） */
 const REPLAY_TOKEN_TTL_MS = 120_000;
+/** 判决缓存容量上限（无界 Map = 缓慢泄漏 —— 对齐 orchestration/index boundedSet 先例） */
+const VERDICT_CACHE_MAX = 256;
+/** 重放令牌容量上限（铸造时驱逐最旧未决令牌 —— 过期未确认的令牌不许无界滞留） */
+const REPLAY_TOKENS_MAX = 64;
+/** 待配对排练结果容量（chainId → 最近 outcome；医生判决迟到时的配对面） */
+const PENDING_OUTCOMES_MAX = 32;
 
 /** 64 位指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
  *  D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖） */
@@ -73,6 +79,8 @@ export class SandboxEngineImpl implements SandboxEngine {
   /** D-4 判决缓存（subject=chainId → 最新回执；重放时刻的复核源） */
   private verdictCache = new Map<string, DoctorVerdictPayload>();
   private replayTokens = new Map<string, ReplayToken>();
+  /** 最近排练结果（chainId → outcome，容量执法 FIFO —— 判决迟到时的配对面） */
+  private pendingOutcomes = new Map<string, import('./types').RehearsalOutcome>();
   private readonly ctx: Context | null;
 
   // 显式字段赋值（非参数属性）：Node strip-only 运行时契约 —— 现世源码同方言
@@ -112,9 +120,16 @@ export class SandboxEngineImpl implements SandboxEngine {
     }
   }
 
-  /** D-4 判决登记（onDoctorVerdict 接线后喂数据；双闸门与重放复核的缓存源） */
+  /** D-4 判决登记（onDoctorVerdict 接线后喂数据；双闸门与重放复核的缓存源）。
+   *  容量执法：超上限 FIFO 驱逐最旧条目（Map 迭代序 = 插入序） */
   noteDoctorVerdict(p: DoctorVerdictPayload): void {
+    this.verdictCache.delete(p.subject); // 重置插入位：更新即最新
     this.verdictCache.set(p.subject, p);
+    while (this.verdictCache.size > VERDICT_CACHE_MAX) {
+      const oldest = this.verdictCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.verdictCache.delete(oldest);
+    }
   }
 
   /** D-1 计划接收（onCognitionPlanReady 接线后的排练触发点） */
@@ -277,7 +292,9 @@ export class SandboxEngineImpl implements SandboxEngine {
     const rawScore = layers.length === 0
       ? 0
       : Math.round((layers.length / LAYER_ORDER.length) * 100);
-    const score = makeScore(rawScore) ?? (0 as any);
+    // rawScore 恒在 [0,100]（layers ⊆ LAYER_ORDER）⇒ makeScore 恒成功；
+    // 兜底走 0 分重铸而非 as-any 走私无品牌值（唯一铸造点纪律）
+    const score = makeScore(rawScore) ?? makeScore(0)!;
 
     const createdAt = Date.now();
     const report = {
@@ -294,6 +311,14 @@ export class SandboxEngineImpl implements SandboxEngine {
       totalLatencyMs: r.totalLatencyMs, budgetMs: r.budgetMs,
       chainTip: sandboxLog.tip, reportPath, createdAt,
     };
+    // 待配对面登记：医生判决（subject=chainId）迟到时由此配对走双闸门固化
+    this.pendingOutcomes.delete(chainId);
+    this.pendingOutcomes.set(chainId, outcome);
+    while (this.pendingOutcomes.size > PENDING_OUTCOMES_MAX) {
+      const oldest = this.pendingOutcomes.keys().next().value;
+      if (oldest === undefined) break;
+      this.pendingOutcomes.delete(oldest);
+    }
     await sandboxLog.append('rehearsal-end', {
       chainId, verdict: r.verdict, score: rawScore,
       totalLatencyMs: r.totalLatencyMs, steps: r.steps.length, reportPath,
@@ -360,13 +385,42 @@ export class SandboxEngineImpl implements SandboxEngine {
   }
 
   /**
+   * 双闸门自动配对（index.ts 的 onDoctorVerdict 接线调用）：判决到达时与最近
+   * 同链排练结果配对走 consolidate —— 排练 passed + 医生 approved ⇒ 固化入库。
+   * 链无排练记录 / 判决先于排练到达 ⇒ no-op（诚实缺席，不伪造配对）。
+   * 这是肌肉记忆写入路径的唯一自动化入口（此前 consolidate 无人调用，
+   * recall/replay 工具因库恒空而永不命中）。
+   */
+  tryConsolidate(verdict: DoctorVerdictPayload): Result<import('./types').MuscleMemoryEntry | null> {
+    const outcome = this.pendingOutcomes.get(verdict.subject);
+    if (!outcome) return { ok: true, value: null };
+    this.pendingOutcomes.delete(verdict.subject);
+    return this.consolidate(outcome, verdict.verdict);
+  }
+
+  /** 肌肉记忆落盘（卸载时序：必须在 reset 之前调用 —— 否则内存态归零后无可存） */
+  persistMemory(): boolean {
+    return this.memory.save();
+  }
+
+  /**
    * 阶段零：铸造重放令牌（B-3 两阶段审批的入口；实现类公开面）。
    * validate 不消费（门禁检查可重复）；consume 用后即焚（replayOnHost 内部）。
+   * 顺带清扫：过期未确认的令牌与超量滞留的旧令牌在铸造时驱逐（否则永久泄漏）。
    */
   requestReplayToken(entryId: string): string {
+    const now = Date.now();
+    for (const [t, tok] of this.replayTokens) {
+      if (now > tok.expiresAt) this.replayTokens.delete(t);
+    }
+    while (this.replayTokens.size >= REPLAY_TOKENS_MAX) {
+      const oldest = this.replayTokens.keys().next().value;
+      if (oldest === undefined) break;
+      this.replayTokens.delete(oldest);
+    }
     const token = 'SBX-' + Math.random().toString(36).slice(2, 10).toUpperCase();
     this.replayTokens.set(token, {
-      token, entryId, expiresAt: Date.now() + REPLAY_TOKEN_TTL_MS,
+      token, entryId, expiresAt: now + REPLAY_TOKEN_TTL_MS,
     });
     return token;
   }
@@ -386,12 +440,15 @@ export class SandboxEngineImpl implements SandboxEngine {
       await sandboxLog.append('host-replay-gate', { entryId, gate: 'entry-missing' });
       return gate('entry not found');
     }
-    // 门禁二：两阶段令牌（validate 语义：不消费可重查；过期/错绑即拒）
+    // 门禁二：两阶段令牌（validate 语义：不消费可重查；过期/错绑即拒）。
+    // 验证通过即刻消费（用后即焚）—— 消费推迟到全部门禁之后会留下双花窗口：
+    // 并发的第二次调用在门禁三/四的 await 间隙同样通过验证
     const token = this.replayTokens.get(opts.confirmToken);
     if (!token || token.entryId !== entryId || Date.now() > token.expiresAt) {
       await sandboxLog.append('host-replay-gate', { entryId, gate: 'token-invalid' });
       return gate('invalid or expired confirm token');
     }
+    this.replayTokens.delete(opts.confirmToken);
     // 门禁三：重放时刻医生复核（固化时的 approved 前提之上，最新否决即刻拦截）
     const latest = this.verdictCache.get(entry.chainId);
     if (latest && latest.verdict === 'rejected') {
@@ -416,8 +473,7 @@ export class SandboxEngineImpl implements SandboxEngine {
       return gate('host state does not match rehearsal entry scene (stale rehearsal is a lie)');
     }
 
-    // 全门禁通过：消费令牌（用后即焚 —— 授权与执行解耦窗口关闭）
-    this.replayTokens.delete(opts.confirmToken);
+    // （令牌已在门禁二验证通过时即刻消费 —— 用后即焚，无双花窗口）
 
     // 宿主执行器未接线（开发者预览）⇒ 诚实 failed（对齐现世 orchestrator Actor 未接线先例：
     // 诚实失败优于虚假成功）。未来纪元：此处经宿主管线逐动作执行并收集 journalRefs。
@@ -459,6 +515,7 @@ export class SandboxEngineImpl implements SandboxEngine {
     this.memory.reset();
     this.replayTokens.clear();
     this.verdictCache.clear();
+    this.pendingOutcomes.clear();
     this.hostFingerprint = null;
     this.hostFingerprintAt = 0;
     sandboxLog.reset();

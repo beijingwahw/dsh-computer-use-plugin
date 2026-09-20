@@ -163,11 +163,25 @@ export class MuscleMemoryStore {
             for (const raw of parsed) {
                 if (!raw || typeof raw.id !== 'string' || !Array.isArray(raw.steps))
                     continue;
-                // steps 是 readonly 属性 —— 不可原地赋值，重建对象后重冻（JSON round-trip 蒸发冻结）
-                const entry = { ...raw, steps: deepFreezeActions([...raw.steps]) };
-                this.entries.set(entry.id, entry);
-                this.bySignature.set(stepSignature(entry.steps), entry.id);
-                restored++;
+                // 逐条目防御（外部文件：手改/旧格式）：单条畸形跳过，不连坐整个库 ——
+                // 否则 stepSignature 对 args:null 抛错，外层 catch 丢弃全部记录且残留半载状态
+                try {
+                    const stepsValid = raw.steps.every(s => s !== null && typeof s === 'object' && typeof s.kind === 'string' && (() => {
+                        const args = s.args;
+                        return args === undefined ||
+                            (typeof args === 'object' && args !== null && !Array.isArray(args));
+                    })());
+                    if (!stepsValid)
+                        continue;
+                    // steps 是 readonly 属性 —— 不可原地赋值，重建对象后重冻（JSON round-trip 蒸发冻结）
+                    const entry = { ...raw, steps: deepFreezeActions([...raw.steps]) };
+                    this.entries.set(entry.id, entry);
+                    this.bySignature.set(stepSignature(entry.steps), entry.id);
+                    restored++;
+                }
+                catch {
+                    continue; // 单条水合失败：跳过（持久化是资产不是命脉）
+                }
             }
             return restored;
         }

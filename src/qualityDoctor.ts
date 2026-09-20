@@ -262,10 +262,20 @@ class Doctor implements QualityDoctor {
       if (f.location.file === 'journal') continue; // 链上发现的解药是行为修正，不是文本补丁
       const src = f.location.snippet;
       if (f.riskLevel === 'mechanical') {
-        // 机械修复：空 catch 补注释（唯一确定安全的文本手术）
-        const commented = /catch/.test(src)
-          ? src.replace(/\{\s*\}\s*$/, `{ /* ${EMPTY_CATCH_FIX} */ }`)
-          : src;
+        // 机械修复：空 catch 补注释（唯一确定安全的文本手术）。
+        // J 纪元修正：多行空 catch 的 snippet 是 open 行（`} catch (e) {`）——
+        // 旧 replace 锚定 `{...}$` 永不命中，after===before 却照样走写盘路径并
+        // 计入 totalFixesApplied（无效手术被统计为成功）。现在分两形态：
+        //   单行 `catch {}` ⇒ 填充 `{ /* FIXME */ }`（原逻辑，括号配平不变）；
+        //   多行 open 行   ⇒ 行尾追加注释（不添括号 —— 原块的闭合 `}` 仍在，
+        //                      添括号会造成语法错误）。
+        let commented = src;
+        if (/catch/.test(src)) {
+          commented = /\{\s*\}\s*$/.test(src)
+            ? src.replace(/\{\s*\}\s*$/, `{ /* ${EMPTY_CATCH_FIX} */ }`)
+            : src.replace(/\{\s*$/, `{ /* ${EMPTY_CATCH_FIX} */`);
+        }
+        if (commented === src) continue; // 无补丁可做 ⇒ 不产 proposal（诚实）
         proposals.push({
           findingId: f.id, riskLevel: 'mechanical',
           patch: { file: f.location.file, before: src, after: commented, lineRange: { start: f.location.line, end: f.location.line } },
@@ -287,14 +297,16 @@ class Doctor implements QualityDoctor {
       // 手术锁（genesis.zero-intrusion-guard 的金丝雀锚点）：structural 恒不写盘
       if (p.riskLevel !== 'mechanical') { result.proposed.push(p); continue; }
       if (!authorized || dryRun) { result.proposed.push(p); continue; }
-      // 真实写盘路径：lineRange 过期保护 —— before 在范围内恰有一次匹配
+      // 真实写盘路径：lineRange 过期保护 —— before 在范围内恰有一次匹配。
+      // snippet 是 trim 过的（doctorRules 存储时截断），而源码行带缩进 ——
+      // 匹配与替换都必须保留行的原始缩进，否则缩进过的行永远 0 命中
       try {
         const full = resolve(this.cfg.sourceRoot, p.patch.file);
         const ls = lines(readFileSync(full, 'utf8'));
         const { start, end } = p.patch.lineRange;
         const hits: number[] = [];
         for (let i = Math.max(0, start - 1); i < Math.min(ls.length, end); i++) {
-          if (ls[i] === p.patch.before) hits.push(i);
+          if (ls[i].trim() === p.patch.before.trim()) hits.push(i);
         }
         if (hits.length !== 1) {
           result.rejected.push({
@@ -305,7 +317,9 @@ class Doctor implements QualityDoctor {
           });
           continue;
         }
-        ls[hits[0]] = p.patch.after;
+        const target = ls[hits[0]];
+        const indent = target.slice(0, target.length - target.trimStart().length);
+        ls[hits[0]] = indent + p.patch.after.trim();
         atomicWrite(full, ls.join('\n'));
         result.applied.push(p);
       } catch (e: any) {

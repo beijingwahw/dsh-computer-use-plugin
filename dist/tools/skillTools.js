@@ -4,6 +4,8 @@
 //   match_skill — 新任务先查库：可靠度加权匹配，命中即省去全程探索
 //   run_skill   — 一键执行技能；成败回写可靠度（越用越准的闭环）
 import { defineTool } from '@deepseek-ai/dsh-tools';
+// J 纪元修正：类型改 type-only 导入 —— Node strip-only 运行时下
+// `import { Skill }`（接口按值导入）会抛 "does not provide an export named 'Skill'"
 import { skillLibrary } from '../skillLibrary.js';
 import { failureMemory } from '../failureMemory.js';
 import { journal } from '../journal.js';
@@ -20,19 +22,23 @@ export function createSaveSkillTool() {
                 type: 'string', required: true,
                 description: 'What task does this skill accomplish? Used for matching future requests (e.g., "打开 GitHub 并搜索仓库").',
             },
-            from_step: { type: 'number', required: false, description: '0-based start index in the journal. Default: start of the current task.' },
-            to_step: { type: 'number', required: false, description: '0-based end index (inclusive). Default: latest.' },
+            from_step: { type: 'number', description: '0-based start index in the journal. Default: start of the current task.' },
+            to_step: { type: 'number', description: '0-based end index (inclusive). Default: latest.' },
         },
         output: {
             schema: { type: 'string' },
             render: (_args, value) => [{ type: 'text', text: value }],
         },
         async execute(args) {
-            const from = args.from_step ?? 0;
+            // from_step 钳制下界（与 replayActions 同律）：负数经 slice 语义变成「从尾部倒数」，
+            // 会把非预期区段铸成技能；to_step 同律补下界（J 纪元 —— 见 replayActions 注）
+            const from = Math.max(0, args.from_step ?? 0);
             const all = journal.list();
-            const to = Math.min(all.length - 1, args.to_step ?? all.length - 1);
+            const to = Math.max(from, Math.min(all.length - 1, args.to_step ?? all.length - 1));
+            // 过滤不可重放工具：click_element 依赖运行时缓存；dismiss_popup 是模型侧
+            // 恢复指令（无机械动作）—— 留在宏里只会让 run_skill 误记失败
             const steps = all.slice(from, to + 1)
-                .filter(e => e.tool !== 'click_element')
+                .filter(e => e.tool !== 'click_element' && e.tool !== 'dismiss_popup')
                 .map(e => ({ tool: e.tool, args: e.args ?? {} }));
             if (steps.length === 0) {
                 return `[Error]: No replayable actions in range [${from}, ${to}].`;

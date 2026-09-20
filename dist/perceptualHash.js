@@ -62,7 +62,11 @@ export async function regionDhash(buffer, cxPct, cyPct, radiusPct = 0.15, hashSi
         .toBuffer();
     return dhash(crop, hashSize);
 }
-/** 相似度 0~1：1 - distance/64 */
+/** 相似度 0~1：1 - distance/hashBits。
+ *  J 纪元修正：分母取实际哈希长度而非硬编码 64 —— regionDhash 的 hashSize
+ *  是暴露参数（≠8 时旧实现会算出错误值甚至深度负数）。长度不等时
+ *  hammingDistance 已返回 max(len)（保守最大距离），这里自然收敛到最小相似度。 */
 export function similarity(a, b) {
-    return 1 - hammingDistance(a, b) / HASH_BITS;
+    const bits = Math.max(a.length, b.length, 1);
+    return Math.max(0, 1 - hammingDistance(a, b) / bits);
 }

@@ -9,7 +9,7 @@
 //        下次会话 predict() 预补偿。官方更新前的全局预测需群体中心（未来基建）。
 // 工程铁律：上报异步非阻塞（fire-and-forget + AbortSignal.timeout），
 //        热路径（截图/点击）永不 await 网络 —— 遥测是旁路义务，不是主路债主。
-import { journal } from './journal';
+import { journal, type JournalEntry } from './journal';
 
 /** 层一：经验晶体。key = `${场景指纹前8位}:${工具}` —— 匿名聚合，天然去隐私 */
 export interface ExperienceCrystal {
@@ -92,6 +92,15 @@ class Swarm {
   private driftCapacity = 200;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSyncAt = 0;
+  /** J 纪元修正：已结晶条目的身份游标（WeakSet）—— 消灭重复计数。
+   *  注释宣称"增量式——只消费上次结晶之后的新条目"，旧实现每次全量遍历且无游标：
+   *  crystalize 的调用点极多（5 分钟定时器 / 每次 what_if / counterfactual /
+   *  checkpoint），同一批日志被反复累加进 attempts/successes —— 成功率先验
+   *  系统性膨胀，与 G-4 收缩的"诚实读数"哲学相悖。
+   *  用对象身份（WeakSet）而非数值序号：journal 条目无 seq 字段，且给条目
+   *  补 seq 会改变 canonical 哈希域、破坏旧链 verify —— 身份游标零迁移成本。
+   *  已知残差（诚实边界）：checkpoint 恢复的条目是新对象，跨会话会再结晶一次。 */
+  private crystallized = new WeakSet<JournalEntry>();
 
   configure(endpoint: string, syncIntervalMs: number, crystalCapacity: number): void {
     this.endpoint = endpoint;
@@ -100,16 +109,18 @@ class Swarm {
   }
 
   /**
-   * 层一：从 journal 链上结晶经验。增量式 —— 只消费上次结晶之后的新条目。
-   * 在 checkpoint 保存与定时器时调用，热路径零成本。
+   * 层一：从 journal 链上结晶经验。增量式 —— 只消费上次结晶之后的新条目
+   * （WeakSet 身份游标执法，见字段注）。在 checkpoint 保存与定时器时调用，热路径零成本。
    */
   crystalize(): number {
     const entries = journal.list(true);
     let added = 0;
     for (const e of entries) {
+      if (this.crystallized.has(e)) continue; // 身份游标：已消费的条目不再入账
       // 观察串格式 `#N dHash=<hex> popup=...` —— 提取指纹而非截断原文（键匿名且稳定）
       const hash = e.observe ? /dHash=([0-9a-fA-F]+)/.exec(e.observe)?.[1] : undefined;
-      if (!hash) continue; // 无指纹锚点的条目无法结晶
+      if (!hash) continue; // 无指纹锚点的条目无法结晶（不计入游标 —— 观察补充后仍可结晶）
+      this.crystallized.add(e);
       const key = `${hash.slice(0, 8).toLowerCase()}:${e.tool}`;
       let c = this.crystals.get(key);
       if (!c) {

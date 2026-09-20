@@ -124,7 +124,13 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     if (errors.length > 0) {
       return { ok: false, error: errors[0] }; // 首错即返 —— field 精确定位
     }
-    this.cfg = { ...config };
+    // J 纪元修正：嵌套对象（regionGrid / stationTokenBudgets）深拷贝 ——
+    // 旧实现浅拷贝共享引用，外部在 configure 后突变配置对象会穿透进编排器。
+    this.cfg = {
+      ...config,
+      regionGrid: { ...config.regionGrid! },
+      stationTokenBudgets: { ...config.stationTokenBudgets! },
+    };
     return { ok: true, value: undefined };
   }
 
@@ -226,17 +232,20 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
             break;
           }
           groundingApprovals += 1;
-          const approved = await this.approveGrounding(intent.id, output.regionId, output.question);
+          const approved = await this.approveGrounding(intent.id, output.regionId, output.question, scene);
           if (approved.approved) {
-            await logPipeline('pipeline-grounding', { intentRef: intent.id, regionId: output.regionId, question: output.question });
+            await logPipeline('pipeline-grounding', { intentRef: intent.id, regionId: output.regionId, regions: approved.regions.length, question: output.question });
             stations.emit?.(EVT_PIPELINE_GROUNDING, { intentRef: intent.id, question: output.question });
-            // 重扫目标区，ceiling='L3' + l3Reason 回执 —— 下轮循环执行
-            const target = approved.region;
+            // 重扫获批分区，ceiling='L3' + l3Reason 回执 —— 下轮循环执行。
+            // J 纪元修正：L3 结果**并入**既有场景（获批分区替换，其余分区保留）——
+            // 旧实现 scene = [] 后只填 L3 补丁，下轮 regionsFor 恒返回 [目标区]，
+            // 决策从此只见屏幕一角且永不回全屏网格。
+            const merged = scene.filter(p => !approved.regions.some(r => r.id === p.region.id));
             const perceiveL3: AttentionEnvelope<'vision', PerceptionRequest> = {
               station: 'vision',
               payload: {
                 intentRef: intent.id,
-                regions: [target],
+                regions: approved.regions,
                 funnelCeiling: 'L3',
                 l3Reason: output.question,
                 deadlineMs: cfg.perceptionDeadlineMs,
@@ -244,10 +253,10 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
               tokenBudget: cfg.stationTokenBudgets.vision,
             };
             tokenUsage.vision += perceiveL3.tokenBudget;
-            scene = [];
             try {
-              for await (const patch of stations.vision.perceive(perceiveL3)) scene.push(patch);
-            } catch { /* Never-reject 纵深防御：空场景继续（决策下轮再要兜底） */ }
+              for await (const patch of stations.vision.perceive(perceiveL3)) merged.push(patch);
+            } catch { /* Never-reject 纵深防御：保留旧分区继续（决策下轮再要兜底） */ }
+            scene = merged;
             feedback = undefined;
             continue;
           }
@@ -260,7 +269,7 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         // ── 执行（信封铸造权：ExecutionOrder 剥离 rationale —— 执行工位物理上看不见）──
         const action = output as AtomicAction;
         seq += 1;
-        const order: ExecutionOrder = { seq, action: { kind: action.kind, args: action.args, expect: action.expect } };
+        const order: ExecutionOrder = { seq, intentRef: intent.id, action: { kind: action.kind, args: action.args, expect: action.expect } };
         const execEnv: AttentionEnvelope<'execution', ExecutionOrder> = {
           station: 'execution',
           payload: order,
@@ -310,19 +319,25 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         // ── 验收：effectDetected 硬证据（D-4 事件回执异步到达 —— AttemptRecord.doctorVerdict
         //    由 index.ts 的 onDoctorVerdict 补写；此处只记硬证据）──
         if (result.effectDetected === true) {
-          // successCriteria 未声明 ⇒ 唯一硬证据已满足即完成（诚实：无判据不伪造达成）
-          if (!intent.successCriteria) {
-            verdict = 'completed';
-            break;
-          }
-          // 有判据：交下一轮感知复查（决策工位读新场景判断达成）——
-          // 骨架最小实现：单步达成即完成（多步判据链由决策工位语义承载）
+          // 唯一硬证据已满足即完成（successCriteria 的多步判据链由决策工位语义
+          // 承载 —— 骨架最小实现：单步达成即完成）
           verdict = 'completed';
           break;
         }
         if (result.effectDetected === null) {
-          // 验证层缺席：非失败非完成 —— 继续循环但计入 degraded 候选
-          verdict = verdict ?? 'degraded';
+          // 验证层缺席：动作已执行但无效果证据。不能无反馈地 continue ——
+          // 决策工位看到同样的场景会重发同一动作，宿主重复执行至 1000 轮防爆环。
+          // 计入重试预算 + 反馈告知「已执行但未验证」；熔断后诚实 degraded 终局
+          verdict = 'degraded';
+          if (retryCount >= cfg.maxDecisionRetries) {
+            feedback = { seq, kind: 'host-error', detail: 'verification layer absent — effect unknown' };
+            break;
+          }
+          retryCount += 1;
+          feedback = {
+            seq, kind: 'host-error',
+            detail: 'verification layer absent — previous action executed but effect unknown; check the fresh scene before repeating it',
+          };
           continue;
         }
         // effectDetected === false：世界回击 ⇒ 走失败反馈重试
@@ -382,17 +397,33 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     return gridRegions(cfg.regionGrid);
   }
 
-  /** L3 花钱权裁决：缺口区在场景中存在且其 funnelDepth 未达 L3 ⇒ 批准重扫 */
+  /** L3 花钱权裁决（J 纪元修正：兑现注释承诺的裁决逻辑，取代恒批准 + 静默回退）。
+   *  裁决规则：
+   *    - regionId 在场且在当前场景中存在、且该分区 funnelDepth 未达 L3 ⇒ 批准重扫该区；
+   *    - regionId 在场但不在场景/网格中（模型幻觉 id）⇒ 拒绝并归因；
+   *    - regionId 缺席（「整屏语义不足」）⇒ 批准**全网格** L3 重扫 ——
+   *      旧实现静默回退 full[0]（左上象限），“整屏不足”却只重扫 1/4 屏。 */
   private async approveGrounding(
-    intentRef: string, regionId: string | undefined, question: string,
-  ): Promise<{ approved: boolean; region: RegionSpec; reason?: string }> {
+    intentRef: string, regionId: string | undefined, question: string, scene: ScenePatch[],
+  ): Promise<{ approved: boolean; regions: RegionSpec[]; reason?: string }> {
     const full = gridRegions(this.cfg!.regionGrid);
-    const target = regionId
-      ? full.find(r => r.id === regionId) ?? full[0]
-      : full[0];
-    // 裁决记录入链（每笔 L3 开销可审计 —— Token 纪律的账本面）
-    await logPipeline('pipeline-grounding-review', { intentRef, regionId: target.id, question });
-    return { approved: true, region: target };
+    if (regionId) {
+      const patch = scene.find(p => p.region.id === regionId) ?? undefined;
+      const gridRegion = full.find(r => r.id === regionId);
+      if (!patch && !gridRegion) {
+        await logPipeline('pipeline-grounding-review', { intentRef, regionId, question, ruling: 'denied: unknown region id' });
+        return { approved: false, regions: [], reason: `regionId '${regionId}' not in current scene or grid (hallucinated id?)` };
+      }
+      if (patch && patch.funnelDepth === 'L3') {
+        await logPipeline('pipeline-grounding-review', { intentRef, regionId, question, ruling: 'denied: already at L3' });
+        return { approved: false, regions: [], reason: `region '${regionId}' already scanned at L3 — re-spend denied` };
+      }
+      const target = patch?.region ?? gridRegion!;
+      await logPipeline('pipeline-grounding-review', { intentRef, regionId: target.id, question, ruling: 'approved: single region' });
+      return { approved: true, regions: [target] };
+    }
+    await logPipeline('pipeline-grounding-review', { intentRef, regionId: null, question, ruling: 'approved: full grid' });
+    return { approved: true, regions: full };
   }
 
   /** 点击落空时的过时区推断（FailureFeedback.staleRegionId 的启发式铸造） */
@@ -427,14 +458,25 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     tokenUsage?: { vision: number; decision: number; execution: number },
     snapshotId?: string,
   ): PipelineReport {
+    const chainTip = sandboxLog.tip;
+    const usage = tokenUsage ?? { vision: 0, decision: 0, execution: 0 };
+    // J 纪元修正：落盘报告补齐 terminalReason / chainTip / tokenUsage ——
+    // 旧实现只写 {intentId, verdict, attempts, snapshotId, startedAt}，
+    // 磁盘报告缺终局归因与审计锚，与内存报告两副面孔。
+    const reportPath = this.persistReport(intent.id, verdict, {
+      attempts, snapshotId, startedAt,
+      terminalReason: terminalReason.slice(0, 120),
+      chainTip,
+      tokenUsage: usage,
+    });
     const report: PipelineReport = {
       intentRef: intent.id,
       verdict,
       terminalReason: terminalReason.slice(0, 120),
       attempts,
-      tokenUsage: tokenUsage ?? { vision: 0, decision: 0, execution: 0 },
-      chainTip: sandboxLog.tip,
-      reportPath: this.persistReport(intent.id, verdict, { attempts, snapshotId, startedAt }),
+      tokenUsage: usage,
+      chainTip,
+      reportPath,
     };
     void logPipeline('pipeline-run-end', {
       intentRef: intent.id, verdict, attempts: attempts.length, chainTip: report.chainTip,

@@ -26,7 +26,7 @@ export function createRequestApprovalTool(config: Config) {
         description: 'EXACTLY what you are about to do and why, e.g., "click 发送 to submit the email to Alice".',
       },
       consequence: {
-        type: 'string', required: false,
+        type: 'string',
         description: 'What happens if this cannot be undone (e.g., "the email will be sent and cannot be recalled").',
       },
     },
@@ -92,6 +92,18 @@ export function createGrantApprovalTool(config: Config) {
           status: 'REVOKED',
           state_anchor: { token: args.token, granted: false },
           next_step: 'Token voided. Do NOT perform the action. Ask the user how they want to proceed instead.',
+        }, null, 2);
+      }
+      // J 纪元：grant 真正激活令牌（approval.grant 同时校验在场与时效）。
+      // 伪造或过期的 token 不给「已同意，立即执行」的指令 —— 否则模型带着
+      // 假令牌重放 click_mouse，白费一轮并侵蚀审批协议的可信度。
+      approval.sweep();
+      if (!approval.grant(args.token, true)) {
+        return JSON.stringify({
+          status: 'FAILED',
+          state_anchor: { token: args.token, granted: false, reason: 'invalid-or-expired-token' },
+          next_step: 'This token is not pending (unknown, already consumed, or expired). ' +
+            'Call request_approval again to mint a fresh one.',
         }, null, 2);
       }
       return JSON.stringify({

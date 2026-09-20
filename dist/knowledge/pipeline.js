@@ -10,7 +10,7 @@
 //      学习失败只告警，绝不击穿流水线）
 // 《异常诚实分层契约》D-7 修正案：configure = 运行层可重配方法 —— Result 降级，严禁
 //   throw（验收修复项 #2）；wire = 加载层（throw 合法，由 apply 收口）；run = 永不抛错。
-import { mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { distillInjection } from './knowledgeBase.js';
 import { InMemoryWorldModel, transitionActionKey } from './worldModel.js';
@@ -84,14 +84,37 @@ export class KnowledgePipelineOrchestrator {
             this.persistence = new KnowledgePersistence(opts.stateDir);
             if (deps.knowledge instanceof InMemoryKnowledgeBase && this.worldModel instanceof InMemoryWorldModel) {
                 const r = this.persistence.load(deps.knowledge, this.worldModel);
-                if (!r.ok)
+                if (!r.ok) {
                     console.warn(`[KnowledgePipeline] state hydrate degraded: ${r.error.message}`);
+                    // J 纪元修正：损坏的状态文件**改名保留**而非被首个 run-end 覆写。
+                    // persistence 的契约是"损坏交上层决定"，但旧实现的"决定"是 warn 后
+                    // 照常 save —— 损坏数据无声丢失。改名 `.corrupt-<ts>` 后：新状态
+                    // 干净起步，旧档可取证。
+                    this.quarantineCorruptState();
+                }
             }
             else {
                 console.warn('[KnowledgePipeline] stateDir set but organs are not in-memory snapshots — skipping hydrate');
             }
         }
         this.metrics = opts?.metricsPath ? new MetricsLedger(opts.metricsPath) : null;
+    }
+    /** 损坏状态隔离（旁路义务：永不抛错；尽力而为） */
+    quarantineCorruptState() {
+        try {
+            const dir = this.persistence?.stateDir;
+            if (!dir)
+                return;
+            const stamp = Date.now();
+            for (const name of ['knowledge.json', 'world-model.json']) {
+                const p = join(dir, name);
+                if (existsSync(p)) {
+                    renameSync(p, `${p}.corrupt-${stamp}`);
+                    console.warn(`[KnowledgePipeline] quarantined corrupt state file: ${p}.corrupt-${stamp}`);
+                }
+            }
+        }
+        catch { /* 隔离失败不阻断启动 —— 语义退化为覆写，仍优于失能 */ }
     }
     /** 运行层入口（契约：永不抛错）。意外 = 结构化 failed 报告，交 D-4 裁决 */
     async run(intent) {
@@ -132,6 +155,11 @@ export class KnowledgePipelineOrchestrator {
                 const forceL3 = ablation.l3Policy === 'always'
                     ? true
                     : ablation.l3Policy === 'never' ? false : escalateL3;
+                // J 纪元修正：本轮 forceL3 消费后即失能 —— 升级权只能由**本轮的**
+                // 转移结算重新授予。旧实现只在结算成功时赋值（含 false），但结算
+                // 失败/场景不可见时保持旧值 —— 一次惊讶后 L3 持续计费多轮（粘性），
+                // 白烧 VLM 预算直到某次成功结算。
+                escalateL3 = false;
                 if (forceL3)
                     l3Rounds += 1;
                 const visionEnv = {
