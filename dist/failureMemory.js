@@ -6,6 +6,7 @@
 // 价值：大多数系统只从成功学习；而一次探索中验证过的死路，本会话内不必再走第二遍。
 import { similarity } from './perceptualHash.js';
 import { tokenize, overlapCoefficient } from './uiMemory.js';
+import { ncdSimilarity } from './ncd.js';
 class FailureMemory {
     records = [];
     nextId = 1;
@@ -23,16 +24,24 @@ class FailureMemory {
             this.records.shift(); // FIFO：旧失败让位新失败
         return rec;
     }
-    /** 匹配：文本重合 + 同场景加成。返回「在这个场景/任务下别这么试」的清单 */
+    /** 匹配：文本重合（query+approach+symptom 全文）+ 同场景加成 + H-2 压缩相似。
+     *  H-2 修正注记：symptom 纳入 token hay（症状文本本就可检索 —— 原只搜 query/
+     *  approach 是检索面残缺）；NCD 仍只对 symptom 比（可换述的部分，避免 approach
+     *  的 ASCII 坐标稀释）。返回「在这个场景/任务下别这么试」的清单 */
     match(query, currentSceneHash, k = 3) {
-        const q = tokenize(query);
+        const qTokens = tokenize(query);
         return this.records
             .map(r => {
-            const text = overlapCoefficient(q, tokenize(r.query + ' ' + r.approach));
+            const hay = `${r.query} ${r.approach} ${r.symptom}`;
+            const text = overlapCoefficient(qTokens, tokenize(hay));
+            // H-2 NCD 通道：leet/typo 变体与原文共享长子串（'verificat·on'）而 token
+            // 化后零词面命中 —— 词面通道失明处由压缩器兜底。权重 0.3：辅通道
+            const compress = ncdSimilarity(query, r.symptom);
             let scene = 0;
             if (currentSceneHash && r.sceneHash && similarity(currentSceneHash, r.sceneHash) >= 0.9)
                 scene = 0.4;
-            return { ...r, score: Math.round((text + scene) * 1000) / 1000 };
+            const score = Math.round((text + 0.3 * compress + scene) * 1000) / 1000;
+            return { ...r, score };
         })
             .filter(r => r.score > 0.2)
             .sort((a, b) => b.score - a.score)

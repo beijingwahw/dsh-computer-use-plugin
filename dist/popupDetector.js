@@ -46,6 +46,52 @@ export async function detectPopupHeuristic(imageBuffer) {
         return false;
     }
 }
+// ─── F-3 贝叶斯弹窗信念（第六维·压缩认知）：Schmitt 迟滞滤波 ───
+//
+// 问题：旧判定是逐帧布尔（geometric OR semantic）—— 弹窗边缘的传感器抖动
+// （隔帧误检/漏检一帧）直接传导给 popupGuard，守卫在拦截/放行间震荡。
+//
+// 数学：对数几率（log-odds）贝叶斯更新 + 施密特触发器双阈值迟滞：
+//   belief ⇄ logit；单帧证据 = 似然比的 nats（geometric +4.0 / semantic +5.0 /
+//   双清洁 −1.5 —— 单帧强证据仍立即触发 ON（与旧行为一致），但单帧清洁
+//   不再立即放行：须累积至 OFF 线）。先验 0.05（世界大多数时刻没有弹窗）。
+//   迟滞带 [0.35, 0.6]：进入需 ≥0.6，退出需 ≤0.35 —— 一帧噪声不再翻转状态。
+// 诚实边界：证据强度是算法形状字面量（「几何启发式比 OCR 词证弱」的先验序），
+// epochF.test 守护三态行为：单帧触发 / 迟滞保持 / 双清洁退出。
+const POPUP_PRIOR = 0.05;
+const LOGIT = (p) => Math.log(p / (1 - p));
+const SIGMOID = (x) => 1 / (1 + Math.exp(-x));
+const EVIDENCE_GEO = 4.0; // 几何证据强度（nats）—— 单帧几何 ⇒ 后验 ≈0.98（立即 ON）
+const EVIDENCE_SEM = 5.0; // 语义证据更强（词表命中是确定性更强的信号）
+const EVIDENCE_CLEAN = -1.5; // 清洁帧证据 —— 单帧清洁把 ON 态拉入迟滞带但不放行
+const ON_THRESHOLD = 0.6;
+const OFF_THRESHOLD = 0.35;
+/** 施密特弹窗滤波器（纯类 —— 可注入任意帧序列，测试的确定性事实源） */
+export class SchmittPopupFilter {
+    logOdds = LOGIT(POPUP_PRIOR);
+    active = false;
+    /** 单帧更新：返回滤波后的信念与迟滞态 */
+    update(ev) {
+        const strength = ev.semantic ? EVIDENCE_SEM : ev.geometric ? EVIDENCE_GEO : EVIDENCE_CLEAN;
+        this.logOdds += strength;
+        const belief = SIGMOID(this.logOdds);
+        // 施密特触发：进入需越 ON 线，退出需跌破 OFF 线 —— 迟滞带内保持原态
+        if (!this.active && belief >= ON_THRESHOLD)
+            this.active = true;
+        else if (this.active && belief <= OFF_THRESHOLD)
+            this.active = false;
+        return { belief: Math.round(belief * 1000) / 1000, active: this.active };
+    }
+    reset() {
+        this.logOdds = LOGIT(POPUP_PRIOR);
+        this.active = false;
+    }
+}
+/** 模块级滤波器单例（take_screenshot 每帧喂数；插件卸载经 resetPopupBelief 归零） */
+const popupFilter = new SchmittPopupFilter();
+export function resetPopupBelief() {
+    popupFilter.reset();
+}
 /**
  * 语义证据：OCR 中央带，词表命中任一即确认。
  * 失败（OCR 不可用/超时/无语言包）静默返回空 —— 几何证据独立生效，行为零回归。
@@ -79,7 +125,7 @@ async function detectPopupSemantic(imageBuffer, keywords, ocrLang) {
         return [];
     }
 }
-/** 双模融合检测：take_screenshot 的唯一传感入口 */
+/** 双模融合检测 + F-3 贝叶斯迟滞滤波：take_screenshot 的唯一传感入口 */
 export async function detectPopup(imageBuffer, opts = {}) {
     const geometric = await detectPopupHeuristic(imageBuffer);
     const keywords = (opts.popupKeywords ?? '')
@@ -89,10 +135,16 @@ export async function detectPopup(imageBuffer, opts = {}) {
     const matchedKeywords = opts.enableOcr && keywords.length > 0
         ? await detectPopupSemantic(imageBuffer, keywords, opts.ocrLang || 'eng')
         : [];
+    // F-3：帧证据喂入施密特滤波 —— 单帧强证据立即 ON（旧行为），单帧噪声不再翻转
+    const { belief, active } = popupFilter.update({
+        geometric,
+        semantic: matchedKeywords.length > 0,
+    });
     return {
-        popup: geometric || matchedKeywords.length > 0,
+        popup: active,
         geometric,
         semantic: matchedKeywords.length > 0,
         matchedKeywords,
+        belief,
     };
 }

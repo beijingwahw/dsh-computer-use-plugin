@@ -14,6 +14,8 @@ import { shaper } from './environmentShaper.js';
 import { quantum, UiExtractorWhitebox } from './quantumSense.js';
 import { buildAllTools } from './tools/index.js';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards/index.js';
+import { resetPopupBelief } from './popupDetector.js';
+import { resetDiffPersistence } from './visualDiff.js';
 import { onToolPost } from './guards/hooks.js';
 import { runOrchestrator, ACTOR_SYSTEM_PROMPT } from './orchestrator.js';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts.js';
@@ -295,6 +297,8 @@ export async function apply(ctx, config) {
             uiMemory.reset(); // 清空场景记忆（可选保留跨会话记忆：删除此行）
             journal.reset(); // 清空行动日志
             updatePopupState(false); // 复位弹窗传感状态
+            resetPopupBelief(); // F-3 复位贝叶斯弹窗信念（迟滞滤波器归零）
+            resetDiffPersistence(); // G-1 复位差分持续性观测史（TDA 环归零）
             skillLibrary.save(); // 技能落盘后仅清内存 —— 技能的寿命长于会话
             skillLibrary.reset();
             failureMemory.reset(); // 失败记忆与技能库对称：已随 checkpoint 持久化

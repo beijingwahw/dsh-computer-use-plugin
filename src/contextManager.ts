@@ -21,10 +21,17 @@ export interface ScreenshotRecord {
   hash?: string; // 整屏 dHash 指纹（元数据，不占图片位）：变化门控与场景匹配的事实源
   textSummary?: string; // 旧截图降级后的文本描述（B-6 起含 OCR 遗像）
   // ── C-4 认知焦点引擎 ──
-  /** 显著度 0~1：类型加权 × 任务相关度 × 时间衰减。驱逐顺序的事实源 */
+  /** 显著度 0~1：类型加权 × 任务相关 × 时间衰减。驱逐顺序的事实源 */
   salience?: number;
   /** 高显著度豁免驱逐（登录态/任务目标锚点等）。名额受 pinBudget 硬顶 */
   pinned?: boolean;
+  /**
+   * E-4 预测误差（第五维·信息热力学）：本帧与前一帧的指纹汉明距离 ——
+   * 预测残差的离散度量。≥24/64 位（≈37.5% 位翻转 = 页面级跳变）的帧
+   * 在显著度评估中获得加成：「世界刚剧变的那一帧」值得注意力优先驻留。
+   * 首帧/无指纹 ⇒ 缺席（无前馈即无残差 —— 诚实缺席，不伪造基线）。
+   */
+  surpriseBits?: number;
 }
 
 /** C-4 潜意识元组：被驱逐记录的有损压缩残响。纯文本 + 硬容量，Token 消耗恒定 */
@@ -108,7 +115,14 @@ class ContextManager {
     // 时间衰减：半衰期 5 分钟 —— 「刚看过」的记忆天然更鲜活
     const ageMin = (now - record.timestamp) / 60_000;
     const recency = Math.exp(-ageMin / 5);
-    return Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
+    const base = Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
+    // E-4 预测残差加成：页面级跳变帧（≥24/64 位）+0.45（封顶 1）。基线帧
+    // 0.8×0.5×1.0=0.4 被抬到 0.85 —— 跨过 0.8 钉扎线，世界剧变锚点获得
+    // 与任务目标同级的钉扎优先权（预测处理理论：注意力跟随预测误差）。
+    // 24 与 0.45 是算法形状字面量：24 位 ≈ 全屏 dHash 的页面级变化下界
+    // （元素级反馈撑不满此距离，不误伤）；0.45 恰把满新近度基线抬过钉扎线。
+    if ((record.surpriseBits ?? 0) >= 24) return Math.min(1, base + 0.45);
+    return base;
   }
 
   /**
@@ -187,7 +201,11 @@ class ContextManager {
 
     // C-4 既视感：新帧入窗前与潜意识比对（旧场景重现 ⇒ 灵光一闪）
     const dejaVu = hash ? this.flashback(hash) : '';
-    this.history.push({ id: newId, timestamp: newId, base64, hash });
+    // E-4 预测残差：与前一幅在窗图像的指纹距离（推送前计算 —— 前馈基准）。
+    // 页面级跳变 ⇒ surpriseBits 入记录 ⇒ 显著度加成 + 钉扎资格（见 assessSalience）
+    const prevHash = this.lastImageRecord()?.hash;
+    const surpriseBits = hash && prevHash ? hammingDistance(prevHash, hash) : undefined;
+    this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits });
 
     // C-4 注意力刷新：显著度评估 + 钉扎决策（驱逐顺序的事实源）
     this.refreshPins();

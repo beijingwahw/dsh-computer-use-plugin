@@ -53,6 +53,13 @@ export interface KnowledgeEntry {
    * 两个问题：「记忆还新鲜吗」（updatedAt）vs「我的亲证还有效吗」（verifiedAt）。
    */
   verifiedAt?: number;
+  /**
+   * E-1 间隔重复（第五维·信息热力学）：该条目自身的遗忘半衰期（ms）。
+   * 缺席 = 30 天基线（未复证条目）；每次复证 ×1.6 增长（FSRS/SuperMemo 间隔效应），
+   * 封顶 365 天。与 updatedAt/verifiedAt 的分工：两个时钟回答「新鲜/可信」，
+   * 半衰期回答「多快变旧」—— 记忆的第三根时间轴（稳定性随使用增长）。
+   */
+  halfLifeMs?: number;
 }
 
 export interface KnowledgeQuery {

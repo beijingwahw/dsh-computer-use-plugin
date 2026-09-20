@@ -82,24 +82,39 @@ export function createMatchSkillTool(config) {
                     hits.push(skill);
                 }
             }
-            // 只有失败记忆命中：没有可用技能，但同场景有验证过的死路 —— 负向引导同样省掉整轮探索
-            if (hits.length === 0 && antiHits.length > 0) {
-                const anti = antiHits.map(a => `- tried "${a.approach}" -> ${a.symptom} (score=${a.score})`).join('\n');
-                return `[System]: No matching skills, but ${antiHits.length} known FAILED approach(es) for this context:\n` +
-                    `${anti}\n[Next Step]: Avoid repeating the above. The normal explore-act-verify loop still applies — ` +
-                    `try a different modality or route from the start.`;
-            }
             if (hits.length === 0) {
+                // F-1 文法归纳前馈：无技能命中时，从行动日志挖「重复着自己却未被固化」的序列
+                // （SEQUITUR：能被短文法压缩的行为就是结构 —— 结构就是技能的胚胎）
+                let motifNote = '';
+                if (config.enableSkillLibrary) {
+                    const motifs = skillLibrary.mineMotifs();
+                    if (motifs.length > 0) {
+                        const top = motifs.map(m => `- [${m.steps.length} steps × ${m.usage} times] ${m.steps.slice(0, 4).map(s => s.tool).join(' → ')}` +
+                            `${m.steps.length > 4 ? ' → …' : ''}`).join('\n');
+                        motifNote = `\n[Recurring motifs in your own journal (grammar-induced)]:\n${top}\n` +
+                            `These sequences repeat but are not yet skills — call save_skill to crystallize one.`;
+                    }
+                }
+                if (antiHits.length > 0) {
+                    const anti = antiHits.map(a => `- tried "${a.approach}" -> ${a.symptom} (score=${a.score})`).join('\n');
+                    return `[System]: No matching skills, but ${antiHits.length} known FAILED approach(es) for this context:\n` +
+                        `${anti}\n[Next Step]: Avoid repeating the above. The normal explore-act-verify loop still applies — ` +
+                        `try a different modality or route from the start.${motifNote}`;
+                }
                 return `[System]: No matching skills. Proceed with the normal explore-act-verify loop; ` +
-                    `consider save_skill afterwards if this workflow is worth remembering.`;
+                    `consider save_skill afterwards if this workflow is worth remembering.${motifNote}`;
             }
             const lines = hits.map(s => {
                 const reliability = s.attemptCount > 0 ? Math.round((s.successCount / s.attemptCount) * 100) : 0;
                 const via = s.matched_via ? ` via=${s.matched_via}` : '';
                 const synthTag = s.synthesized ? ' [synthesized, unverified]' : '';
+                // E-5 透明面：可靠度附 95% 可信区间 —— 「67%±46%」与「67%±9%」是两种决策依据
+                const ci = Array.isArray(s.ci95) ? ` ci95=[${s.ci95[0]},${s.ci95[1]}]` : '';
+                // G-5 多目标透明：非支配候选标注（没有别的候选在相关×可靠×新近全轴更优）
+                const pareto = s.pareto_optimal ? ' [Pareto-optimal]' : '';
                 const preview = s.steps.slice(0, 5).map((st, i) => `    ${i + 1}. ${st.tool} ${JSON.stringify(st.args).slice(0, 80)}`).join('\n');
                 const more = s.steps.length > 5 ? `\n    ... (+${s.steps.length - 5} more)` : '';
-                return `- #${s.id} "${s.name}" reliability=${reliability}% score=${s.score ?? '-'}${via}${synthTag}\n` +
+                return `- #${s.id} "${s.name}" reliability=${reliability}%${ci} score=${s.score ?? '-'}${via}${pareto}${synthTag}\n` +
                     `  does: ${s.description}\n${preview}${more}`;
             });
             // 负向对照：技能命中但同场景存在失败记忆时，显式标注技能步骤中的已知死路段

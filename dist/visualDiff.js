@@ -96,3 +96,140 @@ export async function renderDiffOverlay(afterBuf, regions) {
     const svg = Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">${boxes}</svg>`);
     return sharp(afterBuf).composite([{ input: svg, top: 0, left: 0 }]).png().toBuffer();
 }
+// ─── G-1 差分持续性（第七维·过程感知）：0 维持久同调的工程最小形态 ───
+//
+// 理论根基（Edelsbrunner–Harer 持久同调）：把连续 diff 视为对「变化特征」的
+// 反复观测流 —— 特征的「寿命」（在多少个连续 diff 中重现）即 0 维持续性：
+//   长寿命特征 = 稳定的结构变化（内容真的变了 —— 菜单展开了、面板出现了）
+//   短寿命特征 = 瞬态噪声（光标闪烁、视频帧、动画残影 —— 一次闪现即消亡）
+// 拓扑数据处理（TDA）的核心洞见在此最小化：不看单帧快照，看特征的生存时间。
+//
+// 实现：区域中心量化到 12×12 网格（抖动容忍键）；最近 6 次 diff 的键集合成
+// 观测史；特征在最近 3 次观测中出现 ≥2 次 ⇒ persistent（寿命门槛 ≥2）。
+// 诚实边界：网格量化键无方向性（相邻格不合并 —— 漂移的持续变化会被误判
+// transient）；域敏感的 Vietoris–Rips 复形是留白。
+const PERSIST_RING = 6; // 观测史容量（最近 6 次 diff）
+const PERSIST_WINDOW = 3; // 寿命判定窗口（最近 3 次观测）
+const PERSIST_MIN_LIFE = 2; // 寿命门槛：窗口内出现 ≥2 次 ⇒ 持续
+const KEY_GRID = 12; // 中心量化网格（12×12 —— 抖动容忍 vs 定位分辨的平衡）
+/** 区域 → 量化键（中心坐标的网格量化 —— ±1/24 内的抖动同键） */
+export function regionKey(r) {
+    return `${Math.round(r.center.x * KEY_GRID)},${Math.round(r.center.y * KEY_GRID)}`;
+}
+// ─── H-6 双格点量化（创世纪）：偿还 G-1 的漂移债务 ───
+//
+// G-1 诚实边界原文：「网格量化键无方向性 —— 漂移的持续变化会被误判 transient」。
+// 偿还方案（重叠格点经典技巧）：每个区域铸**两把键**——主格点（12×12 网格）+
+// 副格点（同网格平移半格 1/24）。任何点距其中至少一个格点系的_cell 内边界
+// 足够远：主格点跨界的漂移，副格点必在界内（反之亦然）—— 两条 1/24 容差的
+// 量化证据链，任何一条存活 ⇒ 持续性存活。数学上这是双射覆盖（double
+// covering）：两套平移格点的交集界宽 ≥ 半格，联合量化误差上界从 1/24 的
+// 「运气题」变为 1/24 的「保证题」。
+/** 半格偏移（副格点系的平移量） */
+const HALF_CELL = 1 / (KEY_GRID * 2);
+/** 区域 → 双格点键集（主格点 + 平移半格的副格点）。导出：测试与 H-6 执法面 */
+export function regionKeys(r) {
+    const primary = regionKey(r);
+    const secondary = `s${Math.round((r.center.x - HALF_CELL) * KEY_GRID)},${Math.round((r.center.y - HALF_CELL) * KEY_GRID)}`;
+    return [primary, secondary];
+}
+/**
+ * 持续性分类（纯函数 —— 可注入任意观测史，测试的确定性事实源）：
+ * 区域的**任一**格点键在观测史最近 PERSIST_WINDOW 次中出现 ≥PERSIST_MIN_LIFE 次
+ * ⇒ persistent（H-6 双格点：主键跨界漂移由副键兜底 —— 联合证据链）。
+ *
+ * I-4 迁徙链接（默认模式，history 未注入时）：键断链（漂移超半格）的区域，
+ * 若与窗口内**已被判 persistent** 的历史特征构成传输匹配 —— 距离 ≤0.10 且
+ * 质量比 ∈[0.5,2] —— 则视为**同一持续特征的迁徙**（同一条菜单滑了半屏，
+ * 不是旧特征死了新特征生了）。闭合 G-1/H-6 的债务链：亚半格漂移由双格点
+ * 兜底，超半格漂移由传输兜底 —— 持续性对任意速度的连续漂移全程存活。
+ * 注入 history 的纯键模式保持不变（epochG/H 测试的既有语义零回归）。
+ */
+export function classifyPersistence(regions, history) {
+    const verdict = new Map();
+    if (history) {
+        // 纯键模式（注入观测史 —— 测试与确定性判据的固定面）
+        const window = history.slice(-PERSIST_WINDOW);
+        for (const r of regions) {
+            const keys = regionKeys(r);
+            const life = window.reduce((n, set) => n + (keys.some(k => set.has(k)) ? 1 : 0), 0);
+            verdict.set(r.index, life >= PERSIST_MIN_LIFE ? 'persistent' : 'transient');
+        }
+        return verdict;
+    }
+    // 默认模式：内部富观测史（键 + 持续特征快照）—— 键判据 + I-4 迁徙链接
+    const window = richRing.slice(-PERSIST_WINDOW);
+    for (const r of regions) {
+        const keys = regionKeys(r);
+        const life = window.reduce((n, obs) => n + (keys.some(k => obs.keys.has(k)) ? 1 : 0), 0);
+        if (life >= PERSIST_MIN_LIFE) {
+            verdict.set(r.index, 'persistent');
+            continue;
+        }
+        // I-4 迁徙链接：与窗口内 persistent 特征的传输匹配（距离 + 质量比守恒）
+        const migrated = window.some(obs => obs.persistent.some(p => Math.hypot(p.center.x - r.center.x, p.center.y - r.center.y) <= 0.10 &&
+            (() => { const ratio = r.tiles_changed / p.mass; return ratio >= 0.5 && ratio <= 2; })()));
+        verdict.set(r.index, migrated ? 'persistent' : 'transient');
+    }
+    return verdict;
+}
+/** 内部富观测史（与键环同容量同窗口 —— 双轨合一的存储面） */
+const richRing = [];
+/** I-4 迁徙半径（归一化坐标）：≤0.10 的位移视为同一特征的移动（约 1.2 格） */
+const MIGRATE_RADIUS = 0.10;
+/**
+ * 观测登记：先判后记（本次不自证持续）。verdict 可选注入（diff_view 已算过）；
+ * 缺席时内部判定。登记键集合 + persistent 特征快照（供下一轮迁徙链接）。
+ */
+export function noteDiffObserved(regions, verdict) {
+    const v = verdict ?? classifyPersistence(regions);
+    const keys = new Set();
+    for (const r of regions)
+        for (const k of regionKeys(r))
+            keys.add(k);
+    const persistent = regions
+        .filter(r => v.get(r.index) === 'persistent')
+        .map(r => ({ center: { x: r.center.x, y: r.center.y }, mass: r.tiles_changed }));
+    richRing.push({ keys, persistent });
+    while (richRing.length > PERSIST_RING)
+        richRing.shift();
+}
+/** 生命周期归零（插件卸载 / 测试隔离） */
+export function resetDiffPersistence() {
+    richRing.length = 0;
+}
+/**
+ * H-1 最优传输空间位移：W₁(δ_a, μ) = Σ wᵢ·d(a, cᵢ)，wᵢ = tiles_changedᵢ/Σ
+ * （质量 = 区域面积代理）。Dirac↔离散分布的 W₁ 有闭式解 —— 无需求解传输
+ * 线性规划（一维情形的最优传输退化为加权平均距离）。
+ *
+ * 认知价值：dHash 只答「有没有变」，W₁ 答「**变化发生在你动作的地方吗**」——
+ * 「点了这里侧栏在那边展开」是正确的因果（副作用），而「点了这里、别处闪了
+ * 一下」可能只是巧合。空间因果与像素变化正交，是验证栈的第五个维度。
+ * 纯函数导出：数学原子的测试面。
+ */
+export function spatialDisplacement(action, regions) {
+    if (regions.length === 0) {
+        return { w1: 0, nearestIndex: null, nearestDistance: 0 };
+    }
+    const totalMass = regions.reduce((n, r) => n + r.tiles_changed, 0);
+    if (totalMass <= 0) {
+        return { w1: 0, nearestIndex: null, nearestDistance: 0 };
+    }
+    let w1 = 0;
+    let nearestIndex = null;
+    let nearestDistance = Infinity;
+    for (const r of regions) {
+        const d = Math.hypot(action.x - r.center.x, action.y - r.center.y);
+        w1 += (r.tiles_changed / totalMass) * d;
+        if (d < nearestDistance) {
+            nearestDistance = d;
+            nearestIndex = r.index;
+        }
+    }
+    return {
+        w1: Math.round(w1 * 1000) / 1000,
+        nearestIndex,
+        nearestDistance: Math.round(nearestDistance * 1000) / 1000,
+    };
+}

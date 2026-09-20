@@ -84,7 +84,15 @@ class ContextManager {
         // 时间衰减：半衰期 5 分钟 —— 「刚看过」的记忆天然更鲜活
         const ageMin = (now - record.timestamp) / 60000;
         const recency = Math.exp(-ageMin / 5);
-        return Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
+        const base = Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
+        // E-4 预测残差加成：页面级跳变帧（≥24/64 位）+0.45（封顶 1）。基线帧
+        // 0.8×0.5×1.0=0.4 被抬到 0.85 —— 跨过 0.8 钉扎线，世界剧变锚点获得
+        // 与任务目标同级的钉扎优先权（预测处理理论：注意力跟随预测误差）。
+        // 24 与 0.45 是算法形状字面量：24 位 ≈ 全屏 dHash 的页面级变化下界
+        // （元素级反馈撑不满此距离，不误伤）；0.45 恰把满新近度基线抬过钉扎线。
+        if ((record.surpriseBits ?? 0) >= 24)
+            return Math.min(1, base + 0.45);
+        return base;
     }
     /**
      * C-4 钉扎决策：显著度 >= 0.8 且钉扎名额未满 ⇒ 钉扎。
@@ -168,7 +176,11 @@ class ContextManager {
         const newId = Date.now();
         // C-4 既视感：新帧入窗前与潜意识比对（旧场景重现 ⇒ 灵光一闪）
         const dejaVu = hash ? this.flashback(hash) : '';
-        this.history.push({ id: newId, timestamp: newId, base64, hash });
+        // E-4 预测残差：与前一幅在窗图像的指纹距离（推送前计算 —— 前馈基准）。
+        // 页面级跳变 ⇒ surpriseBits 入记录 ⇒ 显著度加成 + 钉扎资格（见 assessSalience）
+        const prevHash = this.lastImageRecord()?.hash;
+        const surpriseBits = hash && prevHash ? hammingDistance(prevHash, hash) : undefined;
+        this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits });
         // C-4 注意力刷新：显著度评估 + 钉扎决策（驱逐顺序的事实源）
         this.refreshPins();
         // 不变量恢复式驱逐（B-7 双谓词）：反复问「图片数或体积还超标吗」。

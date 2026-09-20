@@ -180,6 +180,20 @@ class ActionJournal {
     return actionOnly ? this.entries.filter(e => ACTION_TOOLS.includes(e.tool)) : [...this.entries];
   }
 
+  /**
+   * F-4 行为复杂度画像：存活窗口内动作流的 LZ76 短语数 + 归一化熵率。
+   * 消费方：get_metrics 的卡死洞见（near-periodic 行为签名）。长度上限 400
+   * （O(n²) 解析的诚实预算；窗口语义 = 最近的行为形态，不是全史统计）。
+   */
+  actionComplexity(maxLen = 400): { phrases: number; normalized: number | null; length: number } {
+    const tools = this.list(true).slice(-maxLen).map(e => e.tool);
+    return {
+      phrases: lempelZivComplexity(tools),
+      normalized: normalizedActionComplexity(tools),
+      length: tools.length,
+    };
+  }
+
   /** 任务起点打标：start_complex_task 执行前调用；description 供失败记忆对齐任务语境 */
   markTaskStart(description = ''): void {
     this.taskStartIndex = this.entries.length;
@@ -290,4 +304,49 @@ export interface CounterfactualQuery {
   sinceIndex?: number;
   /** true = 只看失败/无效条目（死循环排查的默认视角） */
   failedOnly?: boolean;
+}
+
+// ─── F-4 LZ76 行为复杂度（第六维·压缩认知）：Kolmogorov 复杂度的可计算逼近 ───
+
+/**
+ * LZ76 复杂度（Lempel-Ziv 1976 解析法）：把序列切成「历史内最长匹配 + 1 个新符号」
+ * 的短语数。数学地位：c(n) 是 Kolmogorov 复杂度的上界逼近 —— 短语越少，序列越
+ * 接近周期/确定（卡死的复杂度签名）。实现于符号数组域（分隔符隔离，无字符串
+ * 边界歧义）；O(n²) 最坏，消费方以长度上限执法（统计诚实 vs 计算预算）。
+ * 纯函数导出：统计原子的测试面。
+ */
+export function lempelZivComplexity(seq: readonly string[]): number {
+  if (seq.length === 0) return 0;
+  const SEP = '\u0001';
+  let hist = SEP + seq[0] + SEP; // 已消费历史（分隔符包裹：完整符号匹配）
+  let phrases = 1;
+  let i = 1;
+  while (i < seq.length) {
+    let l = 0; // 历史内最长匹配长度
+    for (let len = 1; i + len <= seq.length; len++) {
+      const cand = SEP + seq.slice(i, i + len).join(SEP) + SEP;
+      if (hist.includes(cand)) l = len;
+      else break;
+    }
+    phrases++;
+    const phraseEnd = Math.min(i + l + 1, seq.length); // 短语 = 匹配 + 1 个新符号
+    hist += seq.slice(i, phraseEnd).join(SEP) + SEP;
+    i = phraseEnd;
+  }
+  return phrases;
+}
+
+/**
+ * F-4 归一化行为熵率：c(n)·log₂(n) / (n·log₂(α))，α = 观测字母表大小。
+ * ≈1 ⇒ 与同字母表均匀随机等复杂（真探索）；→0 ⇒ 周期/确定（卡死签名 ——
+ * 与屏幕侧 oscillationTracker 互补：屏幕不变但动作在转的循环只有行为侧可见）。
+ * n < 4 或 α < 2 ⇒ null（统计诚实下限）。
+ */
+export function normalizedActionComplexity(seq: readonly string[]): number | null {
+  const n = seq.length;
+  if (n < 4) return null;
+  const alpha = new Set(seq).size;
+  if (alpha < 2) return 0; // 单字母表 = 完全确定（熵率恒 0 —— 周期 1 的极限态）
+  const c = lempelZivComplexity(seq);
+  return Math.round((c * Math.log2(n)) / (n * Math.log2(alpha)) * 1000) / 1000;
 }

@@ -56,14 +56,27 @@ export function createWhatIfTool() {
           `\n  thought: ${thought}\n  alternatives:\n${alts}`;
       });
 
+      // F-6 经验晶体反事实：同场景指纹的群体工具成功率（历史重放 + 经验先验双通道）
+      // G-4：双率展示 —— 原始率与收缩率并陈（证据稀疏时模型自己看见回撤幅度）
+      const sceneHash = contextManager.lastImageRecord()?.hash;
+      const empirical = swarm.counterfactual(sceneHash, 3);
+      const foresightLines = empirical.map(e =>
+        `- ${e.tool}: ${(e.successRate * 100).toFixed(0)}% (shrunk ${(e.shrunkRate * 100).toFixed(0)}%) over ${e.attempts} attempt(s) in this scene`);
+
       return JSON.stringify({
         status: 'SUCCESS',
         state_anchor: {
           decision_points: points.length,
           causal_note: 'Each entry records observe→thought→action→result; alternatives come from the same-scene history.',
+          // F-6 经验前瞻：同场景的群体工具成功率（经验晶体的反事实通道）
+          ...(empirical.length > 0 ? { empirical_foresight: foresightLines } : {}),
         },
         analysis: lines.join('\n\n'),
-        next_step: 'Weigh the alternatives above. To "rewind", call replay_actions from before the failing step ' +
+        next_step: (empirical.length > 0
+          ? `Empirical priors above: in this exact scene the crowd succeeded with ${empirical[0].tool} ` +
+            `(${(empirical[0].successRate * 100).toFixed(0)}% over ${empirical[0].attempts} attempts) — weigh it as a prior, then verify. `
+          : '') +
+          'Weigh the alternatives above. To "rewind", call replay_actions from before the failing step ' +
           'and substitute a different action; otherwise pick the historically successful route and continue manually.',
       }, null, 2);
     },

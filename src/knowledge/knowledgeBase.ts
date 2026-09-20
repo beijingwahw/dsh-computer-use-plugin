@@ -48,20 +48,35 @@ const CLUSTER_SIMILARITY = 0.45;
 const CONSENSUS_BONUS = 0.1;
 /** 皮层化衰减：情景让位语义，留痕不销毁（knowledge.test 钉住 0.4×0.5=0.2） */
 const CORTICALIZE_DECAY = 0.5;
-/** 置信度半衰期（30 天 —— UI 改版代谢周期的量级估计）。数值是部署域假设
+/** 置信度半衰期基线（E-1 间隔重复：未复证条目的 30 天缺省）。数值是部署域假设
  *  （包络内时间不流逝，不可证伪）；衰减形状（过滤 + 排序让位）由
- *  knowledge.test 免疫 #1 经 snapshot 时间旅行守护。 */
+ *  knowledge.test 免疫 #1 时间旅行守护 —— 它只测未复证条目，基线形状零回归。 */
 const CONFIDENCE_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
+/** E-1 稳定性增长系数：每次复证半衰期 ×1.6 —— Ebbinghaus 间隔效应的工程化
+ *  （FSRS/SuperMemo 文献报告单次复习稳定性增益 ×1.2~×2.5，取下沿保守值）。
+ *  算法形状字面量（值即设计，非旋钮）：「复习让记忆更牢」的机制形状，
+ *  epochE.test 间隔重复用例守护「复证条目抗遗忘 ≫ 未复证条目」的序关系。 */
+const STABILITY_GROWTH = 1.6;
+/** E-1 稳定性封顶（365 天）：一年不复证的记忆无论如何加固都让位 —— 世界会变，
+ *  间隔效应不能把旧知识变成永恒（封顶是诚实性约束，不是性能参数）。 */
+const HALF_LIFE_CAP_MS = 365 * 24 * 60 * 60 * 1000;
 
 /** 分词（检索通道共用：连续字母/数字/CJK 串；无停用词表 —— 留白） */
 function tokenize(text: string): string[] {
   return text.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]+/g) ?? [];
 }
 
-/** 遗忘曲线（纯函数）：c × 0.5^(age/半衰期)。age=0 ⇒ 原值；越老越冷 */
-function decay(confidence: number, updatedAt: number, now: number): number {
+/** 遗忘曲线（纯函数）：c × 0.5^(age/半衰期)。age=0 ⇒ 原值；越老越冷。
+ *  E-1 间隔重复：半衰期逐条目化 —— 条目自带 halfLifeMs（复证增长），
+ *  缺席回退 30 天基线（旧档/未复证自然降级，零迁移成本）；封顶 365 天。 */
+function decay(confidence: number, updatedAt: number, now: number, halfLifeMs?: number): number {
   const age = Math.max(0, now - updatedAt);
-  return confidence * Math.pow(0.5, age / CONFIDENCE_HALF_LIFE_MS);
+  const hl = Math.min(
+    typeof halfLifeMs === 'number' && Number.isFinite(halfLifeMs) && halfLifeMs > 0
+      ? halfLifeMs : CONFIDENCE_HALF_LIFE_MS,
+    HALF_LIFE_CAP_MS,
+  );
+  return confidence * Math.pow(0.5, age / hl);
 }
 
 /** 亲证半衰期（核证接地纪元，出册常数）：信任 = 置信度 × 0.5^(age/半衰期)。
@@ -172,7 +187,7 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     const maxResults = query.maxResults ?? 5;
     const ranked = [...this.entries.values()]
       // 遗忘曲线执法点：过滤与排序均用有效置信度 —— 老知识自然让位
-      .map(e => ({ entry: e, eff: decay(e.confidence, e.updatedAt, startedAt) }))
+      .map(e => ({ entry: e, eff: decay(e.confidence, e.updatedAt, startedAt, e.halfLifeMs) }))
       .filter(({ entry, eff }) => eff >= minConfidence)
       .map(({ entry, eff }) => ({ entry, eff, score: this.hybridScore(entry, tokens, queryVec) }))
       .filter(s => s.score > 0)
@@ -283,6 +298,12 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
         e.confidence = e.confidence + (1 - e.confidence) * P.REINFORCE_STEP; // 渐近 1，结构不越界
         e.updatedAt = now; // 复证即保鲜（遗忘曲线重置）
         e.verifiedAt = now; // 复证即亲证（信任时钟重置）
+        // E-1 间隔重复：复证不仅升滴度（confidence），也升稳定性（半衰期 ×1.6）——
+        // 越被复证的记忆越抗遗忘；封顶 365 天（间隔效应不许把旧知识变成永恒）
+        e.halfLifeMs = Math.min(
+          HALF_LIFE_CAP_MS,
+          Math.round((e.halfLifeMs ?? CONFIDENCE_HALF_LIFE_MS) * STABILITY_GROWTH),
+        );
         reinforced = true;
       } else {
         e.confidence = e.confidence * P.DISCONFIRM_DECAY; // 反证：下沉但绝不销毁证据
@@ -461,6 +482,12 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
       if (entry.verifiedAt !== undefined &&
           (typeof entry.verifiedAt !== 'number' || !Number.isFinite(entry.verifiedAt))) {
         return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" verifiedAt must be a finite number when present` } };
+      }
+      // E-1 稳定性域执法：在场必须是正有限数（0/负/非数 = 结构谎言，域外拒绝）；
+      // 缺席 = 30 天基线（旧档自然降级 —— 间隔重复对历史档案零迁移成本）
+      if (entry.halfLifeMs !== undefined &&
+          (typeof entry.halfLifeMs !== 'number' || !Number.isFinite(entry.halfLifeMs) || entry.halfLifeMs <= 0)) {
+        return { ok: false, error: { field: 'snapshot.entries', reason: `entry "${entry.id}" halfLifeMs must be a positive finite number when present` } };
       }
     }
     // 换脑：清空旧内容后整批入账

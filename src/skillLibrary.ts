@@ -11,6 +11,7 @@ import { journal } from './journal';
 import { similarity } from './perceptualHash';
 import { tokenize, overlapCoefficient } from './uiMemory';
 import { embed, cosine, type SparseVector } from './semanticHash';
+import { sequitur, expandSymbols } from './sequitur';
 
 export interface SkillStep {
   tool: string;
@@ -55,6 +56,83 @@ const REPLAYABLE = new Set([
 
 const stepSignature = (steps: SkillStep[]): string =>
   steps.map(s => `${s.tool}:${JSON.stringify(s.args)}`).join('|');
+
+// ─── E-2 基因组组装（第五维·信息热力学）：OLC 重叠对齐 ───
+
+/** 单步签名（对齐原子）与序列签名（stepSignature 的切片版） */
+const stepSig1 = (s: SkillStep): string => `${s.tool}:${JSON.stringify(s.args)}`;
+const stepsSig = (ss: readonly SkillStep[]): string => ss.map(stepSig1).join('|');
+
+/**
+ * OLC（Overlap-Layout-Consensus）最长尾头重叠：求 merged 尾部与 next 头部的
+ * 最长精确重叠 k（签名逐字节相等），返回 k。合成律：merged + next[k:] ——
+ * 共享子序列只保留一份（基因组组装的 contig 缝合：粘性末端对齐后拼接）。
+ * 保底约束：k ≤ next.length - 1（新基因必须贡献 ≥1 步新物质 —— 全包含基因
+ * 是强化不是合成，走签名撞车路径）。精确匹配语义：确定性、可审计；
+ * 模糊对齐（参数近似 + 场景指纹锚定）是留白。导出仅供测试（_forTest 先例）。
+ */
+export function olcOverlap(merged: readonly SkillStep[], next: readonly SkillStep[]): number {
+  const maxK = Math.min(merged.length, next.length - 1);
+  for (let k = maxK; k > 0; k--) {
+    if (stepsSig(merged.slice(merged.length - k)) === stepsSig(next.slice(0, k))) return k;
+  }
+  return 0;
+}
+
+// ─── E-5 贝叶斯可靠度（Beta-Bernoulli 共轭后验）───
+
+/** 后验可靠度：Beta(1,1) 均匀先验 + (s 胜 n 试) ⇒ Beta(s+1, n-s+1)。
+ *  mean = (s+1)/(n+2) —— 与既有 Laplace 平滑逐字一致（零回归的结构保证）；
+ *  hw = 1.96√(αβ/((α+β)²(α+β+1))) —— 95% 可信区间半宽，随证据量 n 收缩。
+ *  导出纯函数：与 riskGate.matchesRiskPatterns 同律（数学原子的测试面）。 */
+export function betaReliability(successCount: number, attemptCount: number): { mean: number; hw: number } {
+  const alpha = successCount + 1;
+  const beta = attemptCount - successCount + 1;
+  const mean = alpha / (alpha + beta);
+  const hw = 1.96 * Math.sqrt((alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1)));
+  return { mean, hw };
+}
+
+/** F-1 符号化：args → 稳定短哈希（FNV-1a —— semanticHash 同源密码学原语） */
+function hashArgs(args: Record<string, any>): string {
+  let h = 0x811c9dc5;
+  const s = JSON.stringify(args, Object.keys(args).sort());
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+// ─── G-3 模糊量化文法归纳（第七维·过程感知）───
+
+/** 量化网格：数值参数按 0.05 网格取整（坐标抖动 <0.025 ⇒ 同符号）。
+ *  动机：同一工作流重做时坐标总有微差（0.50 vs 0.52）—— 精确签名下 SEQUITUR
+ *  看不见重复。量化等价类让「同一个按钮，稍微偏一点」仍归同一符号。
+ *  仅用于 mineMotifs（建议性）；OLC 重组合成（E-2）保持精确 ——
+ *  建议可模糊，执行必须精确。 */
+const MOTIF_QUANT = 0.05;
+
+/** 深层数值量化（递归；数组与嵌套对象同律）—— 模糊符号化的铸造点 */
+function quantizeArgs(v: unknown): unknown {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return Math.round(v / MOTIF_QUANT) * MOTIF_QUANT;
+  }
+  if (Array.isArray(v)) return v.map(quantizeArgs);
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      out[k] = quantizeArgs((v as Record<string, unknown>)[k]);
+    }
+    return out;
+  }
+  return v;
+}
+
+/** 模糊符号：量化后的 args 哈希（mineMotifs 专用） */
+function hashArgsFuzzy(args: Record<string, any>): string {
+  return hashArgs(quantizeArgs(args) as Record<string, any>);
+}
 
 class SkillLibrary {
   private skills: Skill[] = [];
@@ -163,6 +241,45 @@ class SkillLibrary {
   }
 
   /**
+   * F-1 文法归纳动机挖掘（压缩即学习）：对行动日志跑 SEQUITUR 文法归纳，
+   * 重复 ≥minUsage 次的规则（子序列）即「行为中重复着自己却未被固化的技能」。
+   * 与 induceFromJournal 的分工：后者只切任务边界内的整段轨迹；本方法发现
+   * 跨任务重复的子序列动机（MDL：能被短文法压缩的部分就是结构）。
+   * 消费方：match_skill 落空时提示「日志里已重复 N 次的序列可 save_skill 固化」。
+   * 预算：maxSteps 上限（O(n²) 批处理文法归纳的诚实护栏）；零重复 ⇒ 空数组。
+   */
+  mineMotifs(minUsage = 2, minLength = 2, maxMotifs = 3, maxSteps = 400):
+    Array<{ steps: SkillStep[]; usage: number; motifLength: number }> {
+    if (!this.enabled) return [];
+    const entries = journal.list(true).slice(-maxSteps);
+    if (entries.length < minLength * minUsage) return [];
+    // 符号化：G-3 模糊量化（tool#fnv(quantized-args)）—— 坐标抖动 <0.025 归同符号；
+    // 同一工作流重做时总有微差，精确签名会漏掉全部重复（量化等价类 = 抖动容忍）
+    const dict = new Map<string, SkillStep>();
+    const seq: string[] = [];
+    for (const e of entries) {
+      const sym = `${e.tool}#${hashArgsFuzzy(e.args ?? {})}`;
+      if (!dict.has(sym)) dict.set(sym, { tool: e.tool, args: e.args ?? {} });
+      seq.push(sym);
+    }
+    const grammar = sequitur(seq);
+    const motifs: Array<{ steps: SkillStep[]; usage: number; motifLength: number }> = [];
+    for (const rule of grammar.rules.values()) {
+      if (rule.usage < minUsage || rule.expandedLength < minLength) continue;
+      // 解码：规则体展开回叶符号 → 步骤序列
+      const syms = expandSymbols(grammar, rule.symbols);
+      const steps = syms.map(s => dict.get(s)).filter((x): x is SkillStep => x !== undefined);
+      if (steps.length === syms.length && steps.length >= minLength) {
+        motifs.push({ steps, usage: rule.usage, motifLength: steps.length });
+      }
+    }
+    // 最长且最常重复的动机优先（信息量 = 长度 × 重复度的乘积排序）
+    return motifs
+      .sort((x, y) => (y.motifLength * y.usage) - (x.motifLength * x.usage))
+      .slice(0, maxMotifs);
+  }
+
+  /**
    * 匹配：文本重合 + 可靠度 + 入口场景同屏加成 + 新近度。
    * C-2 语义泛化：文本项取 max(overlap, semanticCosine) ——
    *   精确匹配零回归（overlap 主导）；「整理数据」经向量命中「筛选数据」（零样本泛化）。
@@ -179,7 +296,12 @@ class SkillLibrary {
         if (!s.embedding) s.embedding = vec;
         const semantic = cosine(qVec, vec);
         const text = Math.max(overlap, semantic);
-        const reliability = (s.successCount + 1) / (s.attemptCount + 2); // Laplace 平滑
+        // E-5 贝叶斯可靠度：Beta(1,1) 后验均值（= Laplace 平滑，逐字一致 —— 零回归）
+        // − 0.1 × 95% CI 半宽（不确定度折扣：同均值下证据多者胜 —— 「8/12 的老技能」
+        // 排在「0/0 的新直觉」之前，因为后者可能只是运气）。0.1 是算法形状字面量：
+        // 折扣只做同均值平票的裁决者，绝不做主排序信号。
+        const post = betaReliability(s.successCount, s.attemptCount);
+        const reliability = post.mean - 0.1 * post.hw;
         let scene = 0;
         if (currentSceneHash && s.entrySceneHash && similarity(currentSceneHash, s.entrySceneHash) >= 0.9) {
           scene = 0.3;
@@ -191,11 +313,39 @@ class SkillLibrary {
           // C-2 归因：命中通道对模型透明。overlap>=0.5 才算真正词面命中；
           // 零星共享字（CJK 单字/二元组）是子词噪声，此时排序信号实为语义向量。
           matched_via: overlap >= 0.5 && overlap >= semantic ? 'exact-tokens' : 'semantic-vector',
+          // E-5 透明面：后验均值 + 95% 可信区间（模型看得见「可靠度 0.67±0.46」
+          // 与「0.67±0.09」的区别 —— 不确定性与结论同等可见，决策才有质地）
+          posterior_mean: Math.round(post.mean * 1000) / 1000,
+          ci95: [
+            Math.max(0, Math.round((post.mean - post.hw) * 1000) / 1000),
+            Math.min(1, Math.round((post.mean + post.hw) * 1000) / 1000),
+          ],
+          // G-5 Pareto 轴（内部暂存，判定后剥离）：三目标各自合法但互相冲突，
+          // 加权和排序是仲裁 —— 非支配标注让模型看见「为什么是它」的另一面
+          _axes: { text, rel: post.mean, rec: recency },
         } as Skill & { score: number; matched_via: string };
       })
       .filter(s => s.score > 0.15)
       .sort((a, b) => b.score - a.score)
-      .slice(0, k);
+      .slice(0, k)
+      // G-5 非支配标注：A 支配 B ⇔ 三轴全 ≥ 且至少一轴 >。非支配者标
+      // pareto_optimal —— 「没有任何别的候选在所有维度都不差于它且有一维更好」。
+      // 两遍式（先全量判支配，后全量剥离轴）—— 单遍变异会破坏后续判读
+      .map((hit, _i, all) => {
+        const axesA = (hit as any)._axes;
+        const dominated = all.some(other => {
+          if (other === hit) return false;
+          const axesB = (other as any)._axes;
+          const ge = axesB.text >= axesA.text && axesB.rel >= axesA.rel && axesB.rec >= axesA.recency;
+          const gt = axesB.text > axesA.text || axesB.rel > axesA.rel || axesB.rec > axesA.recency;
+          return ge && gt;
+        });
+        return { hit, dominated };
+      })
+      .map(({ hit, dominated }) => {
+        delete (hit as any)._axes;
+        return { ...hit, pareto_optimal: !dominated };
+      });
   }
 
   /**
@@ -245,15 +395,21 @@ class SkillLibrary {
 
     if (genes.length < 2) return { skill: null, plan: [] }; // 单基因 = 已有技能，无需合成
 
-    // 合成步骤 = 基因步骤串接（去相邻重复：同工具同参数的接缝冗余剪除）
+    // 合成步骤 = E-2 OLC 重叠布局：逐基因折叠，尾头最长精确重叠缝合（共享子序列
+    // 只保留一份）。旧「相邻重复步骤剪除」是本对齐的 k=1 特例 —— 被最长重叠自然包含。
     const merged: SkillStep[] = [];
+    const splices: number[] = [];
     for (const g of genes) {
-      for (const st of g.steps) {
-        const prev = merged[merged.length - 1];
-        if (prev && prev.tool === st.tool && JSON.stringify(prev.args) === JSON.stringify(st.args)) continue;
-        merged.push(st);
-      }
+      const k = merged.length > 0 ? olcOverlap(merged, g.steps) : 0;
+      splices.push(k);
+      for (const st of g.steps.slice(k)) merged.push(st);
     }
+    // 族谱透明：每个接缝的重叠长度写进 plan 的归因（审计可回放 —— 白盒合成）
+    plan.forEach((p, i) => {
+      if (i > 0 && splices[i] > 0) {
+        p.reason += `; OLC spliced ${splices[i]} overlapping step(s)`;
+      }
+    });
     const sig = stepSignature(merged);
     const existing = this.skills.find(s => stepSignature(s.steps) === sig);
     if (existing) return { skill: existing, plan }; // 重组结果撞已有技能 = 强化而非新建
