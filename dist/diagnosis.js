@@ -27,6 +27,62 @@ const BN_SIGNAL_KEYS = ['shifted', 'hurstHigh', 'loop', 'heavyTail', 'highNoop']
  * 消费方：get_metrics 在规则诊断之外附加 belief 块 —— 「首中即断」给处方，
  * 信念表给**证据组合的全景**（包括未被规则命中的竞争假设）。
  */
+/**
+ * M 纪元（留白兑现）：CPT 标定 —— 数据从哪来？**从审计过的确定性规则表蒸馏**。
+ * 32 个信号组合全枚举 × 规则表 oracle（首中即断）⇒ 共现计数 + Beta(1,1) 平滑
+ * + 向专家律收缩（4 伪计数托底）⇒ 拟合 CPT；agreement = 拟合后验 MAP 与规则
+ * 判决的吻合率。数据血缘成文：oracle 可审计（diagnose 规则序）、蒸馏无参
+ * （计数+平滑）—— 真实运行数据的接入点 = 替换 oracle 为遥测流，接口不变。
+ */
+export function calibrateCptFromRules() {
+    const keys = Object.keys(BN_CPT);
+    const counts = {};
+    const fired = {};
+    for (const s of keys) {
+        counts[s] = [0, 0, 0, 0, 0];
+        fired[s] = 0;
+    }
+    let enumerated = 0, ruleFired = 0, agree = 0;
+    for (let mask = 0; mask < 32; mask++) {
+        enumerated++;
+        const sig = {
+            regimeShiftTools: mask & 1 ? ['x'] : [],
+            hurst: mask & 2 ? 0.8 : 0.3,
+            behavior: { normalized: mask & 4 ? 0.1 : 0.6, phrases: mask & 4 ? 4 : 10, length: 30 },
+            heavyLatencyTail: !!(mask & 8),
+            highNoopTools: mask & 16 ? ['y'] : [],
+        };
+        const dx = diagnose(sig);
+        if (!dx)
+            continue;
+        ruleFired++;
+        fired[dx.syndrome] += 1;
+        BN_SIGNAL_KEYS.forEach((k, i) => {
+            if (mask & (1 << i))
+                counts[dx.syndrome][i] += 1;
+            void k;
+        });
+        const belief = bayesianBelief({
+            shifted: !!(mask & 1), hurstHigh: !!(mask & 2), loop: !!(mask & 4),
+            heavyTail: !!(mask & 8), highNoop: !!(mask & 16),
+        });
+        if (belief && belief[0].posterior > 0.5 && belief[0].syndrome === dx.syndrome)
+            agree++;
+    }
+    const cpt = {};
+    for (const s of keys) {
+        const n = fired[s];
+        cpt[s] = counts[s].map((c, i) => {
+            const expert = BN_CPT[s][i];
+            if (n === 0)
+                return expert; // 规则未触达 ⇒ 专家律兜底（血缘标注）
+            const fitted = (c + 1) / (n + 2); // Beta(1,1) 后验均值
+            const w = n / (n + 4); // 收缩权重：证据多则数据主导
+            return Math.round((w * fitted + (1 - w) * expert) * 1000) / 1000;
+        });
+    }
+    return { cpt, agreement: ruleFired > 0 ? agree / ruleFired : 0, enumerated, ruleFired };
+}
 export function bayesianBelief(signals) {
     const observed = BN_SIGNAL_KEYS.filter(k => signals[k] !== null);
     if (observed.length === 0)

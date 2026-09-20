@@ -282,6 +282,18 @@ const USER32_DECL =
   + '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h); '
   + 'public struct RECT { public int L; public int T; public int R; public int B; }"';
 
+
+/** 高对比度 P/Invoke 声明（GET=0x42 / SET=0x43；HCF_HIGHCONTRASTON=0x1） */
+const HC_DECL =
+  "Add-Type -Name U32HC -Namespace Win -MemberDefinition \"" +
+  '[DllImport(\"user32.dll\", SetLastError=true)] public static extern bool SystemParametersInfo(int a, int p, ref int f, int i); ' +
+  'public static int GetHC() { int f = 0; U32HC.SystemParametersInfo(66, 4, ref f, 0); return f; } ' +
+  'public static bool SetHC(int f) { return U32HC.SystemParametersInfo(67, 4, ref f, 3); }"'; // SPIF_UPDATEINIFILE|SENDCHANGE=3
+
+function setHighContrastPs(flagExpr: string): string {
+  return `${HC_DECL}; [Win.U32HC]::SetHC(${flagExpr}) | Out-Null`;
+}
+
 export class WindowsAdapter implements SystemAdapter {
   readonly platform = 'win32';
   private probe: (cmd: string) => boolean;
@@ -302,9 +314,21 @@ export class WindowsAdapter implements SystemAdapter {
         caps.add('maximize_window');
         caps.add('move_window');
         caps.add('set_zoom'); // 键盘假定在场（与 system 热键管线同依赖）
+        caps.add('set_contrast'); // L 纪元：SPI_SETHIGHCONTRAST 官方 API 落成
       }
     } catch { /* 探测异常 ⇒ 空能力集（NullAdapter 语义，不毒化启动） */ }
     return caps;
+  }
+
+  /** 读高对比度 flags（SPI_GETHIGHCONTRAST=0x42；读操作 —— 真机验证安全） */
+  private async getHighContrastFlags(): Promise<number | null> {
+    try {
+      const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, `${HC_DECL}; [Win.U32HC]::GetHC()`]);
+      const f = Number.parseInt(stdout.trim(), 10);
+      return Number.isFinite(f) ? f : null;
+    } catch {
+      return null; // 读失败 ⇒ undo 降级为文档化（flags unknown）
+    }
   }
 
   /** 按标题关键词找主窗口句柄（0 = 未命中） */
@@ -355,8 +379,13 @@ export class WindowsAdapter implements SystemAdapter {
         return { kind: 'set_zoom', titleHint: hint }; // 站点内部态不可读：undo 恒为 Ctrl+0
       }
       case 'set_contrast': {
-        // 不可达（capabilities 诚实不含此项）；分支完备性保留
-        throw new Error('set_contrast on Windows is an honestly-declared void (registry+SPI roundtrip unreliable)');
+        // L 纪元（留白兑现）：SPI_SETHIGHCONTRAST —— 官方高对比度 API（非注册表
+        // 猜测），undo 还原原 flags（GET 先读）。真机验证仅到 GET（读操作）；
+        // SET/undo 的往返正确性由注入式测试锁命令形状 + 用户首次使用时观察。
+        const before = await this.getHighContrastFlags();
+        const flags = (before === null ? 0 : before) | 0x1; // HCF_HIGHCONTRASTON
+        await this.execFn(PS_EXE, [...PS_FLAGS, setHighContrastPs(String(flags))]);
+        return { kind: 'set_contrast', before: { theme: before === null ? 'unknown' : String(before) }, level: undefined } as UndoRecipe;
       }
     }
   }
@@ -389,8 +418,13 @@ export class WindowsAdapter implements SystemAdapter {
         await system.pressHotkey(['ctrl', '0']);
         return;
       }
-      case 'set_contrast':
-        return; // 不可达（apply 即抛）
+      case 'set_contrast': {
+        // 还原为 apply 前读到的 flags（未知 ⇒ 关闭位清除 —— 保守方向）
+        const orig = Number.parseInt(recipe.before?.theme ?? '0', 10);
+        const flags = (Number.isFinite(orig) ? orig : 0) & ~0x1;
+        await this.execFn(PS_EXE, [...PS_FLAGS, setHighContrastPs(String(flags))]);
+        return;
+      }
     }
   }
 

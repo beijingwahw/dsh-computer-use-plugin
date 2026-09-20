@@ -120,8 +120,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return await call_next(request)
 
         # Layer 1: 传输绑定（TCP 只听 127.0.0.1 / UDS 0600，见 config + run()）
-        # Layer 2: PID Attestation —— 传输层 SO_PEERCRED 未实现（见 auth.py 头注），
-        #           仅在 Layer 3 验签后对 payload.pid 做 /proc 存在性/白名单校验。
+        # Layer 2: PID Attestation —— M 纪元兑现：UDS+Linux 下 peercred 协议把
+        # 对端 PID 注入 scope；在场 ⇒ token.pid 必须逐位相等（auth.py 头注承诺的
+        # 校验落地）。scope 无 peer_pid（TCP/非 Linux）⇒ 既有 /proc 白名单路径。
+        scope_pid = request.scope.get("peer_pid")
+        if scope_pid is not None and auth_result.pid != scope_pid:
+            return JSONResponse(
+                status_code=200,
+                content=failure(
+                    ErrorKind.UNAUTHORIZED,
+                    f"token pid {auth_result.pid} != SO_PEERCRED peer pid {scope_pid}",
+                    latency_ms=0,
+                ),
+            )
 
         # Layer 3: Capability Token
         token = request.headers.get("X-Cap-Token", "")
@@ -225,6 +236,12 @@ def run() -> None:
     import uvicorn
 
     if config.server.transport == "uds":
+        # M 纪元（留白兑现）：UDS + Linux ⇒ SO_PEERCRED 协议子类（peer_pid 入
+        # scope；auth 刻度 token.pid 逐位相等）。非 Linux/工厂缺席 ⇒ None 原样。
+        from .peercred import make_peercred_protocol
+        _peercred_http = make_peercred_protocol()
+        if _peercred_http is not None:
+            print("[dsh-physical] SO_PEERCRED peer-pid capture armed (UDS).", file=sys.stderr)
         # UDS 模式：uvicorn 原生支持 ``--uds``
         # 在 uvicorn 启动后，需要 chmod socket 文件权限到 0600
         # 但 uvicorn 创建 socket 时不主动收口权限；我们用 startup 事件 + 异步任务补
@@ -237,6 +254,7 @@ def run() -> None:
 
         uvicorn.run(
             app,
+            http=_peercred_http,  # type: ignore[arg-type]
             uds=config.server.uds_path,
             log_level="info",
             # 生产环境：单 worker（多 worker 会导致 UDS 抢占）

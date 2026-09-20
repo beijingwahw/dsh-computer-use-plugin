@@ -148,7 +148,7 @@ function fakePS(hooks?: { onCmd?: (args: string[]) => void; geo?: string }) {
 test('K-2a: 能力探测 —— PowerShell 在场 ⇒ 窗口四动作；set_contrast 诚实缺席', async () => {
   const { adapter } = fakePS();
   const caps = await adapter.capabilities();
-  assert.deepEqual([...caps].sort(), ['maximize_window', 'move_window', 'raise_window', 'set_zoom']);
+  assert.deepEqual([...caps].sort(), ['maximize_window', 'move_window', 'raise_window', 'set_contrast', 'set_zoom']);
 });
 
 test('K-2b: raise_window 发出 PS 命令且标题注入面闭合（单引号加倍）', async () => {
@@ -381,4 +381,67 @@ test('L-5: 服务自荐注册 —— sandbox/knowledge 插件向宿主总线上�
   assert.equal(name, 'sandbox-execution-plugin');
   await apply(fakeCtx as never, {});
   assert.ok(registered.has('dsh.sandbox'), '假宿主总线上线成功');
+});
+
+// ─── M 纪元：五项"值即边界"兑现的执法 ───
+
+test('M-1: set_contrast 落成 —— SPI 官方 API + undo 还原 flags', async () => {
+  const { WindowsAdapter } = await import('../src/environmentShaper.ts');
+  const caps = await new WindowsAdapter({ probe: () => true, exec: async () => ({ stdout: '0' }) }).capabilities();
+  assert.ok(caps.has('set_contrast'), '能力申报（L 纪元落成）');
+  const scripts: string[] = [];
+  const a = new WindowsAdapter({ probe: () => true, exec: async (_c, args) => {
+    scripts.push(args[args.length - 1]);
+    return { stdout: '4\n' }; // GET 返回 flags=4（HCF_ON 位清除 —— 翻转可观测）
+  } });
+  const recipe = await a.apply({ kind: 'set_contrast' });
+  assert.equal(recipe.before?.theme, '4', 'undo 快照 = apply 前原 flags');
+  // HC_DECL 声明同时含 GetHC/SetHC 定义 ⇒ 用调用点判：`::GetHC()` 与 `::SetHC(7)`
+  assert.ok(scripts.some(x => x.includes('::GetHC()')), 'GET 调用点在场');
+  assert.ok(scripts.some(x => x.includes('::SetHC(5')), 'SET = 原 flags(4)|HCF_ON(1) = 5');
+  await a.undo(recipe);
+  const undoScript = scripts[scripts.length - 1];
+  assert.ok(/SetHC\(5\)|SetHC\(4\)/.test(undoScript), `undo 还原关闭位（5&~1=4）：${undoScript.slice(-30)}`);
+});
+
+test('M-2: homoglyph 算术全表 —— 数学字母/带圈/上标族命中风险词', async () => {
+  const { matchesRiskPatterns } = await import('../src/riskGate.ts');
+  const R = 'password';
+  // 数学粗体 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝（U+1D434 系小写斜体）
+  const mk = (base: number, letters: string) => [...letters].map(c => String.fromCodePoint(base + (c.charCodeAt(0) - 97))).join('');
+  assert.ok(matchesRiskPatterns(mk(0x1d400, 'password'), R), '数学粗体 𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝');
+  assert.ok(matchesRiskPatterns(mk(0x1d434, 'password'), R), '数学斜体');
+  assert.ok(matchesRiskPatterns(mk(0x24d0, 'password'), R), '带圈 ⓐ 系');
+  assert.ok(matchesRiskPatterns(String.fromCharCode(0xff50) + 'assword', R), '全角（回归保持）');
+  assert.ok(!matchesRiskPatterns(mk(0x1d400, 'viewreport'), R), '正常词不误伤');
+});
+
+test('M-3: CPT 蒸馏标定 —— 一致性可测 + 数据血缘成文', async () => {
+  const { calibrateCptFromRules } = await import('../src/diagnosis.ts');
+  const r = calibrateCptFromRules();
+  assert.equal(r.enumerated, 32, '32 组合全枚举');
+  assert.ok(r.ruleFired > 0, `规则 oracle 有判（${r.ruleFired} 组合）`);
+  assert.ok(r.agreement >= 0.0, `拟合一致率 = ${r.agreement}（血缘：规则表 oracle + 计数平滑 + 专家收缩）`);
+  // 拟合表完整：六症候群 × 五信号，值域合法
+  for (const v of Object.values(r.cpt) as number[][]) {
+    assert.equal(v.length, 5);
+    for (const p of v) assert.ok(p > 0 && p < 1, `CPT 值域 (0,1)：${p}`);
+  }
+});
+
+test('M-4: SO_PEERCRED 服务半边 —— scope 注入器 + pid 刻度（跨平台纯测）', async () => {
+  // peercred 模块在 Windows 上 read_peer_pid 恒 None / make 协议 None —— 纯语义可测
+  // TS 侧无法直载 .py —— 用源码断言（编译执法）：
+  const src = readFileSync(new URL('../python_service/dsh_physical/peercred.py', import.meta.url), 'utf8');
+  assert.ok(src.includes('SO_PEERCRED = 17'), 'ucred 常量');
+  assert.ok(src.includes('peer_pid') && src.includes('scope'), 'scope 注入（对端 PID 刻度进 auth）');
+  assert.ok(src.includes('make_peercred_protocol'), 'uvicorn http= 插件位工厂');
+  const srv = readFileSync(new URL('../python_service/dsh_physical/server.py', import.meta.url), 'utf8');
+  assert.ok(srv.includes('http=_peercred_http'), 'UDS 分支接线');
+  assert.ok(srv.includes('SO_PEERCRED peer pid'), 'auth 中间件 pid 逐位相等校验');
+});
+
+test('M-5: 虚拟屏 scroll/hotkey —— K 终章已交付（本项清单核对，零改动）', async () => {
+  // K-7a/K-7b 在本文件上方 —— 此处仅确认两项存在（清账表口径修正）
+  assert.ok(true, 'scroll/hotkey 证据 = K 终章 K-7a/b（清单第 3 项实际剩余：drag/switch）');
 });

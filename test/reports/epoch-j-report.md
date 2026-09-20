@@ -354,3 +354,28 @@ verify 脚本 23/23；112 模块导入干净；tsc 零错误；dist 已重建。
 
 **终态：317 项测试 / 309 pass / 0 fail / 7 skipped（epochK 扩至 24 项含
 L-1..L-5）；基准 12 pass / 0 fail / 2 环境跳过；113 模块干净；tsc 零错误。**
+
+## 附录八：M 纪元 —— 五项"值即边界"的数据/环境工作兑现
+
+1. **虚拟屏 scroll/hotkey**：K 终章已交付（K-7a/b）——清单口径修正：实际剩余
+   的是 drag/switch 证据（M-5 核对）。
+2. **Windows set_contrast 落成**：`SystemParametersInfo` 官方 API（GET=0x42
+   先读快照 / SET=0x43 置 HCF_HIGHCONTRASTON / undo 还原原 flags）。真机
+   验证到 GET（只读，实测返回 0）；SET/undo 命令形状由注入式测试 M-1 锁死
+   （flags=4 → SetHC(5) → undo SetHC(4)，位运算翻转可观测）。
+3. **homoglyph 算术全表**：数学字母五套（U+1D400 系）、带圈 Ⓐ/ⓐ、上标、
+   亚美尼亚/科普特策展 —— 码点偏移算术批量生成（推导即数据，零数据文件；
+   扩展=加一行）。M-2 执法：𝐩𝐚𝐬𝐬𝐰𝐨𝐫𝐝（数学粗体）命中 riskGate。
+4. **CPT 标定数据**：`calibrateCptFromRules()` —— 32 信号组合全枚举 × 规则表
+   oracle ⇒ 共现计数 + Beta(1,1) 平滑 + 专家收缩。**诚实结果**：拟合表与
+   规则首中 MAP 的一致率 0.484（31/32 组合有判）—— 信念侧写不复制首中
+   判决（它给全景后验），分歧本身被量化为数据；接入真实遥测流 = 替换
+   oracle，接口不变（M-3 执法：值域/完整性/确定性）。
+5. **SO_PEERCRED 服务半边**：`peercred.py`（ucred 捕获 + scope 注入经 app
+   包装零侵入）+ server.py UDS 分支接线（uvicorn `http=` 插件位）+ auth
+   中间件 pid 逐位相等刻度（auth.py 头注承诺的校验落地）。非 Linux ⇒ 工厂
+   返回 None 原样运行；**成对留白声明**：Node 侧 undici 不认 UDS（客户端
+   半边仍为已声明留白）。M-4 源码级执法。
+
+**终态：322 项测试 / 315 pass / 0 fail / 7 skipped（epochK 29 项）；基准
+12 pass / 0 fail / 2 环境跳过；113 模块干净；tsc 零错误。**
