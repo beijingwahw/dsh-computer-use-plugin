@@ -43,6 +43,8 @@ export function asVirtualWidget(raw: unknown): VirtualWidget | null {
     name: String((raw as any).name ?? '').slice(0, 20),
     rect: { x, y, width: w, height: h },
     acceptsText: (raw as any).acceptsText === true,
+    scrollable: (raw as any).scrollable === true,  // K 纪元补全：滚动证据前提
+    popup: (raw as any).popup === true,            // K 纪元补全：esc 可关闭对象
   };
 }
 
@@ -53,6 +55,8 @@ export class VirtualScreen {
   private readonly widgets: VirtualWidget[];
   private focus: VirtualWidget | null = null;
   private readonly buffers = new Map<VirtualWidget, string>();
+  /** 滚动偏移记账（K 纪元：内容偏移 = 滚动证据的世界状态） */
+  private readonly scrollOffsets = new Map<VirtualWidget, number>();
 
   constructor(rawWidgets: unknown) {
     this.widgets = Array.isArray(rawWidgets)
@@ -130,6 +134,37 @@ export class VirtualScreen {
         note: `typed ${text.length} chars into ${target.name} (buffer ${buf.length})`, layers };
     }
 
-    return NO_EVIDENCE; // scroll/hotkey/switch/dismiss/noop：布局与键盘模型留白
+    // ── K 纪元补全：滚动证据（光标所在可滚动容器 ⇒ 内容偏移变化 = L1）──
+    if (action.kind === 'scroll_page') {
+      const dir = action.args?.direction;
+      const amount = Number(action.args?.amount);
+      if (typeof dir !== 'string' || !Number.isFinite(amount) || amount <= 0) return NO_EVIDENCE;
+      const container = this.widgets.find(w => w.scrollable) ?? this.widgetAt(this.focus?.rect.x ?? 0.5, this.focus?.rect.y ?? 0.5);
+      const scrollable = container?.scrollable === true ? container : this.widgets.find(w => w.scrollable && this.widgetAt(w.rect.x + w.rect.width / 2, w.rect.y + w.rect.height / 2));
+      if (!scrollable) {
+        return { effectDetected: false, expectationMet: null,
+          note: 'scroll with no scrollable container — content cannot move', layers: ['L1-pixel'] };
+      }
+      this.scrollOffsets.set(scrollable, (this.scrollOffsets.get(scrollable) ?? 0) + amount);
+      return { effectDetected: true, expectationMet: null,
+        note: `scrolled ${dir} x${amount} in ${scrollable.name} (offset ${this.scrollOffsets.get(scrollable)})`, layers: ['L1-pixel'] };
+    }
+
+    // ── K 纪元补全：热键证据（esc ⇒ 关闭最上层弹窗 = L1 状态变化）──
+    if (action.kind === 'press_hotkey') {
+      const keys = Array.isArray(action.args?.keys) ? action.args!.keys : [];
+      if (keys.length !== 1 || String(keys[0]).toLowerCase() !== 'esc') return NO_EVIDENCE; // 其他热键无键盘状态模型 —— 诚实缺席
+      const popupIdx = this.widgets.findIndex(w => w.popup);
+      if (popupIdx < 0) {
+        return { effectDetected: false, expectationMet: null,
+          note: 'esc with no popup open — nothing to dismiss', layers: ['L1-pixel'] };
+      }
+      const [closed] = this.widgets.splice(popupIdx, 1);
+      if (this.focus === closed) this.focus = null;
+      return { effectDetected: true, expectationMet: null,
+        note: `esc dismissed popup ${closed.name}`, layers: ['L1-pixel'] };
+    }
+
+    return NO_EVIDENCE; // drag/switch_tab/switch_window/dismiss_popup/noop：布局模型仍留白（值即边界）
   }
 }

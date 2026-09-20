@@ -262,3 +262,53 @@ test('K-6: 西里尔/全角同形字命中风险词；正常文本零误伤', ()
   assert.ok(matchesRiskPatterns('点击发送按钮', RISK), '正常路径零回归');
   assert.ok(!matchesRiskPatterns('view report', RISK));
 });
+
+// ─── K 纪元补全：虚拟屏 scroll / hotkey 证据（最后一个架构留白落成）───
+
+test('K-7a: 可滚动容器 ⇒ scroll 产出 L1 证据；无容器 ⇒ 诚实反证', async () => {
+  const LIST: VirtualWidget = { role: 'list', name: 'records', rect: { x: 0.1, y: 0.3, width: 0.8, height: 0.5 }, scrollable: true };
+  const { eng, cleanup } = engine();
+  const ok = await eng.rehearse({
+    id: 'chain-k7a-ok', origin: 'manual',
+    virtualScene: [LIST],
+    actions: [{ kind: 'scroll_page', args: { direction: 'down', amount: 3 } }],
+  });
+  assert.equal(ok.verdict, 'passed');
+  assert.equal(ok.steps[0]!.effectDetected, true);
+  const st = ok.steps[0];
+  assert.ok(st && (st.note ?? '').includes('offset 3'), `偏移记账入注：${st?.note}`);
+  const none = await eng.rehearse({
+    id: 'chain-k7a-none', origin: 'manual',
+    virtualScene: [BTN], // 无可滚动容器
+    actions: [{ kind: 'scroll_page', args: { direction: 'down', amount: 3 } }],
+  });
+  assert.equal(none.verdict, 'failed');
+  assert.equal(none.steps[0].effectDetected, false, '无处可滚 = 世界回击');
+  cleanup();
+});
+
+test('K-7b: esc 关闭弹窗 ⇒ L1 证据；无弹窗 ⇒ 诚实反证；其他热键缺席', async () => {
+  const POPUP: VirtualWidget = { role: 'dialog', name: 'confirm', rect: { x: 0.3, y: 0.3, width: 0.4, height: 0.3 }, popup: true };
+  const { eng, cleanup } = engine();
+  const ok = await eng.rehearse({
+    id: 'chain-k7b-ok', origin: 'manual',
+    virtualScene: [BTN, POPUP],
+    actions: [{ kind: 'press_hotkey', args: { keys: ['esc'] } }],
+  });
+  assert.equal(ok.verdict, 'passed');
+  const st = ok.steps[0];
+  assert.ok(st !== undefined && (st.note ?? '').includes('dismissed popup confirm'));
+  const none = await eng.rehearse({
+    id: 'chain-k7b-none', origin: 'manual',
+    virtualScene: [BTN],
+    actions: [{ kind: 'press_hotkey', args: { keys: ['esc'] } }],
+  });
+  assert.equal(none.verdict, 'failed', '无弹窗可关 = esc 无效果');
+  const other = await eng.rehearse({
+    id: 'chain-k7b-other', origin: 'manual',
+    virtualScene: [BTN, POPUP],
+    actions: [{ kind: 'press_hotkey', args: { keys: ['ctrl', 'w'] } }],
+  });
+  assert.equal(other.verdict, 'degraded', '非 esc 热键：无键盘状态模型 ⇒ 诚实缺席（非反证）');
+  cleanup();
+});

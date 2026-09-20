@@ -57,6 +57,10 @@ export interface VirtualWidget {
   name: string;
   rect: { x: number; y: number; width: number; height: number };
   acceptsText?: boolean;
+  /** 可滚动容器（列表/页面）：scroll_page 证据的前提（K 纪元补全） */
+  scrollable?: boolean;
+  /** 模态弹窗：press_hotkey ['esc'] 的可关闭对象（K 纪元补全） */
+  popup?: boolean;
 }
 
 export interface SandboxAction {

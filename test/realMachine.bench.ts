@@ -102,14 +102,34 @@ async function runIntent(
   return { report, probe };
 }
 
+
+/**
+ * K 纪元：真机环境闸 —— 缺 X11 工具链（xvfb-run / DISPLAY / xdotool / import）
+ * 的平台（如 Windows）诚实跳过并给出原因；工具链齐备才放行（真机断言不允许
+ * 在坏环境里崩成 fail —— 那是环境信号，不是代码信号）。
+ */
+async function realMachineEnvGate(): Promise<{ reason: string } | { reason: null }> {
+  if (process.platform === 'win32') {
+    return { reason: 'real-machine bench requires an X11 stack (Xvfb + xdotool + ImageMagick import) — not available on Windows; run on the Linux CI host' };
+  }
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('which', ['xvfb-run', 'xdotool', 'import'], { stdio: 'ignore' });
+    return { reason: null };
+  } catch {
+    return { reason: 'X11 toolchain incomplete (need xvfb-run, xdotool, ImageMagick import) — install or use the Linux CI host' };
+  }
+}
+
 function row(label: string, report: PipelineReport, probe: Probe): string {
   return `${label.padEnd(30)} ${report.verdict.padEnd(10)} executions=${String(probe.executions).padEnd(2)} trapHits=${probe.trapHits} l3=${probe.l3Rounds}`;
 }
 
-test('真机基准（Xvfb+tkinter+OCR+xdotool —— 感知/执行/裁决全真实）', async () => {
+test('真机基准（Xvfb+tkinter+OCR+xdotool —— 感知/执行/裁决全真实）', { skip: (await realMachineEnvGate()).reason ?? false }, async () => {
   // 结构注：不使用嵌套 t.test() —— node 24 的 await t.test() 在子测试注册后即
   // resolve（不等完成），finally 会与子测试并发执行（实测杀掉运行中的世界）。
   // 两个实验用普通 async 阶段函数顺序 await，finally 才有真实的「结束」语义。
+  // K 纪元：环境闸（缺 X11 工具链 ⇒ 诚实 skip 带原因，而非半途崩在断言上）。
   const world = await startRealWorld();
   const stateDir = mkdtempSync(join(tmpdir(), 'd7-real-learn-'));
   const amnesiaDir = mkdtempSync(join(tmpdir(), 'd7-real-amnesia-'));
