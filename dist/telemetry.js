@@ -404,6 +404,45 @@ export class Telemetry {
      * 决策论的全序裁决：无需聚合即可言「快」。交叉分布 ⇒ 'none'（任何单一
      * 「更快」断言都是谎言）。静态纯函数：裁决原子的测试面。
      */
+    /**
+     * K 纪元（留白兑现之五）：二阶随机占优 SSD —— FSD 交叉分布的可判域。
+     * 成本语义（越小越好）：A SSD B ⇔ 一切阈值 t 上 A 的下偏矩 Σ(aᵢ−t)⁺ ≤ B 的
+     * （A 的"坏尾累积"处处不更重）。FSD 全序交叉时（如 [10,50] vs [20,30]），
+     * SSD 仍可裁决一致性偏好 —— 部分序留白由此兑现（全序 FSD ⊂ SSD）。
+     */
+    static secondOrderStochasticDominance(samplesA, samplesB) {
+        if (samplesA.length === 0 || samplesB.length === 0)
+            return 'none';
+        const lpm = (s, t) => s.reduce((acc, v) => acc + Math.max(0, v - t), 0) / s.length;
+        const pts = [...new Set([...samplesA, ...samplesB])].sort((x, y) => x - y);
+        let aDom = true, bDom = true, strict = false;
+        for (const t of pts) {
+            const la = lpm(samplesA, t), lb = lpm(samplesB, t);
+            if (la > lb + 1e-12)
+                aDom = false;
+            if (lb > la + 1e-12)
+                bDom = false;
+            if (Math.abs(la - lb) > 1e-12)
+                strict = true;
+            if (!aDom && !bDom)
+                return 'none';
+        }
+        if (strict && aDom)
+            return 'A';
+        if (strict && bDom)
+            return 'B';
+        return 'none';
+    }
+    /** K 纪元：可播种 RNG（mulberry32）—— Monte Carlo p 值可复现（生产默认仍 Math.random） */
+    static seededUniform(seed) {
+        let a = seed >>> 0;
+        return () => {
+            a = (a + 0x6d2b79f5) | 0;
+            let t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
     static firstOrderStochasticDominance(samplesA, samplesB) {
         if (samplesA.length === 0 || samplesB.length === 0)
             return 'none';
@@ -439,10 +478,20 @@ export class Telemetry {
         for (let i = 0; i < cands.length; i++) {
             for (let j = i + 1; j < cands.length; j++) {
                 const dom = Telemetry.firstOrderStochasticDominance(cands[i].lat, cands[j].lat);
-                if (dom === 'A')
-                    out.push({ faster: cands[i].tool, slower: cands[j].tool });
-                else if (dom === 'B')
-                    out.push({ faster: cands[j].tool, slower: cands[i].tool });
+                if (dom === 'A') {
+                    out.push({ faster: cands[i].tool, slower: cands[j].tool, order: 'FSD' });
+                    continue;
+                }
+                if (dom === 'B') {
+                    out.push({ faster: cands[j].tool, slower: cands[i].tool, order: 'FSD' });
+                    continue;
+                }
+                // K 纪元：FSD 交叉 ⇒ SSD 兜底裁决（一致性偏好）
+                const ssd = Telemetry.secondOrderStochasticDominance(cands[i].lat, cands[j].lat);
+                if (ssd === 'A')
+                    out.push({ faster: cands[i].tool, slower: cands[j].tool, order: 'SSD' });
+                else if (ssd === 'B')
+                    out.push({ faster: cands[j].tool, slower: cands[i].tool, order: 'SSD' });
             }
         }
         return out;

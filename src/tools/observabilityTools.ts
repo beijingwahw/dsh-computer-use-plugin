@@ -15,7 +15,7 @@ import { failureMemory } from '../failureMemory';
 import { saveCheckpoint } from '../checkpoint';
 import { system } from '../system';
 import { dhash } from '../perceptualHash';
-import { diagnose } from '../diagnosis';
+import { diagnose, bayesianBelief } from '../diagnosis';
 import { fitReactPhases } from '../phaseHmm';
 import { reactTraceProperties } from '../ltlf';
 import { Telemetry } from '../telemetry';
@@ -83,6 +83,21 @@ export function createGetMetricsTool() {
       });
       if (dx) {
         insights.push(`DIAGNOSIS [${dx.syndrome}]: ${dx.diagnosis} → ${dx.prescription}`);
+      }
+      // K 纪元（留白兑现）：贝叶斯信念侧写 —— 规则表给处方，信念表给证据组合
+      // 的全景（含未被规则命中的竞争假设）；后验和 = 1（枚举精确归一）。
+      const belief = bayesianBelief({
+        shifted: regimeShifts.length > 0,
+        hurstHigh: H === null ? null : H > 0.6,
+        loop: !!(behav && behav.normalized !== null &&
+          ((behav.normalized <= 0.3 && behav.length >= 24) || (behav.phrases <= 6 && behav.length >= 20))),
+        heavyTail: !!(tail && tail.xi >= 0.25),
+        highNoop: highNoopTools.length > 0,
+      });
+      if (belief) {
+        const top = belief[0];
+        insights.push(`BELIEF (bayesian): ${top.syndrome} p=${top.posterior}` +
+          (belief[1] ? ` | runner-up ${belief[1].syndrome} p=${belief[1].posterior}` : ''));
       }
       // H-3 Thompson 模态仲裁：后验抽样推荐（探索与利用按证据强度成比例）
       const modality = telemetry.suggestModality();

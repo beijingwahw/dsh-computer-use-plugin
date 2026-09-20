@@ -2,7 +2,7 @@
 // Planner-Actor 编排引擎。原版即干净可用，核心协议原样保留：
 //   Actor 状态协议([SUCCESS]/[FAILED]) + fail-fast 短路 + 完整执行轨迹汇总。
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。
-import { planTasks, SubTask, ChatFn } from './planner';
+import { planTasks, type SubTask, type ChatFn } from './planner';
 
 export type { ChatFn } from './planner';
 
@@ -32,6 +32,64 @@ export const ACTOR_SYSTEM_PROMPT = `
 `;
 
 export type ActorFn = (task: string) => Promise<string>;
+
+/**
+ * K 纪元（留白兑现之三）：Actor 工厂 —— start_complex_task 的执行层接线。
+ * 双通道（优先序）：
+ *   ① DSH agents 服务（`agents.run(subtask, systemPrompt)` —— 宿主嵌套代理基建
+ *      到场时的原生通道，ACTOR_SYSTEM_PROMPT 作为子代理人格）；
+ *   ② 技能重放回退（skillLibrary 高可靠匹配 ⇒ replayOne 逐步执行）——
+ *      "曾经成功过的子任务"不再依赖不存在的 LLM 基建：既有基础设施的诚实复用。
+ *   ③ 双缺席 ⇒ 诚实 [FAILED]（零回归 —— 模拟成功是债，地层教训不变）。
+ * 依赖全注入（getAgentsRun / deps 面），测试零宿主耦合。
+ */
+export interface ActorDeps {
+  /** 宿主 agents 服务的 run 通道（缺席 ⇒ 走技能回退） */
+  getAgentsRun?: () => ((subtask: string, systemPrompt: string) => Promise<string>) | null;
+  /** 技能匹配（缺省 = skillLibrary 单例） */
+  matchSkill?: (query: string) => Array<{ id: number; reliability: number; steps: Array<{ tool: string; args: Record<string, unknown> }> }>;
+  /** 单步重放（缺省 = tools/replayActions.replayOne） */
+  replayStep?: (tool: string, args: Record<string, unknown>) => Promise<string>;
+  /** 技能可靠度回写（缺省 = skillLibrary.recordOutcome） */
+  recordOutcome?: (id: number, success: boolean) => void;
+}
+
+export function createActor(deps: ActorDeps = {}) {
+  return async (task: string): Promise<string> => {
+    // ① agents 服务原生通道（获取与调用双故障并入诚实 FAILED）
+    let agentsRun: ((t: string, s: string) => Promise<string>) | null = null;
+    try {
+      agentsRun = deps.getAgentsRun?.() ?? null;
+    } catch (e: any) {
+      return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
+    }
+    if (agentsRun) {
+      try {
+        return await agentsRun(task, ACTOR_SYSTEM_PROMPT);
+      } catch (e: any) {
+        return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
+      }
+    }
+
+    // ② 技能重放回退：可靠度 > 0.5 的最佳匹配（Laplace 0/0=0.5 不入场 —— 需真实验证背书）
+    const match = deps.matchSkill?.(task) ?? [];
+    const best = match.find(m => m.reliability > 0.5 && m.steps.length > 0);
+    if (best) {
+      let failed = 0;
+      for (const step of best.steps) {
+        const r = await deps.replayStep?.(step.tool, step.args);
+        if (r === undefined || r.includes('[FAILED]') || r.includes('"status": "FAILED"')) failed++;
+      }
+      deps.recordOutcome?.(best.id, failed === 0);
+      return failed === 0
+        ? `[SUCCESS] replayed skill ${best.id} (${best.steps.length} steps)`
+        : `[FAILED] skill ${best.id} replay degraded (${failed}/${best.steps.length} steps failed — UI may have changed; re-verify)`;
+    }
+
+    // ③ 双缺席：诚实失败（零回归）
+    return '[FAILED] no actors channel available (no agents service wired, no reliable skill match for this subtask).';
+  };
+}
 
 export async function runOrchestrator(
   userPrompt: string,

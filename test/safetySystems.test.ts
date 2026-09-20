@@ -60,9 +60,9 @@ test('oscillationTracker: 同指纹重复出现 ⇒ 告警一次后清环', () =
   assert.equal(oscillationTracker.observe(h), null);
 });
 
-test('oscillationTracker: 变化序列不误报', () => {
-  for (let i = 0; i < 10; i++) {
-    const alarm = oscillationTracker.observe('h'.repeat(16) + i);
+test('oscillationTracker: 变化序列不误报（K 纪元：互异 = 距离 > 容差）', () => {
+  for (let i = 0; i < 8; i++) {
+    const alarm = oscillationTracker.observe('0'.repeat(i * 8) + '1'.repeat(64 - i * 8));
     assert.equal(alarm, null);
   }
 });

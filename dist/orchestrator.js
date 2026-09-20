@@ -27,6 +27,43 @@ export const ACTOR_SYSTEM_PROMPT = `
 - 永远不要在没有截图的情况下盲目操作。
 - 每次只执行一个原子操作，等待系统反馈。
 `;
+export function createActor(deps = {}) {
+    return async (task) => {
+        // ① agents 服务原生通道（获取与调用双故障并入诚实 FAILED）
+        let agentsRun = null;
+        try {
+            agentsRun = deps.getAgentsRun?.() ?? null;
+        }
+        catch (e) {
+            return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
+        }
+        if (agentsRun) {
+            try {
+                return await agentsRun(task, ACTOR_SYSTEM_PROMPT);
+            }
+            catch (e) {
+                return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
+            }
+        }
+        // ② 技能重放回退：可靠度 > 0.5 的最佳匹配（Laplace 0/0=0.5 不入场 —— 需真实验证背书）
+        const match = deps.matchSkill?.(task) ?? [];
+        const best = match.find(m => m.reliability > 0.5 && m.steps.length > 0);
+        if (best) {
+            let failed = 0;
+            for (const step of best.steps) {
+                const r = await deps.replayStep?.(step.tool, step.args);
+                if (r === undefined || r.includes('[FAILED]') || r.includes('"status": "FAILED"'))
+                    failed++;
+            }
+            deps.recordOutcome?.(best.id, failed === 0);
+            return failed === 0
+                ? `[SUCCESS] replayed skill ${best.id} (${best.steps.length} steps)`
+                : `[FAILED] skill ${best.id} replay degraded (${failed}/${best.steps.length} steps failed — UI may have changed; re-verify)`;
+        }
+        // ③ 双缺席：诚实失败（零回归）
+        return '[FAILED] no actors channel available (no agents service wired, no reliable skill match for this subtask).';
+    };
+}
 export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs) {
     const startAt = Date.now();
     // 1. 调用 Planner 拆解任务

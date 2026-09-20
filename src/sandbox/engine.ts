@@ -20,6 +20,7 @@ import {
   emitHostReplayEnd, emitMemoryConsolidated, emitRehearsalBegin, emitRehearsalEnd,
 } from './events';
 import { MuscleMemoryStore } from './memory';
+import { VirtualScreen } from './virtualScreen';
 import { sandboxLog } from './log';
 import {
   createDefaultIdGenerator, muscleReliability, resolveConsolidation,
@@ -173,6 +174,7 @@ export class SandboxEngineImpl implements SandboxEngine {
     if (this.ctx) emitRehearsalBegin(this.ctx, { chainId: chain.id, snapshotId, startedAt });
 
     const book: VirtualBookkeeping = { cursor: { x: 0.5, y: 0.5 }, typedChars: 0 };
+    const screen = chain.virtualScene ? new VirtualScreen(chain.virtualScene) : null;
     const steps: RehearsalStepResult[] = [];
     const activeLayers = new Set<VerificationLayer>();
     const t0 = Date.now();
@@ -196,19 +198,29 @@ export class SandboxEngineImpl implements SandboxEngine {
         this.applyBookkeeping(book, action);
         const latencyMs = Date.now() - stepStart;
 
-        // 验证层缺席的诚实降级：无模拟器 ⇒ L1/L2 不可判；L3 无 OCR 源；L4 无像素可对照
+        // K 纪元（留白兑现）：虚拟屏在场 ⇒ 逐步产出真证据（L1 命中测试 /
+        // L4 期望对照）；缺席 ⇒ 既有诚实降级（null ≠ false）零回归。
+        const evidence = screen ? screen.applyAction(action) : null;
+        if (evidence) {
+          for (const l of evidence.layers) activeLayers.add(l);
+          // K 纪元：世界回击（effectDetected=false / 期望违例）记入失败位
+          if ((evidence.effectDetected === false || evidence.expectationMet === false) && failedAtIndex === null) failedAtIndex = i;
+        }
         steps.push({
           index: i,
           action,
-          effectDetected: null, // 该层验证不可用（诚实降级，非 false）
-          expectationMet: null, // 即使声明了 expect 也无法对照（非 false）
+          effectDetected: evidence ? evidence.effectDetected : null,
+          expectationMet: evidence ? evidence.expectationMet : null,
           latencyMs,
-          note: action.expect
-            ? 'expect declared but verification layers unavailable (simulator epoch pending)'
-            : 'verification layers unavailable (simulator epoch pending)',
+          note: evidence ? evidence.note
+            : action.expect
+              ? 'expect declared but no virtual scene — verification unavailable (honest null)'
+              : 'no virtual scene — verification unavailable (honest null)',
         });
         await sandboxLog.append('rehearsal-step', {
-          chainId: chain.id, index: i, kind: action.kind, latencyMs, effectDetected: null,
+          chainId: chain.id, index: i, kind: action.kind, latencyMs,
+          effectDetected: evidence ? evidence.effectDetected : null,
+          expectationMet: evidence ? evidence.expectationMet : null,
           virtualFocus: book.focus ? `${book.focus.x},${book.focus.y}` : null,
         });
       }
@@ -222,17 +234,20 @@ export class SandboxEngineImpl implements SandboxEngine {
     }
 
     const totalLatencyMs = Date.now() - t0;
+    // K 纪元：任何反证（L1 落空 / L4 期望违例）⇒ failed —— "变了但不是预期的变化"
+    // 与宿主 intentBetrayed 同律：期望背叛即失败，不因像素有变化而豁免。
     const verdict: RehearsalVerdict = aborted
       ? 'aborted'
-      : steps.some(s => s.effectDetected === false)
+      : steps.some(s => s.effectDetected === false || s.expectationMet === false)
         ? 'failed'
         : activeLayers.size === 0
-          ? 'degraded' // 零生效验证层 ⇒ 诚实 degraded（本纪元常态）
-          : 'passed'; // 模拟器纪元：有效果证据且无反证时到达
+          ? 'degraded' // 零生效验证层 ⇒ 诚实 degraded（无场景的既有语义）
+          : 'passed'; // K 纪元可达：虚拟场景产出证据且无反证（期望违例已计入 false）
 
     return this.finishRehearsal(chain.id, snapshotId, {
       verdict, steps, failedAtIndex, layers: [...activeLayers],
       totalLatencyMs, budgetMs: chain.budgetMs, startedAt,
+      entrySceneFingerprint: chain.entrySceneFingerprint,
       note: aborted ? `budget exceeded at step ${failedAtIndex}` : undefined,
     });
   }
@@ -282,6 +297,7 @@ export class SandboxEngineImpl implements SandboxEngine {
       totalLatencyMs: number;
       budgetMs?: number;
       startedAt: number;
+      entrySceneFingerprint?: string;
       note?: string;
     },
   ): Promise<RehearsalOutcome> {
@@ -310,6 +326,7 @@ export class SandboxEngineImpl implements SandboxEngine {
       failedAtIndex: r.failedAtIndex, score, verificationLayers: layers,
       totalLatencyMs: r.totalLatencyMs, budgetMs: r.budgetMs,
       chainTip: sandboxLog.tip, reportPath, createdAt,
+      entrySceneFingerprint: r.entrySceneFingerprint,
     };
     // 待配对面登记：医生判决（subject=chainId）迟到时由此配对走双闸门固化
     this.pendingOutcomes.delete(chainId);
@@ -362,7 +379,7 @@ export class SandboxEngineImpl implements SandboxEngine {
     const trigger = `chain ${outcome.chainId} (${outcome.steps.length} steps, verdict=${outcome.verdict})`;
     const entry = this.memory.consolidate(
       this.idGen, trigger, outcome.chainId, outcome.steps.map(s => s.action),
-      undefined, // 入口指纹：模拟器纪元由快照供给；本纪元 passed 不可达故此路未至
+      outcome.entrySceneFingerprint, // K 纪元：真实链指纹（同屏加成从此可命中）
     );
     const reliability = muscleReliability(entry);
     void sandboxLog.append('consolidation', { entryId: entry.id, reliability, reinforced: entry.rehearsalPassCount });

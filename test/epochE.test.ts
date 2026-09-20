@@ -134,13 +134,31 @@ test('E-3 周期 1 回归：同指纹 ≥3 次仍告警（旧语义保持）', (
   assert.equal(oscillationTracker.observe(h), null);
 });
 
-test('E-3 变化序列不误报：12 帧互异 ⇒ 零告警', () => {
+test('E-3 变化序列不误报：8 帧两两 ≥ 容差距离 ⇒ 零告警（K 纪元：互异语义随容差升级）', () => {
   oscillationTracker.reset();
-  for (let i = 0; i < 12; i++) {
-    // 位边界随 i 单调漂移的互异序列：无任何周期结构
-    const distinct = '0'.repeat(i) + '1'.repeat(64 - i);
+  // K 纪元：检测升级为 6 位容差后，"互异"必须距离 > 6 —— 位边界 8 位步进
+  // （旧 1 位步进的"互异"实为噪声级抖动，新语义下正确地被视为同场景）
+  for (let i = 0; i < 8; i++) {
+    const distinct = '0'.repeat(i * 8) + '1'.repeat(64 - i * 8);
     assert.equal(oscillationTracker.observe(distinct), null);
   }
+});
+
+test('E-3/K 噪声容忍：周期内 3 位抖动不再断尾（容差 6 的兑现）', () => {
+  oscillationTracker.reset();
+  const A = '0'.repeat(32) + '1'.repeat(32);
+  const B = '1'.repeat(32) + '0'.repeat(32);
+  const flip = (h: string, n: number): string => { // 翻转前 n 位（确定性噪声注入）
+    let out = '';
+    for (let i = 0; i < h.length; i++) out += i < n ? (h[i] === '0' ? '1' : '0') : h[i];
+    return out;
+  };
+  // A,B,A',B',A'',B'' —— 双态交替、每帧 ≤3 位抖动（旧精确匹配必断尾）：
+  // p=2 判据比较 i↔i+2：A≈A'≈A''、B≈B'≈B'' 全部落在 6 位容差内
+  const seq = [A, B, flip(A, 3), flip(B, 3), flip(A, 2), flip(B, 1)];
+  let alarm: string | null = null;
+  for (const h of seq) alarm = oscillationTracker.observe(h);
+  assert.ok(alarm?.includes('2-state'), '噪声内的循环仍被捕获（K 纪元容差兑现）');
 });
 
 // ─── E-4：预测误差驱动注意力（惊讶 → 钉扎）───

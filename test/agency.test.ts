@@ -11,7 +11,7 @@ import { journal } from '../src/journal.ts';
 import { coordinator, ConfidenceWeightedArbitrator } from '../src/subAgent.ts';
 import { migrateCheckpoint } from '../src/checkpoint.ts';
 import { saveCheckpoint, loadCheckpoint } from '../src/checkpoint.ts';
-import { shaper, LinuxAdapter } from '../src/environmentShaper.ts';
+import { shaper, LinuxAdapter, NullAdapter } from '../src/environmentShaper.ts';
 import type { UndoRecord } from '../src/environmentShaper.ts';
 import { quantum, UiExtractorWhitebox } from '../src/quantumSense.ts';
 import type { WhiteboxNode, WhiteboxProvider } from '../src/quantumSense.ts';
@@ -227,10 +227,11 @@ test('D-2: undo 降级 —— 几何不可读时止步于去标记（诚实记�
   assert.ok(!lastTwo.includes('0,undefined'), '无快照不得拼出垃圾几何');
 });
 
-test('D-2: shaper 单例（沙箱形态）—— 空能力集 ⇒ apply 诚实拒绝并指路 capabilities', async () => {
-  // 本沙箱无 wmctrl/xdotool/DISPLAY：真实探测 ⇒ 空能力集 ⇒ 每次拒绝都带可操作指引。
-  // set_contrast 的作用域闸门在能力闸门之后（沙箱形态下先被能力拒绝 —— 顺序即安全层级）。
-  await shaper.initialize();
+test('D-2: shaper 单例（空能力形态）—— 空能力集 ⇒ apply 诚实拒绝并指路 capabilities', async () => {
+  // K 纪元注：真机 Windows 现已探测到真实 PowerShell 能力（WindowsAdapter 落成）——
+  // 空能力路径改经 NullAdapter 注入锁死（真实探测不可伪造，行为必须确定性）。
+  // set_contrast 的作用域闸门在能力闸门之后（空能力形态下先被能力拒绝 —— 顺序即安全层级）。
+  shaper.setAdapterForTest(new NullAdapter());
   assert.equal(shaper.capabilities().size, 0);
   const r = await shaper.apply({ kind: 'raise_window', titleHint: 'X' });
   assert.equal(r.ok, false);

@@ -47,6 +47,18 @@ export interface ExpectedEffect {
   sceneHint?: string;
 }
 
+/**
+ * K 纪元（留白兑现）：虚拟屏控件 —— 排练验证层的确定性世界。
+ * 生产来源：规划期 UI 树提取（getUiTree / extractInteractiveElements 产物映射）；
+ * 排练对**真实控件几何**做命中测试，而非虚构世界。
+ */
+export interface VirtualWidget {
+  role: string;
+  name: string;
+  rect: { x: number; y: number; width: number; height: number };
+  acceptsText?: boolean;
+}
+
 export interface SandboxAction {
   kind: SandboxActionKind;
   /** 与宿主工具参数 schema 同构（归一化坐标等） */
@@ -67,6 +79,9 @@ export interface ActionChain {
   budgetMs?: number;
   /** 链来源：D-1 规划 / 造物主手书 */
   origin: 'cognition' | 'manual';
+  /** K 纪元：排练虚拟场景（可选）。在场 ⇒ 排练对控件几何产出 L1/L4 真证据；
+   *  缺席 ⇒ 既有 degraded 语义零回归。 */
+  virtualScene?: VirtualWidget[];
 }
 
 // ─── 3. 肌肉记忆：沙箱预演的固化产物（skillLibrary 的沙箱对偶器官）───
@@ -172,6 +187,8 @@ export interface RehearsalOutcome {
   chainTip: string;
   /** Token 纪律：对话流只回句柄，全量证据走落盘报告 */
   reportPath: string;
+  /** K 纪元：固化入口指纹的真实来源（此前恒 undefined —— passed 不可达） */
+  entrySceneFingerprint?: string;
   createdAt: number;
 }
 

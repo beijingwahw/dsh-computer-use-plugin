@@ -59,7 +59,10 @@ export const DOCTOR_RULES: DoctorRule[] = [
   },
   {
     id: 'genesis.premature-impl', category: 'genesis', severity: 'major', laws: ['architecture-void'],
-    baseWeight: 1.5, tags: ['genesis'], description: '预留接口槽不得偷填实现（架构留白铁律 —— WindowsAdapter 保持签名就位）',
+    // K 纪元演化：WindowsAdapter 已由预留槽合法落成（PowerShell + P/Invoke）——
+    // 规则从「不得实现」演化为「注入纪律」：实现必须经 AdapterDeps（可测性铁律），
+    // 类体内的裸进程调用仍是违规（防退化为不可测的脚本糊面）。
+    baseWeight: 1.5, tags: ['genesis'], description: '平台适配器实现必须经 AdapterDeps 注入（可测性铁律 —— 类体零裸进程调用）',
     async scan(ctx) {
       const f = ctx.sources.find(s => s.path.endsWith('environmentShaper.ts'));
       if (!f) return [];
@@ -69,11 +72,12 @@ export const DOCTOR_RULES: DoctorRule[] = [
       const end = text.indexOf('export class', start + 10);
       const block = text.slice(start, end < 0 ? undefined : end);
       const out: Finding[] = [];
-      if (/execFile|spawnSync|spawn\(|child_process|powershell|ffi|DllImport/.test(block)) {
+      if (/execFile|spawnSync|spawn\(|child_process|powershell|ffi|DllImport/.test(block) &&
+          !/this\.(execFn|probe)/.test(block)) {
         const line = lines(text.slice(0, start)).length;
         out.push(finding(this, 'structural', f.path, line, 'class WindowsAdapter { … }',
-          'the reserved WindowsAdapter slot contains real implementation calls — the architecture void was filled',
-          'Move the implementation behind a capability probe and keep the slot reserved until a real Windows environment exists.'));
+          'WindowsAdapter class body contains raw process calls without AdapterDeps injection — implementation is legal, untestable wiring is not',
+          'Route execution through constructor-injected AdapterDeps (see LinuxAdapter); keep command names at module level.'));
       }
       return out;
     },

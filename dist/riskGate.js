@@ -32,11 +32,37 @@ const LEET_MAP = {
  *  拦截的代价有界：模型多看一眼截图；漏拦的代价是凭据被代输）。
  * 词表与待检文本同律归一（双向一致 —— 词表「api key」与文本「A P I k e y」对齐）。
  */
+// K 纪元（留白兑现之六）：同形字（homoglyph）归一 —— E-6 留白的兑现。
+// 策领图（Unicode confusables 的策展子集，覆盖攻击面最广的三族）：
+//   西里尔/希腊视觉同形 → 拉丁；全角字母数字 → 半角。完整 consortium 表
+//   数千条 —— 策展 ~50 条是"值即边界"（新增条目零风险，纯数据扩展）。
+const HOMOGLYPH_MAP = {
+    // 西里尔（视觉同形拉丁）
+    '\u0430': 'a', '\u0435': 'e', '\u043e': 'o', '\u0441': 'c', '\u0440': 'p',
+    '\u0445': 'x', '\u0443': 'y', '\u0456': 'i', '\u0455': 's', '\u04bb': 'h',
+    '\u0501': 'd', '\u0497': 'g', '\u04cf': 'l', '\u04e3': 'm', '\u0439': 'u',
+    '\u0458': 'j', '\u0463': 'y', '\u051b': 'q',
+    // 希腊
+    '\u03b1': 'a', '\u03bf': 'o', '\u03c1': 'p', '\u03b5': 'e', '\u03b9': 'i',
+    '\u03ba': 'k', '\u03bc': 'm', '\u03bd': 'v', '\u03c4': 't', '\u03c7': 'x',
+    // 全角字母数字（FF21-FF3A/FF41-FF5A/FF10-FF19 策展）
+    '\uff41': 'a', '\uff42': 'b', '\uff43': 'c', '\uff44': 'd', '\uff45': 'e',
+    '\uff46': 'f', '\uff47': 'g', '\uff48': 'h', '\uff49': 'i', '\uff4a': 'j',
+    '\uff4b': 'k', '\uff4c': 'l', '\uff4d': 'm', '\uff4e': 'n', '\uff4f': 'o',
+    '\uff50': 'p', '\uff51': 'q', '\uff52': 'r', '\uff53': 's', '\uff54': 't',
+    '\uff55': 'u', '\uff56': 'v', '\uff57': 'w', '\uff58': 'x', '\uff59': 'y', '\uff5a': 'z',
+    '\uff10': '0', '\uff11': '1', '\uff12': '2', '\uff13': '3', '\uff14': '4',
+    '\uff15': '5', '\uff16': '6', '\uff17': '7', '\uff18': '8', '\uff19': '9',
+};
 function normalizeForRisk(s) {
     let out = '';
     for (const ch of s.toLowerCase()) {
         if (LEET_MAP[ch] !== undefined) {
             out += LEET_MAP[ch];
+            continue;
+        }
+        if (HOMOGLYPH_MAP[ch] !== undefined) {
+            out += HOMOGLYPH_MAP[ch];
             continue;
         }
         if (/[\s\u200b\u200c\u200d\p{P}\p{S}]/u.test(ch))

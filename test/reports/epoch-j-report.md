@@ -239,3 +239,57 @@ verify 脚本 20/20；112 模块导入干净；tsc 零错误；dist 已重建。
 
 **终态：292 项测试 / 285 pass / 0 fail / 7 skipped；epochJ 19 项执法；
 verify 脚本 23/23；112 模块导入干净；tsc 零错误；dist 已重建。**
+
+## 附录五：K 纪元 —— 留白兑现（代码诚实声明的，逐一落成）
+
+> 终章。J 纪元修的是"坏"；K 纪元填的是"空"—— 各纪元诚实边界章节声明的
+> 留白，七项落成 + 一项机制化，每项配 epochK 执法（17 用例）。
+
+1. **虚拟屏模拟器**（D-5 冻结的根源 —— `sandbox/virtualScreen.ts`）：
+   确定性**控件世界**（非像素渲染 —— 绝不假装渲染屏幕）：场景由调用方供给
+   （生产 = 规划期 UI 树提取的真实控件几何），click 走命中测试（L1 证据：
+   命中=聚焦转移/落空=反证），type 校验焦点控件的文本接收与缓冲包含
+   （L4 证据：expectedText 核验）。引擎 verdict 规则同步升格：**任何反证**
+   （L1 落空或 L4 期望违例）⇒ failed（与宿主 intentBetrayed 同律）。
+   历史性结果：**'passed' 首次可达，肌肉记忆固化首次真实入库**（K-1e：
+   passed × 医生 approved → 双闸门放行 → recall 可召回）——
+   "记忆固化恒 freeze"的留白终结。无场景 ⇒ degraded 零回归（K-1c）。
+2. **WindowsAdapter 落成**（PowerShell + Win32 P/Invoke）：raise/maximize/
+   move/set_zoom 四动作 + 几何快照撤销（SetWindowPos 精确归位）；PS 单引号
+   转义闭合标题注入面（K-2b："O'Brien" → 'O''Brien'）；set_contrast 诚实
+   缺席（注册表+SPI 往返不可靠 —— 留白如实申报）。**genesis.premature-impl
+   规则诚实演化**：从"不得实现"到"注入纪律"（实现合法，裸进程调用违法 ——
+   K-2d 双向执法：真实源码零违规 + 裸调用形态仍被拦截）。本机即 Windows：
+   能力探测真机生效（agency 的空能力测试改经 NullAdapter 注入锁死）。
+3. **Actor 双通道接线**（start_complex_task）：① DSH agents 服务在场 ⇒
+   原生通道（获取/调用双故障并入诚实 FAILED）；② 技能重放回退 —— 可靠度
+   >0.5（Laplace 0/0=0.5 不入场）的匹配逐步重放并回写可靠度；
+   ③ 双缺席 ⇒ 诚实 [FAILED] 零回归（K-3a/b/c）。"Actor 未接线"终结。
+4. **贝叶斯会诊皮层**（diagnosis.ts）：六症候群 × 五信号的专家 CPT +
+   精确枚举归一（log-sum-exp，零近似零采样）；规则表仍主诊断，信念表给
+   证据组合全景 —— get_metrics 附加 `BELIEF` 洞见行。全缺席/全阴 ⇒ null
+   （健康是诚实的缺席）；后验和 = 1（K-4）。"贝叶斯网络留白"兑现。
+5. **SSD 二阶随机占优**（telemetry）：FSD 交叉分布（如 [10,50] vs [20,30]）
+   由下偏矩不等式裁决 —— 全序 FSD ⊂ SSD；latencyDominancePairs 升级
+   `order: 'FSD' | 'SSD'`（K-5）。"部分序留白"兑现。附带 `seededUniform`
+   （mulberry32）—— MC p 值可复现（K-5）。
+6. **同形字归一**（riskGate）：西里尔/希腊视觉同形 + 全角字母数字的策展
+   映射表（~50 条，值即边界；扩展纯数据零风险）—— 三重混淆叠加
+   （西里尔 а + leet 0）也命中（K-6）。E-6 的"Unicode 同形攻击留白"兑现。
+7. **噪声容忍循环检测**（oscillationTracker）：精确匹配升级为汉明容差 6 位
+   （与既视感阈值同律，远小于场景切换 ≥24）—— 周期内 ≤6 位抖动不再断尾
+   （epochE 新增噪声测试）；"互异"语义随容差升级（旧 1 位步进夹具实为噪声级
+   抖动）。E-3 的"模糊循环检测留白"兑现。
+8. **附带的第四枚类型炸弹**：orchestrator 的 `ChatFn/SubTask` 按值导入
+   （epochK 首次直载即爆）—— type-only 修复；smoke 导入器扩至 113 模块全绿。
+
+**K 纪元终态：310 项测试 / 303 pass / 0 fail / 7 skipped；epochK 17 项执法；
+113 模块导入干净；verify 23/23；tsc 零错误；dist 已重建。**
+
+## 留白清账总表（K 纪元后仍诚实声明的）
+
+- 传输层 SO_PEERCRED（需自定义 uvicorn handler —— Linux 独有，本机不可测）
+- Windows set_contrast（注册表+SPI 往返不可靠）
+- 虚拟屏的 scroll/hotkey/switch 证据（布局与键盘状态模型仍留白）
+- 贝叶斯 CPT 为专家律（无训练数据 —— 值即边界）
+- Homoglyph 策展子集（consortium 全表数千条 —— 扩展是数据工作非架构工作）

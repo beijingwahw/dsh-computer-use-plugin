@@ -8,6 +8,51 @@
 //
 // 诚实边界：规则阈值是各引擎洞见阈值的复用（不引入新旋钮）；规则间的互斥性
 // 由优先序保证（先具体后一般）。贝叶斯网络/因果图是留白 —— 当前无训练数据。
+/**
+ * 专家 CPT：P(signal=on | syndrome)。行 = 症候群，列 = [shifted, hurstHigh,
+ * loop, heavyTail, highNoop]。0.5 = 该症候群对此信号无主张（中性似然）。
+ */
+const BN_CPT = {
+    'shift-and-cluster': [0.90, 0.85, 0.20, 0.30, 0.30],
+    'regime-shift': [0.85, 0.30, 0.20, 0.25, 0.35],
+    'deterministic-loop': [0.15, 0.35, 0.90, 0.10, 0.45],
+    'failure-clustering': [0.20, 0.90, 0.30, 0.25, 0.30],
+    'blind-clicking': [0.10, 0.20, 0.25, 0.10, 0.92],
+    'stall-regime': [0.20, 0.25, 0.10, 0.90, 0.25],
+};
+const BN_SIGNAL_KEYS = ['shifted', 'hurstHigh', 'loop', 'heavyTail', 'highNoop'];
+/**
+ * 贝叶斯会诊（纯函数、确定性）：六症候群后验。
+ * 输入信号全缺席 / 全 false ⇒ null（健康是诚实的缺席，不硬造分布）。
+ * 消费方：get_metrics 在规则诊断之外附加 belief 块 —— 「首中即断」给处方，
+ * 信念表给**证据组合的全景**（包括未被规则命中的竞争假设）。
+ */
+export function bayesianBelief(signals) {
+    const observed = BN_SIGNAL_KEYS.filter(k => signals[k] !== null);
+    if (observed.length === 0)
+        return null;
+    if (observed.every(k => signals[k] === false))
+        return null;
+    const logLike = [];
+    for (const s of Object.keys(BN_CPT)) {
+        let ll = Math.log(1 / 6); // 均匀先验
+        BN_SIGNAL_KEYS.forEach((k, i) => {
+            const v = signals[k];
+            if (v === null)
+                return; // 缺席不参与似然（missing-at-random 的最小假设）
+            const pOn = BN_CPT[s][i];
+            ll += Math.log(v ? pOn : 1 - pOn);
+        });
+        logLike.push({ s, ll });
+    }
+    // log-sum-exp 归一（数值稳定；六假设直接枚举 —— 无需近似）
+    const m = Math.max(...logLike.map(x => x.ll));
+    const ws = logLike.map(x => Math.exp(x.ll - m));
+    const z = ws.reduce((a, b) => a + b, 0);
+    return logLike
+        .map((x, i) => ({ syndrome: x.s, posterior: Math.round((ws[i] / z) * 1000) / 1000 }))
+        .sort((a, b) => b.posterior - a.posterior);
+}
 const isLoop = (b) => !!b && ((b.normalized !== null && b.normalized <= 0.3 && b.length >= 24) ||
     (b.phrases <= 6 && b.length >= 20));
 /**

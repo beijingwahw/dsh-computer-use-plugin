@@ -164,14 +164,159 @@ export class LinuxAdapter {
     }
 }
 /** Windows：DWM/UIA 接口签名就位（能力预留 —— 架构留白，实现待真实环境） */
+// ── K 纪元（留白兑现之二）：Windows 适配器 —— PowerShell + Win32 P/Invoke ──
+// 纪律：与 LinuxAdapter 同款 AdapterDeps 注入（probe/exec 可测）；命令名与
+// P/Invoke 声明置于模块级常量 —— 类体零直接进程调用（genesis.premature-impl
+// 规则已同步演化为「注入纪律」守卫：实现合法，裸调用违法）。
+const PS_EXE = 'powershell';
+const PS_FLAGS = ['-NoProfile', '-NonInteractive', '-Command'];
+/** PS 单引号字面量转义（单引号加倍）—— 标题关键词的注入面闭合 */
+function psLiteral(s) {
+    return `'${String(s).replace(/'/g, "''")}'`;
+}
+/** 默认探针（win32）：where 定位可执行文件 */
+function probeWindows(cmd) {
+    try {
+        return spawnSync('where', [cmd], { encoding: 'utf8' }).status === 0;
+    }
+    catch {
+        return false;
+    }
+}
+/** Win32 P/Invoke 一次性声明（SetWindowPos/GetWindowRect/ShowWindowAsync/IsZoomed/SetForegroundWindow） */
+const USER32_DECL = 'Add-Type -Name U32 -Namespace Win -MemberDefinition "'
+    + '[DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); '
+    + '[DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr h, out RECT r); '
+    + '[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr h, int c); '
+    + '[DllImport(\"user32.dll\")] public static extern bool IsZoomed(IntPtr h); '
+    + '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h); '
+    + 'public struct RECT { public int L; public int T; public int R; public int B; }"';
 export class WindowsAdapter {
     platform = 'win32';
-    async capabilities() { return new Set(); }
-    async apply(_action) {
-        throw new Error('WindowsAdapter is a reserved capability slot (not yet implemented)');
+    probe;
+    execFn;
+    constructor(deps = {}) {
+        this.probe = deps.probe ?? probeWindows;
+        this.execFn = deps.exec ?? exec;
     }
-    async undo(_recipe) { }
-    async getWindowGeometry(_titleHint) { return null; }
+    /** 能力探测：PowerShell 在场 ⇒ 窗口四动作；set_contrast 诚实缺席
+     *  （注册表 + SPI_SETHIGHCONTRAST 往返不可靠 —— 留白如实申报，绝不虚报） */
+    async capabilities() {
+        const caps = new Set();
+        try {
+            if (this.probe(PS_EXE)) {
+                caps.add('raise_window');
+                caps.add('maximize_window');
+                caps.add('move_window');
+                caps.add('set_zoom'); // 键盘假定在场（与 system 热键管线同依赖）
+            }
+        }
+        catch { /* 探测异常 ⇒ 空能力集（NullAdapter 语义，不毒化启动） */ }
+        return caps;
+    }
+    /** 按标题关键词找主窗口句柄（0 = 未命中） */
+    async hwndOf(hint) {
+        const script = `(Get-Process | Where-Object { $_.MainWindowTitle -like '*' + ${psLiteral(hint)} + '*' } | Select-Object -First 1).MainWindowHandle`;
+        const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, script]);
+        const hwnd = Number.parseInt(stdout.trim(), 10);
+        return Number.isFinite(hwnd) && hwnd > 0 ? hwnd : 0;
+    }
+    async activate(hwnd) {
+        await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hwnd}) | Out-Null`]);
+    }
+    async apply(action) {
+        const hint = action.titleHint ?? '';
+        const hwnd = await this.hwndOf(hint);
+        if (hwnd === 0)
+            throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
+        switch (action.kind) {
+            case 'raise_window': {
+                await this.activate(hwnd);
+                return { kind: 'raise_window', titleHint: hint }; // z-order 不可逆：undo 为文档化 no-op
+            }
+            case 'maximize_window': {
+                const before = await this.getWindowGeometry(hint);
+                await this.activate(hwnd);
+                await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, 3) | Out-Null`]); // SW_MAXIMIZE
+                return { kind: 'maximize_window', titleHint: hint, before: before ?? undefined };
+            }
+            case 'move_window': {
+                if (typeof action.x !== 'number' || typeof action.y !== 'number') {
+                    throw new Error('move_window requires numeric x and y');
+                }
+                const before = await this.getWindowGeometry(hint);
+                await this.activate(hwnd);
+                // SWP_NOSIZE(0x1) | SWP_NOZORDER(0x4)：只移不改尺寸/层级
+                await this.execFn(PS_EXE, [...PS_FLAGS,
+                    `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`]);
+                return { kind: 'move_window', titleHint: hint, before: before ?? undefined };
+            }
+            case 'set_zoom': {
+                await this.activate(hwnd); // 热键需要目标前台
+                const level = typeof action.level === 'number' ? action.level : 100;
+                const presses = Math.max(0, Math.min(9, Math.round((level - 100) / 10)));
+                const { system } = await import('./system.js');
+                await system.pressHotkey(['ctrl', '0']);
+                for (let i = 0; i < presses; i++)
+                    await system.pressHotkey(['ctrl', '+']);
+                return { kind: 'set_zoom', titleHint: hint }; // 站点内部态不可读：undo 恒为 Ctrl+0
+            }
+            case 'set_contrast': {
+                // 不可达（capabilities 诚实不含此项）；分支完备性保留
+                throw new Error('set_contrast on Windows is an honestly-declared void (registry+SPI roundtrip unreliable)');
+            }
+        }
+    }
+    async undo(recipe) {
+        switch (recipe.kind) {
+            case 'raise_window':
+                return; // z-order 不可逆：文档化 no-op（撤销栈如实记录）
+            case 'maximize_window':
+            case 'move_window': {
+                const hwnd = await this.hwndOf(recipe.titleHint ?? '');
+                if (hwnd === 0)
+                    return; // 窗口已不存在：诚实 no-op
+                const b = recipe.before;
+                await this.activate(hwnd);
+                if (typeof b?.x === 'number' && typeof b.y === 'number') {
+                    await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, ${b.maximized ? 3 : 1}) | Out-Null`]);
+                    const w = typeof b.width === 'number' && b.width > 0 ? Math.round(b.width) : 0;
+                    const h = typeof b.height === 'number' && b.height > 0 ? Math.round(b.height) : 0;
+                    const flags = w > 0 && h > 0 ? 0x4 : 0x4 | 0x1; // 有尺寸快照 ⇒ 精确归位；否则 SWP_NOSIZE
+                    await this.execFn(PS_EXE, [...PS_FLAGS,
+                        `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]::Zero, ${Math.round(b.x)}, ${Math.round(b.y)}, ${w}, ${h}, ${flags}) | Out-Null`]);
+                }
+                else {
+                    // 无几何快照：止步于还原窗口态（与 LinuxAdapter 的诚实降级同律）
+                    await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, 1) | Out-Null`]);
+                }
+                return;
+            }
+            case 'set_zoom': {
+                const { system } = await import('./system.js');
+                await system.pressHotkey(['ctrl', '0']);
+                return;
+            }
+            case 'set_contrast':
+                return; // 不可达（apply 即抛）
+        }
+    }
+    async getWindowGeometry(titleHint) {
+        try {
+            const hwnd = await this.hwndOf(titleHint);
+            if (hwnd === 0)
+                return null;
+            const script = `${USER32_DECL}; $r = New-Object Win.U32+RECT; [Win.U32]::GetWindowRect([IntPtr]${hwnd}, [ref]$r) | Out-Null; $z = [Win.U32]::IsZoomed([IntPtr]${hwnd}); Write-Output ($($r.L.ToString()) + ',' + $($r.T.ToString()) + ',' + ($r.R - $r.L).ToString() + ',' + ($r.B - $r.T).ToString() + ',' + [int]$z)`;
+            const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, script]);
+            const [x, y, w, h, z] = stdout.trim().split(',').map(Number);
+            if (![x, y, w, h].every(Number.isFinite))
+                return null;
+            return { x, y, width: w, height: h, maximized: z === 1 };
+        }
+        catch {
+            return null; // 快照失败 ⇒ undo 降级（诚实记录于撤销栈）
+        }
+    }
 }
 /** Null：capabilities 恒空 —— 优雅降级（swarmEndpoint 同款姿态） */
 export class NullAdapter {
@@ -185,6 +330,12 @@ export class NullAdapter {
 }
 class Shaper {
     adapter = new NullAdapter();
+    /** 测试注入（先例：_legacyDeps._resetSharpCache_forTest）——
+     *  真实环境探测不可在测试内伪造；空能力路径的行为用 NullAdapter 锁死。 */
+    setAdapterForTest(adapter) {
+        this.adapter = adapter;
+        this.initialized = true;
+    }
     caps = new Set();
     undoLog = [];
     tokenSeq = 0;

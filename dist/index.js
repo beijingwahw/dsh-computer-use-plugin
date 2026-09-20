@@ -17,7 +17,7 @@ import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards/i
 import { resetPopupBelief } from './popupDetector.js';
 import { resetDiffPersistence } from './visualDiff.js';
 import { onToolPost } from './guards/hooks.js';
-import { runOrchestrator, ACTOR_SYSTEM_PROMPT } from './orchestrator.js';
+import { runOrchestrator, createActor } from './orchestrator.js';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts.js';
 import { emitCognitionPlanReady, mintIntentPlanReady, COGNITION_PLAN_READY_EVENT, } from './cognitionEvents.js';
 import { wireDoctorVerdictChannel } from './doctorChannel.js';
@@ -171,10 +171,24 @@ export async function apply(ctx, config) {
             // Actor：TODO 接入 DSH agents 服务的子 Agent 循环。
             // 诚实失败优于虚假成功（地层教训：simulated success 是债）—— 返回 [FAILED]
             // 让编排器的 fail-fast 协议立即中止并如实上报。
-            const actorFn = async (_task) => {
-                void ACTOR_SYSTEM_PROMPT; // 接入 agents 服务时作为子 Agent 的 system prompt
-                return '[FAILED] Actor loop is not wired to the DSH agents service yet (developer preview).';
-            };
+            // K 纪元（留白兑现）：Actor 双通道接线 —— ① DSH agents 服务（在场时）
+            // ② 技能重放回退（可靠匹配的子任务直接重放）；双缺席才诚实 [FAILED]。
+            const actorFn = createActor({
+                getAgentsRun: () => {
+                    const agents = ctx.get?.('agents');
+                    return typeof agents?.run === 'function' ? agents.run.bind(agents) : null;
+                },
+                matchSkill: q => config.enableSkillLibrary
+                    ? skillLibrary.match(q).map(m => ({
+                        id: m.id,
+                        // Laplace 可靠度（与肌肉记忆同律）：未经真实验证的 0/0 = 0.5 不入场
+                        reliability: (m.successCount + 1) / (m.attemptCount + 2),
+                        steps: m.steps.map(s => ({ tool: s.tool, args: s.args })),
+                    }))
+                    : [],
+                replayStep: (tool, args) => import('./tools/replayActions.js').then(m => m.replayOne({ tool, args: args })),
+                recordOutcome: (id, success) => skillLibrary.recordOutcome(id, success),
+            });
             // 技能归纳准备：任务起点打标 + 入口场景指纹（成功轨迹的切片边界）
             journal.markTaskStart(args.userRequest);
             const entryScene = contextManager.lastImageRecord()?.hash;
