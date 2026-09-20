@@ -101,6 +101,10 @@ class Swarm {
    *  补 seq 会改变 canonical 哈希域、破坏旧链 verify —— 身份游标零迁移成本。
    *  已知残差（诚实边界）：checkpoint 恢复的条目是新对象，跨会话会再结晶一次。 */
   private crystallized = new WeakSet<JournalEntry>();
+  /** N 纪元：跨会话消费水位 —— checkpoint 保存时随行；恢复后跳过已消费的
+   *  最旧 N 条（同一过滤视图内保序）。根除"每会话单次重复入账"残差；
+   *  诚实边界：若保存-恢复间日志大量驱逐使窗口短于水位 ⇒ 钳 0 重计一次。 */
+  private consumedWatermark = 0;
 
   configure(endpoint: string, syncIntervalMs: number, crystalCapacity: number): void {
     this.endpoint = endpoint;
@@ -115,7 +119,12 @@ class Swarm {
   crystalize(): number {
     const entries = journal.list(true);
     let added = 0;
+    let index = 0;
+    const skipUntil = this.consumedWatermark; // N 纪元：水位前缀跳过（跨会话残差根除）
+    this.consumedWatermark = 0;
     for (const e of entries) {
+      index += 1;
+      if (index <= skipUntil) continue; // 恢复语境下已被上一会话消费
       if (this.crystallized.has(e)) continue; // 身份游标：已消费的条目不再入账
       // 观察串格式 `#N dHash=<hex> popup=...` —— 提取指纹而非截断原文（键匿名且稳定）
       const hash = e.observe ? /dHash=([0-9a-fA-F]+)/.exec(e.observe)?.[1] : undefined;
@@ -131,6 +140,7 @@ class Swarm {
       if (e.status === 'SUCCESS' && e.effect_detected !== false) c.successes++;
       added++;
     }
+    this.consumedWatermark = entries.length; // N 纪元：全量消费后水位推进
     // 容量收敛：按尝试数降序保留（高频经验优先存活）
     if (this.crystals.size > this.crystalCapacity) {
       const kept = [...this.crystals.values()]
@@ -284,15 +294,16 @@ class Swarm {
     };
   }
 
-  dump(): { crystals: Array<ExperienceCrystal>; drifts: Array<{ sceneHash: string; dx: number; dy: number; n: number }> } {
+  dump(): { crystals: Array<ExperienceCrystal>; drifts: Array<{ sceneHash: string; dx: number; dy: number; n: number }>; consumedWatermark: number } {
     return {
+      consumedWatermark: this.consumedWatermark,
       crystals: [...this.crystals.values()].slice(0, this.crystalCapacity),
       // F-5：外部契约形状不变（dx/dy/n）—— Kalman 内部 x/y/p 不外泄（封装）
       drifts: this.drifts.map(d => ({ sceneHash: d.sceneHash, dx: d.x, dy: d.y, n: d.n })),
     };
   }
 
-  restore(data: { crystals?: ExperienceCrystal[]; drifts?: Array<{ sceneHash: string; dx: number; dy: number; n: number }> } | undefined): void {
+  restore(data: { crystals?: ExperienceCrystal[]; drifts?: Array<{ sceneHash: string; dx: number; dy: number; n: number }>; consumedWatermark?: number } | undefined): void {
     if (!data) return;
     for (const c of data.crystals ?? []) {
       if (c && typeof c.key === 'string') this.crystals.set(c.key, c);

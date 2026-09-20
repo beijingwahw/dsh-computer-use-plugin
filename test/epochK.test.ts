@@ -14,6 +14,8 @@ import { createActor } from '../src/orchestrator.ts';
 import { bayesianBelief } from '../src/diagnosis.ts';
 import { Telemetry } from '../src/telemetry.ts';
 import { matchesRiskPatterns } from '../src/riskGate.ts';
+import { journal } from '../src/journal.ts';
+import { swarm } from '../src/swarm.ts';
 import { makeScore } from '../src/doctorEvents.ts';
 import { DOCTOR_RULES } from '../src/doctorRules.ts';
 import type { ScanContext } from '../src/qualityDoctor.ts';
@@ -444,4 +446,61 @@ test('M-4: SO_PEERCRED 服务半边 —— scope 注入器 + pid 刻度（跨平
 test('M-5: 虚拟屏 scroll/hotkey —— K 终章已交付（本项清单核对，零改动）', async () => {
   // K-7a/K-7b 在本文件上方 —— 此处仅确认两项存在（清账表口径修正）
   assert.ok(true, 'scroll/hotkey 证据 = K 终章 K-7a/b（清单第 3 项实际剩余：drag/switch）');
+});
+
+// ─── N 纪元：三项残差根除的执法 ───
+
+test('N-1: swarm 跨会话水位 —— 恢复后同批日志零二次入账', async () => {
+  const h = 'ab'.repeat(32);
+  for (let i = 0; i < 3; i++) {
+    await journal.append({ ts: Date.now(), tool: 'click_mouse', args: { x: 0.1, y: 0.1 }, status: 'SUCCESS', effect_detected: true, observe: `#${i} dHash=${h}` });
+  }
+  swarm.crystalize();
+  const before = swarm.report().topRoutes[0]?.attempts ?? 0;
+  const dump = swarm.dump();
+  swarm.reset(); // 模拟跨会话（身份游标失效 —— 旧残差场景）
+  swarm.restore(dump as never);
+  const added = swarm.crystalize();
+  assert.equal(added, 0, '水位跳过已消费前缀（旧残差：+3 重复入账）');
+  assert.equal(swarm.report().topRoutes[0]?.attempts ?? 0, before, 'attempts 不膨胀');
+});
+
+test('N-2: 审批盲区根除 —— 双通道全沉默的点击被硬前置拒绝', async () => {
+  const { createClickMouseTool } = await import('../src/tools/clickMouse.ts');
+  const tool = createClickMouseTool({ enableApprovalGate: true, dangerPatterns: 'send' } as never);
+  const out = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
+    .execute({ x: 0.5, y: 0.5 }); // 无 target_description / 无 expected_text
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.status, 'ACTION_REQUIRED', '旧版：blind-spot 仅透明化放行');
+  assert.equal(parsed.state_anchor.reason, 'undescribed-click');
+  // 闸门关闭 ⇒ 硬前置不生效（语义只属审批域）
+  const off = createClickMouseTool({ enableApprovalGate: false, dangerPatterns: '' } as never);
+  const out2 = await (off as unknown as { execute: (a: unknown) => Promise<string> })
+    .execute({ x: 0.5, y: 0.5 });
+  assert.notEqual(JSON.parse(out2).status, 'ACTION_REQUIRED');
+});
+
+test('N-3: 虚拟屏 drag/switch_window 证据（真实剩余留白补全）', async () => {
+  const { eng, cleanup } = engine();
+  const drag = await eng.rehearse({
+    id: 'chain-n3-drag', origin: 'manual', virtualScene: SCENE,
+    actions: [{ kind: 'drag_mouse', args: { startX: 0.15, startY: 0.12, endX: 0.6, endY: 0.6 } }],
+  });
+  assert.equal(drag.verdict, 'passed', '抓取按钮拖走 = L1 证据');
+  const grabAir = await eng.rehearse({
+    id: 'chain-n3-air', origin: 'manual', virtualScene: SCENE,
+    actions: [{ kind: 'drag_mouse', args: { startX: 0.9, startY: 0.9, endX: 0.5, endY: 0.5 } }],
+  });
+  assert.equal(grabAir.verdict, 'failed', '抓空 = 反证');
+  const win = await eng.rehearse({
+    id: 'chain-n3-win', origin: 'manual', virtualScene: SCENE,
+    actions: [{ kind: 'switch_window', args: { titleKeyword: 'search' } }],
+  });
+  assert.equal(win.verdict, 'passed', '标题命中 search 输入框 = 聚焦转移');
+  const noWin = await eng.rehearse({
+    id: 'chain-n3-nowin', origin: 'manual', virtualScene: SCENE,
+    actions: [{ kind: 'switch_window', args: { titleKeyword: 'nonexistent' } }],
+  });
+  assert.equal(noWin.verdict, 'failed', '无匹配 = 反证');
+  cleanup();
 });

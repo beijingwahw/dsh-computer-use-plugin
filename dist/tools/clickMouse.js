@@ -101,14 +101,17 @@ export function createClickMouseTool(config) {
                         'Never proceed without consent.',
                 }, null, 2);
             }
-            // J 纪元（盲区透明化）：审批闸门的危险判定依赖描述类信号 —— 两条信号
-            // 都缺席时闸门物理失明。无法强制（参数是模型的自由），但把盲区摆到
-            // 锚点里：模型看得见"这一跳没有被安全网覆盖"。
-            const gateCoverage = config.enableApprovalGate
-                ? ((target_description || expected_text)
-                    ? 'described'
-                    : 'blind-spot (neither target_description nor expected_text given — approval gate could not judge this click)')
-                : 'gate-disabled';
+            // N 纪元（盲区根除）：闸门开启时描述是硬前置 —— 两条信号通道全沉默的点击
+            // 不再放行（旧版仅透明化 blind-spot）。合规零成本：补一句描述重发即过。
+            if (config.enableApprovalGate && !target_description && !expected_text) {
+                return JSON.stringify({
+                    status: 'ACTION_REQUIRED',
+                    state_anchor: { reason: 'undescribed-click', note: 'approval gate cannot judge an undescribed target' },
+                    next_step: 'Re-invoke click_mouse with target_description (what you are clicking) or expected_text ' +
+                        '(text you expect to appear) — the approval gate requires one description channel to judge irreversibility.',
+                }, null, 2);
+            }
+            const gateCoverage = config.enableApprovalGate ? 'described' : 'gate-disabled';
             try {
                 const size = await system.getScreenSize();
                 const px = Math.round(x * size.width);

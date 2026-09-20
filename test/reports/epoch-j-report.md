@@ -379,3 +379,26 @@ L-1..L-5）；基准 12 pass / 0 fail / 2 环境跳过；113 模块干净；tsc 
 
 **终态：322 项测试 / 315 pass / 0 fail / 7 skipped（epochK 29 项）；基准
 12 pass / 0 fail / 2 环境跳过；113 模块干净；tsc 零错误。**
+
+## 附录九：N 纪元 —— 四项残差的三根除一修正
+
+1. **swarm 跨会话重复入账 → 根除**：消费水位（`consumedWatermark`）随
+    dump/restore 持久化 —— 恢复后跳过已消费前缀（同一过滤视图保序）；
+    窗口短于水位（重度驱逐）⇒ 钳 0 重计一次并声明。执法 N-1：restore 后
+    同批日志零新增、attempts 不膨胀（旧残差：+3）。
+2. **审批盲区 → 根除（硬前置）**：闸门开启时 `target_description` /
+    `expected_text` 双通道全沉默的点击返回 `ACTION_REQUIRED
+    (undescribed-click)`，不再仅透明化放行；合规零成本（补描述重发即过），
+    闸门关闭不受影响。执法 N-2 双向。
+3. **虚拟屏 / 'escalated' "留白" → 陈账修正**：两者分别在 K 纪元（K-1..K-7）
+    与 J 二轮（J-12/J-13）交付 —— 本项为清单口径滞后。真实剩余的
+    drag/switch_window 证据本轮补全（抓取命中/抓空反证；标题命中聚焦/
+    无匹配反证）。执法 N-3。仍留白：switch_tab（标签栈模型）。
+4. **环境 skip → 声明维持**：UDS/X11/真机基准为 Linux 专属栈，Windows
+    本机物理不可覆盖；7 项 skip 与基线一致是**环境事实**而非代码缺口
+    （realMachine 已带原因优雅跳过）。软依赖（sharp/tesseract）装即转绿。
+   （calibration.bench 曾现一次 Node test-runner IPC 反序列化抖动 ——
+   复跑 12/0/2 全绿，非代码信号。）
+
+**终态：325 项测试 / 318 pass / 0 fail / 7 skipped（epochK 32 项）；
+基准 12 pass / 0 fail / 2 环境跳过；113 模块干净；tsc 零错误。**

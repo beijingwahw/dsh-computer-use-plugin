@@ -165,6 +165,33 @@ export class VirtualScreen {
         note: `esc dismissed popup ${closed.name}`, layers: ['L1-pixel'] };
     }
 
-    return NO_EVIDENCE; // drag/switch_tab/switch_window/dismiss_popup/noop：布局模型仍留白（值即边界）
+    // ── N 纪元补全：拖拽证据（起点命中 = 抓取；抓空 = 反证）──
+    if (action.kind === 'drag_mouse') {
+      const sx = num(action.args?.startX), sy = num(action.args?.startY);
+      const ex = num(action.args?.endX), ey = num(action.args?.endY);
+      if (sx === null || sy === null || ex === null || ey === null) return NO_EVIDENCE;
+      const grabbed = this.widgetAt(sx, sy);
+      if (!grabbed) {
+        return { effectDetected: false, expectationMet: null,
+          note: 'drag started on empty space — nothing grabbed', layers: ['L1-pixel'] };
+      }
+      this.focus = grabbed;
+      return { effectDetected: true, expectationMet: null,
+        note: `dragged ${grabbed.name} to (${ex.toFixed(2)},${ey.toFixed(2)})`, layers: ['L1-pixel'] };
+    }
+    // ── N 纪元补全：切窗证据（标题关键词命中控件 = 聚焦转移；无匹配 = 反证）──
+    if (action.kind === 'switch_window') {
+      const kw = typeof action.args?.titleKeyword === 'string' ? action.args.titleKeyword.toLowerCase() : '';
+      if (!kw) return NO_EVIDENCE;
+      const target = this.widgets.find(w => w.name.toLowerCase().includes(kw));
+      if (!target) {
+        return { effectDetected: false, expectationMet: null,
+          note: `no window title contains ${JSON.stringify(kw)}`, layers: ['L1-pixel'] };
+      }
+      this.focus = target;
+      return { effectDetected: true, expectationMet: null,
+        note: `focus moved to ${target.name} (title match)`, layers: ['L1-pixel'] };
+    }
+    return NO_EVIDENCE; // switch_tab/dismiss_popup/noop：标签栈/元动作模型留白（值即边界）
   }
 }
