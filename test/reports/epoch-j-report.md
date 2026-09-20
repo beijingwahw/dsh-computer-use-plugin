@@ -145,3 +145,34 @@ pinnedCount 统计含已降级记录，解钉只作用于有图候选 ⇒ 安全
    SO_PEERCRED 需自定义 uvicorn handler，留白如旧但文档已如实）。
 6. 本机 Windows 环境未覆盖的路径：UDS 监听、X11 窗口栈、真机基准
   （realMachine.bench 需 Xvfb）—— 7 项环境 skip 与基线一致。
+
+## 附录：致命级修复的运行时验收（世界级证据，J 纪元追加）
+
+> 修复的下半场是证明。本机（Windows / Python 3.13+ / fastapi+uvicorn+PIL 在场，
+> pyautogui 缺席）三路证据：
+
+1. **集成测试真机解锁**：`physicalExecution.{d7HostPort,shmReader,screenshotHandle}`
+   三组测试此前因服务起不来整组跳过（基线 7 skip 中的主体）——现在
+   **20/20 真实执行全部通过**：真实 spawn Python 微服务、HTTP 探活、
+   perceive→execute 双端口同进程（pid 不变）、跨进程 mmap-file 通道逐字节读回、
+   显式释放语义。
+2. **运行时证据脚本**（`scripts/verify_fatal_fixes.py`，14/14 通过）：
+   - V1a-d：受控桩直击原崩溃行 —— 真实（非 dry-run）点击不再抛 TypeError，
+     `button`/`_pause` kwargs 完整抵达 pyautogui（`('click', 960, 540, 'right',
+     {'_pause': False})`），像素回执正确，屏幕尺寸 TTL 过期后随分辨率刷新
+     （1920→2560 重算为 1280）。
+   - V2a-c：health.screen 成功臂是 `{width,height}` dict（错误臂诚实进入
+     `{error}` —— TS 契约联合两臂全部实测）；capabilities 是能力位图。
+   - V3a-g：weakref 兜底已移除；注册表键 == ShmHandle.name（DELETE 可命中）；
+     **gc.collect() 后通道仍存活**（旧实现在此 munmap/unlink）；10240 字节
+     逐位一致；显式释放 True → 文件消失 → 二次释放诚实 False（幂等）。
+3. **消费侧纵深防御（新增）**：`sanitizeScreenSize` 有限正数闸（纯函数导出）——
+   任何一端未来再产出坏尺寸（undefined/NaN/0/负/Infinity 一切旧事故形态）
+   ⇒ 缓存保持 null ⇒ perceive 诚实 fault，NaN 归一化坐标永久免疫。
+   执法测试 J-11 锁定七种形态。
+
+D-5+D-6 预演闸门（J-D）的执法由 epochJ J-5a/b 承担（degraded 放行 + failed
+拒绝 + rehearsalChainId 回流），随全量套件通过。
+
+**终态：288 项测试 / 281 pass / 0 fail / 7 skipped；tsc 零错误；
+`python scripts/verify_fatal_fixes.py` 14/14。**

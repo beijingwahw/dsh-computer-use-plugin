@@ -327,3 +327,17 @@ test('J-10: save_skill 的 to_step=-2 被钳到 from（旧实现 slice(0,-1) 铸
   assert.equal(skills.length, 1);
   assert.equal(skills[0].steps.length, 1, 'to<from 收敛到 from（旧实现 = 除最后 1 条外的全部 4 步）');
 });
+
+// ─── J-11 纵深防御：屏幕尺寸有限正数闸（NaN 坐标永久免疫）───
+
+test('J-11: sanitizeScreenSize —— 坏数据 ⇒ null，好数据直通', async () => {
+  const { sanitizeScreenSize } = await import('../src/physicalExecution/d7HostPort.ts');
+  assert.deepEqual(sanitizeScreenSize({ width: 1920, height: 1080 }), { width: 1920, height: 1080 });
+  // 旧 NaN 事故的全部形态：undefined 键 / 非有限 / 非正 / 缺席
+  assert.equal(sanitizeScreenSize(undefined), null);
+  assert.equal(sanitizeScreenSize({} as never), null);
+  assert.equal(sanitizeScreenSize({ width: undefined, height: 1080 } as never), null, '旧事故形态：width undefined');
+  assert.equal(sanitizeScreenSize({ width: Number.NaN, height: 1080 } as never), null);
+  assert.equal(sanitizeScreenSize({ width: 0, height: 1080 } as never), null);
+  assert.equal(sanitizeScreenSize({ width: -5, height: Infinity } as never), null);
+});

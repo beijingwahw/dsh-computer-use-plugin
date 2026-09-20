@@ -53,6 +53,7 @@ export {
 } from './serviceManager.js';
 export {
   D7PhysicalHostPort,
+  sanitizeScreenSize,
   type D7PhysicalHostPortOpts,
 } from './d7HostPort.js';
 

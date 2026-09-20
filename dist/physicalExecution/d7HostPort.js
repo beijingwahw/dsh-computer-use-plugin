@@ -30,6 +30,19 @@ function translateFailureKind(kind) {
  * 注意：dispose 未被自动调用，需要 Cordis ctx.effect 或测试手动调。
  *       若调用方忘记，FinalizationRegistry 兜底（见 _finalizer）。
  */
+/**
+ * J 纪元纵深防御（纯函数）：屏幕尺寸的有限正数闸。
+ * 旧链路的 NaN 事故（health 曾把 tuple 序列化成数组 → Node 端 undefined 除数
+ * → 归一化产出 NaN 坐标，静默毒化决策链）在消费侧永久免疫：坏数据 ⇒ null
+ * ⇒ perceive 诚实 fault。宁可失明，不可说谎。
+ */
+export function sanitizeScreenSize(screen) {
+    const w = Number(screen?.width);
+    const h = Number(screen?.height);
+    if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0)
+        return { width: w, height: h };
+    return null;
+}
 class D7PhysicalHostPort {
     name = 'd5-microservice-host';
     opts;
@@ -154,13 +167,20 @@ class D7PhysicalHostPort {
         const source = depth === 'L3' ? 'L3-vlm' : depth === 'L2' ? 'L2-ocr' : 'L1-tree';
         return dispatchElementsToGrid(els, req.grid, depth, source);
     }
-    /** 屏幕尺寸缓存（health 单次探测；失败保持 null ⇒ perceive 诚实 fault） */
+    /** 屏幕尺寸缓存（health 单次探测；失败保持 null ⇒ perceive 诚实 fault）。
+     *  尺寸统一过 `sanitizeScreenSize` 有限正数闸（见该函数注）。 */
     async _syncScreenSize() {
         if (!this.adapter)
             return;
         const health = await this.adapter.health();
         if (health.ok && !('error' in health.value.screen)) {
-            this.screenSize = { width: health.value.screen.width, height: health.value.screen.height };
+            const sanitized = sanitizeScreenSize(health.value.screen);
+            if (!sanitized) {
+                console.warn(`[D7PhysicalHostPort] health reported non-finite screen size ` +
+                    `(${JSON.stringify(health.value.screen)}) — keeping null (honest fault over NaN coords)`);
+                return;
+            }
+            this.screenSize = sanitized;
         }
     }
     /** 当前是否已完成初始化（router 可路由） */
@@ -245,7 +265,12 @@ class D7PhysicalHostPort {
                 if (health.ok) {
                     syncCapabilityFromHealth(this._capability, health.value);
                     if (!('error' in health.value.screen)) {
-                        this.screenSize = { width: health.value.screen.width, height: health.value.screen.height };
+                        // J 纪元纵深防御：有限正数闸（坏数据 ⇒ 保持 null 诚实 fault，绝不 NaN）
+                        this.screenSize = sanitizeScreenSize(health.value.screen);
+                        if (health.value.screen && !this.screenSize) {
+                            console.warn(`[D7PhysicalHostPort] startup health reported non-finite screen size ` +
+                                `(${JSON.stringify(health.value.screen)}) — screenSize stays null`);
+                        }
                     }
                 }
             }

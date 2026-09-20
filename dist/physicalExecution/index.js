@@ -9,7 +9,7 @@ export { ScreenshotHandle, ScreenshotBatch } from './screenshotHandle.js';
 export { CapabilityCache, syncCapabilityFromHealth, syncCapabilityFromSwitchWindowResult, } from './capabilityCache.js';
 // 批次 D：默认实现切换 —— Python 子进程生命周期 + D-7 HostExecutePort 适配
 export { PhysicalServiceManager, } from './serviceManager.js';
-export { D7PhysicalHostPort, } from './d7HostPort.js';
+export { D7PhysicalHostPort, sanitizeScreenSize, } from './d7HostPort.js';
 import { PhysicalExecutionAdapterImpl } from './adapter.js';
 /**
  * 适配器工厂 —— D-7 编排器侧的便捷入口。
