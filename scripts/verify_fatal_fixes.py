@@ -141,4 +141,21 @@ ok('S3 parse_token 单次解析携带 exp/caps/pid（nonce 上界直取）',
 bad = auth_mod.parse_token(key, tok + 'x')
 ok('S3b 篡改签名拒绝', not bad.ok)
 
-print(f'\n=== 全部证据：{PASS}/{PASS} 通过 ===')
+print(f'[section] 致命级 14/14 + 严重级 {PASS - 14}/ {PASS - 14} —— 继续中等级…')
+
+
+# S5：PID 白名单装载器（空壳机制化 —— 纯函数三态）
+from dsh_physical.auth import _load_pid_whitelist  # noqa: E402
+ok('S5a 缺席/空 ⇒ 开放模式（CI 友好，现状语义）',
+   _load_pid_whitelist(None) == set() and _load_pid_whitelist('') == set())
+ok('S5b 合法 64-hex 条目装载（逗号分隔，大小写归一）',
+   _load_pid_whitelist('AB' + '0' * 62 + ', ' + 'cd' + 'f' * 62) ==
+   {'ab' + '0' * 62, 'cd' + 'f' * 62})
+try:
+    _load_pid_whitelist('abc')
+    ok('S5c 非法条目整条拒绝（拒绝半载白名单）', False, '未抛错')
+except ValueError:
+    ok('S5c 非法条目整条拒绝（拒绝半载白名单）', True)
+
+print('')
+print(f'=== 全部证据：{PASS}/{PASS} 通过 ===')

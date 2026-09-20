@@ -33,7 +33,7 @@ export { DoctorVerdictBridge, toD7Intent, translateVerdict } from './adapters';
 export type {
   AttentionEnvelope, D7StationKind, KnowledgeBase, KnowledgeEntry, KnowledgeInjection, KnowledgeQuery,
   KnowledgeResult, KnowledgeCategory, KnowledgeError, IntentPayload, NeedGrounding,
-  PerceptionRequest, DoctorVerdictPayload, ExecutionResult, ExecutionOutcome,
+  PerceptionRequest, D7DoctorVerdict, ExecutionResult, ExecutionOutcome,
   OutcomeSettlement, DecisionContext, FailureFeedback, PipelineReport, PipelineConfig,
   ConfigError, PipelineOrchestrator, Result,
 } from './contracts';

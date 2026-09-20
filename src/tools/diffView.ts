@@ -67,6 +67,8 @@ export function createDiffViewTool() {
 
         // H-1 Wasserstein 空间位移：变化发生在你动作的地方吗（最优传输因果验证）——
         // dHash 答「有没有变」，W₁ 答「变化是否在你的动作点附近」
+        // 焦点窗口 = 2×focusMaxAgeMs（J 纪元命名）：差分对动作点的归因比输入
+        // 验证更宽容 —— 一次 take_screenshot 之后再 diff，焦点仍在归因域内。
         const focus = focusTracker.get(60_000);
         const displacement = focus ? spatialDisplacement(focus, diff.regions) : null;
 

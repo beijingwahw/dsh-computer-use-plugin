@@ -252,7 +252,9 @@ export interface PipelineReport {
   terminalReason: string;
   attempts: AttemptRecord[];
   /** 工位级计量（信封预算的实际消耗） */
-  tokenUsage: { vision: number; decision: number; execution: number };
+  /** J 纪元诚实重命名：计量的是**授予**的信封预算（骨架无消耗计量回路）——
+  *  旧名 tokenUsage 暗示实际消耗，名不副实。 */
+  tokenBudgetsGranted: { vision: number; decision: number; execution: number };
   /** 沙箱因果链锚（Trajectory 回放） */
   chainTip: string;
   reportPath: string;

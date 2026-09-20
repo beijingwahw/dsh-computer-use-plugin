@@ -147,6 +147,8 @@ export class PhysicalServiceManager {
 
     // 1. 密钥文件（缺省 = 临时生成随机）。重生路径（进程崩溃后再 start）先清理
     // 上一轮的临时密钥/mmap 目录 —— 否则旧目录被覆盖引用后永久泄漏在 tmp 里
+    // 重生路径（进程崩溃后再 start）：_started=true 且子进程已死 —— 首次
+    // start（_started=false）天然跳过；复用路径在上方 isRunning 分支提前返回
     if (this._started && !this.isRunning) {
       this._cleanupLocal();
     }

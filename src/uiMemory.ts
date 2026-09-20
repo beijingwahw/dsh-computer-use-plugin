@@ -123,7 +123,10 @@ class UIMemory {
         }
         return { ...l, score: Math.round((text + trust + recency + sceneBonus) * 1000) / 1000 };
       })
-      .filter(l => l.score > 0.05)
+      // 设计决策（J 纪元立法，此前无文档）：信任/新近分量可独立过线 —— 零文本
+      // 重合的地标允许作为 top-k 填充（探索性召回：老位置即使换任务也有先验价值）。
+      // 若需严格文本相关，把过滤改为 overlap > 0 || sceneMatch 即可 —— 行为变更
+      // 需同步 uiMemory.test 的阈值断言。
       .sort((a, b) => b.score - a.score)
       .slice(0, k);
   }

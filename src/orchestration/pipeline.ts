@@ -459,26 +459,26 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     terminalReason: string,
     attempts: AttemptRecord[],
     startedAt: number,
-    tokenUsage?: { vision: number; decision: number; execution: number },
+    budgetsGranted?: { vision: number; decision: number; execution: number },
     snapshotId?: string,
   ): PipelineReport {
     const chainTip = sandboxLog.tip;
-    const usage = tokenUsage ?? { vision: 0, decision: 0, execution: 0 };
-    // J 纪元修正：落盘报告补齐 terminalReason / chainTip / tokenUsage ——
+    const usage = budgetsGranted ?? { vision: 0, decision: 0, execution: 0 };
+    // J 纪元修正：落盘报告补齐 terminalReason / chainTip / 授予预算 ——
     // 旧实现只写 {intentId, verdict, attempts, snapshotId, startedAt}，
     // 磁盘报告缺终局归因与审计锚，与内存报告两副面孔。
     const reportPath = this.persistReport(intent.id, verdict, {
       attempts, snapshotId, startedAt,
       terminalReason: terminalReason.slice(0, 120),
       chainTip,
-      tokenUsage: usage,
+      tokenBudgetsGranted: usage,
     });
     const report: PipelineReport = {
       intentRef: intent.id,
       verdict,
       terminalReason: terminalReason.slice(0, 120),
       attempts,
-      tokenUsage: usage,
+      tokenBudgetsGranted: usage,
       chainTip,
       reportPath,
     };

@@ -7,7 +7,15 @@ function redactArgs(args) {
         return args;
     const out = {};
     for (const [k, v] of Object.entries(args)) {
-        out[k] = REDACT_KEYS.test(k) ? '[REDACTED]' : v;
+        if (REDACT_KEYS.test(k)) {
+            out[k] = '[REDACTED]'; // 敏感键：无论标量/数组/对象，整值脱敏（J 纪元：数组不再原样放行）
+        }
+        else if (v && typeof v === 'object' && !Array.isArray(v)) {
+            out[k] = redactArgs(v); // 嵌套一层同律（深层结构递归，环由 JSON.stringify 天然拒绝）
+        }
+        else {
+            out[k] = v;
+        }
     }
     return out;
 }

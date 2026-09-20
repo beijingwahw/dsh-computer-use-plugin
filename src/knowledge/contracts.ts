@@ -148,7 +148,11 @@ export interface PerceptionRequest {
   snapshotId?: string;
 }
 
-export type DoctorVerdictPayload =
+/** D-4 判决的 **D-7 内部方言**（adapters.translateVerdict 的产物 / 验收结算消费）。
+ *  J 纪元消歧：与 D-4 事件方言 `../doctorEvents.DoctorVerdictPayload`
+ *  （subject/chainTip/verdict/score/rationale 载荷）同名异构曾致跨文件阅读
+ *  混淆 —— 现更名 D7DoctorVerdict，双方言以命名立分。 */
+export type D7DoctorVerdict =
   | { status: 'approved'; confidence: number }
   | { status: 'rejected'; reason: string }
   | { status: 'needs_review'; flags: string[] };
@@ -169,7 +173,7 @@ export interface ExecutionOutcome {
   intent: IntentPayload;
   action: AtomicAction;
   result: ExecutionResult;
-  doctorVerdict?: DoctorVerdictPayload;
+  doctorVerdict?: D7DoctorVerdict;
   retryCount: number;
   totalDurationMs: number;
 }

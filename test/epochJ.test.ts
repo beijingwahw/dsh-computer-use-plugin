@@ -245,7 +245,7 @@ test('J-6b: 合法 regionId（在场且未达 L3）⇒ 批准 → L3 重扫 → 
   const report = await orch.run(intent);
   assert.equal(report.verdict, 'completed');
   assert.equal(report.attempts.length, 1);
-  assert.ok(report.tokenUsage.vision > 0, 'L3 重扫的 token 预算入账');
+  assert.ok(report.tokenBudgetsGranted.vision > 0, 'L3 重扫的 token 预算入账');
 });
 
 // ─── J-7 技能库发号器：nextSynthId 快照保真 + nextId 撞号防线 ───
@@ -369,7 +369,7 @@ test('J-13: reconcileVerdicts —— rejected 否决 / needs_review 把 complete
       action: { kind: 'click_mouse', args: {}, rationale: 'r' } as never,
       result: { seq: 1, effectDetected: true, latencyMs: 1, rehearsed: false, rehearsalChainId: chainId },
     }],
-    tokenUsage: { vision: 0, decision: 0, execution: 0 },
+    tokenBudgetsGranted: { vision: 0, decision: 0, execution: 0 },
     chainTip: 't', reportPath: 'in-memory',
   });
   // rejected：否决权
@@ -408,4 +408,18 @@ test('J-14: 不填 target_description 但 expected_text 命中危险词 ⇒ 闸�
   const okOut = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
     .execute({ x: 0.5, y: 0.5, expected_text: '菜单展开' });
   assert.notEqual(JSON.parse(okOut).status, 'ACTION_REQUIRED');
+});
+
+// ─── J-15 parseExpectation 双分支同词表：未知 kind ⇒ 诚实缺席 ───
+
+test('J-15: JSON 分支与简写分支同一 kind 词表（拼错 kind 不再"貌似合法实为弃权"）', async () => {
+  const { parseExpectation } = await import('../src/intent.ts');
+  // 合法 kind：两分支都收
+  assert.equal(parseExpectation('toggle_on')?.kind, 'toggle_on');
+  assert.equal(parseExpectation('{"kind":"toggle_on","text":"x"}')?.text, 'x');
+  assert.equal(parseExpectation('{"kind":"page_navigate"}')?.kind, 'page_navigate');
+  // 未知 kind：两分支同拒（旧实现 JSON 分支任意字符串直通 as 断言）
+  assert.equal(parseExpectation('togle_on'), null, '简写拼错 ⇒ null（既有行为）');
+  assert.equal(parseExpectation('{"kind":"togle_on"}'), null, 'JSON 拼错 ⇒ null（J 纪元对齐）');
+  assert.equal(parseExpectation('{"kind":123}'), null);
 });

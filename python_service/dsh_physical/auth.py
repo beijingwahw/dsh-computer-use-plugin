@@ -189,8 +189,35 @@ def parse_token(key: bytes, token: str) -> AuthResult:
 
 # ─── PID Attestation（Layer 2，Linux 独有）───
 
-_NODE_BINARY_HASHES: set[str] = set()
-"""启动期填充：允许的 Node 二进制 SHA256。空集合 = 不校验二进制身份（CI 友好）。"""
+def _load_pid_whitelist(raw: str | None) -> set[str]:
+    """PID 白名单装载（J 纪元机制化：空壳 → 可用旋钮）。
+
+    ``DSH_PHYSICAL_PID_WHITELIST`` = 逗号分隔的 64 位十六进制 sha256。
+    非法条目（长度/字符域不符）**整条拒绝**而非半载 —— 白名单半载比空表
+    更危险（给人"已启用"的错觉）。空/缺席 = 开放模式（现状，CI 友好）。
+    装载即校验：让 attestation 的严格性在启动期可见，而非运行期静默。
+    """
+    if not raw:
+        return set()
+    out: set[str] = set()
+    for item in raw.split(","):
+        h = item.strip().lower()
+        if len(h) == 64 and all(c in "0123456789abcdef" for c in h):
+            out.add(h)
+        elif h:
+            raise ValueError(
+                f"DSH_PHYSICAL_PID_WHITELIST entry {item!r} is not a 64-hex sha256 "
+                "(refusing half-loaded whitelist — fix or remove the entry)"
+            )
+    return out
+
+
+# 加载层（模块导入时一次）：非法配置 ⇒ 启动即失败（异常诚实第一条）
+_NODE_BINARY_HASHES: set[str] = _load_pid_whitelist(
+    os.environ.get("DSH_PHYSICAL_PID_WHITELIST")
+)
+"""非空 ⇒ attest_pid 升级为严格二进制身份校验（sha256 of /proc/<pid>/exe）。
+传输层 SO_PEERCRED 仍留白（需自定义 uvicorn handler）—— 见模块头注。"""
 
 
 def _hash_binary(path: str) -> str | None:

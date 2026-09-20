@@ -201,7 +201,7 @@ export async function apply(ctx, config) {
             reconcileVerdicts(report); // J 纪元：在途到达的判决出环回收 + D-4 否决权兑现
             boundedSet(inflightReports, intent.id, report, MAX_LIVE_REPORTS);
             console.log(`[Orchestration] Pipeline ${intent.id}: verdict=${report.verdict} ` +
-                `attempts=${report.attempts.length} tokens(v/d/e)=${report.tokenUsage.vision}/${report.tokenUsage.decision}/${report.tokenUsage.execution} ` +
+                `attempts=${report.attempts.length} budgets(v/d/e)=${report.tokenBudgetsGranted.vision}/${report.tokenBudgetsGranted.decision}/${report.tokenBudgetsGranted.execution} ` +
                 `report=${report.reportPath}`);
         });
     }
@@ -253,7 +253,7 @@ export async function apply(ctx, config) {
                     intent_id: report.intentRef,
                     attempts: report.attempts.length,
                     terminal_reason: report.terminalReason,
-                    token_usage: report.tokenUsage,
+                    token_budgets_granted: report.tokenBudgetsGranted,
                     chain_tip: report.chainTip,
                     report: report.reportPath,
                 });
@@ -304,7 +304,7 @@ export async function apply(ctx, config) {
                     effect: a.result.effectDetected, failure: a.result.failure?.kind ?? null,
                     doctor: a.doctorVerdict?.verdict ?? null,
                 })),
-                token_usage: report.tokenUsage,
+                token_budgets_granted: report.tokenBudgetsGranted,
                 report: report.reportPath,
             });
         },

@@ -6,7 +6,7 @@
 import type { DoctorVerdictPayload as D4DoctorVerdictPayload } from '../doctorEvents';
 import type { IntentPayload as D6IntentPayload } from '../orchestration/contracts';
 import type {
-  DoctorVerdictPayload, ExecutionOutcome, IntentPayload, OutcomeSettlement,
+  D7DoctorVerdict, ExecutionOutcome, IntentPayload, OutcomeSettlement,
 } from './contracts';
 
 // ─── P0-2：D-6 → D-7 意图方言翻译器 ───
@@ -25,7 +25,7 @@ export function toD7Intent(intent: D6IntentPayload): IntentPayload {
 /** D-4 doctor/verdict 载荷 → D-7 三态判决（0-100 分数域 → 0-1 置信域换算）。
  *  域外分数防线：换算前先验 0-100 契约域 —— 域外绝不换算出域外 confidence
  *  （clamp 掩埋 bug，needs_review 标记交人审暴露它）。 */
-export function translateVerdict(p: D4DoctorVerdictPayload): DoctorVerdictPayload {
+export function translateVerdict(p: D4DoctorVerdictPayload): D7DoctorVerdict {
   if (typeof p.score !== 'number' || !Number.isFinite(p.score) || p.score < 0 || p.score > 100) {
     return { status: 'needs_review', flags: [`score ${String(p.score)} out of 0-100 domain`] };
   }
@@ -54,7 +54,7 @@ const MAX_CACHED_VERDICTS = 500;
  *   永不被消费的回执 FIFO 淘汰至上限（迟到死证据不许无界堆积）。
  */
 export class DoctorVerdictBridge {
-  private readonly verdicts = new Map<string, DoctorVerdictPayload>();
+  private readonly verdicts = new Map<string, D7DoctorVerdict>();
   private pending: Array<{ seq: number; outcome: ExecutionOutcome }> = [];
 
   /** D-4 事件回执入口（index.ts 的 onDoctorVerdict 接线点）—— 翻译后缓存。
@@ -74,7 +74,7 @@ export class DoctorVerdictBridge {
   }
 
   /** 只读窥视（审计/测试用；不产生结算） */
-  peek(subject: string): DoctorVerdictPayload | undefined {
+  peek(subject: string): D7DoctorVerdict | undefined {
     return this.verdicts.get(subject);
   }
 

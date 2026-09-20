@@ -206,3 +206,36 @@ D-5+D-6 预演闸门（J-D）的执法由 epochJ J-5a/b 承担（degraded 放行
 
 **终态：291 项测试 / 284 pass / 0 fail / 7 skipped；epochJ 18 项执法；
 verify 脚本 20/20；112 模块导入干净；tsc 零错误；dist 已重建。**
+
+## 附录四：中等级收口（J 纪元第三轮）—— 命名消歧 × 词表对称 × 机制化
+
+> 中等级约 40 项中 34 项已在主提交修复（to_step / DIMS / similarity /
+> repeatGuard / nextSynthId / recombine / 回显 / UDS / initPromise / grounding
+> 视野 / 适配器吞错 / persistence 接线 / 双 tokenize 等各有执法测试）。本轮
+> 收口剩余 7 项结构性弱点：
+
+1. **同名异构类型消歧**：knowledge 侧 `DoctorVerdictPayload`（D-7 内部三态
+   方言）更名 **`D7DoctorVerdict`** —— 与 D-4 事件方言
+   `doctorEvents.DoctorVerdictPayload`（subject/chainTip/score 载荷）以命名
+   立分，跨文件阅读不再混淆；adapters/index 联动改写，编译期全库验证。
+2. **parseExpectation 词表对称**（J-15）：JSON 分支与简写分支走**同一 kind
+   词表校验** —— 旧实现 JSON 分支任意字符串直通 as 断言，模型拼错 kind 得
+   到"貌似合法实为弃权"的裁决；现在未知 kind ⇒ null（诚实缺席），下游零回归。
+3. **PID 白名单机制化**（S5a-c）：`_NODE_BINARY_HASHES` 从环境变量
+   `DSH_PHYSICAL_PID_WHITELIST` 装载（逗号分隔 64-hex；非法条目**整条拒绝**
+   —— 半载白名单比空表更危险）；Layer 2 从"永远空集的空壳"变为可用旋钮，
+   传输层 SO_PEERCRED 仍诚实留白。
+4. **visualOverlay NaN 防御**：外部 UI 数据的非有限/非正 rect 直接跳过、
+   有效 rect 与准星同律夹取 —— 非法 SVG 毒化整张叠加图的路径关闭。
+5. **tokenUsage 诚实重命名** → `tokenBudgetsGranted`（契约/流水线/日志/工具
+   输出四处联动）：它计量的是授予的信封预算而非实际消耗 —— 旧名暗示消耗，
+   名不副实；模型面 JSON 键同步为 `token_budgets_granted`。
+6. **auditGuard 深层脱敏**：敏感键的数组/嵌套对象整值脱敏 + 一层递归 ——
+   旧实现数组原样放行（`text: ["pwd1","pwd2"]` 全裸进控制台）。
+7. **文档性收口**：uiMemory 召回的"信任/新近独立过线填充"正式立法为设计
+   决策（含行为切换路径）；diffView 焦点窗口 2× 命名化（双标是有意的）；
+   fitGpdTail 门槛"必要非充分"注记（实践需 200+ 样本）；telemetry.render
+   列宽 24 截断；serviceManager 重生路径条件语义注释。
+
+**终态：292 项测试 / 285 pass / 0 fail / 7 skipped；epochJ 19 项执法；
+verify 脚本 23/23；112 模块导入干净；tsc 零错误；dist 已重建。**

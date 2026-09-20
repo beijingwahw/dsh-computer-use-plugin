@@ -110,6 +110,8 @@ const GPD_MIN_TAIL = 20;
 export function fitGpdTail(samples) {
     if (samples.length < GPD_MIN_TAIL * 2)
         return null; // 90 分位阈值至少要 20 个超额
+    //（J 纪元注记：40 样本入口门槛是**必要非充分** —— 实际约需 200+ 池化样本
+    //  才可能凑出 20 个尾超额；早期返回 null 是诚实降级，不是拟合失败）
     const sorted = [...samples].sort((a, b) => a - b);
     const n = sorted.length;
     const u = sorted[Math.floor(n * 0.9)];
@@ -500,7 +502,7 @@ export class Telemetry {
             '----                 -----  -------  ----   -----  -----',
         ];
         for (const t of snap.tools) {
-            lines.push(`${t.tool.padEnd(20)} ${String(t.calls).padStart(5)}  ` +
+            lines.push(`${t.tool.slice(0, 24).padEnd(24)} ${String(t.calls).padStart(5)}  ` +
                 `${String(t.success_rate ?? '-').padStart(7)}  ${String(t.noop_rate ?? '-').padStart(4)}  ` +
                 `${String(t.p50_ms).padStart(5)}  ${String(t.p95_ms).padStart(5)}`);
         }

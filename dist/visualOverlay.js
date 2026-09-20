@@ -36,14 +36,25 @@ export async function addVisualOverlay(imageBuffer, options = {}) {
     // 3. 元素边框 + 编号标签：半透明填充不遮挡内容，纯色描边保证可见（标注与原画面共存）
     for (const el of options.elements ?? []) {
         const { x, y, width: w, height: h } = el.rect;
-        svg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="rgba(0,120,255,0.1)" stroke="#0078FF" stroke-width="2" />`;
+        // J 纪元防御：外部 UI 数据可能携带 NaN/负宽高 —— 直接内插会产生非法 SVG
+        // （sharp 合成行为未定义）。与准星同律夹取；NaN/非正尺寸 ⇒ 跳过该元素
+        // （诚实缺席优于毒化整张叠加图）。
+        if (![x, y, w, h].every(Number.isFinite))
+            continue;
+        if (w <= 0 || h <= 0)
+            continue;
+        const ex = Math.max(0, Math.min(width - 1, x));
+        const ey = Math.max(0, Math.min(height - 1, y));
+        const ew = Math.max(1, Math.min(width - ex, w));
+        const eh = Math.max(1, Math.min(height - ey, h));
+        svg += `<rect x="${ex}" y="${ey}" width="${ew}" height="${eh}" fill="rgba(0,120,255,0.1)" stroke="#0078FF" stroke-width="2" />`;
         // 标签宽度按文本长度自适应（1 位到 2 位编号的边界都算到了）
         const text = escapeXml(String(el.label));
         const labelW = text.length * 10 + 10;
-        const labelY = Math.max(0, y - 20); // 顶部越界时回落到框内上沿
-        svg += `<rect x="${x}" y="${labelY}" width="${labelW}" height="20" fill="#0078FF" />`;
+        const labelY = Math.max(0, ey - 20); // 顶部越界时回落到框内上沿
+        svg += `<rect x="${ex}" y="${labelY}" width="${labelW}" height="20" fill="#0078FF" />`;
         // 修复原地层 bug：<text> 内容为空导致编号丢失
-        svg += `<text x="${x + 5}" y="${labelY + 15}" fill="white" font-size="14" font-family="Arial">${text}</text>`;
+        svg += `<text x="${ex + 5}" y="${labelY + 15}" fill="white" font-size="14" font-family="Arial">${text}</text>`;
     }
     svg += `</svg>`;
     return await sharp(imageBuffer)

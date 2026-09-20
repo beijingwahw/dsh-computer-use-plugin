@@ -262,23 +262,29 @@ export function getEnabledPhysicsRules(enabledKinds: string): Map<ExpectationKin
   return out;
 }
 
-/** 解析工具参数中的期望声明（JSON 字符串或简写 kind 字符串） */
+/** 解析工具参数中的期望声明（JSON 字符串或简写 kind 字符串）。
+ *  J 纪元修正：JSON 分支与简写分支**同一 kind 词表校验** —— 旧实现 JSON 分支
+ *  任意字符串直接 as 断言（两分支强度不对称），模型拼错 kind 会得到
+ *  "貌似合法实为弃权" 的意图裁决；现在未知 kind ⇒ null（诚实缺席），
+ *  下游零回归（无期望 = 不启用意图验证通道）。 */
 export function parseExpectation(raw: string | undefined): IntentExpectation | null {
   if (!raw) return null;
   const s = raw.trim();
   if (!s) return null;
+  const isKnownKind = (k: unknown): k is ExpectationKind =>
+    typeof k === 'string' && (k in RULES || NON_PHYSICS_KINDS.has(k as ExpectationKind));
   try {
     const obj = JSON.parse(s);
-    if (obj && typeof obj.kind === 'string') {
+    if (obj && isKnownKind(obj.kind)) {
       // 无 text 时省键而非置 undefined —— 结构稳定，deepEqual/canonical 双友好
       return {
-        kind: obj.kind as ExpectationKind,
+        kind: obj.kind,
         ...(typeof obj.text === 'string' ? { text: obj.text } : {}),
       };
     }
   } catch { /* 非 JSON：尝试整串作为 kind 简写 */ }
-  if (s in RULES || NON_PHYSICS_KINDS.has(s)) {
-    return { kind: s as ExpectationKind };
+  if (isKnownKind(s)) {
+    return { kind: s };
   }
   return null;
 }
