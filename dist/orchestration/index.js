@@ -1,5 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { PipelineOrchestratorImpl } from './pipeline.js';
+import { createDefaultIdGenerator } from '../sandbox/types.js';
 import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events.js';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts.js';
 export { PipelineOrchestratorImpl } from './pipeline.js';
@@ -33,6 +34,8 @@ const DEFAULT_CONFIG = {
 // FIFO 上限淘汰最旧记录（工具面的历史查询语义本就是"近期可查"）。
 const MAX_LIVE_REPORTS = 200;
 const MAX_VERDICT_INDEX = 500;
+/** L 纪元：intent id 铸造走 IdGenerator —— types 立法的 kind='intent' 预留兑现 */
+const intentIdGen = createDefaultIdGenerator();
 const inflightReports = new Map();
 const attemptVerdicts = new Map(); // key: verdict.subject（三方言）
 /** 进程内序号：同毫秒并发 run 的 intent id 不再碰撞（J 纪元修正） */
@@ -235,7 +238,7 @@ export async function apply(ctx, config) {
         async execute(args) {
             try {
                 const intent = {
-                    id: `intent-tool-${Date.now().toString(36)}-${++intentSeq}`,
+                    id: intentIdGen.next('intent'),
                     goal: String(args.goal ?? '').slice(0, GOAL_MAX_CHARS),
                     successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
                     budgetMs: isPositiveFinite(args.budget_ms) ? args.budget_ms : undefined,

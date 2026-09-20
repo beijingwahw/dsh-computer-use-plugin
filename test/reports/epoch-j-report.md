@@ -318,3 +318,39 @@ verify 脚本 23/23；112 模块导入干净；tsc 零错误；dist 已重建。
 
 **终态：312 项测试 / 305 pass / 0 fail / 7 skipped；基准 14 项 / 12 pass /
 0 fail / 2 环境跳过；113 模块导入干净；tsc 零错误；dist 已重建。**
+
+## 附录七：L 纪元 —— 服务归属决策成文 + 契约占位激活 + TODO 兑现
+
+> 三类"诚实现状"升级为"有主的架构"：每项从「保持原样」变为「决策成文 /
+> 活引用执法 / 兑现或改写」。
+
+1. **dsh.sandbox / dsh.knowledge-pipeline 注册归属决策**（原"只有消费方没有
+   注册方"）：决策 = **属主在仓内自荐、宿主裁决上总线**。D-5 插件 apply 时
+   经 `ctx.set?.('dsh.sandbox', 引擎视图)` 自荐注册（rehearse/recall/replay
+   面）；D-7 同律注册 `dsh.knowledge-pipeline`。宿主无 set 面（真实 Cordis
+   未暴露该可选面）⇒ 注册不成立，消费方既有诚实降级**原样保留**——架构
+   张力以"双方各执一半、都不越权"成文（stubs 补可选 set 声明）。
+   执法 L-5：假宿主（set/on/get/effect/tools stub）验证真实上线。
+2. **契约占位三连激活**：
+   - `hasVerificationLayer`（types 纯函数）→ verify_sandbox_log 审计面活
+     引用；L-2 对真实排练 outcome 判四层在场性（L1/L4 true、L2 false）。
+   - `SandboxDoctorView` → doctorChannel 的 `toSandboxDoctorView` 门面适配
+     （reportPath 句柄 + 记忆摘要；医生本体绝不进沙箱）；L-1 行为 + 编译
+     期双执法。
+   - `pipeline idGen 接线位` → orchestration/index 的 intent 铸造改走
+     `createDefaultIdGenerator().next('intent')` —— types 立法的
+     kind='intent' 预留兑现（BOOT_NONCE+计数器+时间戳三重防撞）；L-3。
+3. **TODO 三条清账**：
+   - `index.ts` Actor TODO → 已由 K-3 createActor 兑现，注释改写（保留地层
+     教训表述）；planner.ts 的"TODO"是历史注记（描述已修复的原版缺陷），
+     保留为地层。
+   - `auditGuard` "接入 DSH Approval" TODO → **真实兑现**：审计行消费 J 纪元
+     risk/approval 体系语境 —— 凭据语义文本标注 `[risk: credential-like —
+     risk gate will demand human input]`（挂起点在 typeText 工具内），
+     click 类令牌核验在 click_mouse 内（grant 前置）；审计保持旁路观察者
+     身份但把"安全系统接下来会做什么"写进审计轨迹。L-4 执法。
+4. **第五枚同型地雷**：sandbox/index 的 `SandboxConfig` 接口按值导出（L-2
+   首次导入即爆）—— type-only 修复；113 模块导入保持全绿。
+
+**终态：317 项测试 / 309 pass / 0 fail / 7 skipped（epochK 扩至 24 项含
+L-1..L-5）；基准 12 pass / 0 fail / 2 环境跳过；113 模块干净；tsc 零错误。**

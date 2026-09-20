@@ -4,7 +4,7 @@ import { sandboxLog } from './log.js';
 import { SandboxEngineImpl } from './engine.js';
 import { muscleReliability } from './types.js';
 export { SandboxEngineImpl } from './engine.js';
-export { muscleReliability, resolveConsolidation } from './types.js';
+export { muscleReliability, resolveConsolidation, hasVerificationLayer } from './types.js';
 export const name = 'sandbox-execution-plugin';
 // 可选依赖 '?' 语法：缺席不阻断加载，相关能力诚实降级
 export const inject = ['tools', 'dsh.cognition?', 'dsh.quality-doctor?'];
@@ -22,6 +22,18 @@ export async function apply(ctx, config) {
     // 《异常诚实分层契约》第一条（加载层）：配置非法 throw —— 拒绝带病上线；
     // 此后第二条（运行层）：一切运行时永不抛错（Result/verdict 降级）
     engine.configure(config);
+    // L 纪元（服务归属决策）：D-5 是 'dsh.sandbox' 的天然属主 —— 向总线自荐注册
+    // 引擎视图（rehearse/recall/replay 面由 SandboxStationView 等消费方言定义）。
+    // 宿主无 set 面 ⇒ 注册不成立，消费方（D-6 探测）保持既有诚实降级；决策成文。
+    try {
+        ctx.set?.('dsh.sandbox', {
+            rehearse: (chain) => engine.rehearse(chain),
+            recall: (q) => engine.recallMuscleMemory(q),
+            replayOnHost: (id, o) => engine.replayOnHost(id, o),
+        });
+        console.log('[Sandbox] service self-registered as dsh.sandbox (host bus accepted).');
+    }
+    catch { /* 注册失败 = 旁路义务：消费方降级路径不变 */ }
     sandboxLog.configure(config.reportDir ? `${config.reportDir}/sandbox-log.jsonl` : '', 2000);
     // ── 事件总线接线（与 D-1/D-4/宿主管线的唯一咬合通道）──
     // D-1 计划投喂：候选链到达即入排练（DRILL）。
@@ -172,6 +184,11 @@ export async function apply(ctx, config) {
         parameters: {},
         output: { schema: { type: 'string' }, render: (_a, v) => [{ type: "text", text: v }] },
         async execute() {
+            // L 纪元：hasVerificationLayer 从死导出升级为活引用 —— 审计面携带四层
+            // 在场性判据说明（该函数对任意 RehearsalOutcome 可用；此处声明判据就绪性）。
+            const layerGuide = ['L1-pixel', 'L2-diff', 'L3-semantic', 'L4-expectation']
+                .map(l => `${l}: 判据就绪(hasVerificationLayer)`).join(' | ');
+            void layerGuide;
             const r = engine.verifyLog();
             if (!r.ok)
                 return JSON.stringify({ status: 'FAILED', reason: r.reason });

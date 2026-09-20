@@ -312,3 +312,73 @@ test('K-7b: esc 关闭弹窗 ⇒ L1 证据；无弹窗 ⇒ 诚实反证；其他
   assert.equal(other.verdict, 'degraded', '非 esc 热键：无键盘状态模型 ⇒ 诚实缺席（非反证）');
   cleanup();
 });
+
+// ─── L 纪元：服务归属决策 + 契约占位激活 + TODO 兑现 ───
+
+test('L-1: 属主插件自荐注册 —— 宿主有 set ⇒ 上总线；无 set ⇒ 降级不变', async () => {
+  const { toSandboxDoctorView } = await import('../src/doctorChannel.ts');
+  const doc = { reportPath: () => '/tmp/r.json', memory: () => ({ totalDiagnoses: 3, lastReport: { score: 85 } }) };
+  const view = toSandboxDoctorView(doc);
+  assert.equal(view.reportPath(), '/tmp/r.json');
+  assert.equal(view.memory().totalDiagnoses, 3);
+  // SandboxDoctorView 编译期执法：门面形状即契约（错误形状 = 编译错误）
+  const _typeEnforce: import('../src/sandbox/types.ts').SandboxDoctorView = view;
+  void _typeEnforce;
+});
+
+test('L-2: hasVerificationLayer 活引用 —— 四层在场性判据可判', async () => {
+  const { hasVerificationLayer } = await import('../src/sandbox/index.ts');
+  const { SandboxEngineImpl } = await import('../src/sandbox/engine.ts');
+  const eng = new SandboxEngineImpl(null); eng.configure({});
+  const out = await eng.rehearse({
+    id: 'chain-l2', origin: 'manual', virtualScene: SCENE,
+    actions: [{ kind: 'click_mouse', args: { x: 0.15, y: 0.12 }, expect: { scale: 'element-level' } }],
+  });
+  assert.equal(hasVerificationLayer(out, 'L1-pixel'), true);
+  assert.equal(hasVerificationLayer(out, 'L4-expectation'), true);
+  assert.equal(hasVerificationLayer(out, 'L2-diff'), false);
+  eng.reset();
+});
+
+test('L-3: idGen 接线位兑现 —— intent 铸造走 IdGenerator（防撞三重奏）', async () => {
+  const { createDefaultIdGenerator } = await import('../src/sandbox/types.ts');
+  const gen = createDefaultIdGenerator();
+  const a = gen.next('intent'), b = gen.next('intent');
+  assert.notEqual(a, b, '连续铸造不撞号');
+  assert.match(a, /^intent-/, "kind='intent' 预留兑现（types 立法）");
+  // run_pipeline 工具面同律（编译期：orchestration/index 已改用 intentIdGen）
+  const src = readFileSync(new URL('../src/orchestration/index.ts', import.meta.url), 'utf8');
+  assert.ok(src.includes("intentIdGen.next('intent')"), '工具铸造接线在位');
+});
+
+test('L-4: auditGuard TODO 兑现 —— 审计行携带风险语境（消费 J 纪元体系）', async () => {
+  const src = readFileSync(new URL('../src/guards/auditGuard.ts', import.meta.url), 'utf8');
+  assert.ok(!src.includes('TODO: 接入 DSH Approval'), 'TODO 已兑现移除');
+  assert.ok(src.includes('matchesRiskPatterns'), '审计消费风险闸门语境');
+  // 行为验证：风险词文本命中
+  const { matchesRiskPatterns } = await import('../src/riskGate.ts');
+  assert.ok(matchesRiskPatterns('my password is 123', 'password'));
+  assert.ok(!matchesRiskPatterns('hello world', 'password'));
+});
+
+test('L-5: 服务自荐注册 —— sandbox/knowledge 插件向宿主总线上线', async () => {
+  // 编译期：两插件源码含 set?. 自荐注册（宿主裁决架构决策成文）
+  const sbx = readFileSync(new URL('../src/sandbox/index.ts', import.meta.url), 'utf8');
+  const knw = readFileSync(new URL('../src/knowledge/index.ts', import.meta.url), 'utf8');
+  assert.ok(sbx.includes("set?.('dsh.sandbox'"), 'D-5 自荐注册 dsh.sandbox');
+  assert.ok(knw.includes("set?.('dsh.knowledge-pipeline'"), 'D-7 自荐注册 dsh.knowledge-pipeline');
+  // 行为验证：假宿主接受注册（on/effect 旁路 stub —— apply 只走到注册即验证）
+  const registered = new Map<string, unknown>();
+  const calls: string[] = [];
+  const fakeCtx = {
+    set: (n: string, v: unknown) => registered.set(n, v),
+    on: (ev: string) => { calls.push(ev); },
+    get: (_n: string) => undefined, // 服务探测：全部缺席（诚实降级路径）
+    effect: () => { /* 生命周期登记 no-op */ },
+    tools: { register: () => { calls.push('tool'); } },
+  };
+  const { name, apply } = await import('../src/sandbox/index.ts');
+  assert.equal(name, 'sandbox-execution-plugin');
+  await apply(fakeCtx as never, {});
+  assert.ok(registered.has('dsh.sandbox'), '假宿主总线上线成功');
+});

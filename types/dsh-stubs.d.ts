@@ -9,6 +9,13 @@ declare module '@deepseek-ai/cordis' {
   export interface Context {
     /** 按名查询服务；可选服务不存在时返回 undefined */
     get<T = any>(name: string): T | undefined;
+    /**
+     * L 纪元：服务注册面（属主插件自荐 —— 宿主裁决是否上总线）。
+     * 可选能力：宿主未提供时，插件按既有方言防御性探测 `(ctx as any).set?.(...)`，
+     * 注册不成立 ⇒ 消费方保持诚实降级（"只有消费方没有注册方"的架构决策成文：
+     * 属主在仓内、上线路径在宿主 —— 双方各执一半，都不越权）。
+     */
+    set?<T>(name: string, instance: T): void;
     /** 声明生命周期效果：回调可返回清理函数（注册即效果模型） */
     effect(fn: () => void | Promise<void> | (() => void)): void;
     /** 事件挂载 */

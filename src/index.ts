@@ -201,9 +201,9 @@ export async function apply(ctx: Context, config: Config) {
       // Planner：llm 服务可用则真实拆解，否则 orchestrator 空计划守卫会响亮报告
       const chat = resolvePlannerChat(ctx);
 
-      // Actor：TODO 接入 DSH agents 服务的子 Agent 循环。
-      // 诚实失败优于虚假成功（地层教训：simulated success 是债）—— 返回 [FAILED]
-      // 让编排器的 fail-fast 协议立即中止并如实上报。
+      // Actor：K 纪元已兑现（createActor 双通道）—— ① DSH agents 子 Agent 循环
+      // （在场时）② 技能重放回退；双缺席才诚实 [FAILED]（地层教训：simulated
+      // success 是债 —— fail-fast 协议立即中止并如实上报）。
       // K 纪元（留白兑现）：Actor 双通道接线 —— ① DSH agents 服务（在场时）
       // ② 技能重放回退（可靠匹配的子任务直接重放）；双缺席才诚实 [FAILED]。
       const actorFn = createActor({

@@ -15,6 +15,7 @@ import type { DiagnosisReport } from './doctorTypes';
 import { DOCTOR_VERDICT_EVENT, makeScore } from './doctorEvents';
 import type { DoctorVerdictPayload } from './doctorEvents';
 import { SANDBOX_EVENTS } from './sandbox/events';
+import type { SandboxDoctorView } from './sandbox/types';
 import type { RehearsalEndPayload } from './sandbox/events';
 
 /** 判决阈值（D-4 通道主权立法）：approved 的分数下限。
@@ -80,6 +81,17 @@ export function translateReportToVerdict(
  * 对应 D-5 链条永久冻结直到下一次 rehearsal-end。
  */
 const PENDING_RECEIPTS_MAX = 4;
+
+/**
+ * L 纪元：SandboxDoctorView 从死导出升级为活契约 —— 沙箱侧消费医生的
+ * 最小门面适配（Token 纪律：reportPath 句柄 + 记忆摘要；医生本体绝不进沙箱）。
+ */
+export function toSandboxDoctorView(doc: { reportPath(): string | null; memory(): { totalDiagnoses: number; lastReport: { score: number } | null } }): SandboxDoctorView {
+  return {
+    reportPath: () => doc.reportPath(),
+    memory: () => doc.memory(),
+  };
+}
 
 export function wireDoctorVerdictChannel(ctx: Context, config: Config): void {
   let busy = false;

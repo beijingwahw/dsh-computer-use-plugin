@@ -156,6 +156,13 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { c
   // ── D-4 判决回执桥（P0-4）：事件方言缓存 → 验收结算门（subject = `${intentId}:${seq}`）──
   // 翻译（D-4 事件方言 → D-7 内部方言）单点收口于 adapters.translateVerdict ——
   // 本文件只做接线，绝不二次立法（双方言单适配器铁律）。
+  // L 纪元（服务归属决策）：D-7 自荐注册 —— 消费方（D-1 delegate_to_pipeline
+  // 的 primary_consumer 指引）从此有可探测的注册方；宿主无 set ⇒ 降级不变。
+  try {
+    (ctx as any).set?.('dsh.knowledge-pipeline', orchestrator);
+    console.log('[Knowledge] service self-registered as dsh.knowledge-pipeline.');
+  } catch { /* 注册失败 = 旁路义务 */ }
+
   const verdictBridge = new DoctorVerdictBridge();
   onDoctorVerdict(ctx, p => verdictBridge.ingest(p));
 

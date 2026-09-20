@@ -12,6 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { PipelineOrchestratorImpl } from './pipeline';
+import { createDefaultIdGenerator } from '../sandbox/types';
 import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events';
 import type { DoctorVerdictPayload } from '../doctorEvents';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts';
@@ -61,6 +62,9 @@ const DEFAULT_CONFIG: PipelineConfig = {
 
 const MAX_LIVE_REPORTS = 200;
 const MAX_VERDICT_INDEX = 500;
+
+/** L 纪元：intent id 铸造走 IdGenerator —— types 立法的 kind='intent' 预留兑现 */
+const intentIdGen = createDefaultIdGenerator();
 
 const inflightReports = new Map<string, PipelineReport>();
 const attemptVerdicts = new Map<string, DoctorVerdictPayload>(); // key: verdict.subject（三方言）
@@ -290,7 +294,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
     async execute(args: any) {
       try {
         const intent: IntentPayload = {
-          id: `intent-tool-${Date.now().toString(36)}-${++intentSeq}`,
+          id: intentIdGen.next('intent'),
           goal: String(args.goal ?? '').slice(0, GOAL_MAX_CHARS),
           successCriteria: args.success_criteria ? String(args.success_criteria).slice(0, SUCCESS_CRITERIA_MAX_CHARS) : undefined,
           budgetMs: isPositiveFinite(args.budget_ms) ? args.budget_ms : undefined,
