@@ -23,6 +23,8 @@
     "build": "tsc -p tsconfig.build.json && node scripts/fix-imports.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import ./test/register.mjs \"test/*.test.ts\"",
+    "smoke": "node --import ./test/register.mjs scripts/smoke_imports.mjs",
+    "verify": "python scripts/verify_fatal_fixes.py",
     "doctor": "node --disable-warning=ExperimentalWarning --import ./test/register.mjs src/doctorCli.ts"
   },
   "peerDependencies": {

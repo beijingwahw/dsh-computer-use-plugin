@@ -72,17 +72,24 @@ export function createClickMouseTool(config) {
             // ── 不可逆操作闸门（第六轮 + B-3 两阶段 + J 纪元授予门）：危险目标必须持
             // **已授予**的有效令牌（grant_approval 落点 approval.grant —— "从未 grant"
             // 与 "grant=true" 不再等价）。
+            // J 纪元升级（盲区收窄）：expected_text 作为**第二危险信号** —— 模型即使
+            // 不填 target_description，声明"预期出现『发送/支付』字样"（expected_text
+            // 本就是模型对该按钮的自述）同样触发闸门。旧的 `!!target_description`
+            // 前置条件使"沉默不填描述"成为绕过通道；现在绕过需要同时沉默两条
+            // 独立信号通道。
             // 阶段一 validate：只查不烧 —— 点击若抛异常，令牌仍可用于重试；
             // 阶段二 consume 在动作成功返回前调用（见下方 finally 前的成功路径）。
-            const dangerous = config.enableApprovalGate
-                && !!target_description
-                && matchesDangerPatterns(target_description, config.dangerPatterns);
+            const dangerSignal = (target_description ? matchesDangerPatterns(target_description, config.dangerPatterns) : false) ||
+                (expected_text ? matchesDangerPatterns(expected_text, config.dangerPatterns) : false);
+            const dangerous = config.enableApprovalGate && dangerSignal;
             if (dangerous && !(approval_token && approval.validate(approval_token))) {
                 approval.sweep();
                 return JSON.stringify({
                     status: 'ACTION_REQUIRED',
                     state_anchor: {
-                        target: target_description,
+                        target: target_description ?? expected_text ?? '(undescribed target)',
+                        danger_signal: target_description && matchesDangerPatterns(target_description, config.dangerPatterns)
+                            ? 'target_description' : 'expected_text',
                         reason: approval_token ? 'token-not-granted-or-expired' : 'irreversible-action',
                         note: approval_token
                             ? 'The token exists but the user has not granted it yet (or it expired).'
@@ -94,11 +101,13 @@ export function createClickMouseTool(config) {
                         'Never proceed without consent.',
                 }, null, 2);
             }
-            // J 纪元（盲区透明化）：审批闸门的危险判定依赖 target_description ——
-            // 描述缺席时闸门物理失明。无法强制（不填描述是模型的自由），但把盲区
-            // 摆到锚点里：模型看得见"这一跳没有被安全网覆盖"。
+            // J 纪元（盲区透明化）：审批闸门的危险判定依赖描述类信号 —— 两条信号
+            // 都缺席时闸门物理失明。无法强制（参数是模型的自由），但把盲区摆到
+            // 锚点里：模型看得见"这一跳没有被安全网覆盖"。
             const gateCoverage = config.enableApprovalGate
-                ? (target_description ? 'described' : 'blind-spot (no target_description — approval gate could not judge this click)')
+                ? ((target_description || expected_text)
+                    ? 'described'
+                    : 'blind-spot (neither target_description nor expected_text given — approval gate could not judge this click)')
                 : 'gate-disabled';
             try {
                 const size = await system.getScreenSize();

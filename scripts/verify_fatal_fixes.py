@@ -106,3 +106,39 @@ with tempfile.TemporaryDirectory() as td:
     ok('V3g 二次释放诚实 miss（幂等无害）', shm_mod.release_by_name(h.name) is False)
 
 print(f'\n=== 致命级修复运行时证据：{PASS}/{PASS} 全部通过 ===')
+
+# ═══ 严重级证据（J 纪元升级验收）═══
+print('\n--- 严重级（协议错位/安全）---')
+
+# S1：mint_token 自举死锁已移除（端点从路由表消失）
+paths = [getattr(r, 'path', '') for r in routes.router.routes]
+ok('S1 /v1/mint_token 已移除（自举死锁 + 免密钥全能力铸造洞）',
+   '/v1/mint_token' not in paths, f'routes={len(paths)} 条')
+
+# S2：AppleScript 转义纯函数（顺序铁律：先反斜杠后引号）
+from dsh_physical.window import escape_applescript  # noqa: E402
+BS = chr(92)  # 反斜杠经 chr 构造 —— 免疫任何 shell/编辑器转义环境
+Q = chr(34)   # 双引号
+ok('S2a escape_applescript 转义引号与反斜杠（顺序铁律）',
+   escape_applescript(f'He said {Q}hi{Q}{BS}done') == f'He said {BS}{Q}hi{BS}{Q}{BS}{BS}done',
+   repr(escape_applescript(f'He said {Q}hi{Q}{BS}done')))
+s2b = escape_applescript(f'a{Q}b{BS}{Q}c')
+unescaped = any(ch == Q and (i == 0 or s2b[i - 1] != BS) for i, ch in enumerate(s2b))
+ok('S2b 每个引号都被反斜杠前导（无未转义引号 = 注入面闭合）',
+   not unescaped, repr(s2b))
+ok('S2c 反斜杠先行（旧实现的顺序错误形态永不复现：先引号后反斜杠会翻倍）',
+   escape_applescript(f'{BS}{Q}') == f'{BS}{BS}{BS}{Q}',
+   repr(escape_applescript(f'{BS}{Q}')))
+
+# S3：AuthResult 携带 exp（nonce 防重放不再手工双解）
+from dsh_physical import auth as auth_mod  # noqa: E402
+key = auth_mod.ensure_key(os.path.join(tempfile.mkdtemp(), 'k.key'))
+tok = auth_mod.mint_token(key, 4242, auth_mod.ALL_CAPS, 60)
+res = auth_mod.parse_token(key, tok)
+ok('S3 parse_token 单次解析携带 exp/caps/pid（nonce 上界直取）',
+   res.ok and res.pid == 4242 and res.exp > 0 and len(res.caps) == len(auth_mod.ALL_CAPS),
+   f'exp={res.exp}')
+bad = auth_mod.parse_token(key, tok + 'x')
+ok('S3b 篡改签名拒绝', not bad.ok)
+
+print(f'\n=== 全部证据：{PASS}/{PASS} 通过 ===')

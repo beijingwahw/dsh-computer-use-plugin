@@ -140,7 +140,7 @@ pinnedCount 统计含已降级记录，解钉只作用于有图候选 ⇒ 安全
    参数；锚点 `approval_gate: 'blind-spot'` 是最大可达的诚实）。
 3. D-5 虚拟屏模拟器仍是声明的留白 —— J-D 只是让留白不再阻断执行；
   verdict 'passed' 依旧不可达，肌肉记忆固化保持 freeze-for-review。
-4. `PipelineVerdict` 的 'escalated' 态仍无赋值路径（D-4 集成的第二阶段）。
+4. ~~'escalated' 态无赋值路径~~ —— 已在追加轮兑现双语义（见附录三），七态枚举无死态。
 5. Python 侧 PID Attestation 仍是存在性校验（二进制白名单为空集 ——
    SO_PEERCRED 需自定义 uvicorn handler，留白如旧但文档已如实）。
 6. 本机 Windows 环境未覆盖的路径：UDS 监听、X11 窗口栈、真机基准
@@ -176,3 +176,33 @@ D-5+D-6 预演闸门（J-D）的执法由 epochJ J-5a/b 承担（degraded 放行
 
 **终态：288 项测试 / 281 pass / 0 fail / 7 skipped；tsc 零错误；
 `python scripts/verify_fatal_fixes.py` 14/14。**
+
+## 附录三：严重级升级（J 纪元追加轮）—— 七态无死态 + 盲区收窄 + 可测转义
+
+> 严重级七条（subject 协议 / mint_token / AppleScript / 审批 / swarm / 钉扎 /
+> 压制口径）已在主提交修复。本轮补上修复后仍存留的三个结构性弱点：
+
+1. **'escalated' 兑现双语义**（此前七态枚举的死态，`rejected` 已在主轮可达）：
+   - 路径 A：grounding 批准预算熔断 ⇒ `escalated`（决策层持续索要 L3 帮助 =
+     流水线自身无法推进 ⇒ **上交裁决权**，而非谎称 'failed'；p0-fixes 的
+     熔断测试按协议升级同步更新）；
+   - 路径 B：`reconcileVerdicts` 中报告自称 completed 而最后一条 attempt 的
+     D-4 判决为 needs_review ⇒ 降格 `escalated`（硬证据说成了但医生要复核 ⇒
+     上交人类，不静默放行；保守边界：非 completed 不受篡改）。执法 J-12/J-13。
+2. **审批盲区收窄**：`expected_text` 成为第二危险信号 —— 模型即使沉默不填
+   target_description，其对按钮的自述（"预期出现『发送订单』字样"）同样触发
+   闸门；绕过需要同时沉默**两条独立信号通道**，锚点携带 `danger_signal`
+   归因。执法 J-14。
+3. **AppleScript 转义提为纯函数** `escape_applescript`（顺序铁律注释内立法）；
+   运行时证据 S2a-c：转义正确、每个引号被反斜杠前导（注入面闭合）、
+   反斜杠先行（旧顺序错误形态结构性不可复现）。
+4. **运行时证据扩至 20/20**（verify 脚本新增 S1/S2/S3）：mint_token 从路由表
+   消失（10 条路由实证）、AuthResult 单次解析携带 exp（nonce 上界直取）、
+   篡改签名拒绝。
+5. **全模块烟测导入器**（`npm run smoke`）：112 个 src 模块在 Node strip-only
+   运行时逐一 import —— 又捕获两枚同型潜伏炸弹（clickMouse 的
+   CombinedEffect/SemanticConfirm 接口按值导入，生产 bundler 约定会掩盖），
+   已修复并固化为永久防线。
+
+**终态：291 项测试 / 284 pass / 0 fail / 7 skipped；epochJ 18 项执法；
+verify 脚本 20/20；112 模块导入干净；tsc 零错误；dist 已重建。**

@@ -439,7 +439,9 @@ test('风险加固：D-6 L3 批准预算熔断（grounding 失控循环保险丝
     },
   } as any);
   const report = await o.run({ id: 'i-grounding', goal: 'inspect tiny text', source: 'user' });
-  assert.equal(report.verdict, 'failed'); // 预算熔断 ⇒ 诚实终局（不是千轮空转）
+  // J 纪元升级：预算熔断 ⇒ 'escalated'（决策层持续索要 L3 帮助 = 上交裁决权，
+  // 不再谎称 'failed'）—— 保险丝语义不变（依然不是千轮空转）
+  assert.equal(report.verdict, 'escalated');
   // 决策工位被叫停于批准预算 + 熔断轮（3 次批准 + 第 4 次要价被拒）
   assert.equal(groundingDemands, 4);
 });

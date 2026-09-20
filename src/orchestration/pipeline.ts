@@ -222,12 +222,15 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         // NeedGrounding 路由：L3 花钱权裁决（中枢主权 —— 视觉工位无权自启）
         if ('kind' in output && output.kind === 'need-grounding') {
           // 批准预算（风险加固）：恒批准是 L3 失控循环的绿色通道 ——
-          // 决策工位反复要 grounding 时按预算熔断，诚实终局交 D-4 裁决
+          // 决策工位反复要 grounding 时按预算熔断。
+          // J 纪元升级（'escalated' 兑现语义）：这不是普通失败 —— 决策层持续
+          // 索要超出预算的 L3 帮助，流水线自身已无法推进，把裁决权**上交**
+          // （D-4 复核 / 人类介入），而非谎称"任务失败"。七态枚举从此无死态。
           if (groundingApprovals >= MAX_GROUNDING_APPROVALS_PER_RUN) {
-            verdict = 'failed';
+            verdict = 'escalated';
             await logPipeline('pipeline-grounding-denied', {
               intentRef: intent.id,
-              reason: `grounding approval budget (${MAX_GROUNDING_APPROVALS_PER_RUN}) exhausted — suspected grounding loop`,
+              reason: `grounding approval budget (${MAX_GROUNDING_APPROVALS_PER_RUN}) exhausted — decision layer keeps requesting L3 help; escalating`,
             });
             break;
           }
@@ -443,6 +446,7 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     switch (verdict) {
       case 'completed': return 'goal achieved (hard evidence: effectDetected=true)';
       case 'degraded': return 'completed with absent verification layers';
+      case 'escalated': return 'grounding budget exhausted — decision layer keeps requesting L3 help; escalated upward';
       case 'timeout': return 'intent budget exhausted';
       case 'aborted': return 'cancelled by external signal';
       default: return `${verdict} (no further progress possible)`;

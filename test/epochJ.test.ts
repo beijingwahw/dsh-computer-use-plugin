@@ -19,6 +19,7 @@ import { contextManager } from '../src/contextManager.ts';
 import { doctor } from '../src/qualityDoctor.ts';
 import { ReflexiveDecisionStation } from '../src/knowledge/stations.ts';
 import type { DecisionContext, ScenePatch } from '../src/knowledge/contracts.ts';
+import type { Config } from '../src/config.ts';
 import { PipelineOrchestratorImpl } from '../src/orchestration/pipeline.ts';
 import { DefaultExecutionStation } from '../src/orchestration/stations.ts';
 import type {
@@ -340,4 +341,71 @@ test('J-11: sanitizeScreenSize —— 坏数据 ⇒ null，好数据直通', asy
   assert.equal(sanitizeScreenSize({ width: Number.NaN, height: 1080 } as never), null);
   assert.equal(sanitizeScreenSize({ width: 0, height: 1080 } as never), null);
   assert.equal(sanitizeScreenSize({ width: -5, height: Infinity } as never), null);
+});
+
+// ─── J-12 'escalated' 兑现语义：grounding 预算耗尽 = 上交裁决权（非谎称失败）───
+
+test('J-12: 决策层反复索要 L3 帮助 ⇒ verdict=escalated（七态枚举无死态）', async () => {
+  const orch = new PipelineOrchestratorImpl();
+  assert.ok(orch.configure(pipelineConfig()).ok);
+  const stations = makeStations([
+    { kind: 'need-grounding', regionId: 'g0x0', question: 'where is save?' }, // 每轮都合法要 L3
+  ]);
+  orch.wire(stations);
+  const report = await orch.run({ id: 'intent-j12', goal: 'g', source: 'user' });
+  assert.equal(report.verdict, 'escalated', '预算耗尽 = 上交（旧实现谎称 failed；且 escalated 曾是死态）');
+  assert.match(report.terminalReason, /grounding budget exhausted/, '终局归因诚实');
+});
+
+// ─── J-13 'escalated' 第二路径：completed 但 D-4 needs_review ⇒ 上交人类 ───
+
+test('J-13: reconcileVerdicts —— rejected 否决 / needs_review 把 completed 升格为 escalated', async () => {
+  const { reconcileVerdicts } = await import('../src/orchestration/index.ts');
+  type Report = Parameters<typeof reconcileVerdicts>[0];
+  const mk = (chainId: string): Report => ({
+    intentRef: 'i13', verdict: 'completed', terminalReason: 'goal achieved',
+    attempts: [{
+      seq: 1, attempt: 1,
+      action: { kind: 'click_mouse', args: {}, rationale: 'r' } as never,
+      result: { seq: 1, effectDetected: true, latencyMs: 1, rehearsed: false, rehearsalChainId: chainId },
+    }],
+    tokenUsage: { vision: 0, decision: 0, execution: 0 },
+    chainTip: 't', reportPath: 'in-memory',
+  });
+  // rejected：否决权
+  const idx1 = new Map([['chain-exec-i13-1', { subject: 'chain-exec-i13-1', chainTip: 't', verdict: 'rejected', score: 40, rationale: 'genesis violated' } as never]]);
+  const r1 = mk('chain-exec-i13-1');
+  reconcileVerdicts(r1, idx1);
+  assert.equal(r1.verdict, 'rejected');
+  assert.equal(r1.attempts[0].doctorVerdict?.verdict, 'rejected', '判决按 rehearsalChainId 精确补写');
+  // needs_review：completed ⇒ escalated（上交人类，不静默放行）
+  const idx2 = new Map([['chain-exec-i13-1', { subject: 'chain-exec-i13-1', chainTip: 't', verdict: 'needs_review', score: 75, rationale: 'chain not audited' } as never]]);
+  const r2 = mk('chain-exec-i13-1');
+  reconcileVerdicts(r2, idx2);
+  assert.equal(r2.verdict, 'escalated', '硬证据说成了但 D-4 要求复核 ⇒ 上交');
+  // 非 completed（如 failed）不被 needs_review 篡改
+  const r3 = mk('chain-exec-i13-1');
+  r3.verdict = 'failed';
+  reconcileVerdicts(r3, idx2);
+  assert.equal(r3.verdict, 'failed', '保守：仅 completed 可被升格');
+});
+
+// ─── J-14 审批盲区收窄：expected_text 第二危险信号 ───
+
+test('J-14: 不填 target_description 但 expected_text 命中危险词 ⇒ 闸门照常拦截', async () => {
+  const { createClickMouseTool } = await import('../src/tools/clickMouse.ts');
+  const cfg = {
+    enableApprovalGate: true,
+    dangerPatterns: 'send,发送,delete,删除,pay,支付',
+  } as unknown as Config;
+  const tool = createClickMouseTool(cfg);
+  const out = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
+    .execute({ x: 0.5, y: 0.5, expected_text: '点击后出现 发送订单 确认' });
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.status, 'ACTION_REQUIRED', '旧实现：不填描述即可绕过闸门');
+  assert.equal(parsed.state_anchor.danger_signal, 'expected_text', '归因到第二信号通道');
+  // 安全面零回归：正常预期文本不触发
+  const okOut = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
+    .execute({ x: 0.5, y: 0.5, expected_text: '菜单展开' });
+  assert.notEqual(JSON.parse(okOut).status, 'ACTION_REQUIRED');
 });

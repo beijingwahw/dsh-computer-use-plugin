@@ -87,7 +87,15 @@ function boundedSet<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
  *    ② 遗留约定方言 —— subject = `${intentRef}:${seq}`（测试契约保留）。
  *  旧实现只认 ②，而全库唯一发射方 doctorChannel 用的是 chainId 方言 ⇒
  *  索引与补写永恒空转。 */
-function backfillVerdict(report: PipelineReport, payload: DoctorVerdictPayload): void {
+
+/** run 结束后的迟到判决回收：run 在途时到达的判决只进了索引 —— J 纪元补上
+ *  出环回收（终局验收 = 最后一条 attempt 的 doctorVerdict，契约 §7）。
+ *  D-4 终局判决的两种上交（J 纪元升级 —— 七态枚举无死态）：
+ *    rejected    ⇒ 'rejected'（否决权：任务不许按"完成"交付）
+ *    needs_review ⇒ 'escalated'（仅当报告自称 completed —— 硬证据说成了，
+ *                   但 D-4 要求复核 ⇒ 上交人类裁决，而非静默放行）。
+ *  导出供 epochJ 执法（index 参数可注入测试索引）。 */
+export function backfillVerdict(report: PipelineReport, payload: DoctorVerdictPayload): void {
   for (const attempt of report.attempts) {
     if (attempt.result.rehearsalChainId === payload.subject) {
       attempt.doctorVerdict = payload;
@@ -104,26 +112,29 @@ function backfillVerdict(report: PipelineReport, payload: DoctorVerdictPayload):
   if (attempt) attempt.doctorVerdict = payload;
 }
 
-/** run 结束后的迟到判决回收：run 在途时到达的判决只进了索引 —— J 纪元补上
- *  出环回收（终局验收 = 最后一条 attempt 的 doctorVerdict，契约 §7）。
- *  D-4 否决（rejected）对终局的否决权在此兑现 —— 'rejected' verdict 的唯一
- *  可达路径（此前七态中两态不可达）。 */
-function reconcileVerdicts(report: PipelineReport): void {
+export function reconcileVerdicts(
+  report: PipelineReport,
+  index: Map<string, DoctorVerdictPayload> = attemptVerdicts,
+): void {
   const subjects = new Set<string>();
   for (const a of report.attempts) {
     if (a.result.rehearsalChainId) subjects.add(a.result.rehearsalChainId);
     subjects.add(`${report.intentRef}:${a.seq}`);
   }
   for (const subject of subjects) {
-    const payload = attemptVerdicts.get(subject);
+    const payload = index.get(subject);
     if (payload && !report.attempts.some(a => a.doctorVerdict === payload)) {
       backfillVerdict(report, payload);
     }
   }
   const last = report.attempts[report.attempts.length - 1];
-  if (last?.doctorVerdict?.verdict === 'rejected' && report.verdict !== 'rejected') {
+  const lastVerdict = last?.doctorVerdict?.verdict;
+  if (lastVerdict === 'rejected' && report.verdict !== 'rejected') {
     report.verdict = 'rejected';
-    report.terminalReason = `rejected by D-4 doctor verdict (chainTip ${last.doctorVerdict.chainTip})`.slice(0, 120);
+    report.terminalReason = `rejected by D-4 doctor verdict (chainTip ${last!.doctorVerdict!.chainTip})`.slice(0, 120);
+  } else if (lastVerdict === 'needs_review' && report.verdict === 'completed') {
+    report.verdict = 'escalated';
+    report.terminalReason = `hard evidence says done but D-4 demands review (chainTip ${last!.doctorVerdict!.chainTip}) — escalated to human`.slice(0, 120);
   }
 }
 

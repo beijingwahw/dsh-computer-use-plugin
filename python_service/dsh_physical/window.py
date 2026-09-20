@@ -33,6 +33,15 @@ from .errors import ErrorKind, PhysicalError
 WindowMethod = Literal["native", "hotkey_only", "unavailable"]
 
 
+def escape_applescript(text: str) -> str:
+    """AppleScript 字符串字面量转义（J 纪元：从内联修复提为可测纯函数）。
+
+    铁律：**先转义反斜杠、再转义引号** —— 顺序不可反（先引号会引入新反斜杠，
+    再转义反斜杠时被二次翻倍）。旧实现的注入面即源于此 + 占位符 no-op。
+    """
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
 class WindowManager:
     """窗口管理器 —— 平台分治 + hotkey 降级。"""
 
@@ -126,8 +135,9 @@ class WindowManager:
         #   1. f-string 先插值原始 keyword，再 replace('"{keyword}"', ...) —— 占位符
         #      已不存在，replace 恒 no-op，原始 keyword（可含引号/括号）直接注入脚本；
         #   2. 转义顺序反了 —— 先替换引号再替换反斜杠，会把第一步引入的反斜杠再翻倍。
-        # 正确做法：先转义反斜杠、再转义引号，然后把转义后的值直接插进脚本。
-        safe_keyword = keyword.replace("\\", "\\\\").replace('"', '\\"')
+        # 正确做法：先转义反斜杠、再转义引号（escape_applescript 纯函数，可测），
+        # 然后把转义后的值直接插进脚本。
+        safe_keyword = escape_applescript(keyword)
         script = f'''
         tell application "System Events"
             set frontmostApp to ""
