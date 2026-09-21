@@ -23,7 +23,12 @@ export function registerRepeatActionGuard(ctx: Context): void {
     // 只管动作类工具；dismiss_popup 是幂等元工具，放行
     if (!ACTION_TOOLS.includes(call.name) || call.name === 'dismiss_popup') return next();
 
-    const sig = call.name + ':' + JSON.stringify(call.args ?? {});
+    // T 纪元（T-1）：量化相似签名 —— 数值参数四舍五入到 0.01 网格后铸签。
+    // 旧逐字节签名对坐标抖动（0.501 vs 0.500）失明 —— 同一按钮的微移重试
+    // 不算「重复」，防死循环守卫被抖动绕过。量化后抖动同签（物理分辨率
+    // 0.01 ≈ 屏上 ~20px@1080p —— 低于此差的两次点击本就是同一意图）。
+    const sig = call.name + ':' + JSON.stringify(call.args ?? {}, (_k, v) =>
+      typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
     if (sig === lastSig) {
       repeatCount++;
       if ((lastNoEffect && repeatCount >= 1) || repeatCount >= 2) {
