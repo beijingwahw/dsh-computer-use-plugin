@@ -50,17 +50,107 @@ function rememberFailure(name: string, args: Record<string, any>, symptom: strin
   failureMemory.record(query, actionSignature(name, args), symptom, contextManager.lastImageRecord()?.hash);
 }
 
+// ── R 纪元（R-3 熔断层）：Beta-Bernoulli 序贯后验臂 ──
+// 连续计数的盲区：交替成败型坏路线（fail-success-fail-…，真实失败率 50%+）
+// 永远凑不满连续阈值 —— 旧熔断在此**永不触发**。后验臂：滚动窗内
+// P(失败率 > θ | 窗口证据) ≥ 0.95 即熔断（Beta(a=f+1, b=s+1) 的上尾质量，
+// 正则化不完全 Beta 函数 I_θ(a,b) —— Lentz 连分式，Numerical Recipes 形）。
+
+/** ln Γ(x)（Lanczos 近似 g=7 —— |ε| < 1e-13；Math.lgamma 尚未进 ES） */
+function lgamma(x: number): number {
+  const g = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  if (x < 0.5) {
+    return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma(1 - x);
+  }
+  x -= 1;
+  let a = g[0];
+  const t = x + 7.5;
+  for (let i = 1; i < 9; i++) a += g[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
+}
+
+/** 正则化不完全 Beta 函数 I_x(a,b)（Lentz 连分式；a,b > 0，x ∈ [0,1]） */
+export function regularizedBeta(x: number, a: number, b: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const lbeta = lgamma(a + b) - lgamma(a) - lgamma(b)
+    + a * Math.log(x) + b * Math.log(1 - x);
+  const bt = Math.exp(lbeta);
+  if (x < (a + 1) / (a + b + 2)) {
+    return bt * betacf(x, a, b) / a;
+  }
+  return 1 - bt * betacf(1 - x, b, a) / b;
+}
+
+/** 连分式（NR 6.4：迭代至 |Δ| < 3e-12，上限 200 轮） */
+function betacf(x: number, a: number, b: number): number {
+  const FPMIN = 1e-300;
+  const qab = a + b, qap = a + 1, qam = a - 1;
+  let c = 1, d = 1 - (qab * x) / qap;
+  if (Math.abs(d) < FPMIN) d = FPMIN;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= 200; m++) {
+    const m2 = 2 * m;
+    let aa = (m * (b - m) * x) / ((qam + m2) * (a + m2));
+    d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d; h *= d * c;
+    aa = (-(a + m) * (qab + m) * x) / ((a + m2) * (qap + m2));
+    d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d;
+    const del = d * c;
+    h *= del;
+    if (Math.abs(del - 1) < 3e-12) break;
+  }
+  return h;
+}
+
+/**
+ * 滚动窗熔断判决（纯函数）：窗口内 f 败 s 胜 ⇒ P(失败率 > θ) 的后验质量。
+ * ≥ 0.95 且窗口 ≥ minWindow ⇒ 熔断（θ=0.5：一半以上调用在坏路线上）。
+ */
+export function posteriorTripProbability(failures: number, successes: number, theta = 0.5): number {
+  const a = failures + 1, b = successes + 1;
+  return Math.round((1 - regularizedBeta(theta, a, b)) * 10000) / 10000;
+}
+
+const BREAKER_WINDOW = 20;  // 滚动窗容量（后验臂的证据上限）
+const BREAKER_MIN_WINDOW = 8; // 最小判决样本（先验不越数据）
+const BREAKER_TRIP_MASS = 0.95; // 后验质量阈值（误熔断率 ≈ 5%）
+
 export function registerCircuitBreakerGuard(ctx: Context, maxFailures: number): void {
   let recentFailures = 0;
+  // R-3：滚动窗（true=失败）—— 交替成败的证据在此累积，连续计数看不见它们
+  const window: boolean[] = [];
 
   // 1. 执行前：连续失败达到阈值 -> 熔断一轮（重置计数器 = 强制冷静后还给机会，而非永久锁死）
   onToolPre(ctx, async (toolCall, next) => {
-    if (recentFailures >= maxFailures) {
+    // R-3 后验臂：交替成败型坏路线（连续计数永不满足）的熔断判决
+    const f = window.filter(Boolean).length;
+    const suc = window.length - f;
+    const tripMass = window.length >= BREAKER_MIN_WINDOW
+      ? posteriorTripProbability(f, suc)
+      : 0;
+    const posteriorTrip = tripMass >= BREAKER_TRIP_MASS;
+    if (recentFailures >= maxFailures || posteriorTrip) {
       // 聚合症状补记一条：这批连续失败已被熔断，match_skill 检索时会作为强负向信号
       rememberFailure(toolCall.name, toolCall.args,
         `circuit-breaker: ${maxFailures} consecutive failures triggered a forced pause`);
       recentFailures = 0;
-      return `[Guard Blocked]: Circuit Breaker triggered! The agent has failed ${maxFailures} times consecutively. ` +
+      const why = posteriorTrip
+        ? `posterior arm: P(failure rate > 50% | last ${window.length} calls) = ${tripMass} ≥ 0.95 (flaky-broken route)`
+        : `${maxFailures} consecutive failures`;
+      window.length = 0; // 熔断即冷静：窗口清空（强制冷静后还给机会）
+      // U 纪元（U-3）：守卫裁决入链 —— 拦截即防篡改存证（proof 器官闭环到守卫层：
+      // 每次拦截都是可被 MMR 证明的历史事实，事后不可抵赖）
+      void journal.appendMarker({ kind: 'GUARD_BLOCKED', guard: 'circuit-breaker', reason: posteriorTrip ? 'posterior' : 'consecutive' }).catch(() => { /* 存证旁路 */ });
+      return `[Guard Blocked]: Circuit Breaker triggered (${why})! ` +
         `Please STOP and re-evaluate the overall strategy or ask the user for help.`;
     }
     return next();
@@ -72,6 +162,8 @@ export function registerCircuitBreakerGuard(ctx: Context, maxFailures: number): 
     if (typeof result === 'string') {
       const c = classifyResult(result);
 
+      window.push(isFailure(c));
+      if (window.length > BREAKER_WINDOW) window.shift();
       if (isFailure(c)) {
         recentFailures++;
         // 失败即时入记忆：下一次 match_skill 即可召回「这条路走不通」

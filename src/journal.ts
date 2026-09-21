@@ -12,6 +12,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Config } from './config';
 import { onToolPost } from './guards/hooks';
 import { classifyResult } from './resultContract';
+import { mmrRoot, mmrInclusionProof, type InclusionProof } from './proof';
+import { cohensH } from './knowledge/metrics';
 
 /** 可重放的动作类工具（take_screenshot 等观察类工具不进日志） */
 export const ACTION_TOOLS = [
@@ -28,10 +30,12 @@ export type JournalMarker =
   | { kind: 'AGENT_BEGIN'; taskId: string; role: string; objective: string }
   | { kind: 'AGENT_END'; taskId: string; status: string }
   | { kind: 'ENV_SHAPED'; action: string }
-  | { kind: 'SENSE_SHIFT'; from: string; to: string };
+  | { kind: 'SENSE_SHIFT'; from: string; to: string }
+  /** U 纪元（U-3）：守卫拦截存证 —— 防篡改链上的政策裁决事实（guard 层 proof 闭环） */
+  | { kind: 'GUARD_BLOCKED'; guard: string; reason: string };
 
 /** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'） */
-const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT']);
+const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED']);
 
 export interface JournalEntry {
   ts: number;
@@ -175,6 +179,19 @@ class ActionJournal {
     return { ok: true, length: this.entries.length, brokenAt: null };
   }
 
+  // ── Q 纪元（Q-1 证明层）：MMR 包含证明面（叶值 = 链哈希；纯计算零存储）──
+  /** 行动流 MMR 根（O(n) 计算 —— 审计方凭根 + 单条证明即可核验，免整链重放） */
+  mmrRoot(): string | null {
+    const leaves = this.entries.map(e => e.hash).filter((h): h is string => typeof h === 'string');
+    return leaves.length > 0 ? mmrRoot(leaves) : null;
+  }
+
+  /** 第 index 条行动的 MMR 包含证明（O(log n) 路径；与 mmrRoot 配对验证） */
+  mmrProof(index: number): InclusionProof | null {
+    const leaves = this.entries.map(e => e.hash).filter((h): h is string => typeof h === 'string');
+    return mmrInclusionProof(leaves, index);
+  }
+
   /** checkpoint 恢复：连同链尖端与链基一起还原（否则后续 append/verify 会误判断链） */
   restoreChain(entries: JournalEntry[], chainTip?: string, chainBase?: string): void {
     this.entries = entries;
@@ -252,24 +269,50 @@ class ActionJournal {
     return pool.map(({ entry, actionIndex }) => {
       const scene = entry.observe;
       // 链上异action：同场景指纹、不同工具/坐标的既往动作及其结局
-      const alternatives: CounterfactualAlternative[] = scene
-        ? this.entries
-            .filter(e => e !== entry && e.observe === scene && ACTION_TOOLS.includes(e.tool))
-            .slice(-5)
-            .map(e => ({
-              action: `${e.tool} ${JSON.stringify(e.args).slice(0, 80)}`,
-              historicalOutcome: e.status === 'SUCCESS'
-                ? (e.effect_detected === false ? 'UNKNOWN' : 'SUCCESS')
-                : e.status === 'FAILED' ? 'FAILED' : 'UNKNOWN',
-              evidence: `journal: same scene (${scene.slice(0, 40)}...) → ${e.status}` +
-                (e.effect_detected === false ? ' (no visual effect)' : ''),
-            }))
+      // T 纪元（T-5）：路线率 + 效应量 —— 同场景全池（非切片）统计每条异路线的
+      // Laplace 成功率，最优异路线 vs 本路线的 Cohen's h（R-6 器官传播）——
+      // 「换这条路好多少」从定性变定量（|h|≥0.5 中效应、≥0.8 大效应）。
+      const sameScenePool = scene
+        ? this.entries.filter(e => e !== entry && e.observe === scene && ACTION_TOOLS.includes(e.tool))
         : [];
+      const alternatives: CounterfactualAlternative[] = sameScenePool
+            .slice(-5)
+            .map(e => {
+              const routeKey = e.tool;
+              const route = sameScenePool.filter(x => x.tool === routeKey);
+              const wins = route.filter(x => x.status === 'SUCCESS' && x.effect_detected !== false).length;
+              const routeRate = (wins + 1) / (route.length + 2); // Laplace 后验
+              return {
+                action: `${e.tool} ${JSON.stringify(e.args).slice(0, 80)}`,
+                historicalOutcome: e.status === 'SUCCESS'
+                  ? (e.effect_detected === false ? 'UNKNOWN' : 'SUCCESS')
+                  : e.status === 'FAILED' ? 'FAILED' : 'UNKNOWN',
+                evidence: `journal: same scene (${(scene ?? '').slice(0, 40)}...) → ${e.status}` +
+                  (e.effect_detected === false ? ' (no visual effect)' : '') +
+                  ` | route rate ${(routeRate * 100).toFixed(0)}% (n=${route.length}, Laplace)`,
+                routeRate: Math.round(routeRate * 1000) / 1000,
+                routeN: route.length,
+              } as CounterfactualAlternative;
+            });
+      // 本路线率（同场景同工具）与最优异路线的 h
+      let effectH: number | null = null;
+      if (scene) {
+        const sameTool = sameScenePool.filter(x => x.tool === entry.tool);
+        const curWins = sameTool.filter(x => x.status === 'SUCCESS' && x.effect_detected !== false).length + 1;
+        const curRate = curWins / (sameTool.length + 2);
+        const bestAlt = alternatives.reduce<CounterfactualAlternative | null>(
+          (best, a) => (a.routeRate !== undefined && (!best || a.routeRate > (best.routeRate ?? 0)) ? a : best), null);
+        if (bestAlt?.routeRate !== undefined) {
+          effectH = cohensH(bestAlt.routeRate, curRate);
+        }
+      }
       return {
         index: actionIndex,
         entry,
         thought: entry.thought ?? null,
         alternatives,
+        /** T-5：最优异路线 vs 本路线的 Cohen's h（null = 任一侧证据不足） */
+        effectH,
       };
     });
   }
@@ -304,6 +347,10 @@ export interface CounterfactualAlternative {
   historicalOutcome: 'SUCCESS' | 'FAILED' | 'UNKNOWN';
   /** 证据来源（失败记忆/UI 记忆/技能基因的溯源说明） */
   evidence: string;
+  /** T-5：该异路线在同场景的 Laplace 成功率（同场景全池统计） */
+  routeRate?: number;
+  /** T-5：该路线的同场景样本数 */
+  routeN?: number;
 }
 
 export interface DecisionPoint {
@@ -313,6 +360,8 @@ export interface DecisionPoint {
   /** 当时的思考（可能缺失 —— 模型未声明 reasoning 时证据降级） */
   thought: string | null;
   alternatives: CounterfactualAlternative[];
+  /** T-5：最优异路线 vs 本路线的 Cohen's h（null = 任一侧证据不足） */
+  effectH?: number | null;
 }
 
 export interface CounterfactualQuery {
