@@ -10,6 +10,7 @@
 // 工程铁律：上报异步非阻塞（fire-and-forget + AbortSignal.timeout），
 //        热路径（截图/点击）永不 await 网络 —— 遥测是旁路义务，不是主路债主。
 import { journal } from './journal.js';
+import { Telemetry } from './telemetry.js';
 /** Kalman 常数（算法形状字面量：Q/R 比值决定遗忘速率 —— K=2/3 是「三观测收敛、
  *  新观测主导」的甜点，非旋钮；预测门控 6 位与潜意识既视感同律） */
 const KF_Q = 1; // 过程噪声方差（世界会变）
@@ -60,10 +61,16 @@ class Swarm {
      *  补 seq 会改变 canonical 哈希域、破坏旧链 verify —— 身份游标零迁移成本。
      *  已知残差（诚实边界）：checkpoint 恢复的条目是新对象，跨会话会再结晶一次。 */
     crystallized = new WeakSet();
-    /** N 纪元：跨会话消费水位 —— checkpoint 保存时随行；恢复后跳过已消费的
-     *  最旧 N 条（同一过滤视图内保序）。根除"每会话单次重复入账"残差；
-     *  诚实边界：若保存-恢复间日志大量驱逐使窗口短于水位 ⇒ 钳 0 重计一次。 */
+    /** N/P 纪元：跨会话消费水位 —— checkpoint 保存时随行（= 保存时的窗口长度，
+     *  即已全量消费的前缀）。P 纪元修正（第十二只 bug）：位置在 journal 滑窗
+     *  驱逐下**不稳定**（容量 1000 饱和后 entries.length 恒 plateau，水位恒
+     *  等于 plateau ⇒ 会话内每轮前缀跳过吞掉全部新条目 —— swarm 中途永久失聪）。
+     *  修正律：会话内**只信身份游标**（WeakSet，驱逐免疫）；水位只在 restore
+     *  后首轮（armed）作前缀跳过，跳过的条目同时标记进 WeakSet（身份接管），
+     *  首轮后缴械。跨会话语义不变：恢复的前缀不再重复入账。 */
     consumedWatermark = 0;
+    /** restore 武装位：true = 下一轮 crystalize 执行前缀跳过（跨会话水位执法） */
+    watermarkArmed = false;
     configure(endpoint, syncIntervalMs, crystalCapacity) {
         this.endpoint = endpoint;
         this.syncIntervalMs = syncIntervalMs;
@@ -77,12 +84,16 @@ class Swarm {
         const entries = journal.list(true);
         let added = 0;
         let index = 0;
-        const skipUntil = this.consumedWatermark; // N 纪元：水位前缀跳过（跨会话残差根除）
-        this.consumedWatermark = 0;
+        // P 纪元律：仅 restore 后首轮做前缀跳过（水位 = 保存时已消费的前缀长度）；
+        // 跳过的条目同时入 WeakSet（身份游标接管 —— 后续轮次驱逐免疫）。
+        const skipUntil = this.watermarkArmed ? this.consumedWatermark : 0;
+        this.watermarkArmed = false;
         for (const e of entries) {
             index += 1;
-            if (index <= skipUntil)
-                continue; // 恢复语境下已被上一会话消费
+            if (index <= skipUntil) {
+                this.crystallized.add(e); // P 纪元：跳过即标记 —— 身份游标从此接管该前缀
+                continue;
+            }
             if (this.crystallized.has(e))
                 continue; // 身份游标：已消费的条目不再入账
             // 观察串格式 `#N dHash=<hex> popup=...` —— 提取指纹而非截断原文（键匿名且稳定）
@@ -281,6 +292,29 @@ class Swarm {
                 sceneHash: d.sceneHash, x: d.dx, y: d.dy, p: KF_R, n: Math.max(1, d.n ?? 1),
             }));
         }
+        // P 纪元修正（第十一只 bug）：dump 持久化了 consumedWatermark、restore 却
+        // 静默丢弃（类型里声明了、函数体从未赋值）—— 崩溃恢复语境下 N-1 的根除
+        // 名存实亡（前缀全量重结晶）。水位置入 + 武装下一轮前缀跳过。
+        const wm = data.consumedWatermark;
+        this.consumedWatermark = typeof wm === 'number' && Number.isFinite(wm) && wm > 0
+            ? Math.floor(wm)
+            : 0;
+        this.watermarkArmed = this.consumedWatermark > 0;
+    }
+    /**
+     * Q 纪元（Q-7）：晶体 Thompson 采样排序 —— Beta(s+1, f+1) 一次抽样代替
+     * 点估计排序（H-3 模态仲裁同律的迁移）。价值：低证据晶体（3/3 全胜）的
+     * 抽样分布宽，有机会被抽高而获探索机会 —— 反事实推理不再被早期幸运儿
+     * 垄断；高证据晶体分布窄，长期排序由真值主导。探索按证据不足程度
+     * **成比例**发生（Thompson 采样最优性），不是 ε 贪心的均匀扰动。
+     */
+    thompsonTopRoutes(k = 5, uniform = Math.random) {
+        const sampler = new Telemetry(); // H-3 的 Beta 采样器（实例面）—— 复用不复制
+        return [...this.crystals.values()]
+            .map(c => ({ c, sampled: sampler.sampleBeta(c.successes + 1, c.attempts - c.successes + 1, uniform) }))
+            .sort((a, b) => b.sampled - a.sampled)
+            .slice(0, k)
+            .map(({ c }) => ({ key: c.key, successRate: Math.round((c.successes / c.attempts) * 1000) / 1000, attempts: c.attempts }));
     }
     reset() {
         if (this.timer) {

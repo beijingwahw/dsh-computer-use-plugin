@@ -9,6 +9,7 @@
 //
 // 批次 E 迁移：sharp / tesseract.js 不再作为 dependencies 强绑定，此处改为懒动态导入。
 // 推荐替代：D-5 微服务 adapter.getUiTree({ funnelCeiling: 'L2' })。
+import { fuzzyIncludes } from './fuzzy.js';
 import { getSharp, getTesseract, } from './_legacyDeps.js';
 let workerPromise = null;
 let workerLang = '';
@@ -90,8 +91,10 @@ export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected
         const { text } = await readText(crop, lang);
         const hay = normalize(text);
         const needle = normalize(expected);
+        // R 纪元（R-1 模糊层）：OCR 容错判决 —— 逐字节 includes 在真机 OCR 上必然
+        // 漏判（l→1 / O→0 / 吞空格）；编辑距离 ≤ ⌈m/6⌉ 的近似命中取代之。
         return {
-            confirmed: hay.includes(needle),
+            confirmed: hay.includes(needle) || fuzzyIncludes(needle, hay),
             snippet: text.replace(/\s+/g, ' ').trim().slice(0, 120),
         };
     }

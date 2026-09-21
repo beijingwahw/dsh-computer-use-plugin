@@ -6,6 +6,7 @@
 //   1. click_mouse 时识别敏感目标（target_description 命中风险词）⇒ 标记焦点为敏感
 //   2. type_text 到敏感焦点 ⇒ 拦截，要求暂停并请用户亲自输入（绝不回显内容）
 // 风险词可配置（逗号分隔），默认覆盖中英常见凭据语义。
+import { CONFUSABLES_ASCII } from './riskGate.confusables.generated.js';
 export const DEFAULT_RISK_PATTERNS = 'password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥';
 // 第六轮：不可逆操作模式 —— 命中即需一次性审批令牌（用户显式授权后方可执行）
 export const DEFAULT_DANGER_PATTERNS = 'send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,' +
@@ -42,9 +43,17 @@ const LEET_MAP = {
  * 策展跨脚本核心（西里尔/希腊/亚美尼亚/科普特）保留手工映射 —— 覆盖 =
  * 算术族全覆盖 + 混杂族策展；扩展是加一行，不是加一张表。
  */
+/**
+ * O 纪元（#10 全表）：Unicode confusables.txt（UTS #39）全表蒸馏接入 ——
+ * 1665 条原型纯 ASCII 条目（数据血缘与再生命令见 generated 文件头）打底；
+ * 策展/算术族覆写在后：既有行为零回归，全表只填空白。ASCII→ASCII 折叠
+ * （如 m→rn、0→o）无害且正确 —— haystack 与 pattern 双方过同一归一化，
+ * 对称一致（UTS#39 的混淆语义：rn 与 m 视觉互混，双向都该命中）。
+ */
 function buildHomoglyphMap() {
     const m = {
-        // ── 策展跨脚本核心 ──
+        ...CONFUSABLES_ASCII,
+        // ── 策展跨脚本核心（覆写位：与生成表冲突时以策展为准）──
         'а': 'a', 'е': 'e', 'о': 'o', 'с': 'c', 'р': 'p',
         'х': 'x', 'у': 'y', 'і': 'i', 'ѕ': 's', 'һ': 'h',
         'ԁ': 'd', 'җ': 'g', 'ӏ': 'l', 'ӣ': 'm', 'й': 'u',

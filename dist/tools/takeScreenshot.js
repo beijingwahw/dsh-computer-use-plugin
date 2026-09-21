@@ -14,6 +14,7 @@ import { extractInteractiveElements } from '../uiExtractor.js';
 import { quantum } from '../quantumSense.js';
 import { dhash, hammingDistance } from '../perceptualHash.js';
 import { journal } from '../journal.js';
+import { trackElements } from '../elementTracker.js';
 export function createTakeScreenshotTool(config) {
     return defineTool({
         name: 'take_screenshot',
@@ -81,6 +82,8 @@ export function createTakeScreenshotTool(config) {
                     }
                 }
                 // 3.5 D-3 叠加态渲染：黑盒失明时白盒节点化作图上标注 —— 决策面永远是图。
+                // R-5：本帧元素先过 IoU 跟踪器铸稳定标签（元素框渲染与模型指令共用）
+                const stableLabels = trackElements(elements.map(el => el.rect));
                 //     标注与既有元素框去重合并（IoU/包含判定）；预算内裁剪；零进对话流。
                 const quantumOverlays = config.enableQuantumSense && quantum.mode() === 'superposition'
                     ? await quantum.overlayNodes(elements.map(el => ({ rect: el.rect })))
@@ -90,7 +93,11 @@ export function createTakeScreenshotTool(config) {
                     gridDivisions: config.gridDivisions,
                     crosshair,
                     elements: [
-                        ...elements.map(el => ({ id: el.id, label: String(el.id), rect: el.rect })),
+                        // R 纪元（R-5）：跨帧稳定标签 —— IoU 贪心跟踪后同一物理控件跨帧保号
+                        //（旧：帧间重铸，click_element 的「点 3 号」每帧语义漂移）
+                        ...elements.map((el, i) => ({
+                            id: el.id, label: String(stableLabels[i] ?? el.id), rect: el.rect,
+                        })),
                         ...quantumOverlays.map(o => ({ id: o.tag, label: o.label, rect: o.rect })),
                     ],
                 });

@@ -53,8 +53,12 @@ async function probeHealth(baseUrl, timeoutMs) {
         catch {
             // 连接拒绝 / 超时：继续等
         }
-        // 指数退避 50ms → 100ms → 200ms → 400ms，顶 500ms
-        const backoff = Math.min(500, 50 * Math.pow(2, Math.min(attempt - 1, 4)));
+        // T 纪元（T-4）：全抖动指数退避（AWS Architecture Blog 上的经典形态）——
+        // sleep = uniform(0, min(cap, base·2^n))。定值退避使并发等待者的重试
+        // 同相位共振（惊群）；全抖动把重试相位打散 —— 多实例/重启风暴下探测
+        // 均值不变、方差吃掉相关性。
+        const cap = Math.min(500, 50 * Math.pow(2, Math.min(attempt - 1, 4)));
+        const backoff = Math.random() * cap;
         await new Promise(r => setTimeout(r, backoff));
     }
     return { ok: false, detail: `health probe timed out after ${timeoutMs}ms` };

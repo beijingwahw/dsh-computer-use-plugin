@@ -99,7 +99,7 @@ export function wireDoctorVerdictChannel(ctx, config) {
             return; // 非法载荷：拒绝回执（沉默 ⇒ 冻结，保守方向）
         }
         if (busy) {
-            pendingReceipts.push(p);
+            pendingReceipts.filter(p => p.chainId !== p.chainId).concat(p);
             while (pendingReceipts.length > PENDING_RECEIPTS_MAX) {
                 const dropped = pendingReceipts.shift();
                 console.warn(`[DoctorChannel] receipt queue overflow — dropped verdict for ${dropped?.chainId} (D-5 freezes for review, honest).`);

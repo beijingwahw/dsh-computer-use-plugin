@@ -27,6 +27,30 @@ export const ACTOR_SYSTEM_PROMPT = `
 - 永远不要在没有截图的情况下盲目操作。
 - 每次只执行一个原子操作，等待系统反馈。
 `;
+// ── S 纪元（S-3 决策层）→ V 纪元审判日升格：通道 EMA 成功率仲裁 ──
+// 法则史：乘性权重（w←w·exp(−η·loss)）+ 对称底权在「双方触底」时回到平权
+// ⇒ 劣质通道周期性复辟（审判日仿真 110/151 vs 预言机 234）。根治 = EMA：
+// 每通道维护成功率的指数滑动均值（α=0.15，Laplace 初始化 0.5），argmax
+// （平权 ⇒ agents 优先 = 既有法）；**只更新被选通道**（未选冻结 —— 无损失
+// 可见即无衰减，平权复辟物理消失）。审判日数字：EMA 226/300 vs always 104
+// vs 预言机 234（p_agents=0.3/p_skill=0.8 —— 逼近预言机 96.6%）。
+const channelEma = { agents: 0.5, skill: 0.5 };
+const EMA_ALPHA = 0.15;
+function hedgeUpdate(channel, success) {
+    const r = success ? 1 : 0;
+    channelEma[channel] = channelEma[channel] + EMA_ALPHA * (r - channelEma[channel]);
+}
+export function actorChannelWeights() {
+    return { ...channelEma };
+}
+/** W 纪元（W-1 隔离缝）：通道仲裁归零（Laplace 0.5/0.5）—— 测试隔离与卸载共用 */
+export function resetChannelArbitration() {
+    channelEma.agents = 0.5;
+    channelEma.skill = 0.5;
+}
+function preferAgents() {
+    return channelEma.agents >= channelEma.skill; // 平权 ⇒ agents（既有法）
+}
 export function createActor(deps = {}) {
     return async (task) => {
         // ① agents 服务原生通道（获取与调用双故障并入诚实 FAILED）
@@ -37,17 +61,27 @@ export function createActor(deps = {}) {
         catch (e) {
             return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
         }
-        if (agentsRun) {
+        // S-3：技能通道可用性探测（匹配在场即可，不执行）
+        const skillMatch = deps.matchSkill?.(task) ?? [];
+        const bestSkill = skillMatch.find(m => m.reliability > 0.5 && m.steps.length > 0);
+        const bothViable = !!agentsRun && !!bestSkill;
+        // Hedge 仲裁：双通道在场才比较权重；否则唯一通道直走（零回归）
+        if (agentsRun && (!bothViable || preferAgents())) {
             try {
-                return await agentsRun(task, ACTOR_SYSTEM_PROMPT);
+                const r = await agentsRun(task, ACTOR_SYSTEM_PROMPT);
+                if (bothViable)
+                    hedgeUpdate('agents', !r.startsWith('[FAILED]'));
+                return r;
             }
             catch (e) {
+                if (bothViable)
+                    hedgeUpdate('agents', false);
                 return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
             }
         }
-        // ② 技能重放回退：可靠度 > 0.5 的最佳匹配（Laplace 0/0=0.5 不入场 —— 需真实验证背书）
-        const match = deps.matchSkill?.(task) ?? [];
-        const best = match.find(m => m.reliability > 0.5 && m.steps.length > 0);
+        // ② 技能重放回退 / S-3 Hedge 接管：可靠度 > 0.5 的最佳匹配
+        //（Laplace 0/0=0.5 不入场 —— 需真实验证背书）
+        const best = bestSkill ?? (deps.matchSkill?.(task) ?? []).find(m => m.reliability > 0.5 && m.steps.length > 0);
         if (best) {
             let failed = 0;
             for (const step of best.steps) {
@@ -56,6 +90,8 @@ export function createActor(deps = {}) {
                     failed++;
             }
             deps.recordOutcome?.(best.id, failed === 0);
+            if (agentsRun)
+                hedgeUpdate('skill', failed === 0); // S-3：仅双通道竞争语境记账
             return failed === 0
                 ? `[SUCCESS] replayed skill ${best.id} (${best.steps.length} steps)`
                 : `[FAILED] skill ${best.id} replay degraded (${failed}/${best.steps.length} steps failed — UI may have changed; re-verify)`;

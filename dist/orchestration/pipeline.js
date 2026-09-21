@@ -411,6 +411,21 @@ export class PipelineOrchestratorImpl {
     finalReport(intent, verdict, terminalReason, attempts, startedAt, budgetsGranted, snapshotId) {
         const chainTip = sandboxLog.tip;
         const usage = budgetsGranted ?? { vision: 0, decision: 0, execution: 0 };
+        // O 纪元（#8）：实际消耗计量 —— 工位自报探针（缺席 ⇒ 0 = 未计量，非未消耗）
+        const probe = (p) => {
+            try {
+                const v = p?.();
+                return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
+            }
+            catch {
+                return 0;
+            }
+        };
+        const tokenUsageReported = {
+            vision: probe(this.stations?.usageMeter?.vision),
+            decision: probe(this.stations?.usageMeter?.decision),
+            execution: probe(this.stations?.usageMeter?.execution),
+        };
         // J 纪元修正：落盘报告补齐 terminalReason / chainTip / 授予预算 ——
         // 旧实现只写 {intentId, verdict, attempts, snapshotId, startedAt}，
         // 磁盘报告缺终局归因与审计锚，与内存报告两副面孔。
@@ -419,6 +434,7 @@ export class PipelineOrchestratorImpl {
             terminalReason: terminalReason.slice(0, 120),
             chainTip,
             tokenBudgetsGranted: usage,
+            tokenUsageReported,
         });
         const report = {
             intentRef: intent.id,
@@ -426,6 +442,7 @@ export class PipelineOrchestratorImpl {
             terminalReason: terminalReason.slice(0, 120),
             attempts,
             tokenBudgetsGranted: usage,
+            tokenUsageReported,
             chainTip,
             reportPath,
         };

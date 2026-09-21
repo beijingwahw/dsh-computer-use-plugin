@@ -16,8 +16,9 @@ import { system } from '../system.js';
 import { dhash } from '../perceptualHash.js';
 import { diagnose, bayesianBelief } from '../diagnosis.js';
 import { fitReactPhases } from '../phaseHmm.js';
-import { reactTraceProperties } from '../ltlf.js';
+import { reactTraceProperties, mineTraceProperties } from '../ltlf.js';
 import { Telemetry } from '../telemetry.js';
+import { organCensus } from '../organCensus.js';
 export function createGetMetricsTool() {
     return defineTool({
         name: 'get_metrics',
@@ -53,12 +54,19 @@ export function createGetMetricsTool() {
                     `entropy-rate ${behav.normalized}): your action stream is near-periodic — you are probably spinning. ` +
                     'Break the cycle: what_if for counterfactual routes, match_skill for a verified path, or ask the user.');
             }
-            // G-2 变点洞见：某工具近期失败率突变（环境变了 vs 路线从来就错 —— 两种诊断）
+            // G-2 变点洞见（O 纪元 #27：双边 —— 恶化 + 痊愈都是 regime 变点）
             const regimeShifts = telemetry.regimeShifts();
             for (const rs of regimeShifts) {
-                insights.push(`REGIME SHIFT: ${rs.tool} failure rate has JUMPED recently (CUSUM ${rs.cusum} ≥ 2.5 vs ` +
-                    `baseline ${Math.round(rs.baselineFailureRate * 100)}%) — the environment changed under you. ` +
-                    'Re-observe with take_screenshot; what worked before may need a new route now.');
+                if (rs.direction === 'up') {
+                    insights.push(`REGIME SHIFT: ${rs.tool} failure rate has JUMPED recently (CUSUM ${rs.cusum} ≥ 2.5 vs ` +
+                        `baseline ${Math.round(rs.baselineFailureRate * 100)}%, ${rs.baselineSource}) — the environment changed under you. ` +
+                        'Re-observe with take_screenshot; what worked before may need a new route now.');
+                }
+                else {
+                    insights.push(`RECOVERY SHIFT: ${rs.tool} failure rate has DROPPED recently (CUSUM ${rs.cusum} ≥ 2.5 vs ` +
+                        `baseline ${Math.round(rs.baselineFailureRate * 100)}%, ${rs.baselineSource}) — the environment healed or a fix landed. ` +
+                        'Routes that were abandoned as broken may work again: retry once and re-verify.');
+                }
             }
             // G-6 行为长程依赖：Hurst > 0.6 ⇒ 失败扎堆（持续性强）—— 失败后立即重试是最差策略
             const H = telemetry.hurst();
@@ -71,7 +79,7 @@ export function createGetMetricsTool() {
                 .filter(t => t.noop_rate !== null && t.noop_rate >= 40 && t.calls >= 5)
                 .map(t => t.tool);
             const dx = diagnose({
-                regimeShiftTools: regimeShifts.map(r => r.tool),
+                regimeShiftTools: regimeShifts.filter(r => r.direction === 'up').map(r => r.tool),
                 hurst: H,
                 behavior: behav,
                 heavyLatencyTail: !!(tail && tail.xi >= 0.25),
@@ -240,6 +248,26 @@ export function createSelfDiagnoseTool(config) {
             else if (traceProps.length > 0) {
                 checks.push({ subsystem: 'react-temporal-properties', status: 'GREEN', detail: 'all LTLf properties hold' });
             }
+            // O 纪元（#23）：性质挖掘 —— 行动迹自动铸造的时序不变量（支持度成文；
+            // 弱模式不立 —— 性质库是判据不是倾向表）
+            const mined = mineTraceProperties(journal.list(true).map(e => ({ tool: e.tool, observed: e.observe !== undefined, effect: e.effect_detected })));
+            if (mined.length > 0) {
+                checks.push({
+                    subsystem: 'mined-temporal-invariants',
+                    status: 'GREEN',
+                    detail: mined.slice(0, 4).map(m => `${m.formula} (${m.support}×)`).join('; ') +
+                        (mined.length > 4 ? ` +${mined.length - 4} more` : ''),
+                });
+            }
+            // U 纪元（U-4 自省层）：器官册 census —— 33 件数学器官逐件点名
+            const census = organCensus();
+            checks.push({
+                subsystem: 'organ-census',
+                status: census.degraded.length === 0 ? 'GREEN' : 'AMBER',
+                detail: census.degraded.length === 0
+                    ? `${census.healthy}/${census.total} organs healthy`
+                    : `degraded: ${census.degraded.join(', ')} (${census.healthy}/${census.total} healthy)`,
+            });
             const red = checks.filter(c => c.status === 'RED').length;
             const amber = checks.filter(c => c.status === 'AMBER').length;
             return JSON.stringify({

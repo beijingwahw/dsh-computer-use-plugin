@@ -31,6 +31,25 @@ h = 2.5) {
     return { sum: s, alarmIndex: null };
 }
 /**
+ * O 纪元（#27）：双边 CUSUM —— 升臂（失败率上升 = 环境恶化）之外补降臂
+ * （失败率骤降 = 环境痊愈/修复生效），两个都是 regime 变点。
+ *   S⁺ₜ = max(0, S⁺ₜ₋₁ + xₜ − (p₀+k)) —— 恶化臂（原单边）
+ *   S⁻ₜ = max(0, S⁻ₜ₋₁ + (p₀−k) − xₜ) —— 痊愈臂
+ * 任一臂先越 h ⇒ 告警并报方向。纯函数导出：统计原子的测试面。
+ */
+export function cusumAlarmTwoSided(failures, p0, k = 0.1, h = 2.5) {
+    let up = 0, down = 0;
+    for (let i = 0; i < failures.length; i++) {
+        up = Math.max(0, up + failures[i] - (p0 + k));
+        down = Math.max(0, down + (p0 - k) - failures[i]);
+        if (up >= h)
+            return { sumUp: up, sumDown: down, alarmIndex: i, direction: 'up' };
+        if (down >= h)
+            return { sumUp: up, sumDown: down, alarmIndex: i, direction: 'down' };
+    }
+    return { sumUp: up, sumDown: down, alarmIndex: null, direction: null };
+}
+/**
  * G-6 Hurst 指数（R/S 重标度极差法）：结局流的长程依赖度量。
  *   H > 0.5 持续性（regime 聚集 —— 失败扎堆一段一段地来：一次失败后，短期内
  *   下一次更可能失败）；H ≈ 0.5 独立（无记忆）；H < 0.5 反持续（均值回复）。
@@ -100,11 +119,43 @@ function percentile(sorted, p) {
 /** 最小尾样本数（矩估计的诚实下限：不足则拒绝拟合而非伪装） */
 const GPD_MIN_TAIL = 20;
 /**
- * 广义帕累托尾拟合（Peaks-over-Threshold + 方法矩）：超阈值渐进服从 GPD
- * （Pickands–Balkema–de Haan 定理）—— 分布无关的极值数学。矩方程闭式解：
- * 超额均值 e = σ/(1−ξ)、方差 v = σ²/((1−ξ)²(1−2ξ))（ξ<½）⇒
- * ξ = (k−1)/(2k−1)，k = v/e²。诚实边界：ξ ≥ ½（无穷方差域）时矩法失效 ⇒
- * 返回 null（拒绝拟合优于谎言拟合 —— 与 makeScore 域外拒绝同律）。
+ * O 纪元（#12）：PWM（概率加权矩）GPD 估计器 —— 第二估计器。
+ * β₀ = σ/(1−ξ)（即均值）、β₁ = σ(3−ξ)/(2(2−ξ)(1−ξ))（GPD 的 PWM 闭式），
+ * 比值 r = β₀/β₁ 反解 ξ = (3r−4)/(r−2)，σ = β₀(1−ξ)。
+ * 经验 PWM：β̂₁ = (1/n)Σ x₍ᵢ₎·(i−1)/(n−1)（无偏绘图位权，升序）。
+ * PWM 对重尾的偏倚小于矩法（水文学/EVT 软件的标准选择）。
+ * 纯函数导出：统计原子的测试面。
+ */
+export function fitGpdPwm(excess) {
+    const n = excess.length;
+    if (n < GPD_MIN_TAIL)
+        return null;
+    const sorted = [...excess].sort((a, b) => a - b);
+    const b0 = sorted.reduce((s, x) => s + x, 0) / n;
+    let acc = 0;
+    for (let i = 0; i < n; i++)
+        acc += sorted[i] * (i / Math.max(1, n - 1));
+    const b1 = acc / n;
+    if (b0 <= 0 || b1 <= 0)
+        return null;
+    const r = b0 / b1;
+    if (Math.abs(r - 2) < 1e-9)
+        return null; // ξ→∞ 病态
+    const xi = (3 * r - 4) / (r - 2);
+    if (xi >= 1 || xi <= -1)
+        return null; // 有效域外（均值/支撑退化）
+    return { xi, sigma: b0 * (1 - xi) };
+}
+/**
+ * 广义帕累托尾拟合（Peaks-over-Threshold + 方法矩 + PWM 双估计器）：
+ * 超阈值渐进服从 GPD（Pickands–Balkema–de Haan 定理）—— 分布无关的极值数学。
+ * 矩方程闭式解：超额均值 e = σ/(1−ξ)、方差 v = σ²/((1−ξ)²(1−2ξ))（ξ<½）⇒
+ * k = v/e² = 1/(1−2ξ) ⇒ ξ = (k−1)/(2k)。
+ * O 纪元（#12）修正：旧反演 (k−1)/(2k−1) 系代数笔误（ξ=0 处巧合为零，
+ * 真值 0.4 被估成 0.444 —— 藏在 F-2 测试 ±0.15 容忍带内）；双估计器上线后
+ * 两法系统分歧当场现形。诚实边界：ξ ≥ ½（无穷方差域）矩法失效 ⇒ PWM 单飞；
+ * 两法都在域内且 |ξmom−ξpwm| > 0.1 ⇒ consistent=false（拟合不可信，消费方
+ * 应按不可信处理 —— 与 Anderson-Darling 拒绝同律）。
  * 纯函数导出：统计原子的测试面（与 betaReliability 同律）。
  */
 export function fitGpdTail(samples) {
@@ -124,13 +175,23 @@ export function fitGpdTail(samples) {
     if (e <= 0)
         return null;
     const k = v / (e * e);
-    // k=1 ⇔ ξ=0（指数尾）；k>1 ⇔ ξ>0（重尾）；k∈(0.5,1) ⇔ ξ<0（有界尾）
-    const denom = 2 * k - 1;
-    if (Math.abs(denom) < 1e-9 || k <= 0.5)
-        return null; // ξ→±∞ / 病态：拒绝
-    const xi = (k - 1) / denom;
-    if (xi >= 0.5 || xi <= -1)
-        return null; // 矩法有效域外（无穷方差 / 退化）
+    // k=1 ⇔ ξ=0（指数尾）；k>1 ⇔ ξ>0（重尾）；k∈(1/3,1) ⇔ ξ∈(−1,0)（有界尾）
+    if (k <= 1 / 3)
+        return null; // ξ≤−1 退化（支撑塌缩）：拒绝
+    const xiMom = (k - 1) / (2 * k); // O 纪元修正的正确反演
+    const pwm = fitGpdPwm(excess);
+    const momValid = xiMom < 0.5 && xiMom > -1; // 矩法有效域（ξ<½）
+    if (!momValid && !pwm)
+        return null; // 双法皆域外：拒绝拟合优于谎言拟合
+    // 主 ξ 裁决（O 纪元 #12）：PWM 主估计 —— EVT 实践标准（水文学/极值软件
+    // 同择），矩法在重尾域收敛缓慢（网格样本 400 点：PWM 0.364 vs MoM 0.242，
+    // 真值 0.4）。矩法降为交叉证人：|ξmom−ξpwm| > 0.1 ⇒ consistent=false
+    // 申报分歧（消费方按不可信处理），不夺回主估计权。
+    if (!pwm)
+        return null; // 矩法域外且 PWM 缺席：既有拒绝语义
+    const xi = pwm.xi;
+    const xiPwm = pwm.xi;
+    const consistent = !momValid || Math.abs(xiMom - pwm.xi) <= 0.1;
     const sigma = e * (1 - xi);
     // 0.999 分位外推：P(X>x) = p_t·(1+y/σ)^{-1/ξ} 反解（p_t = 尾占比）
     const pTail = m / n;
@@ -142,6 +203,8 @@ export function fitGpdTail(samples) {
         return null;
     return {
         xi: Math.round(xi * 1000) / 1000,
+        xiPwm: Math.round(xiPwm * 1000) / 1000,
+        consistent,
         sigma: Math.round(sigma * 10) / 10,
         threshold: u,
         tailCount: m,
@@ -194,11 +257,13 @@ export class Telemetry {
         }
     }
     /**
-     * G-2 变点扫描：逐工具 CUSUM。p₀ = **历史半窗基线**（结局环前半的失败率 ——
-     * 不含近期，防基线被突变自身污染），k=0.1 容忍带，h=2.5 决策阈，全环扫描。
-     * 返回近期失败率突变（regime shift）的工具清单 —— 消费方：get_metrics 洞见。
-     * 诚实下限：结局环 <8 个样本不判；全程皆败不判（那是终身问题，不是变点 ——
-     * CUSUM 的职责是「变了」，不是「一直坏」）。
+     * G-2 变点扫描（O 纪元 #27 双边化 + 基线稳定化）：逐工具双边 CUSUM。
+     * 基线 = **环前终身史**（(终身失败 − 环内失败)/(终身确定结局 − 环长) ——
+     * append-only 计数器，不随环滑动翻转；旧实现的环前半基线在环刷新 ~32 样本
+     * 后被新 regime 吸收，告警无声消失）。环前史 <8 ⇒ 回退环半窗并如实申报来源。
+     * k=0.1 容忍带，h=2.5 决策阈。方向：'up' = 恶化（环境变了），'down' = 痊愈
+     * （环境恢复/修复生效 —— 同样是 regime 变点，诊断价值对偶）。
+     * 诚实下限：确定结局 <8 不判；全程皆败不判（那是终身问题，不是变点）。
      */
     regimeShifts() {
         const out = [];
@@ -206,12 +271,32 @@ export class Telemetry {
             const ring = s.outcomeRing;
             if (ring.length < 8)
                 continue;
-            // 历史半窗基线：环前半（最旧的观测）—— 突变前世界的诚实锚点
-            const half = Math.max(1, Math.floor(ring.length / 2));
-            const p0 = ring.slice(0, half).reduce((a, b) => a + b, 0) / half;
-            const { sum, alarmIndex } = cusumAlarm(ring, p0);
-            if (alarmIndex !== null) {
-                out.push({ tool: name, cusum: Math.round(sum * 100) / 100, baselineFailureRate: Math.round(p0 * 1000) / 1000 });
+            // 环前终身基线（稳定锚）：终身计数器只增不减 ⇒ 基线不随环翻转
+            const ringFails = ring.reduce((a, b) => a + b, 0);
+            const preRingDefinite = (s.successes + s.failures) - ring.length;
+            const preRingFails = s.failures - ringFails;
+            let p0;
+            let baselineSource;
+            if (preRingDefinite >= 8 && preRingDefinite > 0) {
+                p0 = preRingFails / preRingDefinite;
+                baselineSource = 'lifetime';
+            }
+            else {
+                // 环前史不足：回退旧环半窗锚（会随环滑动 —— 如实申报，消费方自担）
+                const half = Math.max(1, Math.floor(ring.length / 2));
+                p0 = ring.slice(0, half).reduce((a, b) => a + b, 0) / half;
+                baselineSource = 'ring-half';
+            }
+            const { sumUp, sumDown, direction } = cusumAlarmTwoSided(ring, p0);
+            const cusum = direction === 'down' ? sumDown : sumUp;
+            if (direction !== null) {
+                out.push({
+                    tool: name,
+                    cusum: Math.round(cusum * 100) / 100,
+                    direction,
+                    baselineFailureRate: Math.round(p0 * 1000) / 1000,
+                    baselineSource,
+                });
             }
         }
         return out;
@@ -615,3 +700,67 @@ export class Telemetry {
     }
 }
 export const telemetry = new Telemetry();
+// ─── S 纪元（S-2 过程层）：流式分位数 —— 蓄水库采样草图 ───
+//
+// 备案（诚实边界）：先试 Jain & Chlamtac 1985 的 P² 标记法（5 标记抛物线
+// 增量）—— 本域实测高度增量可破序（标记交叉后斜率无界 ⇒ 估计发散 e+37），
+// 其单调不变量在无重置长流上难以稳定维护。转向**蓄水库草图**（Vitter 1985）：
+// 容量 m 的均匀 reservoir + 精确序统计 —— 无偏、方差 O(1/m)、可证可审。
+// 与按需排序报告的分工：草图给逐观测 O(1) 的活体分位（读时 O(m log m)
+// 且 m 恒定）；排序给精确报告。种子可注入（可复现）。
+/** 蓄水库采样草图（均匀 reservoir，Vitter 1985 算法 R） */
+export class ReservoirSketch {
+    reservoir = [];
+    n = 0;
+    capacity;
+    uniform;
+    constructor(capacity = 512, uniform = Math.random) {
+        this.capacity = capacity;
+        this.uniform = uniform;
+    }
+    observe(x) {
+        this.n += 1;
+        if (this.reservoir.length < this.capacity) {
+            this.reservoir.push(x);
+            return;
+        }
+        // 算法 R：第 n 样本以 m/n 概率换入随机槽位 —— 任意时刻每样本等概率在库
+        const idx = Math.floor(this.uniform() * this.n);
+        if (idx < this.capacity)
+            this.reservoir[idx] = x;
+    }
+    /** 草图上的精确分位（序统计；样本 < capacity 时即全量精确） */
+    quantile(q) {
+        if (this.reservoir.length === 0)
+            return null;
+        const sorted = [...this.reservoir].sort((a, b) => a - b);
+        return sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))];
+    }
+    get samples() {
+        return this.n;
+    }
+    get sketchSize() {
+        return this.reservoir.length;
+    }
+}
+/** 三分位活体读数（P50/P95/P99 —— 蓄水库草图） */
+export class StreamingPercentiles {
+    sketch;
+    constructor(capacity = 512, uniform) {
+        this.sketch = uniform ? new ReservoirSketch(capacity, uniform) : new ReservoirSketch(capacity);
+    }
+    observe(x) {
+        this.sketch.observe(x);
+    }
+    get readout() {
+        if (this.sketch.samples === 0)
+            return null;
+        return {
+            p50: this.sketch.quantile(0.5),
+            p95: this.sketch.quantile(0.95),
+            p99: this.sketch.quantile(0.99),
+            samples: this.sketch.samples,
+            sketchSize: this.sketch.sketchSize,
+        };
+    }
+}

@@ -114,6 +114,11 @@ const PERSIST_MIN_LIFE = 2; // 寿命门槛：窗口内出现 ≥2 次 ⇒ 持�
 const KEY_GRID = 12; // 中心量化网格（12×12 —— 抖动容忍 vs 定位分辨的平衡）
 /** I-4 迁徙半径（归一化坐标）：≤0.10 的位移视为同一特征的移动（约 1.2 格） */
 const MIGRATE_RADIUS = 0.10;
+/** O 纪元（#24）瞬移链接：无距离证据时的更硬形状判据 —— 质量窗收紧 + 长宽比容差 */
+const TELEPORT_MASS_LO = 2 / 3, TELEPORT_MASS_HI = 1.5;
+const TELEPORT_ASPECT_TOL = 0.35;
+/** O 纪元（#24）相干位移容差（归一化坐标）：两对位移矢量同轴判定 */
+const COHERENT_TOL = 0.05;
 /** 区域 → 量化键（中心坐标的网格量化 —— ±1/24 内的抖动同键） */
 export function regionKey(r) {
     return `${Math.round(r.center.x * KEY_GRID)},${Math.round(r.center.y * KEY_GRID)}`;
@@ -159,7 +164,7 @@ export function classifyPersistence(regions, history) {
         }
         return verdict;
     }
-    // 默认模式：内部富观测史（键 + 持续特征快照）—— 键判据 + I-4 迁徙链接
+    // 默认模式：内部富观测史（键 + 持续特征快照）—— 键判据 + I-4 迁徙/瞬移链接
     const window = richRing.slice(-PERSIST_WINDOW);
     for (const r of regions) {
         const keys = regionKeys(r);
@@ -171,9 +176,65 @@ export function classifyPersistence(regions, history) {
         // I-4 迁徙链接：与窗口内 persistent 特征的传输匹配（距离 + 质量比守恒）
         const migrated = window.some(obs => obs.persistent.some(p => Math.hypot(p.center.x - r.center.x, p.center.y - r.center.y) <= MIGRATE_RADIUS &&
             (() => { const ratio = r.tiles_changed / p.mass; return ratio >= 0.5 && ratio <= 2; })()));
-        verdict.set(r.index, migrated ? 'persistent' : 'transient');
+        if (migrated) {
+            verdict.set(r.index, 'persistent');
+            continue;
+        }
+        // O 纪元（#24）瞬移链接（相干位移场版）：极端 UI 变化（窗口移动/布局重排）
+        // 位移远超半径，迁徙链断裂 ⇒ 同一批特征被误判 transient。单帧上「远处同形
+        // 新盒」与「特征瞬移」不可区分（I-4 反例立法）—— 判别子是**相干场**：
+        // 真实重排必携带 ≥2 个特征以一致位移矢量共移（刚体平移）；凑齐相干对 ⇒
+        // 这批区域判 persistent，单个候选维持 transient（证据不足，诚实）。
+        // 形状判据（无距离证据时更硬）：质量窗 [2/3,1.5] + 长宽比相对差 ≤0.35。
+        if (coherentTeleport(r, window, regions)) {
+            verdict.set(r.index, 'persistent');
+            continue;
+        }
+        verdict.set(r.index, 'transient');
     }
     return verdict;
+}
+/** 区域 × persistent 快照的形状守恒判据（#24：无距离证据 ⇒ 形状更硬） */
+function shapeConserved(r, p) {
+    const ratio = r.tiles_changed / p.mass;
+    if (ratio < TELEPORT_MASS_LO || ratio > TELEPORT_MASS_HI)
+        return false;
+    if (typeof p.aspect !== 'number' || !Number.isFinite(p.aspect) || p.aspect <= 0)
+        return false;
+    const aspect = (r.bbox_normalized.x1 - r.bbox_normalized.x0) /
+        Math.max(1e-6, r.bbox_normalized.y1 - r.bbox_normalized.y0);
+    return Math.abs(aspect - p.aspect) / Math.max(aspect, p.aspect) <= TELEPORT_ASPECT_TOL;
+}
+/** O 纪元（#24）：相干瞬移判定 —— 本区域与另一区域相对窗口内 persistent
+ *  特征的位移矢量一致（刚体平移证据）⇒ 瞬移场成立。纯函数、确定性。 */
+function coherentTeleport(r, window, allRegions) {
+    for (const obs of window) {
+        for (const p of obs.persistent) {
+            if (!shapeConserved(r, p))
+                continue;
+            const dx = r.center.x - p.center.x, dy = r.center.y - p.center.y;
+            if (Math.hypot(dx, dy) <= MIGRATE_RADIUS)
+                continue; // 已由迁徙链管辖
+            // 找共移证人：另一区域 q，其相对某个 persistent 特征的位移与 (dx,dy) 一致
+            for (const q of allRegions) {
+                if (q.index === r.index)
+                    continue;
+                for (const obs2 of window) {
+                    for (const p2 of obs2.persistent) {
+                        if (!shapeConserved(q, p2))
+                            continue;
+                        const ddx = q.center.x - p2.center.x, ddy = q.center.y - p2.center.y;
+                        if (Math.hypot(ddx, ddy) <= MIGRATE_RADIUS)
+                            continue;
+                        if (Math.abs(ddx - dx) <= COHERENT_TOL && Math.abs(ddy - dy) <= COHERENT_TOL) {
+                            return true; // 两个形状守恒特征同矢量共移 —— 刚体重排证据
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 /** 内部富观测史（与键环同容量同窗口 —— 双轨合一的存储面） */
 const richRing = [];
@@ -189,7 +250,12 @@ export function noteDiffObserved(regions, verdict) {
             keys.add(k);
     const persistent = regions
         .filter(r => v.get(r.index) === 'persistent')
-        .map(r => ({ center: { x: r.center.x, y: r.center.y }, mass: r.tiles_changed }));
+        .map(r => ({
+        center: { x: r.center.x, y: r.center.y },
+        mass: r.tiles_changed,
+        aspect: (r.bbox_normalized.x1 - r.bbox_normalized.x0) /
+            Math.max(1e-6, r.bbox_normalized.y1 - r.bbox_normalized.y0),
+    }));
     richRing.push({ keys, persistent });
     while (richRing.length > PERSIST_RING)
         richRing.shift();
@@ -210,25 +276,45 @@ export function resetDiffPersistence() {
  */
 export function spatialDisplacement(action, regions) {
     if (regions.length === 0) {
-        return { w1: 0, nearestIndex: null, nearestDistance: 0 };
+        return { w1: 0, w1Info: 0, infoRatio: 1, nearestIndex: null, nearestDistance: 0 };
     }
     const totalMass = regions.reduce((n, r) => n + r.tiles_changed, 0);
     if (totalMass <= 0) {
-        return { w1: 0, nearestIndex: null, nearestDistance: 0 };
+        return { w1: 0, w1Info: 0, infoRatio: 1, nearestIndex: null, nearestDistance: 0 };
     }
+    const LAMBDA = 0.5; // 信息温度：熵视图的话语权（0 = 纯质量，1 = 纯自信息）
+    const logn = Math.log(regions.length);
+    const dists = new Map();
     let w1 = 0;
+    let w1InfoNum = 0, infoWeightSum = 0;
     let nearestIndex = null;
     let nearestDistance = Infinity;
     for (const r of regions) {
         const d = Math.hypot(action.x - r.center.x, action.y - r.center.y);
-        w1 += (r.tiles_changed / totalMass) * d;
+        dists.set(r.index, d);
+        const w = r.tiles_changed / totalMass;
+        w1 += w * d;
+        // 信息熵加权（#25）：自信息 −ln pᵢ 按区域数归一后经 λ 注入质量权
+        if (logn > 0) {
+            const p = r.tiles_changed / totalMass;
+            const iw = r.tiles_changed * (1 - LAMBDA + LAMBDA * (-Math.log(p)) / logn);
+            w1InfoNum += iw * d;
+            infoWeightSum += iw;
+        }
+        else {
+            w1InfoNum += w * d * totalMass; // 单区域：熵退化为质量
+            infoWeightSum += totalMass;
+        }
         if (d < nearestDistance) {
             nearestDistance = d;
             nearestIndex = r.index;
         }
     }
+    const w1Info = w1InfoNum / infoWeightSum;
     return {
         w1: Math.round(w1 * 1000) / 1000,
+        w1Info: Math.round(w1Info * 1000) / 1000,
+        infoRatio: Math.round((w1Info / Math.max(w1, 1e-6)) * 1000) / 1000,
         nearestIndex,
         nearestDistance: Math.round(nearestDistance * 1000) / 1000,
     };

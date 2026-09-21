@@ -189,11 +189,19 @@ class SkillLibrary {
             genes: [{ steps, entrySceneHash, exitSceneHash }],
         };
         this.skills.push(skill);
-        // 容量驱逐：可靠度 × 新近度 综合最低者出局
+        // 容量驱逐：可靠度 × 新近度 × 系谱存续 综合最低者出局
+        // Q 纪元（Q-5）：灭绝剪枝感知 —— 是活跃谱系祖先的技能获得存续加成
+        //（×1.5：其基因仍在后代中表达 = 谱系信息未死）；孤儿技能按原律竞争。
         if (this.skills.length > this.capacity) {
             const now = Date.now();
-            this.skills.sort((a, b) => ((b.successCount / b.attemptCount) * Math.exp(-(now - b.lastUsedAt) / 7200000)) -
-                ((a.successCount / a.attemptCount) * Math.exp(-(now - a.lastUsedAt) / 7200000)));
+            const hasDescendant = new Set();
+            for (const sk of this.skills) {
+                for (const pid of sk.parents ?? [])
+                    hasDescendant.add(pid);
+            }
+            const survival = (x) => ((x.successCount / x.attemptCount) * Math.exp(-(now - x.lastUsedAt) / 7200000)) *
+                (hasDescendant.has(x.id) ? 1.5 : 1);
+            this.skills.sort((a, b) => survival(b) - survival(a));
             this.skills = this.skills.slice(0, this.capacity);
         }
         this.save();
@@ -390,6 +398,8 @@ class SkillLibrary {
             existing.attemptCount++;
             existing.successCount++;
             existing.lastUsedAt = Date.now();
+            this.save(); // P 纪元修正（第十三只 bug）：计数 bump 即落盘 —— 崩溃窗口内
+            // 的强化不再静默丢失（对齐 induce 去重路径的持久化语义）
             return { skill: existing, plan };
         }
         const skill = {
@@ -405,10 +415,41 @@ class SkillLibrary {
             embedding: embed(query),
             genes,
             synthesized: true,
+            // Q 纪元（Q-5）：系谱登记 —— 母体 = 基因供体；世代 = 最深母体 + 1
+            parents: plan.map(p => p.skillId),
+            generation: 1 + Math.max(0, ...plan.map(p => this.skills.find(x => x.id === p.skillId)?.generation ?? 0)),
         };
         this.skills.push(skill);
         this.save(); // 原子落盘：合成中途崩溃 ⇒ 磁盘保持完整旧库
         return { skill, plan };
+    }
+    /**
+     * Q 纪元（Q-5）：技能谱系 —— 自此技能向上回溯母体链（含旁支同胞）。
+     * 返回：根到本技能的祖先链（深先）、同世代同胞数、总家族规模。
+     * 环守卫：parents 环（数据损坏）⇒ 在访问栈处截断（诚实降级，绝不死循环）。
+     */
+    lineage(id) {
+        const target = this.skills.find(x => x.id === id);
+        if (!target)
+            return null;
+        const chain = [];
+        const visiting = new Set([id]);
+        let cursor = target;
+        while (cursor) {
+            const parentList = (cursor.parents ?? [])
+                .map(pid => this.skills.find(x => x.id === pid))
+                .filter((x) => !!x);
+            if (parentList.length === 0)
+                break; // 谱系根
+            const ancestor = parentList[0];
+            if (visiting.has(ancestor.id))
+                break; // 环守卫：损坏数据诚实截断
+            visiting.add(ancestor.id);
+            chain.push(ancestor);
+            cursor = ancestor;
+        }
+        const sameGen = this.skills.filter(x => (x.generation ?? 0) === (target.generation ?? 0)).length;
+        return { chain, siblings: sameGen - 1, familySize: visiting.size };
     }
     /** 执行结果回写：技能的可靠度随真实使用持续校准 */
     recordOutcome(id, success) {

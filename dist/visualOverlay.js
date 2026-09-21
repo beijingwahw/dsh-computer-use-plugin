@@ -26,12 +26,20 @@ export async function addVisualOverlay(imageBuffer, options = {}) {
     }
     // 2. 绿色十字准星：模型的「本体感觉」—— 让它知道鼠标当前在哪
     if (options.crosshair) {
-        // 多显示器场景下全局坐标可能为负，夹取到本屏范围内
-        const cx = Math.max(0, Math.min(width, Math.round(options.crosshair.x)));
-        const cy = Math.max(0, Math.min(height, Math.round(options.crosshair.y)));
-        svg += `<line x1="${cx}" y1="0" x2="${cx}" y2="${height}" stroke="rgba(0,204,102,0.55)" stroke-width="1" />`;
-        svg += `<line x1="0" y1="${cy}" x2="${width}" y2="${cy}" stroke="rgba(0,204,102,0.55)" stroke-width="1" />`;
-        svg += `<circle cx="${cx}" cy="${cy}" r="6" fill="none" stroke="#00CC66" stroke-width="2" />`;
+        // P 纪元修正（第十四只 bug）：全局虚拟屏坐标（多显示器可为负/越本屏）与
+        // 截图本地缓冲是两个坐标域；旧实现夹取 ⇒ 鼠标在副屏时准星钉死在本屏边缘
+        // —— 一个自信的错位 grounding 信号。诚实缺席律：域外（±2px 容差）不画
+        // —— 「不知道在哪」远好于「 confidently 错在哪」。
+        const rx = Math.round(options.crosshair.x);
+        const ry = Math.round(options.crosshair.y);
+        const inBounds = rx >= -2 && ry >= -2 && rx <= width + 2 && ry <= height + 2;
+        if (inBounds) {
+            const cx = Math.max(0, Math.min(width, rx));
+            const cy = Math.max(0, Math.min(height, ry));
+            svg += `<line x1="${cx}" y1="0" x2="${cx}" y2="${height}" stroke="rgba(0,204,102,0.55)" stroke-width="1" />`;
+            svg += `<line x1="0" y1="${cy}" x2="${width}" y2="${cy}" stroke="rgba(0,204,102,0.55)" stroke-width="1" />`;
+            svg += `<circle cx="${cx}" cy="${cy}" r="6" fill="none" stroke="#00CC66" stroke-width="2" />`;
+        }
     }
     // 3. 元素边框 + 编号标签：半透明填充不遮挡内容，纯色描边保证可见（标注与原画面共存）
     for (const el of options.elements ?? []) {

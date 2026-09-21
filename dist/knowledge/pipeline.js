@@ -134,175 +134,204 @@ export class KnowledgePipelineOrchestrator {
             let feedback;
             let lastSceneSummary = ''; // 并行语义：检索的 sceneDescription 只能用上一轮场景
             // ── 预测编码回路状态（惊讶计费器）──
-            const worldModel = this.worldModel; // wire 铸造，跨 run 存活（run 内非空 —— 见顶部守卫）
-            let pendingTransition = null;
-            let escalateL3 = false; // 上轮到达意外 ⇒ 本轮动用贵眼睛（L1/L2 免费看熟悉，L3 付费看意外）
-            // ── 认知仪表盘计数器（证据先于修辞：每轮的感知/成本/经验命中如实入账）──
-            let roundsTotal = 0;
-            let l3Rounds = 0;
-            let knowledgeRounds = 0;
-            // ── 消融执法（科学义务）：'always' 恒开 / 'never' 恒关 / 'surprise' 计费器独裁 ──
-            const ablation = cfg.ablation ?? { disableKnowledge: false, l3Policy: 'surprise' };
-            for (let round = 0; round < MAX_ROUNDS; round++) {
-                // overall 时钟：预算耗尽 ⇒ verdict='timeout'（部分轨迹保留）
-                if (Date.now() - startedAt > cfg.timeout.overall) {
-                    verdict = 'timeout';
-                    terminalReason = `overall budget ${cfg.timeout.overall}ms exhausted`;
-                    break;
-                }
-                // ── 并行双触发：感知 + 隐知识检索（数据流三段论 #2 —— 防卡顿铁律）──
-                roundsTotal += 1;
-                const forceL3 = ablation.l3Policy === 'always'
-                    ? true
-                    : ablation.l3Policy === 'never' ? false : escalateL3;
-                // J 纪元修正：本轮 forceL3 消费后即失能 —— 升级权只能由**本轮的**
-                // 转移结算重新授予。旧实现只在结算成功时赋值（含 false），但结算
-                // 失败/场景不可见时保持旧值 —— 一次惊讶后 L3 持续计费多轮（粘性），
-                // 白烧 VLM 预算直到某次成功结算。
-                escalateL3 = false;
-                if (forceL3)
-                    l3Rounds += 1;
-                const visionEnv = {
-                    station: 'vision',
-                    payload: {
-                        grid: cfg.regionGrid ?? DEFAULT_REGION_GRID,
-                        // 惊讶计费器：预测误差是 L3 的唯一合法开火权（d7HostPort 将其译为
-                        // funnelCeiling='L3' —— 每一次 VLM 开销都有惊讶背书，入链可审计）
-                        forceL3,
-                        snapshotId: undefined,
-                    },
-                    tokenBudget: cfg.stationTokenBudgets.vision,
-                };
-                const [scene, injection] = await Promise.all([
-                    this.withTimeout(deps.vision.perceive(visionEnv), cfg.timeout.perPerception, []),
-                    ablation.disableKnowledge
-                        ? Promise.resolve(null) // 消融：无隐知识模式（检索侧断电）
-                        : this.queryKnowledgeGuarded(intent, lastSceneSummary),
-                ]);
-                if (injection)
-                    knowledgeRounds += 1;
-                knowledgeUsed = injection ?? knowledgeUsed;
-                lastSceneSummary = summarizeScene(scene);
-                // ── 预测编码回路：到达场景定型；待结算转移先惊讶后学习 ──
-                // 顺序即语义：surprise 在 observe 之前（误差是学习信号 —— 先测误差，再入账）。
-                // 看不见（typeOf=null）⇒ 转移悬置（失明轮丢信息是感知的诚实代价，绝不虚构定型）。
-                const currentTypeId = worldModel.typeOf(scene);
-                if (currentTypeId && pendingTransition) {
-                    const sr = worldModel.surprise(pendingTransition.fromTypeId, pendingTransition.actionKey, currentTypeId);
-                    if (sr.ok) {
-                        const observed = worldModel.observe(pendingTransition.fromTypeId, pendingTransition.actionKey, currentTypeId, pendingTransition.success);
-                        if (observed.ok) {
-                            escalateL3 = sr.value.novel || sr.value.bits >= P.L3_ESCALATION_BITS;
-                            logKnowledge('world-transition', {
-                                intentId: intent.id, seq: pendingTransition.seq,
-                                from: pendingTransition.fromTypeId, action: pendingTransition.actionKey,
-                                to: currentTypeId, bits: sr.value.bits, novel: sr.value.novel,
-                                evidence: sr.value.evidence, l3Escalated: escalateL3,
-                            });
-                        }
+            // O 纪元（#20）：run 级快照 —— fork 隔离本 run 的定型/入账，run 终
+            // merge 重放回共享模型（J 纪元只隔离了 pendingTransition，typeOf 的
+            // 中途铸造仍跨 run 互污；并发 fork 的同号类型在 merge 时重铸新 id）。
+            const sharedModel = this.worldModel; // wire 铸造，跨 run 存活（run 内非空 —— 见顶部守卫）
+            const worldModel = sharedModel instanceof InMemoryWorldModel ? sharedModel.fork() : sharedModel;
+            try {
+                let pendingTransition = null;
+                let escalateL3 = false; // 上轮到达意外 ⇒ 本轮动用贵眼睛（L1/L2 免费看熟悉，L3 付费看意外）
+                // ── 认知仪表盘计数器（证据先于修辞：每轮的感知/成本/经验命中如实入账）──
+                let roundsTotal = 0;
+                let l3Rounds = 0;
+                let knowledgeRounds = 0;
+                // ── 消融执法（科学义务）：'always' 恒开 / 'never' 恒关 / 'surprise' 计费器独裁 ──
+                const ablation = cfg.ablation ?? { disableKnowledge: false, l3Policy: 'surprise' };
+                for (let round = 0; round < MAX_ROUNDS; round++) {
+                    // overall 时钟：预算耗尽 ⇒ verdict='timeout'（部分轨迹保留）
+                    if (Date.now() - startedAt > cfg.timeout.overall) {
+                        verdict = 'timeout';
+                        terminalReason = `overall budget ${cfg.timeout.overall}ms exhausted`;
+                        break;
                     }
-                    pendingTransition = null; // 结算即清（一次性 —— 转移是证据不是滚动债务）
-                }
-                // ── 决策（信封铸造权：intent + scene + 隐知识注入 ≤300 字符，无截图字节）──
-                const decisionCtx = {
-                    intent,
-                    scene,
-                    knowledgeContext: injection ?? undefined,
-                    previousResults: intent.previousResults,
-                };
-                const decisionEnv = {
-                    station: 'decision',
-                    payload: decisionCtx,
-                    tokenBudget: cfg.stationTokenBudgets.decision,
-                };
-                const output = await this.withTimeout(deps.decision.decide(decisionEnv, feedback), cfg.timeout.perStep, { reason: `decision step timeout after ${cfg.timeout.perStep}ms`, focus: 'full-scene' });
-                // NeedGrounding 路由：桩纪元无 L3 兜底通道 ⇒ 诚实终局（grounding 批准回路是留白）
-                if (isNeedGrounding(output)) {
-                    verdict = 'failed';
-                    terminalReason = `need-grounding: ${output.reason} (focus: ${output.focus})`;
-                    break;
-                }
-                // ── 执行（信封铸造权：零模型肌肉，tokenBudget 恒 0）──
-                const action = output;
-                seq += 1;
-                const execEnv = {
-                    station: 'execution',
-                    payload: action,
-                    tokenBudget: cfg.stationTokenBudgets.execution,
-                };
-                const result = await this.withTimeout(deps.execution.execute(execEnv), cfg.timeout.perStep, {
-                    action,
-                    status: 'failure',
-                    durationMs: cfg.timeout.perStep,
-                    failure: { kind: 'timeout', detail: `execution step timeout after ${cfg.timeout.perStep}ms` },
-                });
-                // ── 闭环进化（数据流三段论 #4 + P0-4 验收门）：打包 outcome → 结算 → 学习 ──
-                // 学习的前置条件 = 结算：D-4 回执在场 ⇒ 即时结算（verdict 路径）；
-                // 回执缺席 ⇒ 挂账 pending，run-end 冲账兜底 —— 未结算的 outcome 绝不进学习。
-                const outcome = {
-                    intent,
-                    action,
-                    result,
-                    retryCount,
-                    totalDurationMs: Date.now() - startedAt,
-                };
-                outcomes.push(outcome);
-                // ── 预测编码回路：本动作的转移挂账（下轮感知到达时结算 —— 成败已知，去向待察）──
-                if (currentTypeId) {
-                    pendingTransition = {
-                        fromTypeId: currentTypeId,
-                        actionKey: transitionActionKey(action),
-                        seq,
-                        success: result.status === 'success',
+                    // ── 并行双触发：感知 + 隐知识检索（数据流三段论 #2 —— 防卡顿铁律）──
+                    roundsTotal += 1;
+                    const forceL3 = ablation.l3Policy === 'always'
+                        ? true
+                        : ablation.l3Policy === 'never' ? false : escalateL3;
+                    // J 纪元修正：本轮 forceL3 消费后即失能 —— 升级权只能由**本轮的**
+                    // 转移结算重新授予。旧实现只在结算成功时赋值（含 false），但结算
+                    // 失败/场景不可见时保持旧值 —— 一次惊讶后 L3 持续计费多轮（粘性），
+                    // 白烧 VLM 预算直到某次成功结算。
+                    escalateL3 = false;
+                    if (forceL3)
+                        l3Rounds += 1;
+                    const visionEnv = {
+                        station: 'vision',
+                        payload: {
+                            grid: cfg.regionGrid ?? DEFAULT_REGION_GRID,
+                            // 惊讶计费器：预测误差是 L3 的唯一合法开火权（d7HostPort 将其译为
+                            // funnelCeiling='L3' —— 每一次 VLM 开销都有惊讶背书，入链可审计）
+                            forceL3,
+                            snapshotId: undefined,
+                        },
+                        tokenBudget: cfg.stationTokenBudgets.vision,
                     };
+                    // ── 并行双触发：感知 + 隐知识检索（数据流三段论 #2 —— 防卡顿铁律）──
+                    // O 纪元（#26）：firstRoundSerialKnowledge=true 时首轮串行 —— 先感知
+                    // 拿新鲜场景摘要，再检索（场景信号入查询，精度换延迟，仅首轮；
+                    // 后续轮并行不动 —— 上一轮场景天然在场）。
+                    const firstRoundSerial = round === 0 && cfg.firstRoundSerialKnowledge === true
+                        && !ablation.disableKnowledge;
+                    let scene = [];
+                    let injection = null;
+                    if (firstRoundSerial) {
+                        scene = await this.withTimeout(deps.vision.perceive(visionEnv), cfg.timeout.perPerception, []);
+                        lastSceneSummary = summarizeScene(scene);
+                        injection = await this.queryKnowledgeGuarded(intent, lastSceneSummary);
+                    }
+                    else {
+                        [scene, injection] = await Promise.all([
+                            this.withTimeout(deps.vision.perceive(visionEnv), cfg.timeout.perPerception, []),
+                            ablation.disableKnowledge
+                                ? Promise.resolve(null) // 消融：无隐知识模式（检索侧断电）
+                                : this.queryKnowledgeGuarded(intent, lastSceneSummary),
+                        ]);
+                        lastSceneSummary = summarizeScene(scene);
+                    }
+                    if (injection)
+                        knowledgeRounds += 1;
+                    knowledgeUsed = injection ?? knowledgeUsed;
+                    // ── 预测编码回路：到达场景定型；待结算转移先惊讶后学习 ──
+                    // 顺序即语义：surprise 在 observe 之前（误差是学习信号 —— 先测误差，再入账）。
+                    // 看不见（typeOf=null）⇒ 转移悬置（失明轮丢信息是感知的诚实代价，绝不虚构定型）。
+                    const currentTypeId = worldModel.typeOf(scene);
+                    if (currentTypeId && pendingTransition) {
+                        const sr = worldModel.surprise(pendingTransition.fromTypeId, pendingTransition.actionKey, currentTypeId);
+                        if (sr.ok) {
+                            const observed = worldModel.observe(pendingTransition.fromTypeId, pendingTransition.actionKey, currentTypeId, pendingTransition.success);
+                            if (observed.ok) {
+                                escalateL3 = sr.value.novel || sr.value.bits >= P.L3_ESCALATION_BITS;
+                                logKnowledge('world-transition', {
+                                    intentId: intent.id, seq: pendingTransition.seq,
+                                    from: pendingTransition.fromTypeId, action: pendingTransition.actionKey,
+                                    to: currentTypeId, bits: sr.value.bits, novel: sr.value.novel,
+                                    evidence: sr.value.evidence, l3Escalated: escalateL3,
+                                });
+                            }
+                        }
+                        pendingTransition = null; // 结算即清（一次性 —— 转移是证据不是滚动债务）
+                    }
+                    // ── 决策（信封铸造权：intent + scene + 隐知识注入 ≤300 字符，无截图字节）──
+                    const decisionCtx = {
+                        intent,
+                        scene,
+                        knowledgeContext: injection ?? undefined,
+                        previousResults: intent.previousResults,
+                    };
+                    const decisionEnv = {
+                        station: 'decision',
+                        payload: decisionCtx,
+                        tokenBudget: cfg.stationTokenBudgets.decision,
+                    };
+                    const output = await this.withTimeout(deps.decision.decide(decisionEnv, feedback), cfg.timeout.perStep, { reason: `decision step timeout after ${cfg.timeout.perStep}ms`, focus: 'full-scene' });
+                    // NeedGrounding 路由：桩纪元无 L3 兜底通道 ⇒ 诚实终局（grounding 批准回路是留白）
+                    if (isNeedGrounding(output)) {
+                        verdict = 'failed';
+                        terminalReason = `need-grounding: ${output.reason} (focus: ${output.focus})`;
+                        break;
+                    }
+                    // ── 执行（信封铸造权：零模型肌肉，tokenBudget 恒 0）──
+                    const action = output;
+                    seq += 1;
+                    const execEnv = {
+                        station: 'execution',
+                        payload: action,
+                        tokenBudget: cfg.stationTokenBudgets.execution,
+                    };
+                    const result = await this.withTimeout(deps.execution.execute(execEnv), cfg.timeout.perStep, {
+                        action,
+                        status: 'failure',
+                        durationMs: cfg.timeout.perStep,
+                        failure: { kind: 'timeout', detail: `execution step timeout after ${cfg.timeout.perStep}ms` },
+                    });
+                    // ── 闭环进化（数据流三段论 #4 + P0-4 验收门）：打包 outcome → 结算 → 学习 ──
+                    // 学习的前置条件 = 结算：D-4 回执在场 ⇒ 即时结算（verdict 路径）；
+                    // 回执缺席 ⇒ 挂账 pending，run-end 冲账兜底 —— 未结算的 outcome 绝不进学习。
+                    const outcome = {
+                        intent,
+                        action,
+                        result,
+                        retryCount,
+                        totalDurationMs: Date.now() - startedAt,
+                    };
+                    outcomes.push(outcome);
+                    // ── 预测编码回路：本动作的转移挂账（下轮感知到达时结算 —— 成败已知，去向待察）──
+                    if (currentTypeId) {
+                        pendingTransition = {
+                            fromTypeId: currentTypeId,
+                            actionKey: transitionActionKey(action),
+                            seq,
+                            success: result.status === 'success',
+                        };
+                    }
+                    const settlement = deps.verdictBridge.trySettle(seq, outcome);
+                    if (settlement) {
+                        this.learnSettled(settlement);
+                    }
+                    else {
+                        deps.verdictBridge.defer(seq, outcome); // 验收门等待室
+                    }
+                    logKnowledge('knowledge-attempt', {
+                        intentId: intent.id, seq, actionKind: action.kind, status: result.status,
+                        failureKind: result.failure?.kind ?? null, retryCount,
+                    });
+                    this.safeEmit('attempt', {
+                        intentId: intent.id, seq, actionKind: action.kind, status: result.status,
+                        failureKind: result.failure?.kind ?? null,
+                    });
+                    // ── 失败路由：cancelled / timed-out 直达终局，绝不入重试循环 ──
+                    if (result.status !== 'failure') {
+                        verdict = result.status === 'success' ? 'completed' : 'degraded';
+                        terminalReason = result.status === 'success'
+                            ? 'goal achieved (hard evidence: execution success)'
+                            : 'completed with degraded verification (effect unverified)';
+                        break;
+                    }
+                    const kind = result.failure?.kind ?? 'host-error';
+                    if (kind === 'cancelled' || kind === 'timed-out') {
+                        verdict = 'aborted';
+                        terminalReason = `external termination (${kind}): ${result.failure?.detail ?? 'unknown'}`;
+                        break;
+                    }
+                    if (retryCount >= cfg.retryPolicy.maxRetries) {
+                        verdict = 'failed';
+                        terminalReason = `retries exhausted (${retryCount}): ${kind} at seq ${seq} — ${result.failure?.detail ?? 'unknown'}`;
+                        break;
+                    }
+                    retryCount += 1;
+                    feedback = { reason: result.failure?.detail ?? 'unknown failure', retryCount };
+                    // 退避受 overall 预算约束（风险加固）：睡眠绝不超过剩余预算 ——
+                    // 轮首时钟只查一次，裸睡 maxBackoffMs 会让 run 超冲 overall 达一个退避周期
+                    const remaining = cfg.timeout.overall - (Date.now() - startedAt);
+                    await this.sleep(Math.max(0, Math.min(cfg.retryPolicy.backoffMs * 2 ** (retryCount - 1), cfg.retryPolicy.maxBackoffMs, remaining)));
                 }
-                const settlement = deps.verdictBridge.trySettle(seq, outcome);
-                if (settlement) {
-                    this.learnSettled(settlement);
-                }
-                else {
-                    deps.verdictBridge.defer(seq, outcome); // 验收门等待室
-                }
-                logKnowledge('knowledge-attempt', {
-                    intentId: intent.id, seq, actionKind: action.kind, status: result.status,
-                    failureKind: result.failure?.kind ?? null, retryCount,
-                });
-                this.safeEmit('attempt', {
-                    intentId: intent.id, seq, actionKind: action.kind, status: result.status,
-                    failureKind: result.failure?.kind ?? null,
-                });
-                // ── 失败路由：cancelled / timed-out 直达终局，绝不入重试循环 ──
-                if (result.status !== 'failure') {
-                    verdict = result.status === 'success' ? 'completed' : 'degraded';
-                    terminalReason = result.status === 'success'
-                        ? 'goal achieved (hard evidence: execution success)'
-                        : 'completed with degraded verification (effect unverified)';
-                    break;
-                }
-                const kind = result.failure?.kind ?? 'host-error';
-                if (kind === 'cancelled' || kind === 'timed-out') {
-                    verdict = 'aborted';
-                    terminalReason = `external termination (${kind}): ${result.failure?.detail ?? 'unknown'}`;
-                    break;
-                }
-                if (retryCount >= cfg.retryPolicy.maxRetries) {
-                    verdict = 'failed';
-                    terminalReason = `retries exhausted (${retryCount}): ${kind} at seq ${seq} — ${result.failure?.detail ?? 'unknown'}`;
-                    break;
-                }
-                retryCount += 1;
-                feedback = { reason: result.failure?.detail ?? 'unknown failure', retryCount };
-                // 退避受 overall 预算约束（风险加固）：睡眠绝不超过剩余预算 ——
-                // 轮首时钟只查一次，裸睡 maxBackoffMs 会让 run 超冲 overall 达一个退避周期
-                const remaining = cfg.timeout.overall - (Date.now() - startedAt);
-                await this.sleep(Math.max(0, Math.min(cfg.retryPolicy.backoffMs * 2 ** (retryCount - 1), cfg.retryPolicy.maxBackoffMs, remaining)));
+                verdict ??= 'failed';
+                terminalReason ||= `no progress possible after ${outcomes.length} outcome(s)`;
+                this.settlePending(intent.id); // P0-4 终局冲账：本 intent 的挂账在此结算学习
+                const consolidation = this.consolidateKnowledge(intent.id, outcomes.length); // 神经元纪元：run-end 入睡（旁路）
+                this.checkpointState(intent.id, verdict, { roundsTotal, l3Rounds, knowledgeRounds, executions: outcomes.length }, consolidation, startedAt); // 反遗忘 + 仪表盘
+                return this.finalReport(intent, verdict, terminalReason, outcomes, knowledgeUsed, startedAt);
             }
-            verdict ??= 'failed';
-            terminalReason ||= `no progress possible after ${outcomes.length} outcome(s)`;
-            this.settlePending(intent.id); // P0-4 终局冲账：本 intent 的挂账在此结算学习
-            const consolidation = this.consolidateKnowledge(intent.id, outcomes.length); // 神经纪元：run-end 入睡（旁路）
-            this.checkpointState(intent.id, verdict, { roundsTotal, l3Rounds, knowledgeRounds, executions: outcomes.length }, consolidation, startedAt); // 反遗忘 + 仪表盘
-            return this.finalReport(intent, verdict, terminalReason, outcomes, knowledgeUsed, startedAt);
+            finally {
+                // O 纪元（#20）：run 终合并 —— fork 的操作日志重放回共享模型（双出口共用；
+                // merge 幂等且只收 fork 的账 —— 内部故障路径同样合并已发生的观察）
+                if (worldModel !== sharedModel &&
+                    worldModel instanceof InMemoryWorldModel && sharedModel instanceof InMemoryWorldModel) {
+                    sharedModel.merge(worldModel);
+                }
+            }
         }
         catch (e) {
             // 运行层兜底：任何意外 ⇒ 结构化 failed（契约 —— 永不抛错）

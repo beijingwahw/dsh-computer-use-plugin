@@ -78,3 +78,7 @@ export const approval = {
                 pending.delete(k);
     },
 };
+/** W 纪元（W-1 隔离缝）：审批簿记归零 —— 测试隔离与插件卸载共用 */
+export function resetApproval() {
+    pending.clear();
+}

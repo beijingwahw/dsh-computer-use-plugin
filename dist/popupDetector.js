@@ -140,6 +140,8 @@ export async function detectPopup(imageBuffer, opts = {}) {
         geometric,
         semantic: matchedKeywords.length > 0,
     });
+    // Q 纪元（Q-3）：同一帧证据并行喂 SPRT（旁路 —— 信息论最优停止的第二意见）
+    popupSprt.update({ geometric, semantic: matchedKeywords.length > 0 });
     return {
         popup: active,
         geometric,
@@ -147,4 +149,61 @@ export async function detectPopup(imageBuffer, opts = {}) {
         matchedKeywords,
         belief,
     };
+}
+/** SPRT 弹窗判决器（纯类 —— 可注入任意帧序列，测试的确定性事实源） */
+export class SprtPopupFilter {
+    llr = 0;
+    frames = 0;
+    decided = null;
+    // P 纪元注记：构造器参数属性（public readonly x = v）是 transform 语法 ——
+    // Node strip-only 拒载（J 纪元"类型即值地雷"同族）；改显式字段 + 赋值。
+    alpha;
+    beta;
+    constructor(alpha = 0.05, beta = 0.05) {
+        this.alpha = alpha;
+        this.beta = beta;
+    }
+    get acceptBound() {
+        return Math.log((1 - this.beta) / this.alpha);
+    }
+    /** 单帧更新：返回判决（终判后恒返回原判 —— SPRT 停止语义） */
+    update(ev) {
+        if (this.decided)
+            return this.state();
+        // 帧似然比：语义 > 几何（证据强度序与 F-3 同律）；双缺席 = 清洁证据
+        if (ev.semantic)
+            this.llr += Math.log(0.90 / 0.02);
+        else if (ev.geometric)
+            this.llr += Math.log(0.70 / 0.20);
+        else
+            this.llr += Math.log(0.08 / 0.85);
+        this.frames += 1;
+        if (this.llr >= this.acceptBound)
+            this.decided = 'popup';
+        else if (this.llr <= -this.acceptBound)
+            this.decided = 'clean';
+        return this.state();
+    }
+    state() {
+        return {
+            decision: this.decided,
+            logLikelihoodRatio: Math.round(this.llr * 1000) / 1000,
+            frames: this.frames,
+            bounds: { accept: Math.round(this.acceptBound * 1000) / 1000, reject: -Math.round(this.acceptBound * 1000) / 1000 },
+        };
+    }
+    reset() {
+        this.llr = 0;
+        this.frames = 0;
+        this.decided = null;
+    }
+}
+/** 模块级 SPRT 单例（与 Schmitt 单例同喂数同生命周期） */
+const popupSprt = new SprtPopupFilter();
+export function resetPopupSprt() {
+    popupSprt.reset();
+}
+/** SPRT 当前判决（终判锁定；null = 继续观察） */
+export function getPopupSprt() {
+    return popupSprt.state();
 }

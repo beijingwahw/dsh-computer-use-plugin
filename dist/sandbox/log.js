@@ -8,6 +8,7 @@
 import { appendFile, mkdir } from 'fs/promises';
 import { createHash } from 'crypto';
 import path from 'path';
+import { mmrRoot, mmrInclusionProof } from '../proof.js';
 const GENESIS = 'GENESIS';
 /** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提；对齐 journal.canonical） */
 function canonical(obj) {
@@ -82,6 +83,17 @@ export class SandboxLog {
     }
     list() {
         return this.entries;
+    }
+    // ── Q 纪元（Q-1 证明层）：MMR 包含证明面（叶值 = 链哈希；纯计算零存储）──
+    /** 排练链 MMR 根（O(n) 计算 —— D-6 verify_pipeline_log 之外的取证升级面） */
+    mmrRoot() {
+        const leaves = this.entries.map(e => e.hash).filter((h) => typeof h === 'string');
+        return leaves.length > 0 ? mmrRoot(leaves) : null;
+    }
+    /** 第 index 条链记录的包含证明（与 mmrRoot 配对验证） */
+    mmrProof(index) {
+        const leaves = this.entries.map(e => e.hash).filter((h) => typeof h === 'string');
+        return mmrInclusionProof(leaves, index);
     }
 }
 /** 模块级单例（对齐 journal 的导出方言；生命周期随 ctx.effect 清理复位） */
