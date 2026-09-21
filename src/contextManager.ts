@@ -13,7 +13,7 @@
 //   潜意识层 —— 被驱逐记录压缩为 (指纹, 要旨) 元组入有界池，场景重现时「灵光一闪」。
 import { journal } from './journal';
 import { embed, cosine, type SparseVector } from './semanticHash';
-import { hammingDistance } from './perceptualHash';
+import { hammingDistance, similarity } from './perceptualHash';
 export interface ScreenshotRecord {
   id: number;
   timestamp: number;
@@ -41,6 +41,8 @@ export interface SubconsciousTrace {
   /** ≤legacySummaryMaxChars 的遗像文本（B-6 OCR 已产出，零额外成本） */
   gist: string;
   createdAt: number;
+  /** S 纪元（S-6）：pHash 第二指纹（缺席 = sharp 不可用时的单指回忆） */
+  scenePhash?: string;
 }
 
 /** base64 字符数 → 近似 KB（data URL 前缀开销可忽略，预算用途足够精确） */
@@ -58,7 +60,9 @@ class ContextManager {
   // ── C-4 认知焦点引擎 ──
   private salienceFocus = true;            // 注意力开关（关 = 纯 FIFO，行为回归 B 世代）
   private pinBudget = 1;                   // 钉扎名额上限（防全钉扎击穿双预算）
-  private subconscious: SubconsciousTrace[] = []; // 潜意识池（有界双端队列）
+  private subconscious: SubconsciousTrace[] = [];
+  /** S-6：最近一帧的 pHash（既视感双指复核的第二指） */
+  private lastPhash: string | null = null; // 潜意识池（有界双端队列）
   private subconsciousCapacity = 32;       // 池容量：32 × ≤200 字符 ≈ 6KB 封顶
   private subconsciousMatchDistance = 6;   // 既视感触发阈值（dHash 汉明距离）
   private taskQueryCache: { text: string; vec: SparseVector } | null = null; // 任务向量缓存
@@ -164,6 +168,7 @@ class ContextManager {
       sceneHash: record.hash,
       gist: gist.slice(0, this.legacySummaryMaxChars),
       createdAt: Date.now(),
+      scenePhash: this.lastPhash ?? undefined, // S-6：双指纹的第二指（dHash 入库时同步算）
     });
     while (this.subconscious.length > this.subconsciousCapacity) this.subconscious.shift();
   }
@@ -181,6 +186,11 @@ class ContextManager {
       if (d < bestDist) { bestDist = d; best = t; }
     }
     if (best && bestDist <= this.subconsciousMatchDistance) {
+      // S-6 双指共识：库存 pHash 在场 ⇒ 频谱域复核（相似度 ≥0.85 才闪）；
+      // 任一指纹缺席 ⇒ 单指判定（既有语义，零回归）。
+      if (best.scenePhash && this.lastPhash) {
+        if (similarity(best.scenePhash, this.lastPhash) < 0.85) return '';
+      }
       return ` [Flashback: a similar scene appeared before — ${best.gist.slice(0, 120)}]`;
     }
     return '';
@@ -204,9 +214,19 @@ class ContextManager {
   public async addScreenshot(base64: string, hash?: string): Promise<{ currentId: number; message: string }> {
     // Date.now() 一值三用：唯一且单调递增的 id、timestamp、以及「id 升序 = 时间序」
     // 的隐含保证 —— 后文 find 取首个有图记录即最旧图，排序算法被彻底省略。
-    const newId = Date.now();
+    // O 纪元（#22 残差根除）：同毫秒双截 ⇒ 纯 Date.now() 碰撞（锚点引用歧义）。
+    // 混合逻辑时钟：max(墙上钟, lastId+1) —— 数值 id 三重语义全保留，碰撞时
+    // +1ms 顶进（旧测试的 3ms tick 规避从此成为多余而非必需）。
+    const newId = Math.max(Date.now(), (this.history[this.history.length - 1]?.id ?? 0) + 1);
 
     // C-4 既视感：新帧入窗前与潜意识比对（旧场景重现 ⇒ 灵光一闪）
+    // S 纪元（S-6）：双指纹第二指 —— dHash 初中后以 pHash 复核（频谱域独立
+    // 证据），压制同梯度不同内容的假灵光；sharp 缺席 ⇒ 单指回忆（零回归）。
+    this.lastPhash = null;
+    try {
+      const { phash } = await import('./perceptualHash');
+      if (hash) this.lastPhash = await phash(Buffer.from(base64, 'base64'));
+    } catch { this.lastPhash = null; }
     const dejaVu = hash ? this.flashback(hash) : '';
     // E-4 预测残差：与前一幅在窗图像的指纹距离（推送前计算 —— 前馈基准）。
     // 页面级跳变 ⇒ surpriseBits 入记录 ⇒ 显著度加成 + 钉扎资格（见 assessSalience）

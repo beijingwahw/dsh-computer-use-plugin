@@ -23,11 +23,12 @@ import type { JournalEntry } from './journal';
 import type { SubAgentState } from './subAgent';
 import type { UndoRecord } from './environmentShaper';
 import type { QuantumSnapshot } from './quantumSense';
+import { sandboxLog } from './sandbox/log';
 
 // v3：新增 swarmAgents section（D-1 子代理花名册 + 报告 —— 崩溃后团队原地满血复活）。
 // v2：新增 contextManager（潜意识池）与 swarm（经验晶体/漂移模型）section。
 // 加载兼容 v1/v2 旧档：migrateCheckpoint 幂等归一化（见其注释），缺省 section 防御性跳过。
-const CHECKPOINT_VERSION = 3;
+const CHECKPOINT_VERSION = 4;
 
 interface Checkpoint {
   version: number;
@@ -46,6 +47,12 @@ interface Checkpoint {
   shaper?: { undoLog: UndoRecord[] };
   /** D-3 感知相位（第三次原地扩展：叠加态跨崩溃存活 —— 急救未完不中断） */
   quantum?: QuantumSnapshot;
+  // ── v4（R 纪元 R-4 快照层）──
+  /** 证据锚：journal MMR 根（快照时刻的行动流默克尔根 —— 恢复时与重算根
+   *  对照 = 快照-证据一致性的防篡改锚；v3 旧档无此字段 ⇒ 迁移补 null） */
+  journalMmrRoot?: string | null;
+  /** 证据锚：排练链 MMR 根（同律） */
+  sandboxMmrRoot?: string | null;
 }
 
 /**
@@ -55,12 +62,17 @@ interface Checkpoint {
  */
 export function migrateCheckpoint(raw: unknown): Checkpoint | null {
   if (!raw || typeof raw !== 'object') return null;
-  const r = raw as Record<string, any>;
-  if (r.version === 3) return r as Checkpoint; // 已是目标形态：原样透传（幂等性根基）
+  let r = raw as Record<string, any>;
+  if (r.version === 4) return r as Checkpoint; // 已是目标形态：原样透传（幂等性根基）
   if (r.version === 1 || r.version === 2) {
     // 缺省字段补默认而非报错：v1 无 contextManager/swarm、v2 无 swarmAgents —— 全部 no-op 填充。
     // 结构性收窄由调用方的防御性恢复兜底（单 section 损坏不拖垮整档）。
-    return { ...r, version: 3, swarmAgents: Array.isArray(r.swarmAgents) ? r.swarmAgents : [] } as Checkpoint;
+    r = { ...r, swarmAgents: Array.isArray(r.swarmAgents) ? r.swarmAgents : [] };
+  }
+  if (r.version >= 1 && r.version <= 3) {
+    // v1/v2/v3 → v4（R-4）：缺省字段补默认（swarmAgents 等）+ 证据锚补 null
+    //（旧档无 MMR 根 —— 诚实缺席不虚造）；幂等 —— 重复迁移结构不变。
+    return { ...r, version: 4, journalMmrRoot: r.journalMmrRoot ?? null, sandboxMmrRoot: r.sandboxMmrRoot ?? null } as Checkpoint;
   }
   return null;
 }
@@ -84,6 +96,9 @@ function collect(): Checkpoint {
     shaper: { undoLog: shaper.dumpUndoLog() },
     // D-3：感知相位随行 —— 叠加态急救跨崩溃续行
     quantum: quantum.dump(),
+    // R-4：证据锚 —— 快照与证据链的一致性锚（恢复时可验：重算 MMR 根 == 锚）
+    journalMmrRoot: journal.mmrRoot(),
+    sandboxMmrRoot: sandboxLog.mmrRoot(),
   };
 }
 
@@ -126,7 +141,15 @@ export function loadCheckpoint(filePath: string): { restored: boolean; report: s
     ['uiMemory', () => uiMemory.restore(cp.uiMemory)],
     ['skillLibrary', () => skillLibrary.restore(cp.skillLibrary)],
     ['failureMemory', () => failureMemory.restore(cp.failureMemory)],
-    ['journal', () => journal.restoreChain(cp.journal.entries, cp.journal.chainTip, cp.journal.chainBase)],
+    ['journal', () => {
+      // S 纪元（S-1）：证据锚验证（R-4 的另一半）—— 恢复后重算 MMR 根与锚对照；
+      // 不等 ⇒ 条目被改/锚错配（篡改或档案损坏），响亮报告（防御性恢复策略：
+      // 照常恢复但报告置顶 —— 单 section 报告不阻断其余恢复）。
+      journal.restoreChain(cp.journal.entries, cp.journal.chainTip, cp.journal.chainBase);
+      if (typeof cp.journalMmrRoot === 'string' && journal.mmrRoot() !== cp.journalMmrRoot) {
+        report.unshift(`EVIDENCE ANCHOR MISMATCH: journal MMR root after restore != snapshot anchor (entries tampered or stale anchor) — evidence chain integrity untrusted`);
+      }
+    }],
     ['telemetry', () => telemetry.restore(cp.telemetry)],
     // v2 sections：v1 旧档缺省时静默跳过（防御性恢复的红利）
     ['contextManager', () => contextManager.restoreSubconscious(cp.contextManager?.subconscious)],

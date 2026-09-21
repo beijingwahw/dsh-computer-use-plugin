@@ -114,7 +114,10 @@ class UIMemory {
       .map(l => {
         const lTokens = tokenize(l.description + ' ' + (l.appHint ?? ''));
         const text = overlapCoefficient(qTokens, lTokens);
-        const trust = 0.05 * Math.min(l.successCount, 6);
+        // S 纪元（S-4）：Beta(1,1) 后验信任 —— (s+1)/(s+2) 取代线性截断 min(s,6)。
+        // 同域 [0.05→0.3]：贝叶斯 grounded（一次成功不配满信任；渐近饱和），
+        // 曲率由后验自带而非硬帽。0.3 = 0.05×6 的旧上界保持量纲。
+        const trust = 0.3 * ((l.successCount + 1) / (l.successCount + 2)) * (1 / 3) + 0.05;
         const ageH = (now - l.lastUsedAt) / 3_600_000;
         const recency = 0.1 * Math.exp(-ageH / 24);
         let sceneBonus = 0;
