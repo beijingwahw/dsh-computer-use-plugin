@@ -137,3 +137,171 @@ export function reactTraceProperties(entries: readonly TraceEntry[]): TracePrope
     },
   ];
 }
+
+// ─── O 纪元（#23）：性质挖掘自动化 —— 从行动迹自动铸造时序不变量 ───
+
+/** 挖掘产物：预铸库之外、数据自己长出来的性质 */
+export interface MinedProperty extends TraceProperty {
+  /** 支持度：性质获得证据的机会数（出现次数） */
+  support: number;
+  /** 置信度：履行率（挖掘门槛 = 满支持零反例，值恒 1 —— 诚实：挖掘只收铁律） */
+  confidence: 1;
+  /** 挖掘族：该性质来自哪类时序模式 */
+  family: 'precedence' | 'bounded-response' | 'repeat-guard';
+}
+
+/** 挖掘门槛：少于 3 次机会的模式不立法（机会不足 ⇒ 修辞不是定律） */
+export const MINE_MIN_SUPPORT = 3;
+
+/**
+ * 性质挖掘器（纯函数、确定性）：三族时序模式的自动铸造 ——
+ *   bounded-response ：A 后（到迹末前的首次）B 出现 ≥3 次且从未落空 ⇒
+ *                      立 G(A → F≤k B)（k = 历史最大间隔 —— 有界响应的数据定标）。
+ *   precedence       ：有序对 (A→B) 配对 ≥3 次且 B 从未紧邻抢在 A 前 ⇒
+ *                      立 G(¬B U A)（抢跑零例才立法）。
+ *   repeat-guard     ：工具 T 有 ≥3 次自我紧邻机会且从未紧接自身 ⇒
+ *                      立 G(T → X ¬T)（同签名连击零例）。
+ * 立法门槛：support ≥ MINE_MIN_SUPPORT 且零反例 —— 挖掘只收铁律，弱模式
+ * （如「90% 遵守」）如实不立（性质库是判据不是倾向表）。挖掘性质在本迹上
+ * 恒成立（violations 空）；跨迹执法由消费方持性质查新迹。
+ */
+export function mineTraceProperties(entries: readonly TraceEntry[]): MinedProperty[] {
+  const n = entries.length;
+  const out: MinedProperty[] = [];
+  if (n < MINE_MIN_SUPPORT) return out;
+
+  // ── 工具对统计：A 之后首次 B（有界响应的响应语义）+ B 紧邻抢跑机会 ──
+  const pairStats = new Map<string, { count: number; maxGap: number; preceded: number }>();
+  for (let i = 0; i < n; i++) {
+    const a = entries[i].tool;
+    for (let j = i + 1; j < n; j++) {
+      if (entries[j].tool === a) continue; // 自我不算响应对
+      const key = `${a}→${entries[j].tool}`;
+      let st = pairStats.get(key);
+      if (!st) { st = { count: 0, maxGap: 0, preceded: 0 }; pairStats.set(key, st); }
+      st.count += 1;
+      st.maxGap = Math.max(st.maxGap, j - i);
+      break; // 只记 A 之后首次 B
+    }
+  }
+  // 抢跑机会：B 紧邻出现在 A 之前（对在场对 A→B 计数 —— 这是 precedence 的反例面）
+  for (let j = 1; j < n; j++) {
+    const b = entries[j - 1].tool, a = entries[j].tool;
+    if (b === a) continue;
+    const st = pairStats.get(`${a}→${b}`);
+    if (st) st.preceded += 1;
+  }
+  for (const [key, st] of pairStats) {
+    const [a, b] = key.split('→');
+    if (st.count >= MINE_MIN_SUPPORT) {
+      out.push({
+        id: `mined-response[${key}]≤${st.maxGap}`,
+        formula: `G(${a} → F≤${st.maxGap} ${b})`,
+        description: `Mined bounded response: ${a} is historically always followed by ${b} within ${st.maxGap} step(s) — ${st.count} supports, 0 counterexamples.`,
+        violations: [],
+        support: st.count,
+        confidence: 1,
+        family: 'bounded-response',
+      });
+      if (st.preceded === 0) {
+        out.push({
+          id: `mined-precedence[${b}¬≪${a}]`,
+          formula: `G(¬${b} U ${a})`,
+          description: `Mined precedence: ${b} has never appeared immediately before ${a} — ${st.count} paired supports, 0 precedences.`,
+          violations: [],
+          support: st.count,
+          confidence: 1,
+          family: 'precedence',
+        });
+      }
+    }
+  }
+
+  // ── repeat-guard：工具自我紧邻重复的零例立法 ──
+  const selfRepeat = new Map<string, number>();
+  const selfChances = new Map<string, number>();
+  for (let i = 0; i + 1 < n; i++) {
+    const t = entries[i].tool;
+    selfChances.set(t, (selfChances.get(t) ?? 0) + 1);
+    if (entries[i + 1].tool === t) selfRepeat.set(t, (selfRepeat.get(t) ?? 0) + 1);
+  }
+  for (const [tool, chances] of selfChances) {
+    if (chances >= MINE_MIN_SUPPORT && !selfRepeat.has(tool)) {
+      out.push({
+        id: `mined-repeat-guard[${tool}]`,
+        formula: `G(${tool} → X ¬${tool})`,
+        description: `Mined repeat guard: ${tool} has never immediately repeated itself — ${chances} opportunities, 0 repeats.`,
+        violations: [],
+        support: chances,
+        confidence: 1,
+        family: 'repeat-guard',
+      });
+    }
+  }
+
+  return out;
+}
+
+// ─── S 纪元（S-5）：挖掘性质的在线执法器 —— mine→enforce 闭环 ───
+
+/** 执法结果：性质在新迹上的违例位（空 = 性质仍成立） */
+export interface MinedEnforcement {
+  id: string;
+  family: MinedProperty['family'];
+  violations: number[];
+}
+
+/**
+ * 挖掘性质执法器（纯函数）：对**新迹**逐性质检验。挖掘立法于历史，执法
+ * 于未来 —— 性质库从描述统计升格为在线规约（违例 = 世界变了或立法过拟合，
+ * 两者都该被看见）。
+ *   bounded-response：每个 A 位后 k 步内须有 B
+ *   precedence      ：首个 A 之前不得出现 B
+ *   repeat-guard    ：T 不得紧接自身
+ */
+export function enforceMinedProperties(
+  entries: readonly TraceEntry[],
+  props: readonly MinedProperty[],
+): MinedEnforcement[] {
+  const tools = entries.map(e => e.tool);
+  const out: MinedEnforcement[] = [];
+  for (const p of props) {
+    const violations: number[] = [];
+    if (p.family === 'bounded-response') {
+      // id 形如 mined-response[A→B]≤k —— 解析 A/B/k
+      const m = /^mined-response\[(.+?)→(.+?)\]≤(\d+)$/.exec(p.id);
+      if (m) {
+        const [, a, b, kStr] = m;
+        const k = Number(kStr);
+        for (let i = 0; i < tools.length; i++) {
+          if (tools[i] !== a) continue;
+          let ok = false;
+          for (let j = i + 1; j <= Math.min(i + k, tools.length - 1); j++) {
+            if (tools[j] === b) { ok = true; break; }
+          }
+          if (!ok) violations.push(i);
+        }
+      }
+    } else if (p.family === 'precedence') {
+      // id 形如 mined-precedence[B¬≪A] —— 首个 A 前出现 B 即违例
+      const m = /^mined-precedence\[(.+?)¬≪(.+?)\]$/.exec(p.id);
+      if (m) {
+        const [, b, a] = m;
+        const firstA = tools.indexOf(a);
+        if (firstA >= 0) {
+          for (let i = 0; i < firstA; i++) if (tools[i] === b) violations.push(i);
+        }
+      }
+    } else if (p.family === 'repeat-guard') {
+      const m = /^mined-repeat-guard\[(.+?)\]$/.exec(p.id);
+      if (m) {
+        const t = m[1];
+        for (let i = 0; i + 1 < tools.length; i++) {
+          if (tools[i] === t && tools[i + 1] === t) violations.push(i);
+        }
+      }
+    }
+    out.push({ id: p.id, family: p.family, violations });
+  }
+  return out;
+}
