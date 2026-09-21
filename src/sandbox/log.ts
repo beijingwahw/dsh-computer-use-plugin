@@ -8,6 +8,7 @@
 import { appendFile, mkdir } from 'fs/promises';
 import { createHash } from 'crypto';
 import path from 'path';
+import { mmrRoot, mmrInclusionProof, type InclusionProof } from '../proof';
 
 /** 沙箱账本条目：语义事件（非宿主工具镜像）。kind 即事件分类学。
  *  链段扩展（P1-5 可观测性对齐）：D-6 流水线（'pipeline-*'）与 D-7 隐知识中枢
@@ -133,6 +134,19 @@ export class SandboxLog {
 
   list(): ReadonlyArray<SandboxLogEntry> {
     return this.entries;
+  }
+
+  // ── Q 纪元（Q-1 证明层）：MMR 包含证明面（叶值 = 链哈希；纯计算零存储）──
+  /** 排练链 MMR 根（O(n) 计算 —— D-6 verify_pipeline_log 之外的取证升级面） */
+  mmrRoot(): string | null {
+    const leaves = this.entries.map(e => e.hash).filter((h): h is string => typeof h === 'string');
+    return leaves.length > 0 ? mmrRoot(leaves) : null;
+  }
+
+  /** 第 index 条链记录的包含证明（与 mmrRoot 配对验证） */
+  mmrProof(index: number): InclusionProof | null {
+    const leaves = this.entries.map(e => e.hash).filter((h): h is string => typeof h === 'string');
+    return mmrInclusionProof(leaves, index);
   }
 }
 

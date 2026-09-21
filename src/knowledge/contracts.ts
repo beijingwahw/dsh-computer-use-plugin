@@ -254,6 +254,13 @@ export interface PipelineConfig {
    * ReflexiveDecisionOpts 的同名额舌执法 —— 消融矩阵由基准组合两侧。
    */
   ablation?: AblationConfig;
+  /**
+   * O 纪元（#26）：首轮知识检索串行化选项。缺省 false = 既有并行语义
+   * （检索与感知同发 —— 防卡顿铁律，代价：首轮场景信号缺席，检索只靠意图）。
+   * true = 第一轮先感知后检索（新鲜场景摘要可入查询 —— 精度换延迟，仅首轮；
+   * 后续轮天然有上一轮场景，并行不动）。两个都是诚实语义，主权归部署者。
+   */
+  firstRoundSerialKnowledge?: boolean;
 }
 
 /**
@@ -290,6 +297,20 @@ export interface TransitionPrediction {
   successProb: number;
   /** 支撑本预测的观察数（证据经济学：无证据的预测不值钱） */
   evidence: number;
+  /**
+   * Q 纪元（Q-4）：Dirichlet(1) 平滑后验的预测熵（bits）。
+   *   H = −Σ p̂ᵢ log₂ p̂ᵢ，p̂ = (count+1)/(total+K)（K = 已见下一类型数 + 1
+   *   个未seen漏斗）。0 bits = 确定转移（每次都去同一处）；log₂K bits ≈
+   *   均匀无知 —— 模型对「点了之后世界去哪」毫无主张。
+   *   消费语义：熵高 ⇒ 该动作的信息收益高 —— L3 付费观看的正当性可量化。
+   */
+  entropyBits: number;
+  /**
+   * Q 纪元（Q-4）：Dirichlet 后验集中度 = 有效样本量/(有效样本量+2)。
+   *   0 = 无证据（纯先验，熵为均匀），→1 = 后验由数据主导。
+   *   「熵 × 集中度」给出可信的不确定性 vs 廉价的均匀无知。
+   */
+  posteriorConcentration: number;
 }
 
 /**

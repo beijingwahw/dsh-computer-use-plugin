@@ -80,6 +80,69 @@ export class InMemoryWorldModel implements WorldModel {
   private transitions = new Map<string, { total: number; success: number; next: Map<string, number> }>();
   private typeCounter = 0;
 
+  // ── O 纪元（#20）：run 级快照 —— 并发 run 隔离 ──
+  /** fork 出的实例才记账（根实例 journaling=false —— 根永不 merge 自己） */
+  private journaling = false;
+  /** 重放日志：merge 时按序重放到父（mint/member/observe 三类原子操作） */
+  private ops: Array<
+    | { k: 'mint'; id: string; tokens: string[] }
+    | { k: 'member'; id: string }
+    | { k: 'observe'; from: string; action: string; to: string; success: boolean }
+  > = [];
+
+  /**
+   * O 纪元（#20）：run 级快照。并发 run 共享同一模型时，typeOf 的中途定型
+   * （会员计数/新类型铸造）会互相污染（J 纪元只隔离了 pendingTransition）。
+   * fork = 全量拷贝 + 记账模式：run 内一切读写落 fork，run 终 merge 重放回父。
+   * 拷贝是浅层共享不可变数据（tokens/vec 永不修改）+ 复制可变壳（entries/next Map）。
+   */
+  fork(): InMemoryWorldModel {
+    const child = new InMemoryWorldModel();
+    for (const [id, t] of this.types) {
+      child.types.set(id, { tokens: t.tokens, vec: t.vec, members: t.members });
+    }
+    for (const [key, tr] of this.transitions) {
+      child.transitions.set(key, { total: tr.total, success: tr.success, next: new Map(tr.next) });
+    }
+    child.typeCounter = this.typeCounter;
+    child.journaling = true;
+    return child;
+  }
+
+  /**
+   * O 纪元（#20）：fork 的操作日志重放回本模型（run 终点调用）。
+   * 并发 fork 各自铸造的同号类型（screen-N）在此重铸为父计数器的新 id ——
+   * 重放是确定性的（日志序 = 发生序），合并结果与串行执行等价。
+   */
+  merge(child: InMemoryWorldModel): void {
+    if (!child.journaling || child === this) return; // 只收 fork 的账
+    const rewrite = new Map<string, string>();
+    const rw = (id: string): string => rewrite.get(id) ?? id;
+    for (const op of child.ops) {
+      if (op.k === 'mint') {
+        if (this.types.has(op.id)) {
+          // 并发兄弟 fork 已用同号：重铸新 id（父计数器单调递增）
+          this.typeCounter += 1;
+          const nid = `screen-${this.typeCounter}`;
+          rewrite.set(op.id, nid);
+          this.types.set(nid, { tokens: op.tokens, vec: embed(op.tokens.join(' ')), members: 1 });
+        } else {
+          rewrite.set(op.id, op.id);
+          this.types.set(op.id, { tokens: op.tokens, vec: embed(op.tokens.join(' ')), members: 1 });
+          // 计数器同步到所采 id 的序号（fork 的 id 可能领先父计数器 ——
+          // 不同步则后续重铸撞号覆写：screen-3 之后再铸仍是 screen-3）
+          const seq = Number.parseInt(op.id.slice('screen-'.length), 10);
+          if (Number.isFinite(seq) && seq > this.typeCounter) this.typeCounter = seq;
+        }
+      } else if (op.k === 'member') {
+        const t = this.types.get(rw(op.id));
+        if (t) t.members += 1;
+      } else {
+        this.observe(rw(op.from), op.action, rw(op.to), op.success); // 复用入账（含校验）
+      }
+    }
+  }
+
   typeOf(scene: ScenePatch[]): string | null {
     if (!Array.isArray(scene)) return null;
     const tokens = sceneTokens(scene);
@@ -93,6 +156,7 @@ export class InMemoryWorldModel implements WorldModel {
     }
     if (bestId !== null && bestSim >= TYPE_MATCH_SIMILARITY) {
       this.types.get(bestId)!.members += 1; // 指认即注册（会员计数 = 观察次数）
+      if (this.journaling) this.ops.push({ k: 'member', id: bestId });
       return bestId;
     }
     // 铸造新类型：增量聚类（贪心首遇 —— v1 的诚实局限：无分裂/合并，
@@ -100,6 +164,7 @@ export class InMemoryWorldModel implements WorldModel {
     this.typeCounter += 1;
     const id = `screen-${this.typeCounter}`;
     this.types.set(id, { tokens, vec, members: 1 });
+    if (this.journaling) this.ops.push({ k: 'mint', id, tokens });
     return id;
   }
 
@@ -124,6 +189,7 @@ export class InMemoryWorldModel implements WorldModel {
     stats.total += 1;
     if (success) stats.success += 1;
     stats.next.set(toTypeId, (stats.next.get(toTypeId) ?? 0) + 1);
+    if (this.journaling) this.ops.push({ k: 'observe', from: fromTypeId, action: actionKey, to: toTypeId, success });
     return { ok: true, value: undefined };
   }
 
@@ -139,12 +205,23 @@ export class InMemoryWorldModel implements WorldModel {
     const nextTypes = [...stats.next.entries()]
       .map(([typeId, n]) => ({ typeId, prob: Math.round((n / stats.total) * 1000) / 1000 }))
       .sort((a, b) => b.prob - a.prob);
+    // Q 纪元（Q-4）：Dirichlet(1) 平滑预测熵 + 后验集中度（契约字段，纯派生）
+    const K = stats.next.size + 1; // 已见目的地 + 一个未见漏斗
+    const denom = stats.total + K;
+    let entropy = 0;
+    for (const n of stats.next.values()) {
+      const p = (n + 1) / denom;
+      entropy -= p * Math.log2(p);
+    }
+    entropy -= (1 / denom) * Math.log2(1 / denom); // 未见漏斗的熵贡献
     return {
       ok: true,
       value: {
         nextTypes,
         successProb: Math.round((stats.success / stats.total) * 1000) / 1000,
         evidence: stats.total,
+        entropyBits: Math.round(entropy * 1000) / 1000,
+        posteriorConcentration: Math.round((stats.total / (stats.total + 2)) * 1000) / 1000,
       },
     };
   }
@@ -237,6 +314,28 @@ export class InMemoryWorldModel implements WorldModel {
       if (!Array.isArray(tr.next) || !tr.next.every((p: unknown) =>
         Array.isArray(p) && p.length === 2 && typeof (p as unknown[])[0] === 'string' && typeof (p as unknown[])[1] === 'number')) {
         return bad('snapshot.transitions', `transition "${tr.from}|${tr.action}" next must be [string, number] pairs`);
+      }
+      // O 纪元（#21 残差根除）：悬空引用不入库 —— from 与 next 的 typeId 必须
+      // 指向 types 中真实存在的类型；否则 predict/surprise 将对幽灵类型给出
+      // 假概率。附带两重记账不变量：next 键不重复（数组转 Map 会静默去重吞
+      // 计数）、sum(next) === total（observe 每次必记 next —— 破缺即篡改/损坏）。
+      if (!typeIds.has(tr.from)) {
+        return bad('snapshot.transitions', `transition "${tr.from}|${tr.action}" dangles: from type not in snapshot.types`);
+      }
+      const seenNext = new Set<string>();
+      let nextSum = 0;
+      for (const p of tr.next as Array<[string, number]>) {
+        if (!typeIds.has(p[0])) {
+          return bad('snapshot.transitions', `transition "${tr.from}|${tr.action}" dangles: next type "${p[0]}" not in snapshot.types`);
+        }
+        if (seenNext.has(p[0])) {
+          return bad('snapshot.transitions', `transition "${tr.from}|${tr.action}" has duplicate next key "${p[0]}"`);
+        }
+        seenNext.add(p[0]);
+        nextSum += p[1];
+      }
+      if (nextSum !== tr.total) {
+        return bad('snapshot.transitions', `transition "${tr.from}|${tr.action}" bookkeeping broken: sum(next)=${nextSum} != total=${tr.total}`);
       }
     }
     // 换脑：预检全过后整批入账，向量重铸

@@ -182,6 +182,8 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
   let structuredSource = (ctx as any).get?.('dsh.vision.structured') ?? null;
   let traditionalSource = (ctx as any).get?.('dsh.vision.traditional') ?? null;
   const semanticSource = (ctx as any).get?.('dsh.vision.semantic') ?? null;
+  // D-6 自铸源记账：回退分支构造的源才是 D-6 属主权可及的（外部源归外部注册方）
+  const ownedSources: Array<[string, unknown]> = [];
   if (!structuredSource || !traditionalSource) {
     try {
       const { createStructuredFromUiExtractor, createTraditionalFromOcr } =
@@ -191,18 +193,36 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
         structuredSource = createStructuredFromUiExtractor({
           screenSize: () => system.getScreenSize(),
         });
+        ownedSources.push(['dsh.vision.structured', structuredSource]);
       }
       if (!traditionalSource) {
         traditionalSource = createTraditionalFromOcr({
           capture: () => system.captureScreen(),
           screenSize: () => system.getScreenSize(),
         });
+        ownedSources.push(['dsh.vision.traditional', traditionalSource]);
       }
       console.log('[Orchestration] internal vision adapters wired (L1 a11y / L2 OCR — fallback layer).');
     } catch {
       // 原生依赖缺席（沙箱/无屏）：回退源缺席 —— 三级漏斗诚实降级（既有行为）
       console.log('[Orchestration] internal vision adapters unavailable (native deps absent) — honest degradation.');
     }
+  }
+
+  // L 纪元服务归属法（#6 兑现）：外部源缺席时 D-6 以自带回退源成为
+  // 'dsh.vision.structured' / 'dsh.vision.traditional' 的天然属主 —— 向总线自荐，
+  // 其余消费方（含未来的独立视觉插件）从此有可探测的注册方。只自荐 D-6 自己
+  // 铸造的源；外部源在场 ⇒ 属主权归外部注册方，不覆写（单属主铁律）。
+  // 宿主无 set 面 ⇒ 注册不成立，各消费方保持既有诚实降级（与 D-5/D-7 同律）。
+  const selfRegisteredVision: string[] = [];
+  for (const [name, source] of ownedSources) {
+    try {
+      (ctx as any).set?.(name, source);
+      selfRegisteredVision.push(name);
+    } catch { /* 注册失败 = 旁路义务：消费方降级路径不变 */ }
+  }
+  if (selfRegisteredVision.length > 0) {
+    console.log(`[Orchestration] vision services self-registered: ${selfRegisteredVision.join(', ')} (host bus accepted).`);
   }
 
   const vision = new DefaultVisionStation({
@@ -214,11 +234,21 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
   // 决策工位：ChatFn 经 ctx.get('dsh.cognition') 注入（planner 方言）；
   // 缺席 ⇒ chat:null ⇒ decide 恒回 NeedGrounding（P0-5：消灭运行层 throw 闭包 ——
   // 通道缺席是可降级状态，不是异常；伪造一个必炸的 chat 是异常不诚实）
-  const cognitionService = (ctx as any).get?.('dsh.cognition') as
+  // O 纪元（#8）：chat 包装计量 —— 决策工位自报探针（chars/4 的消耗估计，
+  // 成功往返才计费）。探针经 wire 的 usageMeter 进 finalReport。
+  const rawCognition = (ctx as any).get?.('dsh.cognition') as
     | { chat?: (prompt: string) => Promise<string> }
     | undefined;
+  let decisionTokensUsed = 0;
+  const meteredChat = rawCognition?.chat
+    ? async (prompt: string): Promise<string> => {
+        const raw = await rawCognition.chat!(prompt);
+        decisionTokensUsed += Math.ceil((prompt.length + raw.length) / 4);
+        return raw;
+      }
+    : undefined;
   const decision = new DefaultDecisionStation({
-    chat: cognitionService?.chat ?? null,
+    chat: meteredChat ?? null,
   });
 
   // 宿主执行通道：宿主动作工具面经 ctx.get('dsh.host-executor') 注入；缺席 = 开发者预览
@@ -231,7 +261,13 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
   });
 
   orchestrator.wire(
-    { vision, decision, execution, emit: (ev, p) => { try { (ctx as any).emit(ev, p); } catch { /* 发射失败是旁路义务 */ } } },
+    {
+      vision, decision, execution,
+      emit: (ev, p) => { try { (ctx as any).emit(ev, p); } catch { /* 发射失败是旁路义务 */ } },
+      // O 纪元（#8）：决策工位自报探针（chat 包装器累计）；vision/execution
+      // 未装探针 ⇒ 报告 0（未计量 ≠ 未消耗 —— 命名 Reported 如实申报）
+      usageMeter: { decision: () => decisionTokensUsed },
+    },
     { reportDir: (config as any)?.reportDir ?? '' },
   );
 
@@ -388,7 +424,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
   console.log(sandboxService
     ? '[Orchestration] D-5 sandbox service detected — rehearsals before execution enabled.'
     : '[Orchestration] D-5 sandbox service absent — execution without rehearsal (honest degradation).');
-  console.log(cognitionService?.chat
+  console.log(meteredChat
     ? '[Orchestration] D-1 cognition chat channel detected — decision station armed.'
     : '[Orchestration] D-1 cognition chat channel absent — decisions degrade to need-grounding (honest).');
 

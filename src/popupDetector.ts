@@ -182,6 +182,8 @@ export async function detectPopup(
     geometric,
     semantic: matchedKeywords.length > 0,
   });
+  // Q 纪元（Q-3）：同一帧证据并行喂 SPRT（旁路 —— 信息论最优停止的第二意见）
+  popupSprt.update({ geometric, semantic: matchedKeywords.length > 0 });
 
   return {
     popup: active,
@@ -190,4 +192,90 @@ export async function detectPopup(
     matchedKeywords,
     belief,
   };
+}
+
+// ─── Q 纪元（Q-3 决策层）：Wald SPRT —— 序贯最优停止的第二判决器 ───
+//
+// 理论根基（Wald 1945；Wald–Wolfowitz 最优性定理 1948）：似然比序贯检验
+//   Λₜ = Σ ln[P(xᵢ|H₁)/P(xᵢ|H₀)]；Λ ≥ A ⇒ 判 H₁，Λ ≤ B ⇒ 判 H₀，否则继续观察。
+//   A = ln((1−β)/α)、B = ln(β/(1−α))。Wald–Wolfowitz：在同等 (α, β) 下
+//   SPRT 的**期望样本量全类最小** —— Schmitt 迟滞是工程形态，SPRT 是信息论
+//   最优形态；双判决器并存，消费方按需取用（Schmitt 保既有语义零回归）。
+// 传感器模型（似然表，算法形状字面量 —— 与 F-3 证据强度的先验序一致）：
+//   P(semantic-hit | popup)=0.90 / | clean=0.02 ⇒ LLR=+ln(45)
+//   P(geometric-hit | popup)=0.70 / | clean=0.20 ⇒ LLR=+ln(3.5)
+//   P(clean-frame     | popup)=0.08 / | clean=0.85 ⇒ LLR=−ln(10.6)
+// 停止边界（α=β=0.05）：A=ln(19)≈2.944，B=−A。判后锁定（终判不可逆 ——
+//   SPRT 语义：判过即停；reset 后重开）。
+
+export interface SprtState {
+  /** 'popup' | 'clean' | null（null = 继续观察中） */
+  decision: 'popup' | 'clean' | null;
+  /** 累积对数似然比（nats）—— 序贯证据的连续读数 */
+  logLikelihoodRatio: number;
+  /** 已消费帧数 */
+  frames: number;
+  /** 边界（±nats）—— 审计可回放 */
+  bounds: { accept: number; reject: number };
+}
+
+/** SPRT 弹窗判决器（纯类 —— 可注入任意帧序列，测试的确定性事实源） */
+export class SprtPopupFilter {
+  private llr = 0;
+  private frames = 0;
+  private decided: 'popup' | 'clean' | null = null;
+
+  // P 纪元注记：构造器参数属性（public readonly x = v）是 transform 语法 ——
+  // Node strip-only 拒载（J 纪元"类型即值地雷"同族）；改显式字段 + 赋值。
+  readonly alpha: number;
+  readonly beta: number;
+
+  constructor(alpha = 0.05, beta = 0.05) {
+    this.alpha = alpha;
+    this.beta = beta;
+  }
+
+  private get acceptBound(): number {
+    return Math.log((1 - this.beta) / this.alpha);
+  }
+
+  /** 单帧更新：返回判决（终判后恒返回原判 —— SPRT 停止语义） */
+  update(ev: PopupEvidenceFrame): SprtState {
+    if (this.decided) return this.state();
+    // 帧似然比：语义 > 几何（证据强度序与 F-3 同律）；双缺席 = 清洁证据
+    if (ev.semantic) this.llr += Math.log(0.90 / 0.02);
+    else if (ev.geometric) this.llr += Math.log(0.70 / 0.20);
+    else this.llr += Math.log(0.08 / 0.85);
+    this.frames += 1;
+    if (this.llr >= this.acceptBound) this.decided = 'popup';
+    else if (this.llr <= -this.acceptBound) this.decided = 'clean';
+    return this.state();
+  }
+
+  state(): SprtState {
+    return {
+      decision: this.decided,
+      logLikelihoodRatio: Math.round(this.llr * 1000) / 1000,
+      frames: this.frames,
+      bounds: { accept: Math.round(this.acceptBound * 1000) / 1000, reject: -Math.round(this.acceptBound * 1000) / 1000 },
+    };
+  }
+
+  reset(): void {
+    this.llr = 0;
+    this.frames = 0;
+    this.decided = null;
+  }
+}
+
+/** 模块级 SPRT 单例（与 Schmitt 单例同喂数同生命周期） */
+const popupSprt = new SprtPopupFilter();
+
+export function resetPopupSprt(): void {
+  popupSprt.reset();
+}
+
+/** SPRT 当前判决（终判锁定；null = 继续观察） */
+export function getPopupSprt(): SprtState {
+  return popupSprt.state();
 }

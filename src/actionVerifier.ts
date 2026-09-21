@@ -6,7 +6,7 @@
 // 判定矩阵：全屏变化 = 页面级效果；仅区域变化 = 元素级效果（光标出现/文字输入）；
 // 两者皆未变 = 疑似无效操作（盲点）。
 import { system } from './system';
-import { dhash, regionDhash, hammingDistance, similarity } from './perceptualHash';
+import { dhash, regionDhash, hammingDistance, similarity, dualSimilarity } from './perceptualHash';
 import { oscillationTracker } from './oscillationTracker';
 import type { IntentExpectation, PhysicsVerdict } from './intent';
 import { getEnabledPhysicsRules } from './intent';
@@ -73,6 +73,12 @@ export interface CombinedEffect {
   oscillation: string | null;      // 振荡告警（屏幕状态在动作间反复回归旧值）
   /** C-1 意图裁决：期望 kind + 物理规则是否找到证据（未声明期望时 undefined） */
   intent?: { expected: string; satisfied: boolean; evidence: string };
+  /**
+   * Q 纪元（Q-2 感知层）：pHash 频谱佐证 —— DCT 低频指纹对 detected 判决的
+   * 独立第二意见（null = sharp 缺席/计算降级，诚实缺席；true/false = 频谱域
+   * 同判/异议）。两指纹失效模式近似正交：异议时锚点可提示模型细看。
+   */
+  phashCorroborates?: boolean;
 }
 
 /** 轮询直到屏幕稳定：返回稳定帧的 buffer + 全屏指纹（同一帧供区域指纹复用） */
@@ -168,7 +174,17 @@ export async function settleAndVerify(
     }
   }
 
-  return { detected, screen, region, scale, afterBuffer: afterBuf, afterHash: afterScreen, oscillation, intent };
+  // ── Q 纪元（Q-2）：pHash 频谱佐证（旁路义务 —— 失败不毒化判决，诚实缺席）──
+  // 语义：pHash 相似度 < 0.9 = 频谱域看到变化；与 dHash 的 detected 同判 ⇒ true
+  let phashCorroborates: boolean | undefined;
+  if (before.buffer) {
+    try {
+      const dual = await dualSimilarity(before.buffer, afterBuf);
+      phashCorroborates = (dual.phash < 0.9) === detected;
+    } catch { phashCorroborates = undefined; }
+  }
+
+  return { detected, screen, region, scale, afterBuffer: afterBuf, afterHash: afterScreen, oscillation, intent, phashCorroborates };
 }
 
 /** 兼容旧签名：立即取全屏对比（不等待） */
