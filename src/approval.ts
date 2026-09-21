@@ -90,3 +90,9 @@ export const approval = {
     for (const [k, v] of pending) if (v.expiresAt < now) pending.delete(k);
   },
 };
+
+
+/** W 纪元（W-1 隔离缝）：审批簿记归零 —— 测试隔离与插件卸载共用 */
+export function resetApproval(): void {
+  pending.clear();
+}
