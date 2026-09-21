@@ -211,19 +211,51 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     };
   }
 
-  /** hybrid 双通道评分（纯函数视角）：keyword 命中主导 + 语义 cosine 补零样本泛化。
-   *  J 纪元修正：query tokens 先 Set 去重 —— 旧实现对重复 token 逐个 +1
-   *  （"click click click" 获得 3 倍加权），与 reflexArc/deliberate 的
-   *  Set 去重口径不一致。 */
+  /**
+   * hybrid 双通道评分（纯函数视角）：**BM25** 词法通道主导 + 语义 cosine 补零样本泛化。
+   * R 纪元（R-2 检索层）升级：词法通道从**二值命中计数**升格为 BM25
+   * （Robertson & Spärck Jones 血统；k1=1.2、b=0.75 惯例甜点）——
+   *   score = Σ_t IDF(t)·tf·(k1+1)/(tf + k1·(1−b+b·|d|/avgdl))
+   * IDF = ln((N−df+0.5)/(df+0.5)+1)（Lucene 非负形）。三重收益：
+   * ① 稀有词（'token' 类）比常见词（'click' 类）按语料统计**应当**更重 ——
+   *   二值计数把它们等权；② 条目长度归一 —— 长文本不再靠篇幅堆命中；
+   * ③ tf 饱和 —— 同词重复出现边际递减。
+   * J 纪元 Set 去重口径保留（query 侧）；tf 按条目侧真实词频计数。
+   */
   private hybridScore(entry: KnowledgeEntry, tokens: string[], queryVec: SparseVector): number {
-    let hits = 0;
-    if (tokens.length > 0) {
-      const haystack = `${entry.scenario} ${entry.content}`.toLowerCase();
-      for (const t of new Set(tokens)) if (haystack.includes(t)) hits += 1;
+    let bm25 = 0;
+    if (tokens.length > 0 && this.entries.size > 0) {
+      const k1 = 1.2, b = 0.75;
+      const N = this.entries.size;
+      const docText = `${entry.scenario} ${entry.content}`.toLowerCase();
+      const docTokens = tokenize(docText);
+      const tfMap = new Map<string, number>();
+      for (const t of docTokens) tfMap.set(t, (tfMap.get(t) ?? 0) + 1);
+      // 语料统计（df / avgdl —— 检索时刻实算，条目集小到无需缓存）
+      let lenSum = 0;
+      const docLen = docTokens.length;
+      for (const e of this.entries.values()) {
+        lenSum += tokenize(`${e.scenario} ${e.content}`.toLowerCase()).length;
+      }
+      const avgdl = Math.max(1, lenSum / N);
+      const norm = k1 * (1 - b + b * (docLen / avgdl));
+      for (const t of new Set(tokens)) {
+        const tf = tfMap.get(t);
+        if (!tf) continue;
+        // df：含该 token 的条目数（首次出现位置线性扫 —— N 小，即用即算）
+        let dcount = 0;
+        for (const e of this.entries.values()) {
+          if (`${e.scenario} ${e.content}`.toLowerCase().includes(t)) dcount++;
+        }
+        const idf = Math.log((N - dcount + 0.5) / (dcount + 0.5) + 1);
+        bm25 += idf * (tf * (k1 + 1)) / (tf + norm);
+      }
     }
     const vec = this.vectors.get(entry.id);
     const sim = vec ? cosine(queryVec, vec) : 0;
-    return hits + (sim >= SEMANTIC_FLOOR ? SEMANTIC_WEIGHT * sim : 0);
+    // BM25 无界（IDF 随 N 增长）—— 归一到 [0, ~N] 域后与语义权重同尺度：
+    // 以 1 为词法单位（典型单命中 BM25 ≈ 1-4），除以 2 保持与旧二值分同量级
+    return bm25 / 2 + (sim >= SEMANTIC_FLOOR ? SEMANTIC_WEIGHT * sim : 0);
   }
 
   insert(entry: Omit<KnowledgeEntry, 'id' | 'updatedAt' | 'usageCount'>): Result<string, KnowledgeError> {

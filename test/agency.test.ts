@@ -422,7 +422,7 @@ test('D-1: 缺省裁决器 —— 空报告与单报告的诚实降级', async (
 
 // ─── D-1: checkpoint v3 幂等迁移 ───
 
-test('D-1: migrateCheckpoint —— v1/v2 → v3 归一，重复执行幂等', () => {
+test('D-1: migrateCheckpoint —— v1/v2 → 当前版归一，重复执行幂等', () => {
   const v2 = {
     version: 2, savedAt: 1,
     uiMemory: [], skillLibrary: [], failureMemory: [],
@@ -430,7 +430,7 @@ test('D-1: migrateCheckpoint —— v1/v2 → v3 归一，重复执行幂等', (
     telemetry: {},
   };
   const m1 = migrateCheckpoint(v2)!;
-  assert.equal(m1.version, 3);
+  assert.equal(m1.version, 4); // R-4：快照版本靶 v3 → v4（证据锚字段；v3 旧档迁移补 null）
   assert.deepEqual(m1.swarmAgents, []);
   // 幂等性：对迁移结果再迁移，结构不变（可重复执行不报错）
   const m2 = migrateCheckpoint(m1)!;
