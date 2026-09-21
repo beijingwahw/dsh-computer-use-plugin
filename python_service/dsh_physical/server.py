@@ -120,21 +120,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return await call_next(request)
 
         # Layer 1: 传输绑定（TCP 只听 127.0.0.1 / UDS 0600，见 config + run()）
-        # Layer 2: PID Attestation —— M 纪元兑现：UDS+Linux 下 peercred 协议把
-        # 对端 PID 注入 scope；在场 ⇒ token.pid 必须逐位相等（auth.py 头注承诺的
-        # 校验落地）。scope 无 peer_pid（TCP/非 Linux）⇒ 既有 /proc 白名单路径。
-        scope_pid = request.scope.get("peer_pid")
-        if scope_pid is not None and auth_result.pid != scope_pid:
-            return JSONResponse(
-                status_code=200,
-                content=failure(
-                    ErrorKind.UNAUTHORIZED,
-                    f"token pid {auth_result.pid} != SO_PEERCRED peer pid {scope_pid}",
-                    latency_ms=0,
-                ),
-            )
-
-        # Layer 3: Capability Token
+        # Layer 3 先行：Capability Token（Layer 2 的比较对象来自令牌 ——
+        # 令牌未解析前无从比较；P 纪元修正：M 纪元把 Layer 2 块放在 parse_token
+        # 之前 ⇒ UDS+Linux+peercred 路径落地即 UnboundLocalError 崩溃 ——
+        # BC-2 虫型（闭包/先读后赋），M-4 源级执法从未运行故未现形）。
         token = request.headers.get("X-Cap-Token", "")
         if not token:
             return JSONResponse(
@@ -153,6 +142,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     f"token invalid: {auth_result.reason}",
+                    latency_ms=0,
+                ),
+            )
+
+        # Layer 2: PID Attestation —— M 纪元兑现：UDS+Linux 下 peercred 协议把
+        # 对端 PID 注入 scope；在场 ⇒ token.pid 必须逐位相等（auth.py 头注承诺的
+        # 校验落地）。scope 无 peer_pid（TCP/非 Linux）⇒ 既有 /proc 白名单路径。
+        scope_pid = request.scope.get("peer_pid")
+        if scope_pid is not None and auth_result.pid != scope_pid:
+            return JSONResponse(
+                status_code=200,
+                content=failure(
+                    ErrorKind.UNAUTHORIZED,
+                    f"token pid {auth_result.pid} != SO_PEERCRED peer pid {scope_pid}",
                     latency_ms=0,
                 ),
             )

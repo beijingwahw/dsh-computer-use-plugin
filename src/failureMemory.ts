@@ -40,17 +40,37 @@ class FailureMemory {
    *  的 ASCII 坐标稀释）。返回「在这个场景/任务下别这么试」的清单 */
   match(query: string, currentSceneHash?: string, k = 3): Array<FailureRecord & { score: number }> {
     const qTokens = tokenize(query);
-    return this.records
-      .map(r => {
-        const hay = `${r.query} ${r.approach} ${r.symptom}`;
-        const text = overlapCoefficient(qTokens, tokenize(hay));
-        // H-2 NCD 通道：leet/typo 变体与原文共享长子串（'verificat·on'）而 token
-        // 化后零词面命中 —— 词面通道失明处由压缩器兜底。权重 0.3：辅通道
-        const compress = ncdSimilarity(query, r.symptom);
-        let scene = 0;
-        if (currentSceneHash && r.sceneHash && similarity(currentSceneHash, r.sceneHash) >= 0.9) scene = 0.4;
-        const score = Math.round((text + 0.3 * compress + scene) * 1000) / 1000;
-        return { ...r, score };
+    // R 纪元（R-6 召回层）：RRF 倒数排名融合 —— 三通道（词面重合 / NCD 压缩 /
+    // 场景指纹）各排各的名次，融合分 = Σ 1/(60+rankᵢ)（TREC 2003 Cormack 形，
+    // k=60 惯例）。为什么不用加权和：三通道分数量纲悬殊（重合系数 [0,1]、
+    // NCD 相似 [0,1] 但分布不同、场景是 0/0.4 脉冲）—— 加权需要逐通道定标，
+    // 排名是量纲自由的。旧加权和保留为 score2 字段（消费方按需取用，零回归）。
+    const scored = this.records.map(r => {
+      const hay = `${r.query} ${r.approach} ${r.symptom}`;
+      const text = overlapCoefficient(qTokens, tokenize(hay));
+      // H-2 NCD 通道：leet/typo 变体与原文共享长子串（'verificat·on'）而 token
+      // 化后零词面命中 —— 词面通道失明处由压缩器兜底。
+      const compress = ncdSimilarity(query, r.symptom);
+      let scene = 0;
+      if (currentSceneHash && r.sceneHash && similarity(currentSceneHash, r.sceneHash) >= 0.9) scene = 0.4;
+      return { r, text, compress, scene };
+    });
+    // 通道排名（降序；并列取同秩 —— 标准竞争排名）
+    const rank = (key: 'text' | 'compress' | 'scene'): Map<FailureRecord, number> => {
+      const sorted = [...scored].sort((a, b) => b[key] - a[key]);
+      const m = new Map<FailureRecord, number>();
+      sorted.forEach((x, i) => m.set(x.r, i + 1));
+      return m;
+    };
+    const rText = rank('text'), rComp = rank('compress'), rScene = rank('scene');
+    const RRF_K = 60;
+    return scored
+      .map(({ r, text, compress, scene }) => {
+        const rrf = 1 / (RRF_K + rText.get(r)!) + (compress > 0 ? 1 / (RRF_K + rComp.get(r)!) : 0)
+          + (scene > 0 ? 1 / (RRF_K + rScene.get(r)!) : 0);
+        const legacy = Math.round((text + 0.3 * compress + scene) * 1000) / 1000;
+        // score = RRF × 量纲还原（×1000 保持旧阈值 0.2 的语义近邻）
+        return { ...r, score: Math.round(rrf * 1000 * 1000) / 1000, score2: legacy };
       })
       .filter(r => r.score > 0.2)
       .sort((a, b) => b.score - a.score)

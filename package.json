@@ -24,7 +24,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import ./test/register.mjs \"test/*.test.ts\"",
     "smoke": "node --import ./test/register.mjs scripts/smoke_imports.mjs",
-    "verify": "python scripts/verify_fatal_fixes.py",
+    "verify": "python scripts/verify_fatal_fixes.py && python scripts/bug_class_lint.py --strict",
     "doctor": "node --disable-warning=ExperimentalWarning --import ./test/register.mjs src/doctorCli.ts",
     "bench": "node --test --import ./test/register.mjs \"test/*.bench.ts\""
   },
@@ -34,8 +34,12 @@
     "@deepseek-ai/schemastery": "*"
   },
   "devDependencies": {
-    "typescript": "^5.0.0",
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "sharp": "^0.35.4",
+    "tesseract.js": "^7.0.0",
+    "typescript": "^5.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "undici": "^8.10.2"
+  }
 }

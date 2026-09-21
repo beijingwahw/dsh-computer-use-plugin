@@ -77,14 +77,46 @@ ok('V2a health.screen 是 dict 且携带 width/height（成功臂）',
 ok('V2b capabilities 是能力位图而非控制器名',
    isinstance(health['data'].get('capabilities'), list) and 'click' in health['data']['capabilities']
    and isinstance(health['data'].get('controllers'), list))
-# 错误臂：移除桩 + 摘掉合成屏降级 → PhysicalError → {error: ...}（TS 契约的联合另一臂）
+# 错误臂 → PhysicalError → {error: ...}（TS 契约的联合另一臂）
+# O/P 纪元修正：旧模拟依赖「pyautogui 未安装」的环境假设 —— 真机装上
+# pyautogui（且有显示）后假设破产、检查恒假。环境无关律：向 sys.modules
+# 注入毒性桩（size()/screenshot() 必炸）—— 任何机器上确定性走 error 臂。
 input_mod._pyautogui = None
 os.environ.pop('DSH_PHYSICAL_TEST_SCREEN', None)
-bad = input_mod.InputController(ActionConfig())
-routes.set_controllers(bad, ScreenCapture(cfg.screenshot), UIFunnel(cfg.funnel), WindowManager(cfg.window), cfg)
-health2 = asyncio.run(routes.health())
+
+
+class _PoisonedPyautogui:
+    """毒性桩：模拟「显示服务不可用」的运行时故障面。"""
+
+    class _Boom(Exception):
+        pass
+
+    @staticmethod
+    def size():
+        raise RuntimeError('poisoned: display backend unavailable (V2c simulation)')
+
+    @staticmethod
+    def screenshot():
+        raise RuntimeError('poisoned: display backend unavailable (V2c simulation)')
+
+    @staticmethod
+    def position():
+        raise RuntimeError('poisoned: display backend unavailable (V2c simulation)')
+
+
+_real_pyautogui = sys.modules.get('pyautogui')
+sys.modules['pyautogui'] = _PoisonedPyautogui
+try:
+    bad = input_mod.InputController(ActionConfig())
+    routes.set_controllers(bad, ScreenCapture(cfg.screenshot), UIFunnel(cfg.funnel), WindowManager(cfg.window), cfg)
+    health2 = asyncio.run(routes.health())
+finally:
+    if _real_pyautogui is not None:
+        sys.modules['pyautogui'] = _real_pyautogui
+    else:
+        sys.modules.pop('pyautogui', None)
 sc2 = health2['data']['screen']
-ok('V2c 无显示时 health.screen 诚实进入 error 臂',
+ok('V2c 无显示时 health.screen 诚实进入 error 臂（毒性桩环境无关律）',
    isinstance(sc2, dict) and 'error' in sc2 and 'width' not in sc2, f'screen={sc2}')
 
 # ═══ V3：致命级 #3 —— shm 生命周期（注册表唯一持有者 + 键名一致 + 无 weakref 过早释放）═══
