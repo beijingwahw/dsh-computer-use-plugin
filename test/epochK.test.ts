@@ -468,15 +468,22 @@ test('N-1: swarm 跨会话水位 —— 恢复后同批日志零二次入账', a
 test('N-2: 审批盲区根除 —— 双通道全沉默的点击被硬前置拒绝', async () => {
   const { createClickMouseTool } = await import('../src/tools/clickMouse.ts');
   const tool = createClickMouseTool({ enableApprovalGate: true, dangerPatterns: 'send' } as never);
-  const out = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
-    .execute({ x: 0.5, y: 0.5 }); // 无 target_description / 无 expected_text
-  const parsed = JSON.parse(out);
-  assert.equal(parsed.status, 'ACTION_REQUIRED', '旧版：blind-spot 仅透明化放行');
-  assert.equal(parsed.state_anchor.reason, 'undescribed-click');
-  // 闸门关闭 ⇒ 硬前置不生效（语义只属审批域）
+  // O 纪元（#18）：法则上移一层 —— target_description 升格 schema 必填，
+  // 双沉默点击在协议层即被 dsh-tools 拒（ToolArgsError），不再到达运行时。
+  // N 纪元的运行时 undescribed-click 硬前置保留为纵深防御（非 schema 调用方）。
+  await assert.rejects(
+    (tool as unknown as { execute: (a: unknown) => Promise<string> })
+      .execute({ x: 0.5, y: 0.5 }), // 无 target_description / 无 expected_text
+    (e: Error & { violations?: string[] }) => {
+      assert.match(e.message, /missing required property "target_description"/, '协议层硬前置');
+      assert.ok((e.violations ?? []).some(v => v.includes('target_description')), '违规清单点名');
+      return true;
+    },
+    '缺描述点击必须被 schema 层拒绝（#18 协议强制）');
+  // 闸门关闭 ⇒ 描述在场的点击不受审批域影响（语义只属审批域）
   const off = createClickMouseTool({ enableApprovalGate: false, dangerPatterns: '' } as never);
   const out2 = await (off as unknown as { execute: (a: unknown) => Promise<string> })
-    .execute({ x: 0.5, y: 0.5 });
+    .execute({ x: 0.5, y: 0.5, target_description: 'some button' });
   assert.notEqual(JSON.parse(out2).status, 'ACTION_REQUIRED');
 });
 

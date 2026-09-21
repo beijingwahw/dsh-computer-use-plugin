@@ -45,7 +45,8 @@ test('H-1 W1：变化在动作点 ⇒ ≈0；变化在远处 ⇒ 大；质量加
   assert.ok(mixed.w1 < 0.1, `质量加权的 W1=${mixed.w1} 应由近处重质量主导`);
 
   assert.deepEqual(spatialDisplacement({ x: 0.5, y: 0.5 }, []),
-    { w1: 0, nearestIndex: null, nearestDistance: 0 }, '零区域诚实缺席');
+    // O 纪元（#25）契约扩展：零区域同时申报信息视图（w1Info=0，分歧度=1 无分歧）
+    { w1: 0, w1Info: 0, infoRatio: 1, nearestIndex: null, nearestDistance: 0 }, '零区域诚实缺席');
 });
 
 // ─── H-2：NCD 压缩距离 ───

@@ -186,7 +186,12 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
       let feedback: FailureFeedback | undefined;
       let lastSceneSummary = ''; // 并行语义：检索的 sceneDescription 只能用上一轮场景
       // ── 预测编码回路状态（惊讶计费器）──
-      const worldModel = this.worldModel; // wire 铸造，跨 run 存活（run 内非空 —— 见顶部守卫）
+      // O 纪元（#20）：run 级快照 —— fork 隔离本 run 的定型/入账，run 终
+      // merge 重放回共享模型（J 纪元只隔离了 pendingTransition，typeOf 的
+      // 中途铸造仍跨 run 互污；并发 fork 的同号类型在 merge 时重铸新 id）。
+      const sharedModel = this.worldModel; // wire 铸造，跨 run 存活（run 内非空 —— 见顶部守卫）
+      const worldModel = sharedModel instanceof InMemoryWorldModel ? sharedModel.fork() : sharedModel;
+      try {
       let pendingTransition: { fromTypeId: string; actionKey: string; seq: number; success: boolean } | null = null;
       let escalateL3 = false; // 上轮到达意外 ⇒ 本轮动用贵眼睛（L1/L2 免费看熟悉，L3 付费看意外）
       // ── 认知仪表盘计数器（证据先于修辞：每轮的感知/成本/经验命中如实入账）──
@@ -226,19 +231,37 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
           },
           tokenBudget: cfg.stationTokenBudgets!.vision,
         };
-        const [scene, injection] = await Promise.all([
-          this.withTimeout(
+        // ── 并行双触发：感知 + 隐知识检索（数据流三段论 #2 —— 防卡顿铁律）──
+        // O 纪元（#26）：firstRoundSerialKnowledge=true 时首轮串行 —— 先感知
+        // 拿新鲜场景摘要，再检索（场景信号入查询，精度换延迟，仅首轮；
+        // 后续轮并行不动 —— 上一轮场景天然在场）。
+        const firstRoundSerial = round === 0 && cfg.firstRoundSerialKnowledge === true
+          && !ablation.disableKnowledge;
+        let scene: ScenePatch[] = [];
+        let injection: KnowledgeInjection | null = null;
+        if (firstRoundSerial) {
+          scene = await this.withTimeout(
             deps.vision.perceive(visionEnv),
             cfg.timeout.perPerception,
-            [], // 感知超时 = 空场景（决策下轮 NeedGrounding 诚实暴露）
-          ),
-          ablation.disableKnowledge
-            ? Promise.resolve(null) // 消融：无隐知识模式（检索侧断电）
-            : this.queryKnowledgeGuarded(intent, lastSceneSummary),
-        ]);
+            [],
+          );
+          lastSceneSummary = summarizeScene(scene);
+          injection = await this.queryKnowledgeGuarded(intent, lastSceneSummary);
+        } else {
+          [scene, injection] = await Promise.all([
+            this.withTimeout(
+              deps.vision.perceive(visionEnv),
+              cfg.timeout.perPerception,
+              [], // 感知超时 = 空场景（决策下轮 NeedGrounding 诚实暴露）
+            ),
+            ablation.disableKnowledge
+              ? Promise.resolve(null) // 消融：无隐知识模式（检索侧断电）
+              : this.queryKnowledgeGuarded(intent, lastSceneSummary),
+          ]);
+          lastSceneSummary = summarizeScene(scene);
+        }
         if (injection) knowledgeRounds += 1;
         knowledgeUsed = injection ?? knowledgeUsed;
-        lastSceneSummary = summarizeScene(scene);
 
         // ── 预测编码回路：到达场景定型；待结算转移先惊讶后学习 ──
         // 顺序即语义：surprise 在 observe 之前（误差是学习信号 —— 先测误差，再入账）。
@@ -377,9 +400,17 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
       verdict ??= 'failed';
       terminalReason ||= `no progress possible after ${outcomes.length} outcome(s)`;
       this.settlePending(intent.id); // P0-4 终局冲账：本 intent 的挂账在此结算学习
-      const consolidation = this.consolidateKnowledge(intent.id, outcomes.length); // 神经纪元：run-end 入睡（旁路）
+      const consolidation = this.consolidateKnowledge(intent.id, outcomes.length); // 神经元纪元：run-end 入睡（旁路）
       this.checkpointState(intent.id, verdict, { roundsTotal, l3Rounds, knowledgeRounds, executions: outcomes.length }, consolidation, startedAt); // 反遗忘 + 仪表盘
       return this.finalReport(intent, verdict, terminalReason, outcomes, knowledgeUsed, startedAt);
+      } finally {
+        // O 纪元（#20）：run 终合并 —— fork 的操作日志重放回共享模型（双出口共用；
+        // merge 幂等且只收 fork 的账 —— 内部故障路径同样合并已发生的观察）
+        if (worldModel !== sharedModel &&
+            worldModel instanceof InMemoryWorldModel && sharedModel instanceof InMemoryWorldModel) {
+          sharedModel.merge(worldModel);
+        }
+      }
     } catch (e: unknown) {
       // 运行层兜底：任何意外 ⇒ 结构化 failed（契约 —— 永不抛错）
       const msg = e instanceof Error ? e.message : String(e);

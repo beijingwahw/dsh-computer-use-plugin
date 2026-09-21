@@ -1,0 +1,30 @@
+# O 纪元（#2）：Linux CI —— POSIX shm 分支（/dev/shm）的真机执法位。
+# Windows 开发机只能测 mmap-file/base64；本 workflow 在 ubuntu 上跑全量套件，
+# shm 跨进程往返（physicalExecution.shmReader）在此平台真实执行。
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install JS deps
+        run: npm ci
+      - name: Install Python deps (service + test fixtures)
+        run: pip install fastapi uvicorn numpy pillow
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Python service compile gate
+        run: python -m compileall python_service/dsh_physical
+      - name: Full test suite (POSIX shm arm live on /dev/shm)
+        run: npm test
+      - name: Smoke import (113 modules)
+        run: npm run smoke

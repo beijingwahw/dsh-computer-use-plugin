@@ -29,7 +29,7 @@ interface SeededMeta extends ScreenshotResult {
 }
 
 /** 启动 Python fixture，写入 shm 并阻塞等待 stdin 关闭 */
-function seedScreenshot(transport: 'mmap-file' | 'base64', mmapDir: string): {
+function seedScreenshot(transport: 'mmap-file' | 'base64' | 'shm', mmapDir: string): {
   proc: ReturnType<typeof spawn>;
   metaPromise: Promise<SeededMeta>;
 } {
@@ -195,4 +195,36 @@ test('readShm: invalid_args when base64 transport has empty image_base64', async
       return true;
     },
   );
+});
+
+
+// ─── O 纪元（#2）：POSIX shm 分支实测 —— Linux CI 上 readShm 跨进程往返 ───
+
+test('readShm: POSIX shm transport cross-process round trip (/dev/shm)', { skip: process.platform !== 'linux' ? 'POSIX shm 仅 Linux（/dev/shm）' : false }, async () => {
+  const mmapDir = mkdtempSync(join(tmpdir(), 'dsh-shm-test-'));
+  const { proc, metaPromise } = seedScreenshot('shm', mmapDir);
+  try {
+    const meta = await metaPromise;
+    assert.equal(meta.transport, 'shm', 'POSIX shm 传输');
+    assert.ok(meta.name, 'shm 对象名非空（/dev/shm 下）');
+    assert.equal(meta.size, meta._expected_size);
+    assert.equal(meta.format, 'PNG');
+
+    // 跨进程往返：Python write_image 写 → Node readShm 读
+    const buf = await readShm(meta);
+    assert.equal(buf.length, meta._expected_size, '字节长度一致（跨进程往返无损）');
+    assert.equal(buf[0], 0x89);
+    assert.equal(buf[1], 0x50); // 'P'
+    assert.equal(buf[2], 0x4e); // 'N'
+    assert.equal(buf[3], 0x47); // 'G'
+
+    // 流式读同律
+    const chunks: Buffer[] = [];
+    for await (const chunk of readShmStreaming(meta)) chunks.push(chunk);
+    assert.equal(chunks.reduce((acc, c) => acc + c.length, 0), meta._expected_size, '流式往返无损');
+  } finally {
+    await teardown(proc);
+    await closeAllFds();
+    rmSync(mmapDir, { recursive: true, force: true });
+  }
 });

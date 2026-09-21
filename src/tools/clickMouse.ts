@@ -20,7 +20,9 @@ export function createClickMouseTool(config: Config) {
     name: 'click_mouse',
     description: 'Clicks the mouse at normalized coordinates (0.0 to 1.0). ' +
       'Effect verification is built-in: the result tells you whether the screen actually changed. ' +
-      'Provide target_description to strengthen spatial memory.',
+      'target_description is REQUIRED (protocol level): every click must name its target — ' +
+      'it feeds UI memory and the risk/approval gate; a click that cannot describe its ' +
+      'target is a click that cannot be verified.',
     parameters: {
       x: { type: 'number', required: true, description: 'X coordinate (0.0-1.0)' },
       y: { type: 'number', required: true, description: 'Y coordinate (0.0-1.0)' },
@@ -31,7 +33,11 @@ export function createClickMouseTool(config: Config) {
       },
       target_description: {
         type: 'string',
-        description: 'Short description of what you are clicking (e.g., "GitHub 搜索框"). Used for UI memory.',
+        // O 纪元（#18）：协议强制 —— 审批盲区的模型侧根除。schema 必填 ⇒
+        // harness 在调用前就拒绝无描述点击（N 纪元的运行时硬前置是第二道闸）。
+        required: true,
+        description: 'Short description of what you are clicking (e.g., "GitHub 搜索框"). REQUIRED — ' +
+          'used for UI memory and the credential/danger gate.',
       },
       expected_change: {
         type: 'string',

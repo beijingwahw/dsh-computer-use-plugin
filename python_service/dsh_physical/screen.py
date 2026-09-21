@@ -70,13 +70,14 @@ class ScreenCapture:
         def _encode() -> tuple[bytes, int, int]:
             buf = io.BytesIO()
             if format == "jpeg":
-                # JPEG 不支持 RGBA → 转 RGB
-                if img.mode in ("RGBA", "LA", "P"):
-                    img = img.convert("RGB")
+                # O 纪元（#1 真机执法）：不得对 img 重赋值 —— 闭包内赋值会使 img
+                # 整体变局部量，第 74 行读未赋值局部量 ⇒ UnboundLocalError
+                # （jpeg+任意模式在一切平台必炸的潜伏 bug；改用别名 src）。
+                src = img.convert("RGB") if img.mode in ("RGBA", "LA", "P") else img
                 q = quality if quality is not None else self.cfg.jpeg_quality
-                img.save(buf, format="JPEG", quality=q, optimize=True)
-            else:
-                img.save(buf, format="PNG", optimize=True)
+                src.save(buf, format="JPEG", quality=q, optimize=True)
+                return buf.getvalue(), src.width, src.height
+            img.save(buf, format="PNG", optimize=True)
             return buf.getvalue(), img.width, img.height
 
         try:

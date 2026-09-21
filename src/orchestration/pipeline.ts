@@ -33,6 +33,17 @@ export interface PipelineStations {
   execution: ExecutionStation;
   /** 事件发射面（index.ts 注入 ctx；null = 无宿主事件面 —— 开发者预览） */
   emit?: (event: string, payload: Record<string, unknown>) => void;
+  /**
+   * O 纪元（#8）：工位消耗计量探针 —— 谁计量？**工位自报**（只有工位知道
+   * 自己烧了什么）。接线方（index.ts）包装工位通道铸造探针；finalReport 读取。
+   * 探针缺席 ⇒ 该工位报告 0（未计量 ≠ 未消耗 —— 报告字段命名 Reported 如实）。
+   * 决策工位缺省探针：chat 包装器累计 (prompt+response chars)/4 的估计。
+   */
+  usageMeter?: {
+    vision?: () => number;
+    decision?: () => number;
+    execution?: () => number;
+  };
 }
 
 /** 网格分区铸造（'g{col}x{row}' —— 坐标同一性，跨轮稳定） */
@@ -464,6 +475,18 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
   ): PipelineReport {
     const chainTip = sandboxLog.tip;
     const usage = budgetsGranted ?? { vision: 0, decision: 0, execution: 0 };
+    // O 纪元（#8）：实际消耗计量 —— 工位自报探针（缺席 ⇒ 0 = 未计量，非未消耗）
+    const probe = (p?: () => number): number => {
+      try {
+        const v = p?.();
+        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
+      } catch { return 0; }
+    };
+    const tokenUsageReported = {
+      vision: probe(this.stations?.usageMeter?.vision),
+      decision: probe(this.stations?.usageMeter?.decision),
+      execution: probe(this.stations?.usageMeter?.execution),
+    };
     // J 纪元修正：落盘报告补齐 terminalReason / chainTip / 授予预算 ——
     // 旧实现只写 {intentId, verdict, attempts, snapshotId, startedAt}，
     // 磁盘报告缺终局归因与审计锚，与内存报告两副面孔。
@@ -472,6 +495,7 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
       terminalReason: terminalReason.slice(0, 120),
       chainTip,
       tokenBudgetsGranted: usage,
+      tokenUsageReported,
     });
     const report: PipelineReport = {
       intentRef: intent.id,
@@ -479,6 +503,7 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
       terminalReason: terminalReason.slice(0, 120),
       attempts,
       tokenBudgetsGranted: usage,
+      tokenUsageReported,
       chainTip,
       reportPath,
     };

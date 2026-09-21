@@ -236,3 +236,102 @@ export function diagnose(sig: CognitionSignals): Diagnosis | null {
   }
   return null;
 }
+
+// ─── O 纪元（#9）：CPT 真实遥测标定 —— oracle 换血（M 纪元的接入点兑现）───
+
+/** 遥测观测：一次真实会诊现场的五信号布尔视图 + 出现频次（权重） */
+export interface TelemetryObservation {
+  shifted: boolean;
+  hurstHigh: boolean;
+  loop: boolean;
+  heavyTail: boolean;
+  highNoop: boolean;
+  /** 该组合在真实日志中的出现次数（缺省 1） */
+  weight?: number;
+}
+
+/**
+ * 遥测 → 观测向量（标定管线的推导端）：从活体 Telemetry/Journal 提取当前
+ * 五信号视图（与 observabilityTools.get_metrics 的洞见判据同律 —— 一处立法）。
+ * 任一引擎数据不足 ⇒ 该信号 false（缺席不参与毒化）。
+ */
+export function observeSignalsForCalibration(deps: {
+  regimeShifts: Array<{ tool: string }>;
+  hurst: number | null;
+  behavior: { normalized: number | null; phrases: number; length: number };
+  heavyLatencyTail: boolean;
+  highNoopTools: string[];
+}): TelemetryObservation {
+  return {
+    shifted: deps.regimeShifts.length > 0,
+    hurstHigh: typeof deps.hurst === 'number' && deps.hurst > 0.6,
+    loop: !!(deps.behavior &&
+      ((deps.behavior.normalized !== null && deps.behavior.normalized <= 0.3 && deps.behavior.length >= 24) ||
+        (deps.behavior.phrases <= 6 && deps.behavior.length >= 20))),
+    heavyTail: deps.heavyLatencyTail === true,
+    highNoop: deps.highNoopTools.length > 0,
+  };
+}
+
+/**
+ * CPT 遥测标定（M 纪元接口的换血版）：观测流（真实日志的信号组合 + 频次）
+ * × 规则表 oracle 标签 ⇒ 共现计数 + Beta(1,1) 平滑 + 专家律收缩（与
+ * calibrateCptFromRules 同律；差别仅在数据源 —— 枚举 32 均匀组合 vs 真实
+ * 分布加权）。agreement = 加权吻合率。样本不足的症候群行由专家律托底
+ * （血缘标注在同行的 cpt 值中不可分 —— 由 n 字段如实申报）。
+ */
+export function calibrateCptFromTelemetry(
+  observations: readonly TelemetryObservation[],
+): {
+  cpt: Record<string, [number, number, number, number, number]>;
+  agreement: number;
+  sampled: number;      // 加权观测数
+  distinct: number;     // 出现过的组合数（≤32）
+  syndromeSamples: Record<string, number>;
+} {
+  const keys = Object.keys(BN_CPT) as SyndromeId[];
+  const counts: Record<string, number[]> = {};
+  const fired: Record<string, number> = {};
+  for (const s of keys) { counts[s] = [0, 0, 0, 0, 0]; fired[s] = 0; }
+  let sampled = 0, agree = 0;
+  const distinct = new Set<string>();
+  for (const obs of observations) {
+    const w = Math.max(1, Math.floor(obs.weight ?? 1));
+    distinct.add([obs.shifted, obs.hurstHigh, obs.loop, obs.heavyTail, obs.highNoop].map(b => b ? 1 : 0).join(''));
+    const sig: CognitionSignals = {
+      regimeShiftTools: obs.shifted ? ['x'] : [],
+      hurst: obs.hurstHigh ? 0.8 : 0.3,
+      behavior: { normalized: obs.loop ? 0.1 : 0.6, phrases: obs.loop ? 4 : 10, length: 30 },
+      heavyLatencyTail: obs.heavyTail,
+      highNoopTools: obs.highNoop ? ['y'] : [],
+    };
+    const dx = diagnose(sig);
+    sampled += w;
+    if (!dx) continue; // 健康组合：无症候群可归 —— 不参与计数（同 M 律）
+    fired[dx.syndrome] += w;
+    const bits = [obs.shifted, obs.hurstHigh, obs.loop, obs.heavyTail, obs.highNoop];
+    bits.forEach((b, i) => { if (b) counts[dx.syndrome][i] += w; });
+    const belief = bayesianBelief({
+      shifted: obs.shifted, hurstHigh: obs.hurstHigh, loop: obs.loop,
+      heavyTail: obs.heavyTail, highNoop: obs.highNoop,
+    });
+    if (belief && belief[0].posterior > 0.5 && belief[0].syndrome === dx.syndrome) agree += w;
+  }
+  const cpt: Record<string, [number, number, number, number, number]> = {};
+  for (const s of keys) {
+    const n = fired[s];
+    cpt[s] = counts[s].map((c, i) => {
+      const expert = BN_CPT[s][i];
+      if (n === 0) return expert;
+      const fitted = (c + 1) / (n + 2);
+      return Math.round((0.8 * fitted + 0.2 * expert) * 1000) / 1000;
+    }) as [number, number, number, number, number];
+  }
+  return {
+    cpt,
+    agreement: sampled > 0 ? Math.round((agree / sampled) * 1000) / 1000 : 0,
+    sampled,
+    distinct: distinct.size,
+    syndromeSamples: fired,
+  };
+}

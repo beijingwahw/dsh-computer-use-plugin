@@ -22,7 +22,7 @@ export interface StepEvidence {
   expectationMet: boolean | null;
   note: string;
   /** 本步产生的验证层（计入 RehearsalOutcome.verificationLayers 的评分） */
-  layers: Array<'L1-pixel' | 'L4-expectation'>;
+  layers: Array<'L1-pixel' | 'L3-semantic' | 'L4-expectation'>;
 }
 
 const NO_EVIDENCE: StepEvidence = {
@@ -57,6 +57,8 @@ export class VirtualScreen {
   private readonly buffers = new Map<VirtualWidget, string>();
   /** 滚动偏移记账（K 纪元：内容偏移 = 滚动证据的世界状态） */
   private readonly scrollOffsets = new Map<VirtualWidget, number>();
+  /** 活动标签指针（O 纪元 #14：标签页栈 —— role='tab' 控件按场景序成栈） */
+  private activeTab: VirtualWidget | null = null;
 
   constructor(rawWidgets: unknown) {
     this.widgets = Array.isArray(rawWidgets)
@@ -78,6 +80,25 @@ export class VirtualScreen {
     return null;
   }
 
+  /**
+   * O 纪元（#15）：场景 OCR —— 区域内控件名拼接（场景供源的真文本；无像素
+   * 世界的诚实等价物：widget.name 就是渲染后 OCR 会读到的文字）。命中区域
+   * 的控件按场景序拼接；空区域返回空串。导出：L3 层的测试面。
+   */
+  sceneOcr(x: number, y: number, half = 0.08): string {
+    const texts: string[] = [];
+    for (const w of this.widgets) {
+      const { x: x0, y: y0 } = w.rect;
+      const x1 = x0 + w.rect.width, y1 = y0 + w.rect.height;
+      if (x1 >= x - half && x0 <= x + half && y1 >= y - half && y0 <= y + half) {
+        texts.push(w.name);
+        const buf = this.buffers.get(w);
+        if (buf) texts.push(buf); // 输入缓冲也是屏上文字（已上屏的输入）
+      }
+    }
+    return texts.join(' ');
+  }
+
   /** 应用单步动作 → 证据（世界状态随之转移） */
   applyAction(action: SandboxAction): StepEvidence {
     if (this.isEmpty) return NO_EVIDENCE;
@@ -97,8 +118,17 @@ export class VirtualScreen {
           expectationMet = hit !== null;
           layers.push('L4-expectation');
         } else if (action.expect.scale === 'text-level') {
-          expectationMet = hit?.acceptsText === true; // 聚焦可输入控件 = 文字可落
-          layers.push('L4-expectation');
+          // O 纪元（#15）L3 语义层：expectedText 在场 ⇒ 场景 OCR 对照（瞄准
+          // 验证 —— 点的位置读出的文字应含预期 = 瞄对了控件）；缺席 ⇒ 聚焦
+          // 可输入控件即可落字的既有语义（零回归）。
+          if (action.expect.expectedText) {
+            expectationMet = hit !== null && this.sceneOcr(x!, y!).includes(action.expect.expectedText);
+            layers.push('L3-semantic', 'L4-expectation');
+            note += `; scene-ocr "${this.sceneOcr(x!, y!).slice(0, 24)}" vs expected "${action.expect.expectedText}"`;
+          } else {
+            expectationMet = hit?.acceptsText === true; // 聚焦可输入控件 = 文字可落
+            layers.push('L4-expectation');
+          }
         } else {
           note += '; page-level expectation unverifiable without a navigation model (honest null)';
         }
@@ -192,6 +222,31 @@ export class VirtualScreen {
       return { effectDetected: true, expectationMet: null,
         note: `focus moved to ${target.name} (title match)`, layers: ['L1-pixel'] };
     }
-    return NO_EVIDENCE; // switch_tab/dismiss_popup/noop：标签栈/元动作模型留白（值即边界）
+    // ── O 纪元补全（#14）：切签证据（标签页栈模型 —— role='tab' 按场景序成栈，
+    // 活动指针循环移动；指针移动 = L1 状态变化。栈 <2 ⇒ 反证：无处可切）──
+    if (action.kind === 'switch_tab') {
+      const dir = action.args?.direction;
+      const tabs = this.widgets.filter(w => w.role === 'tab');
+      if (tabs.length < 2) {
+        return { effectDetected: false, expectationMet: null,
+          note: `tab stack has ${tabs.length} tab(s) — nothing to switch to`,
+          layers: ['L1-pixel'] };
+      }
+      // 活动指针初始化：聚焦在标签上 ⇒ 就是它；否则首标签（场景序 = 文档序）
+      if (!this.activeTab || !tabs.includes(this.activeTab)) {
+        this.activeTab = this.focus && tabs.includes(this.focus) ? this.focus : tabs[0];
+      }
+      const from = this.activeTab!;
+      const idx = tabs.indexOf(from);
+      const delta = dir === 'previous' ? -1 : 1; // 缺省/未知方向 = next（与工具面方言同律）
+      const next = tabs[(idx + delta + tabs.length) % tabs.length];
+      this.activeTab = next;
+      this.activeTab = next;
+      this.focus = next;
+      return { effectDetected: true, expectationMet: null,
+        note: `tab ${from.name} → ${next.name} (${dir ?? 'next'}, stack ${tabs.length})`,
+        layers: ['L1-pixel'] };
+    }
+    return NO_EVIDENCE; // dismiss_popup/noop：元动作无状态模型（值即边界）
   }
 }

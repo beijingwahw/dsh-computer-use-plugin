@@ -37,10 +37,24 @@ function makeConfig(overrides: Partial<PhysicalExecutionConfig> = {}): PhysicalE
 }
 
 // 启动期探活 —— 失败则跳过整个测试套件（服务未启动 / 端口被占）
+// O 纪元：鉴权探针纳入闸 —— 并行套件中其他测试文件可能写了自己的 key 并
+// 假设 8421 服务用它；若本文件的 key 与活服务不匹配（health 无鉴权可过、
+// 鉴权端点 401），那是环境错配，skip 如实申报而非 fail 误导为代码信号。
 async function ensureServiceUp(): Promise<boolean> {
   try {
     const resp = await fetch(`${BASE_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    return resp.ok;
+    if (!resp.ok) return false;
+    const { createPhysicalExecution } = await import('../src/physicalExecution/index.ts');
+    const key = process.env.DSH_PHYSICAL_KEY_PATH ?? KEY_PATH;
+    const { existsSync } = await import('node:fs');
+    if (!existsSync(key)) return false;
+    const probe = createPhysicalExecution({
+      baseUrl: BASE_URL, timeoutMs: 3000, keyPath: key, tokenTtlSeconds: 30, enableAuth: true,
+    } as never);
+    await probe.init();
+    const r = await probe.takeScreenshotHandle({ format: 'png' });
+    if (r.ok) { await r.value.release(); return true; }
+    return false; // 401/传输失败 = key 与活服务错配（环境信号）
   } catch {
     return false;
   }
@@ -57,9 +71,10 @@ test('adapter.health: 探活 + 返回能力声明', { skip }, async () => {
   assert.ok(result.ok, 'health must succeed');
   if (!result.ok) return; // type narrow
   assert.equal(result.value.status, 'ok');
-  assert.equal(result.value.platform, 'linux');
+  assert.equal(result.value.platform, process.platform, 'platform = 服务所在 OS（O 纪元：Windows 真机解禁）');
   assert.equal(result.value.screenshot_transport, 'mmap-file');
-  assert.equal(result.value.switch_window_method, 'hotkey_only');
+  assert.ok(['hotkey_only', 'native'].includes(result.value.switch_window_method!),
+    `switch_window_method ∈ {hotkey_only(Linux), native(Win)}：${result.value.switch_window_method}`);
 });
 
 test('adapter.takeScreenshotHandle: HTTP 端到端 + RAII 生命周期', { skip }, async () => {
@@ -75,8 +90,9 @@ test('adapter.takeScreenshotHandle: HTTP 端到端 + RAII 生命周期', { skip 
   assert.equal(handle.meta.transport, 'mmap-file');
   assert.ok(handle.meta.name, 'mmap-file transport must have file path');
   assert.equal(handle.meta.format, 'PNG');
-  assert.equal(handle.meta.width, 128);
-  assert.equal(handle.meta.height, 128);
+  // O 纪元（#1 Windows 解禁）：尺寸不再硬编码 128（Linux 合成图）——
+  // Windows 上 pyautogui 真截屏（2560×1440）；断言语义 = 正尺寸 + 与服务报屏一致
+  assert.ok(handle.meta.width > 0 && handle.meta.height > 0, `positive dims: ${handle.meta.width}x${handle.meta.height}`);
   assert.equal(handle.released, false);
 
   // 2. read —— 读出字节
@@ -133,7 +149,8 @@ test('adapter: CapabilityCache 从 health 同步状态', { skip }, async () => {
   const cache = new CapabilityCache();
   syncCapabilityFromHealth(cache, health.value);
 
-  assert.equal(cache.switchWindowRoute(), 'hotkey_only');
+  assert.ok(['hotkey_only', 'native'].includes(cache.switchWindowRoute() as string),
+    `route ∈ {hotkey_only, native}：${cache.switchWindowRoute()}`);
   assert.equal(cache.screenshotTransport(), 'mmap-file');
   assert.equal(cache.isInitialized(), true);
 

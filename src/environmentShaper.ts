@@ -272,23 +272,31 @@ function probeWindows(cmd: string): boolean {
   }
 }
 
-/** Win32 P/Invoke 一次性声明（SetWindowPos/GetWindowRect/ShowWindowAsync/IsZoomed/SetForegroundWindow） */
+/** Win32 P/Invoke 一次性声明（SetWindowPos/GetWindowRect/ShowWindowAsync/IsZoomed/SetForegroundWindow）
+ *  O 纪元（#17 真机执法）：C# 成员定义包 PS 单引号串 —— 内嵌 " 无需转义。
+ *  旧实现的 \" 在 PS 双引号串里不是转义（PS 用反引号），经 execFile 真机调用
+ *  从未编译成功（注入式测试的 exec 桩掩盖）。 */
 const USER32_DECL =
-  'Add-Type -Name U32 -Namespace Win -MemberDefinition "'
-  + '[DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); '
-  + '[DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr h, out RECT r); '
-  + '[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr h, int c); '
-  + '[DllImport(\"user32.dll\")] public static extern bool IsZoomed(IntPtr h); '
-  + '[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h); '
-  + 'public struct RECT { public int L; public int T; public int R; public int B; }"';
+  "Add-Type -Name U32 -Namespace Win -MemberDefinition '"
+  + '[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); '
+  + '[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); '
+  + '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int c); '
+  + '[DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h); '
+  + '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); '
+  + "public struct RECT { public int L; public int T; public int R; public int B; }'";
 
 
-/** 高对比度 P/Invoke 声明（GET=0x42 / SET=0x43；HCF_HIGHCONTRASTON=0x1） */
+/** 高对比度 P/Invoke 声明（GET=0x42 / SET=0x43；HCF_HIGHCONTRASTON=0x1）
+ *  O 纪元（#17 真机执法）：pvParam 必须指向 HIGHCONTRAST 结构体（cbSize +
+ *  dwFlags + lpszDefaultScheme），不是 int 引用 —— 旧形状 SET 恒 false。
+ *  cbSize 先置再调（Win32 结构体契约）；单引号律同 USER32_DECL。 */
 const HC_DECL =
-  "Add-Type -Name U32HC -Namespace Win -MemberDefinition \"" +
-  '[DllImport(\"user32.dll\", SetLastError=true)] public static extern bool SystemParametersInfo(int a, int p, ref int f, int i); ' +
-  'public static int GetHC() { int f = 0; U32HC.SystemParametersInfo(66, 4, ref f, 0); return f; } ' +
-  'public static bool SetHC(int f) { return U32HC.SystemParametersInfo(67, 4, ref f, 3); }"'; // SPIF_UPDATEINIFILE|SENDCHANGE=3
+  "Add-Type -Name U32HC -Namespace Win -MemberDefinition '" +
+  '[DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(int a, uint p, ref HC f, int i); ' +
+  'public struct HC { public uint cbSize; public uint dwFlags; public IntPtr lpszDefaultScheme; } ' +
+  'public static HC MkHC(uint flags) { HC h = new HC(); h.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(HC)); h.dwFlags = flags; return h; } ' +
+  'public static int GetHC() { HC h = MkHC(0); U32HC.SystemParametersInfo(66, h.cbSize, ref h, 0); return (int)h.dwFlags; } ' +
+  "public static bool SetHC(int f) { HC h = MkHC((uint)f); return U32HC.SystemParametersInfo(67, h.cbSize, ref h, 3); }'"; // SPIF_UPDATEINIFILE|SENDCHANGE=3
 
 function setHighContrastPs(flagExpr: string): string {
   return `${HC_DECL}; [Win.U32HC]::SetHC(${flagExpr}) | Out-Null`;
@@ -344,9 +352,13 @@ export class WindowsAdapter implements SystemAdapter {
   }
 
   async apply(action: ShaperAction): Promise<UndoRecipe> {
+    // O 纪元（#17 真机执法抓出的潜伏 bug）：set_contrast 是系统级动作，
+    // 不需要窗口句柄 —— 旧实现无条件解析 hwnd 且空标题必 throw，真机上
+    // apply({kind:'set_contrast'}) 从未可达（注入式测试的 exec 恒返 '4\n' 掩盖）。
+    const needsWindow = action.kind !== 'set_contrast';
     const hint = action.titleHint ?? '';
-    const hwnd = await this.hwndOf(hint);
-    if (hwnd === 0) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
+    const hwnd = needsWindow ? await this.hwndOf(hint) : 1;
+    if (needsWindow && hwnd === 0) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
     switch (action.kind) {
       case 'raise_window': {
         await this.activate(hwnd);
@@ -419,9 +431,10 @@ export class WindowsAdapter implements SystemAdapter {
         return;
       }
       case 'set_contrast': {
-        // 还原为 apply 前读到的 flags（未知 ⇒ 关闭位清除 —— 保守方向）
+        // O 纪元（#17）：精确还原 apply 前读到的 flags —— 原本就开着高对比度
+        // （奇数 flags）的机器，& ~0x1 会错关用户自己的设置；未知 ⇒ 0（保守）。
         const orig = Number.parseInt(recipe.before?.theme ?? '0', 10);
-        const flags = (Number.isFinite(orig) ? orig : 0) & ~0x1;
+        const flags = Number.isFinite(orig) ? orig : 0;
         await this.execFn(PS_EXE, [...PS_FLAGS, setHighContrastPs(String(flags))]);
         return;
       }

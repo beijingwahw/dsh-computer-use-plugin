@@ -392,21 +392,24 @@ test('J-13: reconcileVerdicts —— rejected 否决 / needs_review 把 complete
 
 // ─── J-14 审批盲区收窄：expected_text 第二危险信号 ───
 
-test('J-14: 不填 target_description 但 expected_text 命中危险词 ⇒ 闸门照常拦截', async () => {
+test('J-14: expected_text 命中危险词 ⇒ 闸门照常拦截（跨通道法则）', async () => {
   const { createClickMouseTool } = await import('../src/tools/clickMouse.ts');
   const cfg = {
     enableApprovalGate: true,
     dangerPatterns: 'send,发送,delete,删除,pay,支付',
   } as unknown as Config;
   const tool = createClickMouseTool(cfg);
+  // O 纪元（#18）后 target_description 是 schema 必填（协议层第一道闸）——
+  // 本测试执法**第二通道**：描述本身无害，但 expected_text 携带危险语义 ⇒
+  // 闸门仍拦截并归因 expected_text（跨通道法则不因描述在场而豁免）。
   const out = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
-    .execute({ x: 0.5, y: 0.5, expected_text: '点击后出现 发送订单 确认' });
+    .execute({ x: 0.5, y: 0.5, target_description: 'submit area', expected_text: '点击后出现 发送订单 确认' });
   const parsed = JSON.parse(out);
-  assert.equal(parsed.status, 'ACTION_REQUIRED', '旧实现：不填描述即可绕过闸门');
+  assert.equal(parsed.status, 'ACTION_REQUIRED', '第二信号通道照常拦截');
   assert.equal(parsed.state_anchor.danger_signal, 'expected_text', '归因到第二信号通道');
   // 安全面零回归：正常预期文本不触发
   const okOut = await (tool as unknown as { execute: (a: unknown) => Promise<string> })
-    .execute({ x: 0.5, y: 0.5, expected_text: '菜单展开' });
+    .execute({ x: 0.5, y: 0.5, target_description: 'menu area', expected_text: '菜单展开' });
   assert.notEqual(JSON.parse(okOut).status, 'ACTION_REQUIRED');
 });
 

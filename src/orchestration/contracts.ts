@@ -255,6 +255,11 @@ export interface PipelineReport {
   /** J 纪元诚实重命名：计量的是**授予**的信封预算（骨架无消耗计量回路）——
   *  旧名 tokenUsage 暗示实际消耗，名不副实。 */
   tokenBudgetsGranted: { vision: number; decision: number; execution: number };
+  /**
+   * O 纪元（#8）：工位自报的实际消耗（计量回路：谁计量？工位自报）。
+   * 0 = 该工位未装探针（未计量 ≠ 未消耗 —— 决策工位缺省装 chars/4 估计器）。
+   */
+  tokenUsageReported?: { vision: number; decision: number; execution: number };
   /** 沙箱因果链锚（Trajectory 回放） */
   chainTip: string;
   reportPath: string;

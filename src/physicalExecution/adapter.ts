@@ -22,7 +22,7 @@ import type {
 } from './contracts.js';
 import { ALL_CAPS, PhysicalErrorKind } from './contracts.js';
 import { ensureKey, mintToken, mintNonce } from './capToken.js';
-import { microFetch, type HttpClientConfig } from './httpClient.js';
+import { microFetch, parseUnixBaseUrl, type HttpClientConfig } from './httpClient.js';
 import { ScreenshotHandle } from './screenshotHandle.js';
 
 /** Cap Token 提前刷新阈值（避免请求时刻过期） */
@@ -51,12 +51,14 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     if (!config.baseUrl || !/^(http|http\+unix):\/\//.test(config.baseUrl)) {
       errors.push(`baseUrl must start with http:// or http+unix://, got ${config.baseUrl}`);
     }
-    // J 纪元修正：UDS 显式拒绝 —— Node 内置 fetch（undici）不认 http+unix://，
-    // 契约虽声明支持，实际第一笔请求必抛 TypeError 被归类为 transport_error。
-    // 与其运行时误导，不如加载层诚实拒绝（ServiceManager 默认强制 TCP，
-    // 本路径只影响手写 baseUrl 的调用方）。
+    // O 纪元（#16）：UDS 客户端半兑现 —— J 纪元的加载层显式拒绝退役。
+    // http+unix:// 现经 undici Agent(socketPath) dispatcher 传输；宿主须注入
+    // undici 桥（setUndiciBridge）或依赖运行时 transport_error 诚实归因。
     if (config.baseUrl?.startsWith('http+unix://')) {
-      errors.push('http+unix:// baseUrl is declared in contracts but unsupported by the Node built-in fetch (undici) — use http://127.0.0.1:<port> (ServiceManager default)');
+      const uds = parseUnixBaseUrl(config.baseUrl);
+      if (!uds) {
+        errors.push('http+unix:// baseUrl must contain a ".sock" socket path, e.g. http+unix:///var/run/dsh-physical.sock/v1');
+      }
     }
     if (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0) {
       errors.push(`timeoutMs must be positive finite, got ${config.timeoutMs}`);
