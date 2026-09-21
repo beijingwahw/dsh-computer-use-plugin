@@ -113,6 +113,137 @@ L4 预期   expected_*   —— 与模型行动前声明的预期对照
 1. **敏感焦点标记**：`click_mouse` 的 `target_description` 命中风险词（密码/验证码/2FA/OTP/API key…，可配置）⇒ `focusTracker` 将焦点标记为敏感，锚点携带 `sensitive_focus` 并预警
 2. **输入拦截**：`type_text` 到敏感焦点（或文本自身命中风险语义）⇒ 返回 `ACTION_REQUIRED`，要求暂停并请用户亲自输入；**待输内容绝不回显**（`[REDACTED]`）
 
+## 第六纪元（J）：工程收敛 —— 全库质量加固
+
+前五轮堆出了 32 个数学引擎与 D-1~D-7 器官方阵；本轮停止加-feature，把整个器官群焊牢：**四条主链致命修复**（Python 服务真实点击此前 100% TypeError、shm 传输生命周期注册表单主、降级排练不再误锁主机执行、D-4 判决三方言配对令 `rejected` 否决权首次可达）、**审批协议改为"请求 ≠ 同意"**（`grant_approval` 是执行前置）、安全面（AppleScript 注入序、中间件洋葱序、nonce 双解码）与数十项中危修复。287 测试全绿起步。
+
+## 第七纪元（K）：留白兑现 —— 诚实声明的空白逐一落成
+
+| 留白 | 落成 |
+| --- | --- |
+| 排练永远 `degraded`（无验证层） | **虚拟屏模拟器**（`sandbox/virtualScreen.ts`）：确定性控件世界，命中测试产 L1 证据、焦点输入产 L4 证据（`expectedText` 核对）——历史性一刻：`passed` 首次可达，肌肉记忆固化真实触发 |
+| Windows 环境塑形缺席 | **WindowsAdapter**：PowerShell + Win32 P/Invoke（raise/maximize/move/set_zoom），几何快照 undo，PS 单引号转译封死标题注入面 |
+| Actor 无真实后端 | **双通道**：DSH `agents` 服务在场走服务；缺席走技能回放（可靠度 > 0.5）并回写结局；双缺席诚实 `[FAILED]` |
+| 会诊只有规则表 | **贝叶斯皮层**：六症候群 × 五信号 CPT，log-sum-exp 精确枚举；规则为主、信念侧写随报告附体 |
+| 统计兵器缺口 | **SSD 二阶随机占优**（FSD 交叉时按下偏矩不等式裁决）、**同形字归一化**（西里尔/希腊/全角三层混淆仍命中风险词）、**噪声容忍环检测**（汉明容差 6） |
+| 无科学基准 | **基准套件**（`npm run bench`）：消融/标定/参数消融/联合标定四件套，首跑全绿 |
+
+## 第八纪元（L）：服务归属立法 —— 消费方终于有注册方
+
+**法条：仓内天然属主自荐，宿主裁决总线。** D-5 `apply()` 经可选 `ctx.set?` 面自荐 `dsh.sandbox` 引擎视图；D-7 自荐 `dsh.knowledge-pipeline`；宿主无 `set` 面 ⇒ 既有诚实降级一字不动。同时把三处"死导出"契约占位符激活为执法面（`hasVerificationLayer` 进审计面、`SandboxDoctorView` 得真实门面适配器、intent 铸造走 `IdGenerator` 三重防碰撞）。
+
+## 第九纪元（M）：值即边界 —— 五项数值留白交付
+
+- **Windows `set_contrast`**：SystemParametersInfo 官方 API（SPI_GETHIGHCONTRAST 快照 → SPI_SETHIGHCONTRAST 置位，undo 还原原 flags）
+- **同形字算术全表**：五个数学字母系（U+1D400..）、带圈、上标、亚美尼亚/科普特系——码点算术生成，零数据文件，扩展 = 一行
+- **CPT 蒸馏标定**（`calibrateCptFromRules`）：32 信号组合全枚举 + 共现计数 + Beta(1,1) 平滑 + 专家收缩；与规则首判一致率 0.484 本身即量化数据，真遥测接入 = 换 oracle 接口不变
+- **SO_PEERCRED 服务端半**：UDS 连接捕获对端 PID，auth 中间件强校验 `token.pid == peer_pid`（非 Linux 优雅回退）
+
+## 第十纪元（N）：残差根除
+
+swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳过已消费前缀）；**审批盲区硬前置根除**——闸门开启时双描述通道皆沉默的点击返回 `ACTION_REQUIRED` 而非透明放行（合规是零成本的：带描述重发即可）；虚拟屏 drag 命中证据与 switch_window 标题匹配焦点证据补齐。套件 325/318/0 败。
+
+## 第十一纪元（O）：28 项清账战役 —— 世界性创世升级
+
+七轮战役后的全量待完善清单，按推荐执行序 28 项逐一兑现（`test/epochO.test.ts` 逐项执法）：
+
+**环境与真机**：Windows 真机基准落地（`test/realMachineWin.bench.ts` 四实验全绿 —— D-5 服务真截屏 → tesseract.js 离线 OCR → **真 pyautogui 物理点击** → tkinter 世界状态翻转；E1b 陷阱改道与 E3 学习曲线在真机上复现）；POSIX shm 跨进程往返测试 + Linux CI workflow（`/.github/workflows/ci.yml`）；sharp/tesseract.js 入库后 7 项环境闸全绿。
+
+**潜伏 bug 群根除（真机执法的战果）**：① Windows `set_contrast` 的三只（apply 误要求窗口句柄 / PS `\"` 转义非法 / pvParam 须为 HIGHCONTRAST **结构体**）—— 真机往返 126→127→126 VERIFIED；② `screen.py` JPEG 闭包 UnboundLocalError（任何平台必炸）；③ GPD 矩估计反演代数错误（(k−1)/(2k−1) → (k−1)/(2k)，双估计器上线后现形）；④ contextManager id 时钟回拨。
+
+**数学器官**：GPD **PWM 第二估计器** + 一致性检验（主估计权归 PWM）；**双边 CUSUM** + 环前终身基线（基线不再随环翻转，痊愈臂 = RECOVERY 洞见）；W₁ **信息熵加权**（w1Info/infoRatio 双视图显形掩蔽）；I-4 **相干瞬移场**（≥2 特征同矢量共移 = 刚体重排证据，单候选诚实瞬态）；LTLf **性质挖掘器**（有界响应/先序/防重三族自动立法，支持度≥3 零反例才立）；A² 临界值 **MC 自举表** + Kalman Q/R / Schmitt / NCD 阈**标定回路**（`src/calibration.ts`）。
+
+**架构补全**：`dsh.vision.structured/traditional` 服务自荐（单属主铁律）；worldModel **run 级快照**（fork/merge 重放，并发同号类型重铸）；restore 悬空引用三重校验；沙箱 **L3 场景 OCR**（`sceneOcr` 点燃休眠的 L3-semantic 层）；switch_tab **标签页栈模型**（role='tab' 循环指针）；SO_PEERCRED **Node 客户端半**（undici UDS dispatcher + 桥注入）；token **真实消耗计量**（工位自报回路 `tokenUsageReported`）；审批根除的**模型侧协议强制**（`target_description` schema 必填）；首轮知识检索**串行化选项**；homoglyph **Unicode confusables 全表**（1665 条蒸馏，~22MB/s）。
+
+## 第十二纪元（P）：灭虫圣战 —— 全库清虫 + 虫型免疫机制
+
+对全库（TS 13 文件深审 + Python 3 文件 + 机械扫描）猎杀潜伏 bug，**共根除 7 只**，并把每类虫型铸成永久免疫：
+
+- **#8（严重）`auth_middleware` 顺序倒置**：peer-PID 比对在令牌解析之前执行——UDS+Linux+peercred 路径（M 纪元 SO_PEERCRED 服务端半）**落地即 UnboundLocalError 崩溃**。M-4 源级执法从未运行故未现形。
+- **#9（严重）A² 反号约定**：`calibration.ts` 的 GPD CDF 用了与采样器相反的 ξ 符号约定——MC 临界表在错误分布下计算（分位 78–160 vs 文献 ~0.5–1.1）。
+- **#10 标定器 NaN 泄漏 + 装饰字段**：`calibrateNcdThreshold` 被毒化后仍返回貌似合法的标定；`calibrateKalmanQR` 的 `predicted` 字段从未被使用（API 谎言）——修为真互补滤波。
+- **#11/#12（严重）swarm 消费水位双缺陷**：restore 静默丢弃持久化的水位（N-1 的根除名存实亡）；水位基于 journal 滑窗位置（容量饱和后位置不稳 ⇒ 会话中途永久停止积累经验）。修为「武装水位」：恢复后首轮前缀跳过即标记进身份游标（WeakSet），会话内驱逐免疫。
+- **#13** `recombine` 去重强化路径漏 `save()`（崩溃窗口内计数丢失）。
+- **#14** 多显示器准星钉边：全局虚拟屏坐标混入截图本地域——鼠标在副屏时给出**自信的错位** grounding 信号；修为域外诚实缺席。
+- 另修 `verify` 的 V2c 环境假设（pyautogui 装机后"无显示"模拟失效——改毒性模块注入，任何机器确定性执法）。
+
+**免疫机制（创世）**：`scripts/bug_class_lint.py` —— **Bug 类注册表（BCR）**：每类历史虫型（PS 引号律/闭包重赋值/时钟单调假设）铸成机械检测器，全库扫描签名形状，接入 `npm run verify` 构建闸；`test/epochP.test.ts` —— **属性测试炮台**：全部统计引擎过「已知参数恢复 + 闭式对齐 + 不变量」关（Hurst iid→0.5、置换检验对 Fisher 闭式、贝叶斯归一、NCD 对称、A² 文献带、Kalman 对 DARE 闭式、汉明度量律、LTLf 有限迹语义）。示例断言抓不住约定错配——参数恢复能。
+
+## 第十三纪元（Q）：开天辟地 —— 全模块八器官创世
+
+对全部模块簇的一次创世级升级——每簇一件真正的新数学器官（`test/epochQ.test.ts` 逐件执法）：
+
+- **Q-1 证明层 `src/proof.ts`（新器官）**：Merkle Mountain Range——追加型证据流的 **O(log n) 包含证明**（叶数为 2 的幂的山峰二进制分解 + 峰袋根）。journal 与 sandbox 链双双接线：审计者凭单根 + 单证明核验单条记录在册，**免整链重放**；篡改任一叶 ⇒ 全部旧证明失效（Q-1 执法 1..1000 全尺寸 + 全篡改检出）。
+- **Q-2 感知层 pHash**：DCT-II 低频谱第二指纹（32×32 → 二维可分离 DCT → 左上 8×8 中位阈值，DC 排除 ⇒ 亮度不变）。dHash（梯度域）与 pHash（频谱域）失效模式正交——`dualSimilarity` 保守融合（min）；actionVerifier 判决携带 `phashCorroborates` 独立第二意见。
+- **Q-3 决策层 Wald SPRT**：弹窗判决的**序贯最优停止**（Wald 1945；Wald–Wolfowitz 定理：同 (α,β) 下期望样本量全类最小）。语义单帧即判（LLR=ln45）、几何三帧累积、双清洁两帧判净、终判锁定；与 Schmitt 迟滞并存（后者保既有语义零回归）。
+- **Q-4 知识层 Dirichlet 预测熵**：worldModel 转移预测携带 `entropyBits`（平滑预测熵——「点了之后世界去哪」的主张强度，L3 付费观看的正当性可量化）与 `posteriorConcentration`（可信的不确定性 vs 廉价的均匀无知）。
+- **Q-5 记忆层技能系谱**：Skill 增 `parents/generation`——合成技能登记基因供体谱系；`lineage(id)` 祖先链回溯（环守卫诚实截断）；容量驱逐感知**谱系存续**（活跃祖先 ×1.5 加成——基因仍在后代中表达的技能不死）。
+- **Q-6 证据层效应量**：`cohensH`（反正弦效应量——比例近 0/1 域不虚胀）+ `mannWhitney`（非参秩检验，并列校正 + 连续性修正；延迟是重尾——GPD 纪元的教训，A/B 对照配秩检验不配 t 检验）。「主张要有数字」升格为「数字要有效应量与检验」。
+- **Q-7 探索层 Thompson 晶体**：swarm 经验晶体的 Beta(s+1,f+1) 抽样排序（H-3 同律迁移）——低证据晶体（2/2 全胜）按证据不足程度**成比例**获探索配额，反事实推理不再被早期幸运儿垄断。
+- **Q-8 运动层焦点外推**：焦点两点一阶差分估计漂移速度，`predicted()` 外推长延迟后的焦点位置（钳半屏）；证据不足诚实回退原点。
+
+## 第十四纪元（R）：开天辟地第二击 —— 六层器官再造
+
+对 Q 纪元未触及的六个模块簇各铸一件新器官（`test/epochR.test.ts` 逐件执法）：
+
+- **R-1 模糊层 `src/fuzzy.ts`（新器官）**：子串编辑距离近似匹配（Wagner–Fischer 行进形；Myers 位向量的渐近界备案、审计性优先选经典 DP）——OCR 把 l 读成 1、O 读成 0、吞空格时，`expected_text` 的逐字节对照在真机必然漏判；容错 ≤⌈m/6⌉ 判决接入 textReader 语义核对。
+- **R-2 检索层 BM25**：知识库词法通道从二值命中计数升格为 BM25（k1=1.2/b=0.75，语料级 IDF + 长度归一 + tf 饱和）——稀有词（'api token'）的判别力被语料统计兑现，长文本不再靠篇幅堆命中。
+- **R-3 熔断层 Beta-Bernoulli 序贯后验**：连续计数熔断的盲区是**交替成败型坏路线**（失败-成功-失败…永不连败即永不熔断）；滚动窗内 P(失败率>50%) ≥ 0.95（正则化不完全 Beta，Lentz 连分式 + Lanczos lnΓ）即熔断。
+- **R-4 快照层 v4 证据锚**：checkpoint 携带 journal/sandbox 双 MMR 根（快照与证据链的一致性锚——恢复时可验"重算根 == 锚"）；v1/v2/v3 幂等迁移。
+- **R-5 视觉层跨帧稳定元素 ID**：IoU 贪心跟踪（阈值 0.4，消失 ≤5 帧续号）——同一物理控件跨截图保号，`click_element` 的"点 3 号"不再每帧语义漂移。
+- **R-6 召回层 RRF**：失败记忆三通道（词面/NCD/场景）改倒数排名融合（TREC 形 Σ1/(60+rank)）——排名无量纲，三通道不再需要逐通道定标；旧加权和并存为 `score2`。
+
+## 第十五纪元（S）：开天辟地第三击 —— 六器官闭环
+
+给仍未触及的模块簇铸六件，并把前世代的环**闭环**（`test/epochS.test.ts` 逐件执法）：
+
+- **S-1 快照层·锚验证**：checkpoint 恢复时重算 journal MMR 根与锚对照——不符即 `EVIDENCE ANCHOR MISMATCH` 置顶报告（R-4 的另一半，快照-证据一致性从"可锚"到"可验"）。
+- **S-2 过程层·蓄水库流式分位**（Vitter 1985 算法 R + 序统计）：逐观测 O(1) 维护 P50/P95/P99 活体读数，容量 512 内存有界，种子可注入可复现（P² 标记法实测增量可破序发散，诚实弃用并备案）。
+- **S-3 决策层·Hedge 通道仲裁**：Actor 双通道按乘性权重 w←w·exp(−η·loss) 学得偏好——平权时 agents 优先（既有法零回归），agents 连败且技能连胜后技能通道接管；权重带 0.1 底权（复活通道不死）。
+- **S-4 记忆层·Beta 后验信任**：UI 地标信任分从线性帽 `0.05·min(s,6)` 升格 `(s+1)/(s+2)` 贝叶斯曲率——一次成功不配满信任、渐近饱和、零成功留先验底。
+- **S-5 规约层·挖掘性质在线执法**：`enforceMinedProperties` —— R/Q 纪元挖掘的性质在新迹上逐位执法（bounded-response 破缺/抢跑/连击定位），性质库从描述统计升格为**在线规约**（mine→enforce 闭环）。
+- **S-6 认知层·既视感双指共识**：潜意识条目携带 pHash 第二指纹，dHash 初中后须频谱域复核（≥0.85）才闪灵光——同梯度不同内容的假既视感被压制；sharp 缺席单指回忆零回归。
+
+## 第十六纪元（T）：开天辟地第四击 —— 对称与传播
+
+主题：给只有正半边的机制补对称、把已立器官传播到残余模块（`test/epochT.test.ts` 逐件执法）：
+
+- **T-1 行为层·量化相似签名**：防死循环守卫的逐字节签名对坐标抖动（0.501 vs 0.500）失明——同一按钮的微移重试不算"重复"。数值参数 0.01 网格量化后铸签（≈20px@1080p 物理分辨率），抖动同签、真位移异签。
+- **T-2 期望词表对称性认证**：intent 物理词表的消失半边（toggle_off/menu_collapse/text_vanish/scroll_down）核验已在册——**认证而非重造**（不为改而改）。
+- **T-3 判决通道·同链去重**：D-4 回执队列对同 chainId 的重复回执合并（保留最新）——同链多次排练不再触发多次昂贵会诊。
+- **T-4 服务层·全抖动指数退避**：`uniform(0, base·2^n)` 取代定值退避（AWS 经典形态）——并发等待者重试相位解相关，惊群免疫。
+- **T-5 证据层·反事实效应量传播**：what_if 决策点的异路线证据携带 Laplace 路线率（同场景全池统计），并给出最优异路线 vs 本路线的 **Cohen's h**——"换这条路好多少"从定性变定量（R-6 器官传播到反事实推理）。
+
+## 第十七纪元（U）：开天辟地第五击 —— 旋转与自省
+
+- **U-1 感知层·环形旋转不变指纹**：dHash/pHash 双双怕旋转——质心环带强度分布（旋转不改变环带内像素集合）给出第三指。诚实边界：不变域 = 90° 整数倍（实测 sim=1.0；小角重采样与环宽量化同阶）——专职竖屏/横屏切换类判定。
+- **U-2 视觉层·非极大值抑制（NMS）**：a11y 树的嵌套申报（容器与其子按钮共占一区）在元素预算前先去冗余——面积降序贪心保留，IoU≥0.6 抑制。
+- **U-3 证明层·守卫裁决入链**：`GUARD_BLOCKED` 标记种类——每次守卫拦截都是防篡改链上的政策裁决事实（proof 器官闭环到守卫层，拦截不可抵赖）。
+- **U-4 自省层·器官册 census**（`src/organCensus.ts`）：七纪元 33 件数学器官登记入册（层/数学根基/自检 λ），`quality_checkup` 自省段逐件点名——genesis 的 "premature-impl" 规则至此有了对称面：**impl 之后的 operational census**。
+
+## 第十八纪元（V）：器官审判日 —— 联合消融基准
+
+给七纪元铸的器官上科学法庭：`test/organAblation.bench.ts` 八项微基准（确定性、可复现），每件器官的贡献由数字判决（`test/reports/organ-ablation-report.md` 全表）：
+
+| 器官 | 审判数字 |
+| --- | --- |
+| 模糊匹配 | OCR 变体恢复率 **100%** vs 逐字节基线 0% |
+| 三指纹 | 同/异图双指 100%；90° 旋转环指捕获 **100%** vs 双指 0%（正交性实证） |
+| BM25 | 稀有词查询 MRR **0.583** vs 二值基线 0.250 |
+| 通道仲裁 | 劣质主通道场景 EMA 收益 **226/300** vs always-agents 104，逼近预言机 234 的 96.6% |
+| 蓄水库分位 | 三分布（均匀/重尾/双峰）ΔP50=ΔP95=**0.0%**（m=512, n=2000） |
+| MMR | 千叶证明长度 ≤ log₂(n)+1（实测 6/9） |
+| RRF | 通道重标定（×10）排名稳定 **100%** vs 加权和 0% |
+| LTLf 执法 | 三型注入违例**逐位全中**（响应@1/抢跑@0/连击@5） |
+
+**审判日的真实战果**：仿真抓到 S-3 乘性权重的**复辟缺陷**（对称底权触底后回到平权 ⇒ 劣质通道周期性复辟，151/300）——裁决升格为 **EMA 成功率仲裁**（只更新被选通道，未选冻结），回写实现后逼近预言机。另裁决两例测试前提不成立（加权 0.3 律在合成域不真输、倒序非 OCR 域变异）——法庭对自己一样诚实。
+
+## 第十九纪元（W）：第七击 —— 隔离与真机审判
+
+- **W-1 单例隔离审计**：一切有状态单例必有归零缝——补上两只真缺（`approval` 审批簿记、`orchestrator` 通道 EMA——V 日泄漏源），执法矩阵：脏化 → reset → 必须回到初值。
+- **W-2 真机审判**：器官时代后首次重跑 Windows 真机基准——**4/4 全绿**（真 OCR 感知 / 真鼠标物理点击闭环 / 陷阱改道 / 学习曲线）：六纪元改造后真截屏→离线 OCR→真 pyautogui→tkinter 世界翻转全链无恙。
+- **W-3 创世总账**（[GENESIS.md](GENESIS.md)）：30+ 器官一行一件（数学根基/执法册/审判数字），七击可导航。
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
@@ -354,6 +485,80 @@ World-class CUA consensus (e.g. Operator): **credential input belongs to the hum
 
 1. **Sensitive-focus marking**: `click_mouse`'s `target_description` hits a risk keyword (password / verification code / 2FA / OTP / API key…, configurable) ⇒ `focusTracker` marks the focus sensitive; the anchor carries `sensitive_focus` and warns
 2. **Input interception**: `type_text` into a sensitive focus (or text that itself hits risk semantics) ⇒ returns `ACTION_REQUIRED`, pausing for the human to type personally; **the pending content is never echoed** (`[REDACTED]`)
+
+## Epoch W — The Seventh Strike: Isolation & Real-Machine Judgment
+
+- **W-1 Singleton isolation audit**: every stateful singleton must expose a reset seam (two real gaps fixed: the approval ledger and the channel-EMA arbitration); enforced by a dirty→reset→initial-state matrix.
+- **W-2 Real-machine judgment**: the Windows real-machine benchmark re-run for the first time after six epochs of organ changes — **4/4 green** (real OCR perception, real pyautogui click loop, trap rerouting, learning curve).
+- **W-3 Genesis ledger** (`GENESIS.md`): every organ on one line — mathematical root, enforcement test, judgment number.
+
+## Epoch V — Judgment Day: The Joint Organ-Ablation Benchmark
+
+Eight deterministic micro-benchmarks (`test/organAblation.bench.ts`) put the organs on trial with numbers: fuzzy recovery 100% vs 0% baseline; ring-hash catches 90° rotations at 100% while the dual fingerprint is at 0% (orthogonality proven); BM25 MRR 0.583 vs 0.250; EMA channel arbitration reaches 226/300 versus the always-agents 104, within 3.4% of the oracle; reservoir quantiles exact to 0.0% across three distributions; MMR proofs within the log bound; RRF 100% stable under channel rescaling where the weighted sum collapses to 0%; LTLf enforcement pinpoints all three injected violation types. The trial itself caught a real defect (S-3's multiplicative weights let a degraded channel periodically revive) — the verdict, EMA arbitration, was written back into the implementation.
+
+## Epoch U — The Fifth Genesis: Rotation & Self-Reflection
+
+- **U-1 Ring-hash rotation-invariant fingerprint** (third fingerprint; invariance domain honestly scoped to multiples of 90°).
+- **U-2 NMS** for nested accessibility-tree element declarations (IoU ≥ 0.6, area-descending greedy).
+- **U-3 `GUARD_BLOCKED` chain markers** — every guard interception becomes a tamper-evident policy fact.
+- **U-4 Organ census** (`src/organCensus.ts`): 33 mathematical organs registered with self-checks, surfaced in `quality_checkup`.
+
+## Epoch T — The Fourth Genesis: Symmetry & Propagation
+
+- **T-1 Quantized action signatures**: the repeat-action guard's byte-exact signature was blind to coordinate jitter; numeric args now quantize to a 0.01 grid (≈20px at 1080p).
+- **T-2 Expectation vocabulary symmetry certified** (verification, not rework).
+- **T-3 Verdict-channel coalescing**: duplicate receipts for the same chain merge (newest wins).
+- **T-4 Full-jitter exponential backoff** in the service manager (decorrelated retry phases).
+- **T-5 Counterfactual effect sizes**: what_if alternatives carry Laplace route rates and a Cohen's h versus the current route.
+
+## Epoch S — The Third Genesis: Six Organs That Close Loops
+
+- **S-1 Snapshot anchor verification**: restored checkpoints recompute the journal MMR root and loudly report anchor mismatches (completing R-4).
+- **S-2 Streaming percentiles**: Vitter reservoir-sampling sketches with exact order statistics (O(1)/observation, bounded memory, seedable; the P² marker method was tried, found divergent in this domain, and honestly retired).
+- **S-3 Hedge channel arbitration**: the Actor's dual channels learn a multiplicative-weights preference (agents-first tie-break preserved; skill channel takes over after agents fails while skills succeed; floor weight keeps revival possible).
+- **S-4 Beta-posterior landmark trust**: (s+1)/(s+2) replaces the linear cap on UI-landmark trust.
+- **S-5 Online enforcement of mined properties**: mined LTLf invariants are checked against new traces with per-position violations (mine→enforce closure).
+- **S-6 Dual-fingerprint déjà-vu**: subconscious traces carry a pHash second opinion; flashbacks require spectral corroboration.
+
+## Epoch R — The Second Genesis: Six More Organs
+
+- **R-1 Fuzzy layer — `src/fuzzy.ts` (new organ)**: approximate substring edit-distance matching (OCR-tolerant expected_text verification; the Myers bit-vector bound is documented, classic DP chosen for auditability).
+- **R-2 Retrieval — BM25**: corpus-statistics IDF with length normalization replaces binary hit counting in the knowledge base.
+- **R-3 Breaker — Beta-Bernoulli sequential posterior**: a rolling-window P(failure-rate > 50%) ≥ 0.95 trip arm catching flaky-broken routes the consecutive counter can never see.
+- **R-4 Snapshots — v4 evidence anchors**: checkpoints carry journal/sandbox MMR roots; idempotent v1→v4 migration.
+- **R-5 Vision — stable cross-frame element IDs**: greedy IoU tracking keeps the same label on the same physical widget across screenshots.
+- **R-6 Recall — RRF**: reciprocal-rank fusion over the three failure-memory channels (dimension-free ranking; legacy weighted score kept as `score2`).
+
+## Epoch Q — The Genesis Upgrades: Eight New Organs Across Every Module Cluster
+
+- **Q-1 Proof layer — `src/proof.ts` (new organ)**: a Merkle Mountain Range giving **O(log n) inclusion proofs** over append-only evidence streams; wired into both the journal and sandbox chains — a single root plus a single proof now certifies one record without replaying the chain (tamper-evident across all sizes 1..1000).
+- **Q-2 Perception — pHash**: a DCT-II low-spectrum second fingerprint (brightness-invariant via DC exclusion). Its failure modes are near-orthogonal to dHash's; `dualSimilarity` fuses conservatively and `actionVerifier` carries a `phashCorroborates` second opinion.
+- **Q-3 Decision — Wald SPRT**: sequential optimal stopping for popup verdicts (Wald–Wolfowitz: minimum expected sample size at fixed error rates). Single semantic frame decides; weak geometric evidence accumulates; terminal decisions lock.
+- **Q-4 Knowledge — Dirichlet predictive entropy**: worldModel predictions now carry `entropyBits` (how uninformed the model is about where the world goes next — quantified justification for paid L3 looks) and `posteriorConcentration`.
+- **Q-5 Memory — skill phylogeny**: skills record `parents`/`generation`; `lineage()` walks ancestry with cycle guards; capacity eviction grants survival bonuses to ancestors of living lineages.
+- **Q-6 Evidence — effect sizes**: Cohen's h for proportion contrasts and a tie-corrected Mann–Whitney U for heavy-tailed latency A/B (never a t-test on GPD-tailed data).
+- **Q-7 Exploration — Thompson crystals**: swarm experience crystals rank by Beta posterior sampling — exploration proportional to evidence insufficiency.
+- **Q-8 Motion — focus extrapolation**: first-difference velocity estimation projects the focus point across long delays (clamped to half a screen; honest fallback without evidence).
+
+## Epoch P — The Great Bug Hunt: Eradication + Class Immunity
+
+Seven more latent bugs eradicated across a full-repo audit (13 TS files line-by-line + 3 Python files + mechanical scans), headlined by: the `auth_middleware` ordering bug that made the M-era SO_PEERCRED server half **dead on arrival** (peer-PID compare before token parse → UnboundLocalError); an opposite-sign CDF convention silently corrupting the Monte-Carlo A² critical table; and a two-part swarm watermark defect that both voided the N-era cross-session fix and permanently stopped experience accumulation once the journal's sliding window saturated. Plus the immunity machinery: a **Bug Class Registry** (`scripts/bug_class_lint.py`) turning every historical bug class into a mechanical detector wired into `npm run verify`, and a **property-test battery** (`test/epochP.test.ts`) verifying every statistical engine by known-parameter recovery against closed forms — the kind of check example-based tests cannot provide.
+
+## Epoch O — The 28-Item Closeout Campaign
+
+Every remaining item from the post-campaign ledger, delivered in recommended order and enforced one-by-one (`test/epochO.test.ts`):
+- **Real-machine Windows benchmark** (`test/realMachineWin.bench.ts`, 4/4 green): real service screenshots → offline tesseract.js OCR → **real pyautogui physical clicks** → tkinter world-state flips; trap-rerouting and the learning curve reproduce on real hardware. Plus a Linux CI workflow with a live POSIX-shm cross-process round-trip test.
+- **Latent-bug eradication caught by live verification**: three Windows `set_contrast` bugs (window-handle requirement / illegal PS `\"` escaping / pvParam must be a HIGHCONTRAST **struct**) — live round trip 126→127→126 VERIFIED; a JPEG-closure UnboundLocalError in `screen.py`; the GPD moment-inversion algebra error; the contextManager clock-rollback hazard.
+- **Mathematical organs**: PWM second estimator with consistency adjudication; two-sided CUSUM with a lifetime pre-ring baseline; entropy-weighted W₁ (info-view `w1Info`/`infoRatio`); coherent-teleport fields for I-4; an LTLf property miner (bounded-response/precedence/repeat-guard); a Monte-Carlo A² critical table plus Kalman/Schmitt/NCD calibration loops (`src/calibration.ts`).
+- **Architecture completions**: `dsh.vision.*` service self-registration (single-owner law); worldModel run-level snapshots (fork/merge replay); dangling-ref validation on restore; sandbox scene-OCR lighting up the dormant L3-semantic layer; a switch_tab tab-stack model; the SO_PEERCRED Node client half (undici UDS dispatcher); station-reported token metering (`tokenUsageReported`); `target_description` as a REQUIRED protocol field; first-round serial knowledge retrieval option; the full Unicode confusables table (1665 distilled entries).
+
+## Epochs J–N: Engineering Convergence, Void-Filling, and Residual Eradication
+
+- **Epoch J — engineering convergence**: fatal fixes unblocking all four main chains (real clicks previously threw 100% of the time; shm transport lifecycle single-owner; degraded rehearsals no longer block host execution; the D-4 `rejected` veto became reachable for the first time). Approval protocol upgraded to *request ≠ consent* — `grant_approval` is now a precondition for execution. Security surface hardened (AppleScript injection order, middleware onion order, nonce double-decode).
+- **Epoch K — the honestly-declared blanks, delivered**: a **virtual screen simulator** (deterministic widget world; hit-testing yields L1 evidence, focused-input buffering yields L4 evidence — the `passed` verdict and muscle-memory consolidation became reachable for the first time); a **WindowsAdapter** (PowerShell + Win32 P/Invoke with geometry-snapshot undo); **Actor dual-channel** (DSH agents service → skill replay → honest `[FAILED]`); a **Bayesian cortex** (6-syndrome × 5-signal CPT, exact log-sum-exp enumeration); SSD second-order stochastic dominance; homoglyph normalization; noise-tolerant cycle detection; and the **scientific benchmark suite** (`npm run bench`) — first run all green.
+- **Epoch L — service ownership codified**: the natural in-repo owner self-nominates onto the host bus via the optional `ctx.set?` surface (D-5 → `dsh.sandbox`, D-7 → `dsh.knowledge-pipeline`); hosts without `set` keep the existing honest degradation. Contract placeholders promoted from dead exports to enforced surfaces.
+- **Epoch M — value-is-boundary**: Windows `set_contrast` via SystemParametersInfo (snapshot + undo); homoglyph arithmetic full table (mathematical alphabets generated from codepoint arithmetic — zero data files); `calibrateCptFromRules()` CPT distillation (32-combination enumeration + Beta smoothing + expert shrinkage); SO_PEERCRED server half (UDS peer-PID capture, `token.pid == peer_pid` enforced).
+- **Epoch N — residuals eradicated**: swarm cross-session double-count fixed by a persisted consumption watermark; the approval blind spot eradicated as a hard precondition (a click silent on both description channels returns `ACTION_REQUIRED`, not a pass-through); virtual-screen drag/switch-window evidence delivered. Suite: 325 tests / 318 pass / 0 fail.
 
 ## Tool List
 
