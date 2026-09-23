@@ -486,6 +486,21 @@ World-class CUA consensus (e.g. Operator): **credential input belongs to the hum
 1. **Sensitive-focus marking**: `click_mouse`'s `target_description` hits a risk keyword (password / verification code / 2FA / OTP / API key…, configurable) ⇒ `focusTracker` marks the focus sensitive; the anchor carries `sensitive_focus` and warns
 2. **Input interception**: `type_text` into a sensitive focus (or text that itself hits risk semantics) ⇒ returns `ACTION_REQUIRED`, pausing for the human to type personally; **the pending content is never echoed** (`[REDACTED]`)
 
+## Epoch X — The Graphomotor Epoch: Motor Reflexes for the Reflex-Era Brain
+
+The reflex-era decision brain could only do one thing with the world: click. This epoch gives it a **motor vocabulary** — `type_text` / `scroll_page` / `press_hotkey` — with zero LLM, via `src/intentGrammar.ts` (pure-function intent grammar) and the motor arc in `ReflexiveDecisionStation`:
+
+- **Quote-anchored payload extraction (lossless by construction)**: the text to type must be carried by a reversible encoding — quoted spans (`"…"` / `'…'` / `「…」` / `『…』` / `“…”` / `‘…’`) are extracted exactly (edit distance 0). Free-text extraction is a lossy guess — a mistyped password is as bad as none — and is refused (precision-first). Enforcement itself caught a real defect: contraction apostrophes (`don't`) paired with later single-quote payloads and silently corrupted them; single-quote openers now carry a word-boundary gate.
+- **Motor-sequence law (acquire the landing point before writing)**: the dependency DAG `{target → text}` is executed in topological order — `type "gamma" into the server field` first emits the *click* on the field (focus acquisition), the writing follows once focus is carried. The same law protects `press the big red button` from being misrouted into the hotkey arc.
+- **Payload disenfranchisement**: the residue (intent minus verbs minus quoted spans) is what votes on *where*; payload words never vote on the landing point — in both the motor arc and deliberation's lexical channel.
+- **Born-verified reflex (L4 self-anchor)**: the quote anchor doubles as `expectedText` — for the first time a reflex *knows what its own success looks like* (a click cannot predict pixels; a payload can predict text). The bench's execution station enforces it against world truth.
+- **Kinematic domains**: scroll amounts must fall in `[1,20]` (out-of-domain refused, never clamped — clamping would silently rewrite `scroll 999` into 20); hotkey chords normalize key aliases (`control→ctrl`, `escape→esc`) and cap at 4 keys.
+- **Hierarchy intact**: Tier-0 immune suppression still gates every motor class; knowledge teaches *where* (workflow lift on residue), grammar teaches *what* (the payload); `disableMotorArc` ablation proves the contribution (typing intents degrade to honest zero-action grounding).
+
+Enforcement: `test/epochX.test.ts` (14 items, X-1..X-9 — extraction tables, arc-selection tables, virtual-screen rehearsal with L4 met, ablation, suppression precedence). Real-machine judgment: the large-scale Data Console bench grows a sixth page (`editor`: three text fields with focus ground-truth) and a `typing` category — real pyautogui **keystrokes** landing in tkinter entries, judged by per-keystroke world state.
+
+The campaign itself eradicated two real-machine defects: (1) `pyautogui.typewrite` passes through the active IME (`alpha.local` → `alpha。local`, `ada` → `阿达`) — the D-5 service now types via `SendInput` + `KEYEVENTF_UNICODE` on Windows, the only IME-orthogonal deterministic text injection; (2) same-baseline nav/content words corrupt tesseract's line segmentation (`settings` + `format disk` in one row ⇒ `setines`, conf 0) — perception now runs **strip OCR** (nav strip | content strip recognized separately, cross-column line mixing impossible by construction), with the nav invariant tightened to all-six-words-present.
+
 ## Epoch W — The Seventh Strike: Isolation & Real-Machine Judgment
 
 - **W-1 Singleton isolation audit**: every stateful singleton must expose a reset seam (two real gaps fixed: the approval ledger and the channel-EMA arbitration); enforced by a dirty→reset→initial-state matrix.

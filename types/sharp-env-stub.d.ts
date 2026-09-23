@@ -7,9 +7,9 @@ declare module 'sharp' {
   interface Sharp {
     grayscale(): Sharp;
     /** 位置参数形式：resize(w, h?, fit?) */
-    resize(width: number, height?: number, opts?: { fit?: string }): Sharp;
+    resize(width: number, height?: number, opts?: { fit?: string; kernel?: string }): Sharp;
     /** 对象参数形式：resize({ width }) / resize({ width, height, fit }) —— 项目内主流用法 */
-    resize(options: { width?: number; height?: number; fit?: string }): Sharp;
+    resize(options: { width?: number; height?: number; fit?: string; kernel?: string }): Sharp;
     extract(region: { left: number; top: number; width: number; height: number }): Sharp;
     raw(): Sharp;
     /** 通道统计（亮度均值/标准差）：intent 规则与 popupDetector 几何证据的消费面 */

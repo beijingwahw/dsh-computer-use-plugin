@@ -87,6 +87,65 @@ _KEY_MAP: dict[str, str] = {
     "a": "a", "c": "c", "v": "v", "z": "z",
 }
 
+# ─── Windows IME-proof typing（X 纪元真机战果）───
+# pyautogui.typewrite 发虚拟键码 —— 经活动输入法（中文 IME）时被劫持：
+# 'alpha.local' → 'alpha。local'、'ada' → '阿达'（拼音候选上屏）。物理躯体
+# 的打字必须与键盘布局/输入法状态正交：SendInput + KEYEVENTF_UNICODE 按
+# UTF-16 码元直注 WM_CHAR，绕过 IME 组合管线 —— 这是 Windows 上唯一与
+# 输入法无关的确定性文本注入路径。非 Windows 平台保持 typewrite。
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _PUL = ctypes.POINTER(ctypes.c_ulong)
+
+    class _KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+            ("dwExtraInfo", _PUL),
+        ]
+
+    class _MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG), ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD), ("dwExtraInfo", _PUL),
+        ]
+
+    class _HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD), ("wParamH", wintypes.WORD)]
+
+    class _INPUTUNION(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
+
+    class _INPUT(ctypes.Structure):
+        # 完整 union 布局（SendInput 校验 cbSize —— 只写 ki 会给短结构）
+        _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+    _INPUT_KEYBOARD = 1
+    _KEYEVENTF_UNICODE = 0x0004
+    _KEYEVENTF_KEYUP = 0x0002
+
+    def _type_unicode(text: str) -> int:
+        """UTF-16 码元逐个直注（ surrogate pair 各自成事件 —— SendInput 语义）。"""
+        units = text.encode("utf-16-le")
+        inputs = []
+        for i in range(0, len(units), 2):
+            scan = units[i] | (units[i + 1] << 8)
+            for flag in (0, _KEYEVENTF_KEYUP):
+                inp = _INPUT(type=_INPUT_KEYBOARD)
+                inp.u.ki = _KEYBDINPUT(
+                    wVk=0, wScan=scan,
+                    dwFlags=_KEYEVENTF_UNICODE | flag, time=0, dwExtraInfo=None,
+                )
+                inputs.append(inp)
+        if not inputs:
+            return 0
+        arr = (_INPUT * len(inputs))(*inputs)
+        return int(ctypes.windll.user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT)))
+
+
 # ─── 串行队列：所有物理动作经此排队（ioMutex 同源）───
 
 _io_lock: asyncio.Lock | None = None
@@ -220,8 +279,19 @@ class InputController:
                 else:
                     await _run_in_executor(pa.hotkey, "ctrl", "a")
                 await _run_in_executor(pa.press, "backspace")
-            # type 安全：长文本可能触发 KeyBoardInterrupt？我们在线程池中跑，无影响
-            await _run_in_executor(lambda: pa.typewrite(text, interval=0) if text else None)
+            if sys.platform == "win32" and text:
+                # IME-proof：SendInput UNICODE 直注（见模块顶部战果注记）。
+                # 失败对账：SendInput 返回成功注入的事件数 —— 不足即 PhysicalError。
+                expected = len(text.encode("utf-16-le")) // 2 * 2  # 每码元 down+up
+                sent = await _run_in_executor(_type_unicode, text)
+                if sent < expected:
+                    raise PhysicalError(
+                        ErrorKind.INTERNAL_ERROR,
+                        f"SendInput(unicode) incomplete: {sent}/{expected} events",
+                    )
+            elif text:
+                # type 安全：长文本可能触发 KeyBoardInterrupt？我们在线程池中跑，无影响
+                await _run_in_executor(lambda: pa.typewrite(text, interval=0))
             await asyncio.sleep(self.cfg.pause_after_action_ms / 1000)
 
         return {"typed_chars": len(text)}
