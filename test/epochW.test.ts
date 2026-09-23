@@ -28,12 +28,13 @@ test('W-1: 隔离缝矩阵 —— 脏化后 reset 必须把状态打回初值', 
   assert.deepEqual(orch.actorChannelWeights(), { agents: 0.5, skill: 0.5 }, 'EMA 归零');
   void w0;
 
-  // ② 审批簿记：请求在挂 → reset 清空
-  const req = appr.approval.request('danger-op', 'high');
-  assert.ok(req.ok || req.token, '请求受理');
+  // ② 审批簿记：请求在挂 → reset 清空（J 纪元方言：request 单参返回
+  //    PendingApproval；grant(token, boolean) → boolean —— 请求≠同意）
+  const req = appr.approval.request('danger-op');
+  assert.ok(req.token && !req.granted, '请求受理（在场且未授予）');
   appr.resetApproval();
-  const drained = appr.approval.grant(req.token ?? 'x', 60_000);
-  assert.ok(!drained.ok, 'reset 后旧令牌失效（簿记清空）');
+  const drained = appr.approval.grant(req.token, true);
+  assert.ok(!drained, 'reset 后旧令牌失效（簿记清空）');
 
   // ③ 焦点/元素跟踪/视觉差分/弹窗滤波/日志/swarm —— 快速归零抽查
   focus.focusTracker.set(0.3, 0.3); focus.focusTracker.clear();
