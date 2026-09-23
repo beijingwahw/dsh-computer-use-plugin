@@ -84,15 +84,16 @@ export const inject = ['tools'];
 /** 可选服务查询：systemPrompt 存在则注入提示词，不存在则优雅降级（行为准则已内置于工具描述与锚点） */
 function tryInjectPrompt(ctx: Context): void {
   const sp = ctx.get('systemPrompt') as
-    | { section: (o: { name: string; content: string }) => void }
+    | { section: (o: { name: string; order: number; text: string }) => unknown }
     | undefined;
   if (!sp) {
     console.log('[Vision Plugin] systemPrompt 服务不可用，行为准则将依赖工具描述与状态锚点。');
     return;
   }
-  sp.section({ name: 'vision-grounding-rules', content: VISION_GROUNDING_PROMPT });
-  sp.section({ name: 'react-workflow-rules', content: REACT_WORKFLOW_PROMPT });
-  sp.section({ name: 'popup-handling-rules', content: POPUP_HANDLING_PROMPT });
+  // 系统段落序约定：-100 harness identity / -99 harness source / 0 persona；插件行为准则置于 persona 之后
+  sp.section({ name: 'vision-grounding-rules', order: 10, text: VISION_GROUNDING_PROMPT });
+  sp.section({ name: 'react-workflow-rules', order: 11, text: REACT_WORKFLOW_PROMPT });
+  sp.section({ name: 'popup-handling-rules', order: 12, text: POPUP_HANDLING_PROMPT });
 }
 
 /** 可选服务查询：llm 存在且方法签名匹配时构造 ChatFn，否则返回 undefined（Planner 响亮降级） */
