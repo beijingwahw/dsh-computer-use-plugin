@@ -3,6 +3,7 @@ import { embed, cosine } from '../semanticHash.js';
 import { trustOf } from './knowledgeBase.js';
 import { P } from './params.js';
 import { SANDBOX_ACTION_KINDS } from '../sandbox/types.js';
+import { classifyMotor, extractQuotedSpans, residueTokens, extractScroll, extractHotkey, } from '../intentGrammar.js';
 // ─── 网格分区铸造（'g{col}x{row}' —— D-6 坐标同一性方案复刻，跨轮稳定）───
 function gridRegions(grid) {
     const regions = [];
@@ -264,6 +265,7 @@ export class ReflexiveDecisionStation {
     suppressAt;
     reflexOn;
     deliberationOn;
+    motorOn;
     llm;
     /** 探针一次性闩锁（intentId → 已探针）：一 run 一针的结构执法 ——
      *  与 D-4 结算时序解耦（回执沉默 ⇒ 学习挂账 run-end，run 内知识不变） */
@@ -272,6 +274,7 @@ export class ReflexiveDecisionStation {
         this.suppressAt = opts.suppressConfidence ?? P.REFLEX_SUPPRESS_CONFIDENCE;
         this.reflexOn = !opts.disableReflex;
         this.deliberationOn = !opts.disableDeliberation;
+        this.motorOn = !opts.disableMotorArc;
         this.llm = opts.chat ? new StubDecisionStation({ chat: opts.chat }) : null;
     }
     async decide(env, retryCtx) {
@@ -280,7 +283,7 @@ export class ReflexiveDecisionStation {
         const ctx = env.payload;
         // 压制评估（Tier 0）与本能弧（Tier 1）并行计算 —— 探针需要被压制的弧
         const suppression = this.assessSuppression(ctx);
-        const arc = this.reflexOn ? this.reflexArc(ctx) : null;
+        const arc = this.reflexOn ? this.arcOf(ctx) : null;
         // ── 压制路径：本能弧冻结，前额叶改道；无活路 ⇒ 核证接地（信任门控探针）──
         if (suppression) {
             if (this.deliberationOn) {
@@ -383,19 +386,115 @@ export class ReflexiveDecisionStation {
             rationale: `probe(verified-grounding): trap evidence untrusted (max trust ${maxTrust.toFixed(2)} < floor ${P.VERIFY_TRUST_FLOOR.toFixed(2)}) — suppressed arc released for one-shot verification; ${arc.action.rationale}`,
         };
     }
-    /** 脊髓反射弧（Tier 1）：动作 / 接地 + 前额叶可否接手（压制路径外独立计算） */
-    reflexArc(ctx) {
-        const intentTokens = new Set(tokenize(ctx.intent.description));
-        if (intentTokens.size === 0) {
+    /** 弧合流点（Tier 1）：运动类刺激 ⇒ 运动反射弧主权；否则点击弧（既有律） */
+    arcOf(ctx) {
+        if (this.motorOn) {
+            const motor = this.motorArc(ctx);
+            if (motor)
+                return motor;
+        }
+        return this.reflexArc(ctx);
+    }
+    /**
+     * 运动反射弧（Tier 1 运动词汇，X 纪元）—— 零 LLM 的结构化动作发射器。
+     *
+     * 刺激类别（动词位判别）→ 逐类提取 → 发射或拒绝：
+     *   typing  : 引号锚定载荷（信息无损）+ 残差落点（载荷词不参选）
+     *   scrolling: 方向词唯一 + 幅度在运动学域 [1,20]
+     *   hotkey  : 键名归一 + 和弦 ≤4
+     *
+     * 运动序法则（先落点后运笔）：残差对场景元素有**严格领先**词法命中 ⇒
+     * 本轮发射前置动作（点击落点/聚焦控件），笔迹留待焦点就位后的下一轮 ——
+     * 书写 presupposes 落点，这是 {落点 → 笔迹} 依赖 DAG 的拓扑序，
+     * 不是启发式。'press the red button' 同律被保护（button 残差命中 ⇒ 点击，
+     * 不会误入热键弧）。
+     *
+     * 自证反射（born-verified reflex）：引号锚定让 type_text 生而携带 L4
+     * 预期锚（expectedText === 载荷，编辑距离 0）—— 反射第一次「知道自己
+     * 成功长什么样」；点击弧做不到（无法预像素），笔迹弧可以（载荷即预期）。
+     *
+     * 拒绝语义（精确性优先）：载荷缺席/多义、方向缺席/多义、幅度域外、
+     * 键名域外 ⇒ 结构化 grounding —— 自由文本提取是有损猜测，打错一个字
+     * 的密码与没打一样。知识能救落点（deliberable ⇒ workflow 语义托举），
+     * 救不了词法结构（引号缺失不是知识问题）。
+     */
+    motorArc(ctx) {
+        const motorClass = classifyMotor(ctx.intent.description);
+        if (!motorClass)
+            return null; // 非运动类刺激 —— 点击弧主权不动
+        // 落点优先法则：残差（引号段+动词已切除）对元素的严格领先命中
+        const lead = this.lexicalLead(new Set(residueTokens(ctx.intent.description)), ctx.scene);
+        if (lead.match) {
+            const { name, cx, cy } = lead.match;
             return {
-                grounding: { reason: 'intent has no recognizable tokens — no reflex arc', focus: 'full-scene' },
-                deliberable: false, // 零 token 意图连语义锚也没有 —— 仿真同样无米下锅
+                action: {
+                    kind: 'click_mouse',
+                    args: { x: Math.round(cx * 10000) / 10000, y: Math.round(cy * 10000) / 10000 },
+                    rationale: `motor-reflex(${motorClass}): prerequisite-first — acquiring '${name}' (residue overlap=${lead.match.score}, best of ${lead.total}); motion deferred until focus is set`,
+                },
             };
         }
+        if (motorClass === 'typing') {
+            const spans = extractQuotedSpans(ctx.intent.description);
+            if (spans.length === 1) {
+                const text = spans[0].content;
+                return {
+                    action: {
+                        kind: 'type_text',
+                        // clearFirst：引号载荷 = 字段的完整内容（不是追加片段）—— 重试/
+                        // 复放语义确定性：同载荷重打覆盖而非叠加。
+                        args: { text, clearFirst: true },
+                        // 自证 L4 锚：引号锚定的载荷与预期同源 —— 编辑距离 0 的自我预言
+                        expect: { scale: 'text-level', expectedText: text },
+                        rationale: `motor-reflex(type): payload ${text.length} chars quote-anchored (${spans[0].quote}, lossless, clearFirst); no named target — focus-carried`,
+                    },
+                };
+            }
+            return {
+                grounding: {
+                    reason: spans.length === 0
+                        ? 'motor-reflex refused: typing without quoted payload (free-text extraction is lossy — precision-first)'
+                        : `motor-reflex refused: ${spans.length} quoted spans (payload ambiguous)`,
+                    focus: 'full-scene',
+                },
+                deliberable: spans.length === 0, // 无载荷但可能有语义落点（workflow 可托举）；多载荷是结构病
+            };
+        }
+        if (motorClass === 'scrolling') {
+            const r = extractScroll(ctx.intent.description);
+            if (r.kind === 'ok') {
+                return {
+                    action: {
+                        kind: 'scroll_page',
+                        args: { direction: r.value.direction, amount: r.value.amount },
+                        rationale: `motor-reflex(scroll): ${r.value.direction} x${r.value.amount} (kinematic domain [1,${20}])`,
+                    },
+                };
+            }
+            return { grounding: { reason: `motor-reflex refused: ${r.reason}`, focus: 'full-scene' }, deliberable: false };
+        }
+        // hotkey
+        const r = extractHotkey(ctx.intent.description);
+        if (r.kind === 'ok') {
+            return {
+                action: {
+                    kind: 'press_hotkey',
+                    args: { keys: r.value.keys },
+                    rationale: `motor-reflex(hotkey): chord [${r.value.keys.join('+')}] (normalized key names)`,
+                },
+            };
+        }
+        // 键名域外 ⇒ 可能本就是点击意图（'press the big red button' 且词法零重合）
+        // —— 语义托举仍可能找到落点，deliberable
+        return { grounding: { reason: `motor-reflex refused: ${r.reason}`, focus: 'full-scene' }, deliberable: true };
+    }
+    /** 词法领先扫描（反射弧与运动弧的共用件）：token 集 × 场景元素，
+     *  最优严格领先才匹配 —— 平票/零重合 ⇒ 无匹配（绝不掷硬币）。 */
+    lexicalLead(intentTokens, scene) {
         let best = null;
         let second = 0;
         let total = 0;
-        for (const patch of ctx.scene) {
+        for (const patch of scene) {
             for (const el of patch.elements) {
                 total += 1;
                 const score = tokenize(el.name).filter(t => intentTokens.has(t)).length;
@@ -408,23 +507,40 @@ export class ReflexiveDecisionStation {
                 }
             }
         }
-        if (!best || best.score === 0) {
+        if (!best || best.score === 0)
+            return { match: null, second, total };
+        if (best.score === second)
+            return { match: null, second, total }; // 平票 ⇒ 歧义交上层
+        return { match: best, second, total };
+    }
+    /** 脊髓反射弧（Tier 1）：动作 / 接地 + 前额叶可否接手（压制路径外独立计算） */
+    reflexArc(ctx) {
+        const intentTokens = new Set(tokenize(ctx.intent.description));
+        if (intentTokens.size === 0) {
             return {
-                grounding: { reason: `no reflex arc: none of ${total} scene elements match intent tokens`, focus: 'full-scene' },
-                deliberable: true, // 词汇零重合 ≠ 语义零相关 —— 前额叶的零样本泛化可能命中
+                grounding: { reason: 'intent has no recognizable tokens — no reflex arc', focus: 'full-scene' },
+                deliberable: false, // 零 token 意图连语义锚也没有 —— 仿真同样无米下锅
             };
         }
-        if (best.score === second) {
+        const { match, second, total } = this.lexicalLead(intentTokens, ctx.scene);
+        if (!match) {
+            if (second === 0 && total > 0 && intentTokens.size > 0) {
+                // 全零重合（second===0 且 best.score===0 被 lexicalLead 判无匹配）
+                return {
+                    grounding: { reason: `no reflex arc: none of ${total} scene elements match intent tokens`, focus: 'full-scene' },
+                    deliberable: true, // 词汇零重合 ≠ 语义零相关 —— 前额叶的零样本泛化可能命中
+                };
+            }
             return {
-                grounding: { reason: `reflex ambiguous: top candidates tie at score ${best.score} — grounding`, focus: 'full-scene' },
+                grounding: { reason: `reflex ambiguous: top candidates tie at score ${second} — grounding`, focus: 'full-scene' },
                 deliberable: true, // 平票 ⇒ 知识证据是唯一合法的破局者
             };
         }
         return {
             action: {
                 kind: 'click_mouse',
-                args: { x: Math.round(best.cx * 10000) / 10000, y: Math.round(best.cy * 10000) / 10000 },
-                rationale: `reflex: '${best.name}' matched intent (overlap=${best.score}, best of ${total})`,
+                args: { x: Math.round(match.cx * 10000) / 10000, y: Math.round(match.cy * 10000) / 10000 },
+                rationale: `reflex: '${match.name}' matched intent (overlap=${match.score}, best of ${total})`,
             },
         };
     }
@@ -451,7 +567,11 @@ export class ReflexiveDecisionStation {
         const fragments = ctx.knowledgeContext?.fragments;
         if (!fragments || fragments.length === 0)
             return null; // 无证据 ⇒ 无仿真（诚实降级）
-        const intentTokens = new Set(tokenize(ctx.intent.description));
+        // X 纪元（载荷剥夺）：运动类意图的词法通道用残差 token —— 引号内的
+        // 载荷词不参加落点选举（与运动弧同律）；语义通道仍用完整意图（证据
+        // 经济学不因词法纪律而失明）。
+        const motorClass = classifyMotor(ctx.intent.description);
+        const intentTokens = new Set(motorClass ? residueTokens(ctx.intent.description) : tokenize(ctx.intent.description));
         const intentVec = embed(ctx.intent.description);
         const fragmentVecs = fragments.map(f => embed(f.content));
         let best = null;
