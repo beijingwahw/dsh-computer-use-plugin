@@ -3,16 +3,9 @@
 //   read_text  — 区域文字读取：文本替代截图，Token 数量级下降
 //   find_text  — 文字→坐标定位：带文字标签的元素获得精确 ground truth，
 //                彻底消灭「按按钮文字估坐标」的幻觉源
+// 本轮接线：OCR 双路径 —— D-5 服务端 L2（RapidOCR）优先，tesseract.js 兜底。
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { getSharp } from '../_legacyDeps.js';
-import { system } from '../system.js';
-import { readText } from '../textReader.js';
-/** 截一张无叠加层的干净屏（OCR 不受网格线干扰），降采样到 OCR 友好宽度 */
-async function cleanShot() {
-    const raw = await system.captureScreen();
-    const sharp = await getSharp();
-    return sharp(raw).resize(1600).jpeg({ quality: 85 }).toBuffer();
-}
+import { readTextAny } from '../textReader.js';
 export function createReadTextTool(config) {
     return defineTool({
         name: 'read_text',
@@ -30,9 +23,6 @@ export function createReadTextTool(config) {
         },
         async execute(args) {
             try {
-                const shot = await cleanShot();
-                let target = shot;
-                let cropNote = 'full_screen';
                 // J 纪元修正：单坐标（只传 x 或只传 y）不再被静默忽略 —— 参数语义
                 // 是"区域中心"，半指定即无意义；诚实报错好过全屏兜底（调用方以为
                 // 读的是局部，拿到的是全屏）。
@@ -40,27 +30,22 @@ export function createReadTextTool(config) {
                     !(typeof args.x === 'number' && typeof args.y === 'number')) {
                     return `[Error]: Region requires BOTH x and y (got x=${JSON.stringify(args.x)}, y=${JSON.stringify(args.y)}). Omit both for a full-screen read.`;
                 }
+                let region;
+                let cropNote = 'full_screen';
                 if (typeof args.x === 'number' && typeof args.y === 'number') {
                     const half = args.half_size ?? 0.25;
                     if (args.x < 0 || args.x > 1 || args.y < 0 || args.y > 1 || half <= 0 || half > 0.5) {
                         return `[Error]: Invalid region. x/y in 0.0-1.0, half_size in (0, 0.5].`;
                     }
-                    const sharp = await getSharp();
-                    const meta = await sharp(shot).metadata();
-                    const W = meta.width, H = meta.height;
-                    // 双侧夹取（与 zoomInspect 同律）：x-half < 0 时 left 归 0，但宽度必须
-                    // 同时以 x+half 为右界 —— 否则边缘区域实际读取范围比声明的大（漂移 bug）
-                    const left = Math.max(0, Math.round((args.x - half) * W));
-                    const top = Math.max(0, Math.round((args.y - half) * H));
-                    const right = Math.min(W, Math.round((args.x + half) * W));
-                    const bottom = Math.min(H, Math.round((args.y + half) * H));
-                    const width = Math.max(1, right - left);
-                    const height = Math.max(1, bottom - top);
-                    // 区域裁剪 + 放大：OCR 对小文字的准确率关键
-                    target = await sharp(shot).extract({ left, top, width, height }).resize(1400).toBuffer();
+                    // 双侧夹取（与 zoomInspect 同律）：越界侧归边，另一侧以 x±half 为界
+                    const x0 = Math.max(0, args.x - half);
+                    const y0 = Math.max(0, args.y - half);
+                    const x1 = Math.min(1, args.x + half);
+                    const y1 = Math.min(1, args.y + half);
+                    region = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
                     cropNote = `region_center=(${args.x}, ${args.y}) half=${half}`;
                 }
-                const { text } = await readText(target, config.ocrLang);
+                const { text } = await readTextAny(region, config.ocrLang);
                 const clean = text.replace(/\n{3,}/g, '\n\n').trim();
                 if (!clean) {
                     return JSON.stringify({
@@ -82,7 +67,7 @@ export function createReadTextTool(config) {
                 }, null, 2);
             }
             catch (error) {
-                return `[Error]: OCR failed (${error.message}). The language pack may need to be downloaded on first use; check network, or fall back to take_screenshot.`;
+                return `[Error]: OCR failed (${error.message}). The OCR engine may be unavailable (rapidocr for the service path, tesseract.js for the legacy path); fall back to take_screenshot.`;
             }
         },
     });
@@ -105,8 +90,7 @@ export function createFindTextTool(config) {
         },
         async execute(args) {
             try {
-                const shot = await cleanShot();
-                const { words } = await readText(shot, config.ocrLang);
+                const { words } = await readTextAny(undefined, config.ocrLang);
                 const needle = args.keyword.toLowerCase().trim();
                 const hits = words.filter(w => w.text.toLowerCase().includes(needle));
                 if (hits.length === 0) {

@@ -26,7 +26,7 @@ export function buildAllTools(config) {
         createTakeScreenshotTool(config),
         createClickMouseTool(config),
         createTypeTextTool(config),
-        createScrollPageTool(),
+        createScrollPageTool(config),
         createPressHotkeyTool(),
         createDragMouseTool(config),
         // 突破四：二阶段精定位（coarse -> zoom -> precise）

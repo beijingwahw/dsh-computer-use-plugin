@@ -10,6 +10,26 @@ import { skillLibrary } from '../skillLibrary.js';
 import { failureMemory } from '../failureMemory.js';
 import { journal } from '../journal.js';
 import { replayOne } from './replayActions.js';
+import * as backend from '../physicalBackend.js';
+import { normalizeHash, similarity } from '../perceptualHash.js';
+// ─── Y-7 技能后置条件（Epoch Y：可靠度回写从「Actor 说了算」到「场景作证」）───
+//
+// 数学：技能归纳时记录离场指纹 H_exit（终态世界的 dhash）；run_skill 完毕
+// 取当前指纹 H_now，verified ⇔ sim(H_exit, H_now) ≥ τ（UI 含时钟等微变，
+// dhash 对此鲁棒故阈值取 0.75 而非 0.95）。回写策略：仅 verified 的成功
+// 记 successCount；未验证的成功只记 attemptCount 并在锚点声明「未经场景
+// 作证」—— 技能的可靠度从此是世界盖戳的量，不是自我报告的量。
+export const POSTCONDITION_THRESHOLD = 0.75;
+export function judgePostcondition(exitHash, currentHash, threshold = POSTCONDITION_THRESHOLD) {
+    if (!exitHash)
+        return { verified: false, similarity: null, reason: 'no-exit-fingerprint' };
+    if (!currentHash)
+        return { verified: false, similarity: null, reason: 'hash-unavailable' };
+    const sim = similarity(normalizeHash(exitHash), normalizeHash(currentHash));
+    return sim >= threshold
+        ? { verified: true, similarity: Math.round(sim * 1000) / 1000, reason: 'verified' }
+        : { verified: false, similarity: Math.round(sim * 1000) / 1000, reason: 'below-threshold' };
+}
 import { sleep } from '../actionVerifier.js';
 import { contextManager } from '../contextManager.js';
 export function createSaveSkillTool() {
@@ -47,9 +67,21 @@ export function createSaveSkillTool() {
             if (!skill) {
                 return `[Error]: Skill library is disabled (enableSkillLibrary=false).`;
             }
+            // Y-7 后置条件：离场指纹随卡入库（run_skill 的世界级验收基准）
+            let exitNote = '';
+            try {
+                const cap = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
+                if (cap.dhash) {
+                    skill.exitFingerprint = cap.dhash;
+                    exitNote = ' [exit fingerprint recorded]';
+                }
+            }
+            catch {
+                exitNote = '';
+            }
             const dup = skill.successCount > 1 ? ' (existing skill reinforced)' : '';
             return `[System]: Skill #${skill.id} "${skill.name}" saved with ${skill.steps.length} step(s)${dup}. ` +
-                `Reliability ${skill.successCount}/${skill.attemptCount}. Reuse via match_skill + run_skill.`;
+                `Reliability ${skill.successCount}/${skill.attemptCount}.${exitNote} Reuse via match_skill + run_skill.`;
         },
     });
 }
@@ -176,14 +208,38 @@ export function createRunSkillTool(config) {
                 await sleep(150);
             }
             const success = failed === 0;
-            skillLibrary.recordOutcome(skill.id, success);
+            // ── Y-7 后置条件验收：终态指纹 vs 离场指纹 ──
+            let post = { verified: false, similarity: null, reason: 'hash-unavailable' };
+            try {
+                const cap = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
+                post = judgePostcondition(skill.exitFingerprint, cap.dhash ?? null);
+            }
+            catch { /* 指纹不可得：reason 已是 hash-unavailable */ }
+            // 回写策略：verified 成功才入 successCount（世界盖戳）；未验证只记尝试
+            if (success && post.verified) {
+                skillLibrary.recordOutcome(skill.id, true);
+            }
+            else if (success) {
+                skillLibrary.recordOutcome(skill.id, false);
+            }
+            else {
+                skillLibrary.recordOutcome(skill.id, false);
+            }
             return JSON.stringify({
-                status: success ? 'SUCCESS' : 'PARTIAL_FAILURE',
+                status: success ? (post.verified ? 'SUCCESS' : 'SUCCESS_UNVERIFIED') : 'PARTIAL_FAILURE',
                 state_anchor: {
                     skill: `#${skill.id} "${skill.name}"`,
                     steps_total: skill.steps.length,
                     steps_failed: failed,
                     reliability_now: `${skill.successCount}/${skill.attemptCount}`,
+                    postcondition: {
+                        verified: post.verified,
+                        final_scene_similarity: post.similarity,
+                        reason: post.reason,
+                        note: post.verified
+                            ? 'final scene matches the exit fingerprint recorded at skill-creation time'
+                            : 'reliability NOT credited — the final scene diverges from the recorded exit state (UI may have changed, or the macro ran in a different context)',
+                    },
                 },
                 execution_log: log.join('\n'),
                 next_step: success

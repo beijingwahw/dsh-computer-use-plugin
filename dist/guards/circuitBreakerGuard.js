@@ -121,26 +121,40 @@ const BREAKER_WINDOW = 20; // 滚动窗容量（后验臂的证据上限）
 const BREAKER_MIN_WINDOW = 8; // 最小判决样本（先验不越数据）
 const BREAKER_TRIP_MASS = 0.95; // 后验质量阈值（误熔断率 ≈ 5%）
 export function registerCircuitBreakerGuard(ctx, maxFailures) {
-    let recentFailures = 0;
-    // R-3：滚动窗（true=失败）—— 交替成败的证据在此累积，连续计数看不见它们
-    const window = [];
+    const MAX_TRACKED_SESSIONS = 16;
+    const bySession = new Map();
+    const stateFor = (sessionId) => {
+        const key = sessionId ?? '_anon';
+        let s = bySession.get(key);
+        if (!s) {
+            if (bySession.size >= MAX_TRACKED_SESSIONS) {
+                const oldest = bySession.keys().next().value;
+                if (oldest !== undefined)
+                    bySession.delete(oldest);
+            }
+            s = { recentFailures: 0, window: [] };
+            bySession.set(key, s);
+        }
+        return s;
+    };
     // 1. 执行前：连续失败达到阈值 -> 熔断一轮（重置计数器 = 强制冷静后还给机会，而非永久锁死）
     onToolPre(ctx, async (toolCall, next) => {
+        const st = stateFor(toolCall.sessionId);
         // R-3 后验臂：交替成败型坏路线（连续计数永不满足）的熔断判决
-        const f = window.filter(Boolean).length;
-        const suc = window.length - f;
-        const tripMass = window.length >= BREAKER_MIN_WINDOW
+        const f = st.window.filter(Boolean).length;
+        const suc = st.window.length - f;
+        const tripMass = st.window.length >= BREAKER_MIN_WINDOW
             ? posteriorTripProbability(f, suc)
             : 0;
         const posteriorTrip = tripMass >= BREAKER_TRIP_MASS;
-        if (recentFailures >= maxFailures || posteriorTrip) {
+        if (st.recentFailures >= maxFailures || posteriorTrip) {
             // 聚合症状补记一条：这批连续失败已被熔断，match_skill 检索时会作为强负向信号
             rememberFailure(toolCall.name, toolCall.args, `circuit-breaker: ${maxFailures} consecutive failures triggered a forced pause`);
-            recentFailures = 0;
+            st.recentFailures = 0;
             const why = posteriorTrip
-                ? `posterior arm: P(failure rate > 50% | last ${window.length} calls) = ${tripMass} ≥ 0.95 (flaky-broken route)`
+                ? `posterior arm: P(failure rate > 50% | last ${st.window.length} calls) = ${tripMass} ≥ 0.95 (flaky-broken route)`
                 : `${maxFailures} consecutive failures`;
-            window.length = 0; // 熔断即冷静：窗口清空（强制冷静后还给机会）
+            st.window.length = 0; // 熔断即冷静：窗口清空（强制冷静后还给机会）
             // U 纪元（U-3）：守卫裁决入链 —— 拦截即防篡改存证（proof 器官闭环到守卫层：
             // 每次拦截都是可被 MMR 证明的历史事实，事后不可抵赖）
             void journal.appendMarker({ kind: 'GUARD_BLOCKED', guard: 'circuit-breaker', reason: posteriorTrip ? 'posterior' : 'consecutive' }).catch(() => { });
@@ -153,17 +167,18 @@ export function registerCircuitBreakerGuard(ctx, maxFailures) {
     //    第 1/2 次失败注入递进式恢复提示（waterfall 允许改写透传值）
     onToolPost(ctx, async (toolCall, result, next) => {
         if (typeof result === 'string') {
+            const st = stateFor(toolCall.sessionId);
             const c = classifyResult(result);
-            window.push(isFailure(c));
-            if (window.length > BREAKER_WINDOW)
-                window.shift();
+            st.window.push(isFailure(c));
+            if (st.window.length > BREAKER_WINDOW)
+                st.window.shift();
             if (isFailure(c)) {
-                recentFailures++;
+                st.recentFailures++;
                 // 失败即时入记忆：下一次 match_skill 即可召回「这条路走不通」
                 rememberFailure(toolCall.name, toolCall.args, extractSymptom(result));
                 // 递进式恢复策略：第一次失败教「放大精定位」，第二次教「换模态」
-                if (recentFailures === 1 || recentFailures === 2) {
-                    const hint = recentFailures === 1
+                if (st.recentFailures === 1 || st.recentFailures === 2) {
+                    const hint = st.recentFailures === 1
                         ? "Recovery hint: call 'zoom_inspect' around the target to refine coordinates before retrying."
                         : 'Recovery hint: switch modality — try keyboard navigation via press_hotkey (tab/enter), ' +
                             "or scroll_page if the target may be off-screen. Also try recall_ui for remembered locations.";
@@ -171,7 +186,7 @@ export function registerCircuitBreakerGuard(ctx, maxFailures) {
                 }
             }
             else if (isSuccess(c)) {
-                recentFailures = 0; // 成功即重置
+                st.recentFailures = 0; // 成功即重置
             }
         }
         return next(result); // 必须把 result 透传给下一个

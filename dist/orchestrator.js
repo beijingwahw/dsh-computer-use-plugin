@@ -2,7 +2,7 @@
 // Planner-Actor 编排引擎。原版即干净可用，核心协议原样保留：
 //   Actor 状态协议([SUCCESS]/[FAILED]) + fail-fast 短路 + 完整执行轨迹汇总。
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。
-import { planTasks } from './planner.js';
+import { planTasks, topoSortSubTasks } from './planner.js';
 // Actor 人格纪律（来自「Actor 纪元」地层）：四步 ReAct 含独立的「排雷」步骤；
 // 状态协议与 orchestrator 的 includes 嗅探隔着抽象层握手；反越权负面禁令锁死职责边界。
 export const ACTOR_SYSTEM_PROMPT = `
@@ -62,8 +62,13 @@ export function createActor(deps = {}) {
             return `[FAILED] agents service fault: ${e?.message ?? 'unknown'}`;
         }
         // S-3：技能通道可用性探测（匹配在场即可，不执行）
+        // Y6 真机战果：旧判据只看 reliability>0.5 —— 一个"曾经成功过"但与子任务
+        // 毫无文本/语义关联的技能（如 53 步的记事本宏顶替"关闭窗口"子任务）也
+        // 能入列并整体重放。score 是 skillLibrary.match 的综合匹配分（文本相似
+        // 为主 + 可靠度加成），低于 0.45 视为不相关 —— 可靠不等于相关。
+        const skillViable = (m) => m.reliability > 0.5 && (m.score ?? 1) > 0.45 && m.steps.length > 0;
         const skillMatch = deps.matchSkill?.(task) ?? [];
-        const bestSkill = skillMatch.find(m => m.reliability > 0.5 && m.steps.length > 0);
+        const bestSkill = skillMatch.find(skillViable);
         const bothViable = !!agentsRun && !!bestSkill;
         // Hedge 仲裁：双通道在场才比较权重；否则唯一通道直走（零回归）
         if (agentsRun && (!bothViable || preferAgents())) {
@@ -81,7 +86,7 @@ export function createActor(deps = {}) {
         }
         // ② 技能重放回退 / S-3 Hedge 接管：可靠度 > 0.5 的最佳匹配
         //（Laplace 0/0=0.5 不入场 —— 需真实验证背书）
-        const best = bestSkill ?? (deps.matchSkill?.(task) ?? []).find(m => m.reliability > 0.5 && m.steps.length > 0);
+        const best = bestSkill ?? (deps.matchSkill?.(task) ?? []).find(skillViable);
         if (best) {
             let failed = 0;
             for (const step of best.steps) {
@@ -108,9 +113,15 @@ export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs) {
     if (subTasks.length === 0) {
         return '[Planner] 未能生成任务计划（检查 llm 服务与提示词），任务未执行。';
     }
+    // Y-9 依赖 DAG：拓扑排序定执行序；环 ⇒ 拒绝执行（诚实上报，不静默截断）
+    const topo = topoSortSubTasks(subTasks);
+    if (topo.cycle) {
+        return `[Planner] 子任务依赖图含环（tasks ${topo.cyclicIds.join(', ')}）——拒绝执行。请重新拆解并声明无环依赖。`;
+    }
+    const orderedSubTasks = topo.order;
     const results = [];
     // 2. 循环执行子任务
-    for (const task of subTasks) {
+    for (const task of orderedSubTasks) {
         // 预算感知：在子任务边界检查时钟 —— 长任务的优雅降级，而非无限烧钱
         if (timeBudgetMs && Date.now() - startAt > timeBudgetMs) {
             const elapsed = Math.round((Date.now() - startAt) / 1000);

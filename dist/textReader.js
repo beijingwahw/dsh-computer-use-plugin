@@ -5,12 +5,12 @@
 //   1. find_text：文字 → 精确坐标（带文字标签的元素不再靠坐标估算）
 //   2. read_text：区域文字读取（用文本替代截图，Token 数量级下降）
 //   3. semanticConfirm：动作后自动核对「预期文字是否出现」
-// 依赖 tesseract.js（语言数据首次使用时按需下载，故 enableOcr 默认关闭）。
 //
-// 批次 E 迁移：sharp / tesseract.js 不再作为 dependencies 强绑定，此处改为懒动态导入。
-// 推荐替代：D-5 微服务 adapter.getUiTree({ funnelCeiling: 'L2' })。
+// 双路径（本轮接线）：D-5 服务端 L2 OCR（RapidOCR，getUiTree）优先；
+// tesseract.js（懒动态导入）保留为 legacy 路径。enableOcr 语义不变。
 import { fuzzyIncludes } from './fuzzy.js';
 import { getSharp, getTesseract, } from './_legacyDeps.js';
+import * as backend from './physicalBackend.js';
 let workerPromise = null;
 let workerLang = '';
 async function getWorker(lang) {
@@ -45,6 +45,61 @@ export async function disposeOcr() {
     }
 }
 const normalize = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+// ─── D-5 服务端 L2 OCR 路径 ───
+/**
+ * 服务端 L2 OCR 可用性探测缓存。失败只做**限时负缓存**（60s）—— 引擎可能
+ * 随部署修复/依赖安装恢复，一次失败锁死整个会话会把语义验证层饿死。
+ */
+const OCR_RETRY_MS = 60000;
+let serverOcrFailedAt = 0;
+async function readScreenTextServer(region) {
+    if (Date.now() - serverOcrFailedAt < OCR_RETRY_MS)
+        return null;
+    let tree;
+    try {
+        tree = await backend.getUiTree({ source: 'ocr', region, funnelCeiling: 'L2' });
+    }
+    catch {
+        serverOcrFailedAt = Date.now();
+        return null;
+    }
+    if (tree.funnel_depth === 'empty' && tree.fault) {
+        // L2 引擎缺席/出错 —— 限时负缓存后降级（不锁死）
+        serverOcrFailedAt = Date.now();
+        return null;
+    }
+    serverOcrFailedAt = 0;
+    const words = tree.elements
+        .filter(el => el.source === 'L2-ocr')
+        .map(el => ({
+        text: el.name,
+        // 服务端已按 score≥0.5 过滤；这里给固定置信度（词级分数未跨线传）
+        confidence: 90,
+        bbox_normalized: {
+            x0: el.rect.x, y0: el.rect.y,
+            x1: el.rect.x + el.rect.width, y1: el.rect.y + el.rect.height,
+        },
+        center_normalized: {
+            x: el.rect.x + el.rect.width / 2,
+            y: el.rect.y + el.rect.height / 2,
+        },
+    }));
+    return { text: words.map(w => w.text).join(' '), words };
+}
+/**
+ * 双路径区域读取：服务端 L2 优先 → legacy tesseract（buffer+sharp）→ 抛错。
+ * region 缺省 = 全屏。
+ */
+export async function readTextAny(region, lang = 'eng') {
+    // 1) 服务端 L2
+    const server = await readScreenTextServer(region);
+    if (server)
+        return server;
+    // 2) legacy：tesseract.js + sharp（开发仓 / DSH_FORCE_LEGACY_SYSTEM）
+    const buf = await backend.captureCleanPng(region);
+    return readText(buf, lang);
+}
+/** legacy 路径：tesseract.js 识别既有 buffer（开发/测试路径，需 sharp+tesseract） */
 export async function readText(buffer, lang = 'eng') {
     const worker = await getWorker(lang);
     const { data } = await worker.recognize(buffer);
@@ -71,24 +126,40 @@ export async function readText(buffer, lang = 'eng') {
 /**
  * 语义核对：在动作点邻域内 OCR，检查预期文字是否出现。
  * 大小写/空白不敏感的包含匹配。任何失败返回 null（调用方降级为 ocr-unavailable）。
+ * fullBuf 在 D-5 路径下可为 null（服务端 OCR 直接读屏，无需本地解码）。
  */
 export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected, lang = 'eng') {
     try {
-        const sharp = await getSharp();
-        const meta = await sharp(fullBuf).metadata();
-        const W = meta.width, H = meta.height;
-        const left = Math.max(0, Math.round((cxPct - radiusPct) * W));
-        const top = Math.max(0, Math.round((cyPct - radiusPct) * H));
-        const width = Math.min(W - left, Math.round(radiusPct * 2 * W));
-        const height = Math.min(H - top, Math.round(radiusPct * 2 * H));
-        if (width < 8 || height < 8)
+        const left = Math.max(0, cxPct - radiusPct);
+        const top = Math.max(0, cyPct - radiusPct);
+        const width = Math.min(1 - left, radiusPct * 2);
+        const height = Math.min(1 - top, radiusPct * 2);
+        if (width < 0.005 || height < 0.005)
             return null;
-        // 放大到 1200 宽再识别：小区域文字的准确率关键
-        const crop = await sharp(fullBuf)
-            .extract({ left, top, width, height })
-            .resize(1200)
-            .toBuffer();
-        const { text } = await readText(crop, lang);
+        const region = { x: left, y: top, width, height };
+        let text;
+        const server = await readScreenTextServer(region);
+        if (server) {
+            text = server.text;
+        }
+        else if (fullBuf && fullBuf.length > 0) {
+            // legacy 放大路径：区域裁剪 + resize 1200（小字命中率关键）
+            const sharp = await getSharp();
+            const meta = await sharp(fullBuf).metadata();
+            const W = meta.width, H = meta.height;
+            const pxLeft = Math.round(left * W);
+            const pxTop = Math.round(top * H);
+            const pxW = Math.max(1, Math.round(width * W));
+            const pxH = Math.max(1, Math.round(height * H));
+            const crop = await sharp(fullBuf)
+                .extract({ left: pxLeft, top: pxTop, width: pxW, height: pxH })
+                .resize(1200)
+                .toBuffer();
+            text = (await readText(crop, lang)).text;
+        }
+        else {
+            return null;
+        }
         const hay = normalize(text);
         const needle = normalize(expected);
         // R 纪元（R-1 模糊层）：OCR 容错判决 —— 逐字节 includes 在真机 OCR 上必然
