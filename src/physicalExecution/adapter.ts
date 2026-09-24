@@ -225,11 +225,95 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     format?: 'png' | 'jpeg';
     quality?: number;
     region?: { x: number; y: number; width: number; height: number };
+    overlay?: Record<string, unknown>;
+    maxWidth?: number;
+    upscale?: number;
+    wantHashes?: boolean;
+    wantRegionHash?: { x: number; y: number; r: number };
+    gate?: { dhashRef: string; distance: number };
+    keepFrame?: boolean;
+    metaOnly?: boolean;
+    wantSalience?: boolean;
   }): Promise<Result<ScreenshotResult, PhysicalError>> {
     return this.call('/take_screenshot', {
       format: args?.format ?? 'png',
       quality: args?.quality,
       region: args?.region,
+      overlay: args?.overlay ?? null,
+      max_width: args?.maxWidth ?? null,
+      upscale: args?.upscale ?? null,
+      want_hashes: args?.wantHashes ?? false,
+      want_region_hash: args?.wantRegionHash ?? null,
+      gate: args?.gate ?? null,
+      keep_frame: args?.keepFrame ?? false,
+      meta_only: args?.metaOnly ?? false,
+      want_salience: args?.wantSalience ?? false,
+    });
+  }
+
+  /** 感知辅助（D-1 工具层接线）：当前鼠标位置（全屏像素） */
+  async getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>> {
+    return this.callGet('/cursor');
+  }
+
+  /** 感知辅助：显示器清单（全屏虚拟坐标系） */
+  async getDisplays(): Promise<Result<{
+    displays: Array<{ name: string; x: number; y: number; width: number; height: number; primary?: boolean }>;
+  }, PhysicalError>> {
+    return this.callGet('/displays');
+  }
+
+  /** GET 版 call —— 只读感知端点（/cursor /displays）复用同一鉴权与信封解析 */
+  private async callGet<T>(path: string): Promise<Result<T, PhysicalError>> {
+    if (!this.state) {
+      return {
+        ok: false,
+        error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+      };
+    }
+    if (this.state.config.enableAuth !== false && !this.state.key) {
+      await this.init();
+    }
+    const result = await microFetch<T>(this.state.httpClientConfig, path, { method: 'GET' });
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+    const resp = result.response as any;
+    if (resp.status === 'failure') {
+      return {
+        ok: false,
+        error: { kind: resp.error.kind as PhysicalErrorKind, detail: resp.error.detail },
+      };
+    }
+    return { ok: true, value: resp.data as T };
+  }
+
+  /** 感知辅助：缓存帧区域统计（物理规则 / popup 几何传感的躯体） */
+  async frameStats(frameId: number, regions: Array<{
+    x: number; y: number; width: number; height: number;
+  }>): Promise<Result<{ frame_id: number; stats: Array<{ mean: number | null; stdev: number | null }> }, PhysicalError>> {
+    return this.call('/frame_stats', { frame_id: frameId, regions });
+  }
+
+  /** 感知辅助：缓存帧行亮度序列（内容平移检测） */
+  async frameRowmeans(frameId: number, grid?: number): Promise<Result<{
+    frame_id: number; rows: number[];
+  }, PhysicalError>> {
+    return this.call('/frame_rowmeans', { frame_id: frameId, grid: grid ?? 64 });
+  }
+
+  /** 感知辅助：两缓存帧差分 → 变化区域清单 + 可选红框标注 JPEG(base64) */
+  async frameDiff(args: {
+    frameA: number; frameB: number; block?: number; annotate?: boolean;
+  }): Promise<Result<{
+    frame_a: number; frame_b: number;
+    changed_regions: Array<{ x: number; y: number; width: number; height: number }>;
+    region_count: number; block_threshold: number;
+    annotated_image_base64?: string;
+  }, PhysicalError>> {
+    return this.call('/frame_diff', {
+      frame_a: args.frameA, frame_b: args.frameB,
+      block: args.block ?? 24, annotate: args.annotate ?? false,
     });
   }
 

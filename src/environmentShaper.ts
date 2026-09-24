@@ -50,6 +50,8 @@ export interface ShaperResult {
   ok: boolean;
   /** 失败必有原因 —— 与 toolOk/toolErr 的反幻觉锚点同款纪律 */
   reason?: string;
+  /** Y6：窗口动作实际命中的窗口标题（switch_window 的 focus_handoff 取证源） */
+  matchedTitle?: string;
 }
 
 /**
@@ -70,6 +72,8 @@ export interface UndoRecipe {
    */
   before?: { x?: number; y?: number; width?: number; height?: number; maximized?: boolean; level?: number; theme?: string };
   titleHint?: string;
+  /** Y6：窗口动作实际命中的标题（Get-Process MainWindowTitle 原文） */
+  matchedTitle?: string;
 }
 
 export interface UndoRecord {
@@ -339,12 +343,15 @@ export class WindowsAdapter implements SystemAdapter {
     }
   }
 
-  /** 按标题关键词找主窗口句柄（0 = 未命中） */
-  private async hwndOf(hint: string): Promise<number> {
-    const script = `(Get-Process | Where-Object { $_.MainWindowTitle -like '*' + ${psLiteral(hint)} + '*' } | Select-Object -First 1).MainWindowHandle`;
+  /** 按标题关键词找主窗口句柄（hwnd=0 = 未命中；title = 命中窗口标题原文） */
+  private async hwndOf(hint: string): Promise<{ hwnd: number; title: string }> {
+    // Y6：一次往返同时取句柄与标题 —— 标题是 focus_handoff 取证的原料
+    const script = `$p = Get-Process | Where-Object { $_.MainWindowTitle -like '*' + ${psLiteral(hint)} + '*' } | Select-Object -First 1; if ($p) { "$($p.MainWindowHandle)||$($p.MainWindowTitle)" } else { '0||' }`;
     const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, script]);
-    const hwnd = Number.parseInt(stdout.trim(), 10);
-    return Number.isFinite(hwnd) && hwnd > 0 ? hwnd : 0;
+    const [h, t] = stdout.trim().split('||');
+    const hwnd = Number.parseInt(h ?? '', 10);
+    if (Number.isFinite(hwnd) && hwnd > 0) return { hwnd, title: (t ?? '').trim() };
+    return { hwnd: 0, title: '' };
   }
 
   private async activate(hwnd: number): Promise<void> {
@@ -357,32 +364,33 @@ export class WindowsAdapter implements SystemAdapter {
     // apply({kind:'set_contrast'}) 从未可达（注入式测试的 exec 恒返 '4\n' 掩盖）。
     const needsWindow = action.kind !== 'set_contrast';
     const hint = action.titleHint ?? '';
-    const hwnd = needsWindow ? await this.hwndOf(hint) : 1;
-    if (needsWindow && hwnd === 0) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
+    const hit = needsWindow ? await this.hwndOf(hint) : { hwnd: 1, title: '' };
+    if (needsWindow && hit.hwnd === 0) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
     switch (action.kind) {
       case 'raise_window': {
-        await this.activate(hwnd);
-        return { kind: 'raise_window', titleHint: hint }; // z-order 不可逆：undo 为文档化 no-op
+        await this.activate(hit.hwnd);
+        // z-order 不可逆：undo 为文档化 no-op；matchedTitle 供 switch_window 取证
+        return { kind: 'raise_window', titleHint: hint, matchedTitle: hit.title };
       }
       case 'maximize_window': {
         const before = await this.getWindowGeometry(hint);
-        await this.activate(hwnd);
-        await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, 3) | Out-Null`]); // SW_MAXIMIZE
-        return { kind: 'maximize_window', titleHint: hint, before: before ?? undefined };
+        await this.activate(hit.hwnd);
+        await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hit.hwnd}, 3) | Out-Null`]); // SW_MAXIMIZE
+        return { kind: 'maximize_window', titleHint: hint, before: before ?? undefined, matchedTitle: hit.title };
       }
       case 'move_window': {
         if (typeof action.x !== 'number' || typeof action.y !== 'number') {
           throw new Error('move_window requires numeric x and y');
         }
         const before = await this.getWindowGeometry(hint);
-        await this.activate(hwnd);
+        await this.activate(hit.hwnd);
         // SWP_NOSIZE(0x1) | SWP_NOZORDER(0x4)：只移不改尺寸/层级
         await this.execFn(PS_EXE, [...PS_FLAGS,
-          `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`]);
-        return { kind: 'move_window', titleHint: hint, before: before ?? undefined };
+          `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hit.hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`]);
+        return { kind: 'move_window', titleHint: hint, before: before ?? undefined, matchedTitle: hit.title };
       }
       case 'set_zoom': {
-        await this.activate(hwnd); // 热键需要目标前台
+        await this.activate(hit.hwnd); // 热键需要目标前台
         const level = typeof action.level === 'number' ? action.level : 100;
         const presses = Math.max(0, Math.min(9, Math.round((level - 100) / 10)));
         const { system } = await import('./system');
@@ -408,7 +416,7 @@ export class WindowsAdapter implements SystemAdapter {
         return; // z-order 不可逆：文档化 no-op（撤销栈如实记录）
       case 'maximize_window':
       case 'move_window': {
-        const hwnd = await this.hwndOf(recipe.titleHint ?? '');
+        const { hwnd } = await this.hwndOf(recipe.titleHint ?? '');
         if (hwnd === 0) return; // 窗口已不存在：诚实 no-op
         const b = recipe.before;
         await this.activate(hwnd);
@@ -443,7 +451,7 @@ export class WindowsAdapter implements SystemAdapter {
 
   async getWindowGeometry(titleHint: string): Promise<WindowGeometry | null> {
     try {
-      const hwnd = await this.hwndOf(titleHint);
+      const { hwnd } = await this.hwndOf(titleHint);
       if (hwnd === 0) return null;
       const script = `${USER32_DECL}; $r = New-Object Win.U32+RECT; [Win.U32]::GetWindowRect([IntPtr]${hwnd}, [ref]$r) | Out-Null; $z = [Win.U32]::IsZoomed([IntPtr]${hwnd}); Write-Output ($($r.L.ToString()) + ',' + $($r.T.ToString()) + ',' + ($r.R - $r.L).ToString() + ',' + ($r.B - $r.T).ToString() + ',' + [int]$z)`;
       const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, script]);
@@ -585,7 +593,7 @@ class Shaper implements EnvironmentShaper {
       void journal.appendMarker({
         kind: 'ENV_SHAPED', action: `${action.kind}${action.titleHint ? ` "${action.titleHint}"` : ''}`,
       });
-      return { ok: true, token };
+      return { ok: true, token, matchedTitle: recipe.matchedTitle };
     } catch (e: any) {
       return { ok: false, reason: e.message };
     }

@@ -7,6 +7,23 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
 import { journal } from '../journal';
+import * as backend from '../physicalBackend';
+import { normalizeHash, hammingDistance } from '../perceptualHash';
+
+// ─── Y-6 重放场景门控（Epoch Y：宏从「盲目复读」升维为「带门控的执行」）───
+//
+// 数学：每步前后取全屏 dhash，汉明距离 ≤ deadStepDistance ⇒ 该步是「死步」
+// （重放的点击落在已变化的 UI 上，什么都没发生）。策略：死步即停（fail-fast）
+// —— 宏的后续步骤建立在死步的前提之上，继续只会制造连锁错误。与幂等重试
+// 的区别：这里重放的是「历史」，历史的前提已崩塌时诚实中止并报告分叉点。
+
+export const DEAD_STEP_DISTANCE = 1;
+
+/** 死步判决（纯函数 —— 测试的确定性事实源） */
+export function isDeadStep(hashBefore: string | null, hashAfter: string | null, deadDistance: number = DEAD_STEP_DISTANCE): boolean {
+  if (!hashBefore || !hashAfter) return false; // 证据缺席：不判死（放行）
+  return hammingDistance(normalizeHash(hashBefore), normalizeHash(hashAfter)) <= deadDistance;
+}
 import type { JournalEntry } from '../journal';
 import { sleep } from '../actionVerifier';
 import { toolOk, toolErr, toolActionRequired } from '../toolResult';
@@ -67,12 +84,43 @@ export function createReplayActionsTool(config: Config) {
       }
 
       const log: string[] = [];
-      for (const entry of steps) {
+      let halted: { index: number; tool: string } | null = null;
+      const gated = config.verifyActions && !config.dryRun;
+      for (let i = 0; i < steps.length; i++) {
+        const entry = steps[i];
+        // Y-6 场景门控：动作步前取指纹（观察型步骤无副作用，免门控开销）
+        const isActionStep = ['click_mouse', 'type_text', 'scroll_page', 'press_hotkey', 'drag_mouse'].includes(entry.tool);
+        const before = gated && isActionStep
+          ? await backend.captureProcessed({ metaOnly: true, wantHashes: true })
+          : null;
         const line = await replayOne(entry);
         log.push(`#${entry.ts} ${entry.tool}: ${line}`);
         await sleep(150); // 步间微歇，给 UI 响应时间
+        if (before?.dhash) {
+          const after = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
+          if (isDeadStep(before.dhash, after.dhash ?? null)) {
+            halted = { index: i, tool: entry.tool };
+            log.push(`  [GATE] step ${i} produced NO screen change — replay halted (the UI has diverged from the recorded scene)`);
+            break;
+          }
+        }
       }
 
+      if (halted) {
+        return JSON.stringify({
+          status: 'PARTIAL_FAILURE',
+          state_anchor: {
+            replayed_steps: halted.index,
+            total_steps: steps.length,
+            diverged_at_step: halted.index,
+            diverged_tool: halted.tool,
+            gate: 'per-step scene hash (dHash dead-step detection)',
+          },
+          execution_log: log.join('\n'),
+          next_step: 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
+            'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
+        }, null, 2);
+      }
       return toolOk(
         `Replayed ${steps.length} action(s).`,
         { replayed_steps: steps.length, detail: log },

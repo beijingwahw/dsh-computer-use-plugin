@@ -137,7 +137,7 @@ export interface DragResult {
 }
 
 export interface ScreenshotResult {
-  transport: 'shm' | 'mmap-file' | 'base64';
+  transport: 'shm' | 'mmap-file' | 'base64' | 'none';
   /** shm 模式：shm 对象名；mmap-file 模式：文件路径；base64 模式：空串 */
   name: string;
   size: number;
@@ -150,6 +150,27 @@ export interface ScreenshotResult {
   captured_at: number;
   /** 仅 base64 模式：内联图像字节 */
   image_base64: string;
+  /** ── D-1 工具层接线扩展（服务端计算，无原生图像依赖）── */
+  /** 干净帧（无叠加层）dHash —— 变化门控 / 前后对比 */
+  dhash?: string | null;
+  /** 干净帧 pHash（DCT 频谱第二指纹） */
+  phash?: string | null;
+  /** want_region_hash 请求的区域 dHash */
+  region_dhash?: string | null;
+  /** gate 命中（屏幕未变）—— 此时无图像句柄 */
+  unchanged?: boolean;
+  /** keep_frame 帧环 id（frame_stats / frame_diff 引用锚） */
+  frame_id?: number | null;
+  frame_count?: number;
+  /** Y-1/Y-2：块级梯度熵显著度（zones 热点区/blocks 网格熵/stats） */
+  salience?: SalienceMap | null;
+}
+
+/** 块级梯度熵显著度图（服务端 PIL 计算） */
+export interface SalienceMap {
+  zones: Array<{ x: number; y: number; width: number; height: number; entropy: number }>;
+  blocks: number[];
+  stats: { mean: number; std: number; max: number };
 }
 
 export interface UIElement {
@@ -229,6 +250,15 @@ export interface PhysicalExecutionAdapter {
     format?: 'png' | 'jpeg';
     quality?: number;
     region?: { x: number; y: number; width: number; height: number };
+    overlay?: Record<string, unknown>;
+    maxWidth?: number;
+    upscale?: number;
+    wantHashes?: boolean;
+    wantRegionHash?: { x: number; y: number; r: number };
+    gate?: { dhashRef: string; distance: number };
+    keepFrame?: boolean;
+    metaOnly?: boolean;
+    wantSalience?: boolean;
   }): Promise<Result<ScreenshotResult, PhysicalError>>;
   /** 截图并返回 RAII 资源句柄 —— 调用方无需自行管 readShm/releaseShm */
   takeScreenshotHandle(args?: {
@@ -243,6 +273,31 @@ export interface PhysicalExecutionAdapter {
   }): Promise<Result<UiTreeResult, PhysicalError>>;
   switchWindow(args: { keyword: string }):
     Promise<Result<SwitchWindowResult, PhysicalError>>;
+
+  // ─── 感知辅助端点（D-1 工具层接线 —— 只读，与截图同能力位）───
+  /** 当前鼠标位置（全屏像素）—— SoM 准星与多屏感知的数据源 */
+  getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>>;
+  /** 显示器清单（全屏虚拟坐标系） */
+  getDisplays(): Promise<Result<{
+    displays: Array<{ name: string; x: number; y: number; width: number; height: number; primary?: boolean }>;
+  }, PhysicalError>>;
+  /** 缓存帧区域统计（物理规则 / popup 几何传感的躯体） */
+  frameStats(frameId: number, regions: Array<{
+    x: number; y: number; width: number; height: number;
+  }>): Promise<Result<{ frame_id: number; stats: Array<{ mean: number | null; stdev: number | null }> }, PhysicalError>>;
+  /** 缓存帧行亮度序列（内容平移检测） */
+  frameRowmeans(frameId: number, grid?: number): Promise<Result<{
+    frame_id: number; rows: number[];
+  }, PhysicalError>>;
+  /** 两缓存帧差分 → 变化区域清单 + 可选红框标注 JPEG(base64) */
+  frameDiff(args: {
+    frameA: number; frameB: number; block?: number; annotate?: boolean;
+  }): Promise<Result<{
+    frame_a: number; frame_b: number;
+    changed_regions: Array<{ x: number; y: number; width: number; height: number }>;
+    region_count: number; block_threshold: number;
+    annotated_image_base64?: string;
+  }, PhysicalError>>;
 
   /** 显式释放 shm 对象（Node 端读完截图后调用） */
   releaseShm(name: string): Promise<Result<{ released: boolean }, PhysicalError>>;

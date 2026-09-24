@@ -32,6 +32,28 @@ from .errors import ErrorKind, PhysicalError
 
 WindowMethod = Literal["native", "hotkey_only", "unavailable"]
 
+# Y6：常见应用的窗口标题本地化别名（小写）。英文关键词在中文 Windows 上
+# 匹配不到本地化标题（"Calculator" vs "计算器"）—— 切窗先试原词，再试别名。
+WINDOW_TITLE_ALIASES: dict[str, list[str]] = {
+    "notepad": ["记事本"],
+    "calculator": ["计算器"],
+    "calc": ["计算器"],
+    "paint": ["画图", "绘图"],
+    "mspaint": ["画图", "绘图"],
+    "explorer": ["资源管理器", "文件资源管理器"],
+    "file explorer": ["资源管理器", "文件资源管理器"],
+    "edge": ["microsoft edge"],
+    "msedge": ["microsoft edge"],
+    "chrome": ["google chrome"],
+    "firefox": ["mozilla firefox"],
+    "word": ["microsoft word"],
+    "excel": ["microsoft excel"],
+    "记事本": ["notepad"],
+    "计算器": ["calculator"],
+    "画图": ["paint"],
+    "资源管理器": ["explorer", "file explorer"],
+}
+
 
 def escape_applescript(text: str) -> str:
     """AppleScript 字符串字面量转义（J 纪元：从内联修复提为可测纯函数）。
@@ -115,7 +137,14 @@ class WindowManager:
                     return await self._switch_windows(keyword)
                 elif self._backend == "wmctrl":
                     return await self._switch_linux_wmctrl(keyword)
-            except PhysicalError:
+            except PhysicalError as e:
+                # Y6 真机战果：ELEMENT_NOT_FOUND 是调用方关键词未命中（合法失败，
+                # 错误里带可用窗口清单供模型一轮自纠）—— 必须原样上抛。
+                # 旧实现把它当"原生不可用"一并触发 hotkey 永久降级：一个打错的
+                # 探测词（如 ZZZ-NOT-EXIST）就毒化服务余生，后续所有切窗盲降
+                # alt+tab。只有 WINDOW_UNAVAILABLE 这类后端缺席才允许降级。
+                if e.kind == ErrorKind.ELEMENT_NOT_FOUND:
+                    raise
                 # 原生失败 → 切到 hotkey 模式（永久降级，本会话不再尝试原生）
                 self._hotkey_fallback = True
             except Exception as e:  # noqa: BLE001
@@ -176,7 +205,16 @@ class WindowManager:
         return {"method": "native", "matched": result, "keyword": keyword}
 
     async def _switch_windows(self, keyword: str) -> dict:
-        """Windows：pygetwindow + SetForegroundWindow。"""
+        """Windows：pygetwindow + SetForegroundWindow。
+
+        Y6 真机战果三连修：
+          1. ``gw.getWindowsWithTitle`` 是**大小写敏感**子串匹配 —— 模型传
+             "todo-a" 匹配不到 "TODO-A"，改为自行枚举 + lower() 包含；
+          2. 英文关键词在中文 Windows 上必然落空（"Calculator" vs "计算器"），
+             加常见应用的本地化别名表，关键词与别名依次尝试；
+          3. 未命中时的错误信息附上当前全部可见窗口标题 —— 模型一轮自纠，
+             不再盲试 alt+tab。
+        """
         try:
             import pygetwindow as gw  # type: ignore[import-not-found]
         except ImportError as e:
@@ -186,17 +224,23 @@ class WindowManager:
             ) from e
 
         def _do_switch() -> str:
-            windows = gw.getWindowsWithTitle(keyword)
-            if not windows:
-                raise PhysicalError(
-                    ErrorKind.ELEMENT_NOT_FOUND,
-                    f"no window with title containing {keyword!r}",
-                )
-            win = windows[0]
-            if win.isMinimized:
-                win.restore()
-            win.activate()
-            return win.title
+            candidates = [keyword.strip().lower()] + [
+                alias for alias in WINDOW_TITLE_ALIASES.get(keyword.strip().lower(), [])
+            ]
+            windows = [w for w in gw.getAllWindows() if w.title.strip()]
+            for w in windows:
+                title_lower = w.title.lower()
+                if any(c and c in title_lower for c in candidates):
+                    if w.isMinimized:
+                        w.restore()
+                    w.activate()
+                    return w.title
+            titles = "; ".join(w.title[:40] for w in windows[:12]) or "(none)"
+            raise PhysicalError(
+                ErrorKind.ELEMENT_NOT_FOUND,
+                f"no window with title containing {keyword!r} (tried aliases: "
+                f"{candidates}). Visible windows: {titles}",
+            )
 
         loop = asyncio.get_running_loop()
         title = await loop.run_in_executor(None, _do_switch)

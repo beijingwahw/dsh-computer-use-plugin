@@ -7,8 +7,11 @@
 //   输入聚焦 ⇒ 光标邻域微变而大邻域静止
 // 每条规则 ≤30 行纯视觉启发式；规则表数据驱动注册，config 可裁剪（禁止硬编码红线）。
 // 这是从「被动检测变化」到「主动验证意图」的升维：验证器带着预期找证据。
-// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+//
+// 测量层双路径（本轮接线）：D-5 帧环 id（frame_stats/frame_rowmeans，服务端
+// PIL 统计）优先；sharp buffer 路径保留给 legacy/开发仓。区域坐标统一归一化。
 import { getSharp } from './_legacyDeps';
+import * as backend from './physicalBackend';
 
 /** 平移检测的缩放网格边长（8×8=64 行亮度签名）—— 与 dHash 网格维度同源 */
 const SHIFT_GRID = 64;
@@ -31,6 +34,9 @@ export interface IntentExpectation {
 export interface PhysicsContext {
   beforeBuf: Buffer;
   afterBuf: Buffer;
+  /** D-5 帧环 id（服务端统计路径）；缺席时回退 buffer+sharp 路径 */
+  beforeFrameId?: number | null;
+  afterFrameId?: number | null;
   /** 归一化动作点（无焦点时部分规则返回 not-applicable） */
   focus: { x: number; y: number } | null;
   regionRadius: number;
@@ -50,31 +56,74 @@ export interface PhysicsRule {
   check(ctx: PhysicsContext): Promise<PhysicsVerdict>;
 }
 
-// ─── 视觉度量原语（规则共用） ───
+// ─── 视觉度量原语（规则共用；双路径：服务端帧统计优先） ───
 
-/** 区域统计：均值（亮度）与标准差（细节丰富度/对比度） */
-async function regionStats(buf: Buffer, region: { left: number; top: number; width: number; height: number }) {
+interface NormRegion { x: number; y: number; width: number; height: number }
+
+/** 以归一化点为中心的归一化矩形（越界夹取） */
+function focusRegionNorm(x: number, y: number, radius: number): NormRegion {
+  const rx = Math.max(0.01, radius);
+  const ry = Math.max(0.01, radius);
+  return {
+    x: Math.max(0, x - rx), y: Math.max(0, y - ry),
+    width: Math.min(1, rx * 2), height: Math.min(1, ry * 2),
+  };
+}
+
+/** 区域统计（双路径）：frameId → 服务端 frame_stats；否则 buffer+sharp */
+async function regionStats(
+  ctx: PhysicsContext,
+  which: 'before' | 'after',
+  region: NormRegion,
+): Promise<{ mean: number; stdev: number }> {
+  const fid = which === 'before' ? ctx.beforeFrameId : ctx.afterFrameId;
+  if (fid != null) {
+    const s = await backend.frameStats(fid, [region]);
+    const st = s[0];
+    if (!st || st.mean == null || st.stdev == null) {
+      throw new Error(`frame_stats returned no data for frame ${fid}`);
+    }
+    return { mean: st.mean, stdev: st.stdev };
+  }
   const sharp = await getSharp();
-  const stats = await sharp(buf).extract(region).stats() as { channels: Array<{ mean: number; stdev: number }> };
+  const buf = which === 'before' ? ctx.beforeBuf : ctx.afterBuf;
+  const meta = await sharp(buf).metadata();
+  const W = meta.width!, H = meta.height!;
+  const px = {
+    left: Math.max(0, Math.min(W - 1, Math.round(region.x * W))),
+    top: Math.max(0, Math.min(H - 1, Math.round(region.y * H))),
+    width: Math.max(1, Math.round(region.width * W)),
+    height: Math.max(1, Math.round(region.height * H)),
+  };
+  const stats = await sharp(buf).extract(px).stats() as { channels: Array<{ mean: number; stdev: number }> };
   const mean = stats.channels.reduce((n: number, c: { mean: number }) => n + c.mean, 0) / stats.channels.length;
   const stdev = stats.channels.reduce((n: number, c: { stdev: number }) => n + c.stdev, 0) / stats.channels.length;
   return { mean, stdev };
 }
 
-/** 以归一化点为中心的像素裁剪框（越界夹取） */
-async function focusRegion(buf: Buffer, x: number, y: number, radius: number) {
+/** 行亮度序列（双路径）：frameId → 服务端 frame_rowmeans；否则 buffer+sharp */
+async function rowMeans(
+  ctx: PhysicsContext,
+  which: 'before' | 'after',
+  grid: number,
+): Promise<number[]> {
+  const fid = which === 'before' ? ctx.beforeFrameId : ctx.afterFrameId;
+  if (fid != null) {
+    return backend.frameRowmeans(fid, grid);
+  }
   const sharp = await getSharp();
-  const meta = await sharp(buf).metadata();
-  const W = meta.width!, H = meta.height!;
-  const rx = Math.max(8, Math.round(radius * W));
-  const ry = Math.max(8, Math.round(radius * H));
-  const left = Math.max(0, Math.round(x * W) - rx);
-  const top = Math.max(0, Math.round(y * H) - ry);
-  return {
-    left, top,
-    width: Math.min(W - left, rx * 2),
-    height: Math.min(H - top, ry * 2),
-  };
+  const buf = which === 'before' ? ctx.beforeBuf : ctx.afterBuf;
+  const res = await sharp(buf)
+    .grayscale().resize(grid, grid, { fit: 'fill' }).raw()
+    .toBuffer({ resolveWithObject: true });
+  const { data, info } = res as any;
+  const rows: number[] = [];
+  for (let y = 0; y < info.height; y++) {
+    let s = 0;
+    for (let x = 0; x < info.width; x++) s += data[y * info.width + x];
+    rows.push(s / info.width);
+  }
+  return rows;
 }
 
 // ─── 物理规则实现（每条编码一个物理直觉） ───
@@ -84,9 +133,9 @@ const toggleOn: PhysicsRule = {
   kind: 'toggle_on',
   async check(ctx) {
     if (!ctx.focus) return { satisfied: false, evidence: 'no focus point', notApplicable: true };
-    const r = await focusRegion(ctx.afterBuf, ctx.focus.x, ctx.focus.y, ctx.regionRadius);
+    const r = focusRegionNorm(ctx.focus.x, ctx.focus.y, ctx.regionRadius);
     const [before, after] = await Promise.all([
-      regionStats(ctx.beforeBuf, r), regionStats(ctx.afterBuf, r),
+      regionStats(ctx, 'before', r), regionStats(ctx, 'after', r),
     ]);
     const detailGain = after.stdev - before.stdev;
     return {
@@ -101,9 +150,9 @@ const toggleOff: PhysicsRule = {
   kind: 'toggle_off',
   async check(ctx) {
     if (!ctx.focus) return { satisfied: false, evidence: 'no focus point', notApplicable: true };
-    const r = await focusRegion(ctx.afterBuf, ctx.focus.x, ctx.focus.y, ctx.regionRadius);
+    const r = focusRegionNorm(ctx.focus.x, ctx.focus.y, ctx.regionRadius);
     const [before, after] = await Promise.all([
-      regionStats(ctx.beforeBuf, r), regionStats(ctx.afterBuf, r),
+      regionStats(ctx, 'before', r), regionStats(ctx, 'after', r),
     ]);
     const detailLoss = before.stdev - after.stdev;
     return {
@@ -119,20 +168,16 @@ const menuExpand: PhysicsRule = {
   kind: 'menu_expand',
   async check(ctx) {
     if (!ctx.focus) return { satisfied: false, evidence: 'no focus point', notApplicable: true };
-    const sharp = await getSharp();
-    const afterMeta = await sharp(ctx.afterBuf).metadata();
-    const W = afterMeta.width!, H = afterMeta.height!;
-    const cx = ctx.focus.x * W, cy = ctx.focus.y * H;
-    const depth = Math.max(8, Math.round(ctx.regionRadius * H * 2));
-    const left = Math.max(0, Math.round(cx - ctx.regionRadius * W));
-    const top = Math.min(H - 8, Math.round(cy + ctx.regionRadius * H * 0.3));
-    const region = {
-      left, top,
-      width: Math.min(W - left, Math.round(ctx.regionRadius * W * 2)),
-      height: Math.min(H - top, depth),
+    // 点击点下方带（跨 ~2×radius 的深度）
+    const left = Math.max(0, ctx.focus.x - ctx.regionRadius);
+    const top = Math.min(1 - 0.01, ctx.focus.y + ctx.regionRadius * 0.3);
+    const region: NormRegion = {
+      x: left, y: top,
+      width: Math.min(1 - left, ctx.regionRadius * 2),
+      height: Math.min(1 - top, ctx.regionRadius * 2),
     };
     const [before, after] = await Promise.all([
-      regionStats(ctx.beforeBuf, region), regionStats(ctx.afterBuf, region),
+      regionStats(ctx, 'before', region), regionStats(ctx, 'after', region),
     ]);
     const changed = Math.abs(after.mean - before.mean) > 3 || Math.abs(after.stdev - before.stdev) > 4;
     return {
@@ -161,22 +206,8 @@ const menuCollapse: PhysicsRule = {
  * 正 shift = after 内容相对 before 下移；负 = 上移。这是滚动/拖拽的纯视觉签名。
  */
 async function detectShift(ctx: PhysicsContext): Promise<number> {
-  const sharp = await getSharp();
-  const rowMeans = async (buf: Buffer) => {
-    const res = await sharp(buf)
-      .grayscale().resize(SHIFT_GRID, SHIFT_GRID, { fit: 'fill' }).raw()
-      .toBuffer({ resolveWithObject: true });
-    const { data, info } = res as any;
-    const rows: number[] = [];
-    for (let y = 0; y < info.height; y++) {
-      let s = 0;
-      for (let x = 0; x < info.width; x++) s += data[y * info.width + x];
-      rows.push(s / info.width);
-    }
-    return rows;
-  };
-  const A = await rowMeans(ctx.beforeBuf);
-  const B = await rowMeans(ctx.afterBuf);
+  const A = await rowMeans(ctx, 'before', SHIFT_GRID);
+  const B = await rowMeans(ctx, 'after', SHIFT_GRID);
   let bestShift = 0, bestErr = Infinity;
   for (let s = -8; s <= 8; s++) {
     let err = 0, n = 0;
@@ -219,11 +250,11 @@ const inputFocus: PhysicsRule = {
   kind: 'input_focus',
   async check(ctx) {
     if (!ctx.focus) return { satisfied: false, evidence: 'no focus point', notApplicable: true };
-    const rSmall = await focusRegion(ctx.afterBuf, ctx.focus.x, ctx.focus.y, ctx.regionRadius * 0.4);
-    const rLarge = await focusRegion(ctx.afterBuf, ctx.focus.x, ctx.focus.y, ctx.regionRadius * 2.5);
+    const rSmall = focusRegionNorm(ctx.focus.x, ctx.focus.y, Math.max(0.005, ctx.regionRadius * 0.4));
+    const rLarge = focusRegionNorm(ctx.focus.x, ctx.focus.y, ctx.regionRadius * 2.5);
     const [sBefore, sAfter, lBefore, lAfter] = await Promise.all([
-      regionStats(ctx.beforeBuf, rSmall), regionStats(ctx.afterBuf, rSmall),
-      regionStats(ctx.beforeBuf, rLarge), regionStats(ctx.afterBuf, rLarge),
+      regionStats(ctx, 'before', rSmall), regionStats(ctx, 'after', rSmall),
+      regionStats(ctx, 'before', rLarge), regionStats(ctx, 'after', rLarge),
     ]);
     const localChanged = Math.abs(sAfter.stdev - sBefore.stdev) > 1 || Math.abs(sAfter.mean - sBefore.mean) > 2;
     const largeStatic = Math.abs(lAfter.mean - lBefore.mean) < 6;

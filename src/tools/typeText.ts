@@ -61,9 +61,24 @@ export function createTypeTextTool(config: Config) {
       try {
         // 效果验证（焦点区域放大）：输入的变化几乎总发生在「最近点击的位置」——
         // 焦点追踪器把上次点击坐标隐式传给本工具，文字出现这类局部变化
-        // 在全屏指纹里撑不动距离，但在焦点区域指纹里是巨变
+        // 在全屏指纹里撑不动距离，但在焦点区域指纹里是巨变。
+        // 无跟踪焦点时（如 win+r 打开的运行框、启动即聚焦的编辑器）退化为
+        // 全屏指纹 —— 小文本在全屏 9x8 下采样中不可见，误报「无焦点」。
+        // 兜底：以当前鼠标位置为区域中心（最近交互的强先验），保留区域放大器。
         const verify = config.verifyActions && !config.dryRun;
-        const focus = focusTracker.get(config.focusMaxAgeMs);
+        let focus = focusTracker.get(config.focusMaxAgeMs);
+        let focusSource: 'click-tracked' | 'mouse-position' | 'none' = 'none';
+        if (focus) {
+          focusSource = 'click-tracked';
+        } else if (verify) {
+          try {
+            const [cursor, size] = await Promise.all([system.getMousePosition(), system.getScreenSize()]);
+            if (cursor.x >= 0 && cursor.y >= 0) {
+              focus = { x: Math.min(1, cursor.x / size.width), y: Math.min(1, cursor.y / size.height) };
+              focusSource = 'mouse-position';
+            }
+          } catch { /* 鼠标位置不可得：保持全屏验证 */ }
+        }
         const before = verify ? await captureBefore(focus, config.regionVerifyRadius) : null;
 
         await system.typeText(text, clearFirst);
@@ -83,14 +98,21 @@ export function createTypeTextTool(config: Config) {
 
         // ── 语义自证（第四轮）：OCR 核对「输入的文字真的上屏了」──
         // 无需模型传参：把 typed 内容的前 40 字符作为预期文本，在焦点邻域核对。
-        // 「打字进了错误的输入框 / 输入法吞字 / 焦点丢失」三类事故在此现形
+        // 「打字进了错误的输入框 / 输入法吞字 / 焦点丢失」三类事故在此现形。
+        // 不再以 effect.detected 为前提 —— dHash 对小文本天生迟钝（这正是
+        // 需要语义通道的原因）；OCR 独立取证，像素盲区由文字层补判。
         let typedConfirmed: SemanticConfirm | 'ocr-unavailable' | null = null;
-        if (config.enableOcr && focus && effect?.detected) {
+        if (config.enableOcr && focus && text.trim().length >= 2) {
           typedConfirmed = await semanticConfirm(
-            effect.afterBuffer, focus.x, focus.y,
+            effect?.afterBuffer ?? null, focus.x, focus.y,
             Math.max(config.regionVerifyRadius * 1.5, 0.2),
             text.slice(0, 40), config.ocrLang,
           ) ?? 'ocr-unavailable';
+        }
+        // 语义命中可推翻像素误报：文字上屏是比 dHash 更强的证据
+        const semanticLanded = typedConfirmed && typedConfirmed !== 'ocr-unavailable' && typedConfirmed.confirmed;
+        if (semanticLanded && noopSuspected) {
+          effect = effect && { ...effect, detected: true, scale: effect.scale === 'none' ? 'element-level' : effect.scale };
         }
 
         return JSON.stringify({
@@ -113,6 +135,7 @@ export function createTypeTextTool(config: Config) {
               screen_similarity_pct: effect.screen.similarity_pct,
               region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
               verified_around_focus: effect.region ? true : false,
+              focus_source: focusSource,
             } : 'verification-off',
             expected_change: expected_change || undefined,
             typed_semantic: typedConfirmed
@@ -121,7 +144,7 @@ export function createTypeTextTool(config: Config) {
                 : { confirmed: typedConfirmed.confirmed, region_text_snippet: typedConfirmed.snippet })
               : undefined,
           },
-          next_step: noopSuspected
+          next_step: (noopSuspected && !semanticLanded)
             ? 'WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.'
             : (typedConfirmed && typedConfirmed !== 'ocr-unavailable' && !typedConfirmed.confirmed
               ? 'SEMANTIC MISMATCH: the typed text was NOT found in the focus region — it may have gone to the WRONG field or been swallowed by an IME. Verify with take_screenshot and retype if needed.'

@@ -60,6 +60,12 @@ ENDPOINT_CAPABILITY: dict[str, Capability] = {
     "/v1/take_screenshot": "screenshot",
     "/v1/get_ui_tree": "ui_tree",
     "/v1/switch_window": "switch_window",
+    # 感知辅助端点（只读，与截图同能力位 —— D-1 工具层接线）
+    "/v1/cursor": "screenshot",
+    "/v1/displays": "screenshot",
+    "/v1/frame_stats": "screenshot",
+    "/v1/frame_rowmeans": "screenshot",
+    "/v1/frame_diff": "screenshot",
 }
 
 

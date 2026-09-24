@@ -4,9 +4,44 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { captureBefore, settleAndVerify } from '../actionVerifier';
+import * as backend from '../physicalBackend';
+import { captureBefore, settleAndVerify, sleep } from '../actionVerifier';
+import { normalizeHash, similarity } from '../perceptualHash';
 import { quantum } from '../quantumSense';
 import { focusTracker } from '../focusTracker';
+
+// ─── Y-4 运输验证判决（纯函数 —— 测试的确定性事实源）───
+//
+// 拖拽的本体论：不是「屏幕变了」（那是 click 的语义），而是「被抓取物从 A
+// 运动到了 B」。证据三元组：起点区内容指纹（前）、终点区内容指纹（后）、
+// 起点区内容指纹（后）。运输成立 = 前A ≈ 后B（同一视觉内容现在在目的地）；
+// 腾空成立 = 前A ≄ 后A（原位置不再显示该内容）。两者同时成立 = 完整运输。
+
+export interface TransportVerdict {
+  transported: boolean;
+  vacated: boolean;
+  copyLike: boolean; // 内容出现在目的地但原位也在 = 复制/克隆语义
+}
+
+export function judgeTransport(
+  beforeStartHash: string | null,
+  afterEndHash: string | null,
+  afterStartHash: string | null,
+  thresholds: { transported: number; vacated: number } = { transported: 0.75, vacated: 0.85 },
+): TransportVerdict | null {
+  if (!beforeStartHash || !afterEndHash) return null;
+  const atDestination = similarity(normalizeHash(beforeStartHash), normalizeHash(afterEndHash));
+  const stillAtSource = afterStartHash
+    ? similarity(normalizeHash(beforeStartHash), normalizeHash(afterStartHash))
+    : null;
+  const transported = atDestination >= thresholds.transported;
+  const vacated = stillAtSource === null ? false : stillAtSource < thresholds.vacated;
+  return {
+    transported,
+    vacated,
+    copyLike: transported && stillAtSource !== null && stillAtSource >= thresholds.vacated,
+  };
+}
 
 export function createDragMouseTool(config: Config) {
   return defineTool({
@@ -60,6 +95,27 @@ export function createDragMouseTool(config: Config) {
         quantum.recordEffect(effect?.detected);
         const noopSuspected = effect && !effect.detected;
 
+        // ── Y-4 运输验证：被抓取物真的从起点运动到终点了吗 ──
+        let transport: TransportVerdict | null = null;
+        if (verify) {
+          try {
+            const r = Math.max(config.regionVerifyRadius, 0.08);
+            const atEnd = await backend.captureProcessed({
+              metaOnly: true,
+              wantRegionHash: { x: endX, y: endY, r },
+            });
+            const atStart = await backend.captureProcessed({
+              metaOnly: true,
+              wantRegionHash: { x: startX, y: startY, r },
+            });
+            transport = judgeTransport(
+              before?.region ?? null,
+              atEnd.regionDhash ?? null,
+              atStart.regionDhash ?? null,
+            );
+          } catch { /* 运输验证是旁路义务：失败不毒化主判决 */ }
+        }
+
         return JSON.stringify({
           status: 'SUCCESS',
           action: 'Mouse dragged.',
@@ -73,10 +129,24 @@ export function createDragMouseTool(config: Config) {
               screen_similarity_pct: effect.screen.similarity_pct,
               region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
             } : 'verification-off',
+            // Y-4 运输三元组：内容级证据（比像素变化更强的「物走了」判决）
+            transport: transport
+              ? {
+                transported: transport.transported,
+                vacated: transport.vacated,
+                ...(transport.copyLike ? { semantics: 'copy-like (content now at BOTH source and destination)' } : {}),
+              }
+              : undefined,
           },
-          next_step: noopSuspected
-            ? 'WARNING: Neither the screen nor the start region changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
-            : "MANDATORY: Call 'take_screenshot' to verify the drag result.",
+          next_step: transport && !transport.transported && effect?.detected
+            ? 'PIXELS CHANGED BUT NO TRANSPORT: something moved, yet the content you grabbed is NOT at the destination — ' +
+              'you may have dragged the wrong object or dropped it midway. take_screenshot to see where it went.'
+            : transport && transport.transported
+              ? `TRANSPORT VERIFIED: the grabbed content now sits at the destination${transport.vacated ? ' and its old position is empty' : ''}. ` +
+                "MANDATORY: take_screenshot to confirm the final layout."
+              : noopSuspected
+                ? 'WARNING: Neither the screen nor the start region changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
+                : "MANDATORY: Call 'take_screenshot' to verify the drag result.",
         }, null, 2);
 
       } catch (error: any) {

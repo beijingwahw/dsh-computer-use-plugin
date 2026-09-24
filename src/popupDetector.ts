@@ -6,49 +6,66 @@
 //       命中词表任一词即确认。与几何互补：横幅类弹窗（顶部条）几何必漏、语义能抓。
 // 融合判据：geometric OR semantic —— 弹窗检测的使命是宁可误报拦截，不可漏报放行
 // （popupGuard 拦截后模型只需多看一眼截图，代价有界；漏报则盲操作直接失败）。
-// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+//
+// 测量双路径（本轮接线）：D-5 帧环统计（frame_stats）优先；sharp buffer 保留。
 import { getSharp } from './_legacyDeps';
-import { readText } from './textReader';
+import { readTextAny } from './textReader';
+import * as backend from './physicalBackend';
 
 function avg(nums: number[]): number {
   return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
 /** 中央区域裁剪框（几何与语义共用同一「弹窗栖息地」假设） */
-function centerRegion(w: number, h: number, fraction = 0.4) {
+function centerRegionNorm(fraction = 0.4) {
   const inset = (1 - fraction) / 2;
+  return { x: inset, y: inset, width: fraction, height: fraction };
+}
+
+function centerRegion(w: number, h: number, fraction = 0.4) {
+  const r = centerRegionNorm(fraction);
   return {
-    left: Math.round(w * inset),
-    top: Math.round(h * inset),
-    width: Math.round(w * fraction),
-    height: Math.round(h * fraction),
+    left: Math.round(r.x * w),
+    top: Math.round(r.y * h),
+    width: Math.round(r.width * w),
+    height: Math.round(r.height * h),
   };
 }
 
-export async function detectPopupHeuristic(imageBuffer: Buffer): Promise<boolean> {
+/**
+ * 几何启发式（双路径）：
+ *   frameId → 服务端帧环统计（中心 40% vs 全图）
+ *   buffer + sharp → 本地统计（legacy/开发路径）
+ * 失败返回 false —— 检测失败不应阻断截图主流程：宁可漏报，不可误杀。
+ */
+export async function detectPopupHeuristic(frameId: number | null, buffer: Buffer | null): Promise<boolean> {
   try {
+    if (frameId != null) {
+      const [global, center] = await Promise.all([
+        backend.frameStats(frameId, []),
+        backend.frameStats(frameId, [centerRegionNorm()]),
+      ]);
+      const g = global[0], c = center[0];
+      if (!g || !c || g.mean == null || c.mean == null) return false;
+      const gStd = g.stdev ?? 0, cStd = c.stdev ?? 0;
+      return cStd < gStd * 0.55 && c.mean > g.mean * 1.15;
+    }
+    if (!buffer || buffer.length === 0) return false;
     const sharp = await getSharp();
-    const meta = await sharp(imageBuffer).metadata();
+    const meta = await sharp(buffer).metadata();
     const w = meta.width!;
     const h = meta.height!;
-
-    // 中央 40% 区域 vs 全图：亮度对比 + 方差对比
     const region = centerRegion(w, h);
-
     const [globalStats, centerStats] = await Promise.all([
-      sharp(imageBuffer).stats(),
-      sharp(imageBuffer).extract(region).stats(),
+      sharp(buffer).stats(),
+      sharp(buffer).extract(region).stats(),
     ]) as [{ channels: Array<{ stdev: number; mean: number }> }, { channels: Array<{ stdev: number; mean: number }> }];
-
     const gStd = avg(globalStats.channels.map((c: { stdev: number }) => c.stdev));
     const cStd = avg(centerStats.channels.map((c: { stdev: number }) => c.stdev));
     const gMean = avg(globalStats.channels.map((c: { mean: number }) => c.mean));
     const cMean = avg(centerStats.channels.map((c: { mean: number }) => c.mean));
-
-    // 中央更均匀（方差显著低于全局）且更亮（弹窗多为高亮底色）-> 判定为弹窗
     return cStd < gStd * 0.55 && cMean > gMean * 1.15;
   } catch {
-    // 检测失败不应阻断截图主流程：宁可漏报，不可误杀
     return false;
   }
 }
@@ -128,27 +145,38 @@ export interface PopupDetectOptions {
 
 /**
  * 语义证据：OCR 中央带，词表命中任一即确认。
+ * 双路径：服务端 L2 OCR（readTextAny 截屏+识别一体）→ legacy buffer+sharp。
  * 失败（OCR 不可用/超时/无语言包）静默返回空 —— 几何证据独立生效，行为零回归。
  */
 async function detectPopupSemantic(
-  imageBuffer: Buffer,
+  frameId: number | null,
+  buffer: Buffer | null,
   keywords: string[],
   ocrLang: string,
 ): Promise<string[]> {
   if (keywords.length === 0) return [];
   try {
-    const sharp = await getSharp();
-    const meta = await sharp(imageBuffer).metadata();
-    const w = meta.width!, h = meta.height!;
-    if (w < 32 || h < 32) return [];
-
-    // 放大到 1200 宽再识别：小字命中率的关键（与 textReader.semanticConfirm 同律）
-    const crop = await sharp(imageBuffer)
-      .extract(centerRegion(w, h, 0.6))
-      .resize(1200)
-      .toBuffer();
-
-    const { text } = await readText(crop, ocrLang);
+    let text: string | null = null;
+    try {
+      const r = await readTextAny(centerRegionNorm(0.6), ocrLang);
+      text = r.text;
+    } catch {
+      text = null;
+    }
+    if (text == null && buffer && buffer.length > 0) {
+      const sharp = await getSharp();
+      const meta = await sharp(buffer).metadata();
+      const w = meta.width!, h = meta.height!;
+      if (w < 32 || h < 32) return [];
+      const crop = await sharp(buffer)
+        .extract(centerRegion(w, h, 0.6))
+        .resize(1200)
+        .toBuffer();
+      const { readText } = await import('./textReader');
+      text = (await readText(crop, ocrLang)).text;
+    }
+    if (text == null) return [];
+    void frameId; // frameId 语义通道由服务端截屏覆盖（readTextAny 服务端自截）
     const hay = text.toLowerCase();
     const matched: string[] = [];
     for (const kw of keywords) {
@@ -163,10 +191,11 @@ async function detectPopupSemantic(
 
 /** 双模融合检测 + F-3 贝叶斯迟滞滤波：take_screenshot 的唯一传感入口 */
 export async function detectPopup(
-  imageBuffer: Buffer,
+  buffer: Buffer | null,
   opts: PopupDetectOptions = {},
+  frameId: number | null = null,
 ): Promise<PopupDetection> {
-  const geometric = await detectPopupHeuristic(imageBuffer);
+  const geometric = await detectPopupHeuristic(frameId, buffer);
 
   const keywords = (opts.popupKeywords ?? '')
     .split(',')
@@ -174,7 +203,7 @@ export async function detectPopup(
     .filter(Boolean);
 
   const matchedKeywords = opts.enableOcr && keywords.length > 0
-    ? await detectPopupSemantic(imageBuffer, keywords, opts.ocrLang || 'eng')
+    ? await detectPopupSemantic(frameId, buffer, keywords, opts.ocrLang || 'eng')
     : [];
 
   // F-3：帧证据喂入施密特滤波 —— 单帧强证据立即 ON（旧行为），单帧噪声不再翻转

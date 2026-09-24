@@ -50,6 +50,11 @@ class MockAdapter implements PhysicalExecutionAdapter {
   async takeScreenshotHandle(): Promise<Result<ScreenshotHandle, PhysicalError>> { return { ok: true, value: {} as ScreenshotHandle }; }
   async getUiTree(): Promise<Result<UiTreeResult, PhysicalError>> { return { ok: true, value: {} as UiTreeResult }; }
   async switchWindow(): Promise<Result<SwitchWindowResult, PhysicalError>> { return { ok: true, value: {} as SwitchWindowResult }; }
+  async getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>> { return { ok: true, value: { x: 0, y: 0 } }; }
+  async getDisplays(): Promise<Result<{ displays: Array<{ name: string; x: number; y: number; width: number; height: number; primary?: boolean }> }, PhysicalError>> { return { ok: true, value: { displays: [] } }; }
+  async frameStats(): Promise<Result<{ frame_id: number; stats: Array<{ mean: number | null; stdev: number | null }> }, PhysicalError>> { return { ok: true, value: { frame_id: 0, stats: [] } }; }
+  async frameRowmeans(): Promise<Result<{ frame_id: number; rows: number[] }, PhysicalError>> { return { ok: true, value: { frame_id: 0, rows: [] } }; }
+  async frameDiff(): Promise<Result<{ frame_a: number; frame_b: number; changed_regions: Array<{ x: number; y: number; width: number; height: number }>; region_count: number; block_threshold: number; annotated_image_base64?: string }, PhysicalError>> { return { ok: true, value: { frame_a: 0, frame_b: 0, changed_regions: [], region_count: 0, block_threshold: 0 } }; }
 
   async releaseShm(name: string): Promise<Result<{ released: boolean }, PhysicalError>> {
     this.releaseCallCount++;

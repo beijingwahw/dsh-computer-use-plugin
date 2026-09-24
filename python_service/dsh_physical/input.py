@@ -73,18 +73,34 @@ Key = Literal[
 _KEY_MAP: dict[str, str] = {
     "ctrl": "ctrl",       # pyautogui 接受 'ctrl' 简写
     "cmd": "cmd" if sys.platform == "darwin" else "win",
+    # Windows 键的完整别名族（win+r 运行框 / win+d 显示桌面 / win+e 资源管理器
+    # 是 GUI 自动化的高频入口 —— 缺失时 Agent 只能绕道 shell 启动应用）
+    "win": "cmd" if sys.platform == "darwin" else "win",
+    "meta": "cmd" if sys.platform == "darwin" else "win",
+    "super": "cmd" if sys.platform == "darwin" else "win",
     "alt": "alt",
     "shift": "shift",
     "enter": "enter",
+    "return": "enter",
     "tab": "tab",
     "space": "space",
     "backspace": "backspace",
     "delete": "delete",
+    "del": "delete",
     "esc": "esc",
+    "escape": "esc",
+    # 导航与编辑键（滚动/选择/对话框导航的键盘模态）
+    "home": "home", "end": "end",
+    "pageup": "pageup", "pagedown": "pagedown",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+    "arrowup": "up", "arrowdown": "down", "arrowleft": "left", "arrowright": "right",
+    "printscreen": "printscreen", "prtsc": "printscreen",
     "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4", "f5": "f5",
     "f6": "f6", "f7": "f7", "f8": "f8", "f9": "f9", "f10": "f10",
     "f11": "f11", "f12": "f12",
-    "a": "a", "c": "c", "v": "v", "z": "z",
+    # 编辑快捷键常用字母（全字母表补齐 —— ctrl+s / ctrl+o / ctrl+n 等组合的完整覆盖）
+    **{chr(c): chr(c) for c in range(ord("a"), ord("z") + 1)},
+    **{str(d): str(d) for d in range(0, 10)},
 }
 
 # ─── Windows IME-proof typing（X 纪元真机战果）───
@@ -164,11 +180,31 @@ async def _run_in_executor(func, *args, **kwargs):
     支持 kwargs（经 ``functools.partial`` 绑定）—— J 纪元修复：
     旧签名 ``(*args)`` 使 ``pa.click(x, y, button=...)`` 必抛 TypeError，
     真实点击路径 100% 失败（被 ``safe_call`` 误归为 internal_error）。
+
+    Y6 真机战果补丁：动作开始时鼠标恰好停在屏幕角落（往往是上一步动作的
+    落点残留），pyautogui 的 fail-safe 急停被误触发 —— win+r / 任务栏点击
+    整段失败。自愈路径：临时解除 FAILSAFE → 鼠标回屏幕中心 → 恢复
+    FAILSAFE → 原调用重试一次。用户在动作进行中甩鼠标到角落的急停能力
+    不受影响（正常路径 FAILSAFE 全程在场，仅恢复移动这一步旁路）。
     """
     loop = asyncio.get_running_loop()
-    if kwargs:
-        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
-    return await loop.run_in_executor(None, func, *args)
+    call = functools.partial(func, *args, **kwargs) if kwargs else functools.partial(func, *args)
+    try:
+        return await loop.run_in_executor(None, call)
+    except Exception as e:  # noqa: BLE001
+        if type(e).__name__ != "FailSafeException":
+            raise
+        pa = _get_pyautogui()
+        saved = pa.FAILSAFE
+        pa.FAILSAFE = False
+        try:
+            def _recentre() -> None:
+                w, h = pa.size()
+                pa.moveTo(w // 2, h // 2, _pause=False)
+            await loop.run_in_executor(None, _recentre)
+        finally:
+            pa.FAILSAFE = saved
+        return await loop.run_in_executor(None, call)
 
 
 # ─── 公开 API ───

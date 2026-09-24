@@ -1,21 +1,22 @@
 // src/tools/takeScreenshot.ts
 // 皇冠工具：七世地层融合的最终形态。
-// 管线：截屏 -> 多屏感知 -> SoM 网格+准星(+元素框) -> 压缩 -> 滑动窗口 -> 弹窗传感 -> 状态锚点。
-// 修复：screenshot_id 契约误用、updatePopupState 导入断裂、detectPopupHeuristic 未定义。
-// 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+// 管线：截屏(服务端:叠加/缩放/编码/指纹一体) -> 多屏感知 -> 变化门控 ->
+//       滑动窗口 -> 弹窗传感(帧统计+OCR) -> 状态锚点。
+// 本轮接线：截图管线整体迁至 D-5 服务端（PIL）—— Node 端零原生图像依赖。
+// 门控语义保留：与窗口内最新指纹距离 ≤ stableScreenDistance ⇒ 返回缓存引用。
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { getSharp } from '../_legacyDeps';
 import type { Config } from '../config';
 import { system } from '../system';
-import { addVisualOverlay } from '../visualOverlay';
+import { normalizeHash } from '../perceptualHash';
 import { contextManager } from '../contextManager';
 import { detectPopup } from '../popupDetector';
 import { updatePopupState, getPopupState } from '../guards/popupGuard';
 import { extractInteractiveElements, UIElement } from '../uiExtractor';
 import { quantum } from '../quantumSense';
-import { dhash, hammingDistance } from '../perceptualHash';
 import { journal } from '../journal';
 import { trackElements } from '../elementTracker';
+import * as backend from '../physicalBackend';
+import { saveScreenshotAttachment, imageBlockFromValue } from '../imageDelivery';
 
 export function createTakeScreenshotTool(config: Config) {
   return defineTool({
@@ -37,7 +38,10 @@ export function createTakeScreenshotTool(config: Config) {
     },
     output: {
       schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
+      render: (_args, value) => [
+        { type: 'text', text: value },
+        ...imageBlockFromValue(value),
+      ] as any,
     },
     async execute(args) {
       try {
@@ -45,39 +49,23 @@ export function createTakeScreenshotTool(config: Config) {
         if (region !== 'full' && region !== 'active_window') {
           return `[Error]: Invalid region. Options: "full", "active_window".`;
         }
-        // 1. 捕获原始屏幕
-        const rawBuffer = await system.captureScreen();
-        const sharp = await getSharp();
-        const rawMeta = await sharp(rawBuffer).metadata();
 
-        // ── 变化门控（change-gated screenshots）：指纹与窗口内最新一张几乎相同
-        //    ⇒ 屏幕未变，跳过整条压缩/入窗管线，返回缓存引用锚点。
-        //    省 Token（不占窗口图片位）、省 CPU（不做管线）；弹窗状态沿用上次传感。
-        const rawHash = await dhash(rawBuffer);
-        if (!args?.force) {
-          const last = contextManager.lastImageRecord();
-          if (last?.hash && hammingDistance(last.hash, rawHash) <= config.stableScreenDistance) {
-            return JSON.stringify({
-              status: 'SUCCESS',
-              unchanged: true,
-              state_anchor: {
-                same_as_screenshot: last.id,
-                popup_detected: getPopupState(),
-                context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
-                change_gate: `screen identical to #${last.id} (dHash distance <= ${config.stableScreenDistance})`,
-              },
-              next_step: 'Screen is UNCHANGED since the referenced screenshot. Reuse it for grounding; ' +
-                'do NOT re-capture. If you expected a change, the previous action had no effect — see its effect report.',
-            }, null, 2);
-          }
-        }
-        // 门控未命中：rawHash 随记录入库，供下次门控与场景记忆使用
+        // ── 变化门控参考（与旧管线同语义：与窗口内最新指纹比对）──
+        const last = args?.force ? null : contextManager.lastImageRecord();
+        const lastHashBits = last?.hash ? normalizeHash(last.hash) : null;
 
-        // 2. 多屏感知：当前操作的是哪块屏、其坐标系原点在哪
-        const display = await system.getActiveDisplay();
-        const crosshair = await system.getMousePosition();
+        // 1. 多屏感知 + 准星（并行取，供叠加层与锚点）
+        const [display, crosshairPx, size] = await Promise.all([
+          system.getActiveDisplay(),
+          system.getMousePosition(),
+          system.getScreenSize(),
+        ]);
+        const crosshair = {
+          x: crosshairPx.x / size.width,
+          y: crosshairPx.y / size.height,
+        };
 
-        // 3. 混合模式（可选）：提取元素以启用 ID 寻址；失败则静默降级回纯视觉
+        // 2. 混合模式（可选）：提取元素以启用 ID 寻址；失败则静默降级回纯视觉
         let elements: UIElement[] = [];
         if (config.enableElementIdMode) {
           try {
@@ -87,54 +75,90 @@ export function createTakeScreenshotTool(config: Config) {
           }
         }
 
-        // 3.5 D-3 叠加态渲染：黑盒失明时白盒节点化作图上标注 —— 决策面永远是图。
         // R-5：本帧元素先过 IoU 跟踪器铸稳定标签（元素框渲染与模型指令共用）
         const stableLabels = trackElements(elements.map(el => el.rect));
-        //     标注与既有元素框去重合并（IoU/包含判定）；预算内裁剪；零进对话流。
         const quantumOverlays = config.enableQuantumSense && quantum.mode() === 'superposition'
           ? await quantum.overlayNodes(elements.map(el => ({ rect: el.rect })))
           : [];
 
-        // 4. SoM 视觉辅助：网格 + 准星（+ 元素框 + 白盒标注）
-        const overlayedBuffer = await addVisualOverlay(rawBuffer, {
+        // 3. 服务端一次往返：干净帧指纹 + 变化门控 + 中央凹 SoM + 缩放 + JPEG
+        // Y-1：auto_foveate —— 服务端熵引擎在干净帧上找热点区，区内网格 2x 加密
+        const cap = await system.captureScreenWithOverlay({
+          format: 'jpeg',
+          quality: config.jpegQuality,
+          maxWidth: config.compressWidth,
           gridDivisions: config.gridDivisions,
+          autoFoveate: true,
           crosshair,
-          elements: [
-            // R 纪元（R-5）：跨帧稳定标签 —— IoU 贪心跟踪后同一物理控件跨帧保号
-            //（旧：帧间重铸，click_element 的「点 3 号」每帧语义漂移）
+          boxes: [
             ...elements.map((el, i) => ({
               id: el.id, label: String(stableLabels[i] ?? el.id), rect: el.rect,
             })),
             ...quantumOverlays.map(o => ({ id: o.tag, label: o.label, rect: o.rect })),
-          ],
+          ].map(b => ({
+            // UIElement.rect 是原始像素域（uiExtractor 契约）→ 归一化（叠加层契约）
+            x: b.rect.x / size.width,
+            y: b.rect.y / size.height,
+            width: b.rect.width / size.width,
+            height: b.rect.height / size.height,
+            label: b.label,
+          })),
+          wantHashes: true,
+          keepFrame: true,
+          ...(lastHashBits
+            ? {
+              gate: {
+                // hex 位序差异：服务端指纹与旧位串经 normalizeHash 统一后再比
+                dhashRef: lastHashBitsToHex(lastHashBits),
+                distance: config.stableScreenDistance,
+              },
+            }
+            : {}),
         });
 
-        // 5. Token 杀手：resize + jpeg。参数来自「纯视觉定型纪元」——
-        //    截图是唯一信息源时，压缩让步于保真（1440/q75），且全部由 Config 决定
-        const compressedBuffer = await sharp(overlayedBuffer)
-          .resize({ width: config.compressWidth })
-          .jpeg({ quality: config.jpegQuality })
-          .toBuffer();
-        const compressedMeta = await sharp(compressedBuffer).metadata();
+        const rawHash = cap.dhash ? normalizeHash(cap.dhash) : '';
+        if (cap.unchanged && last) {
+          return JSON.stringify({
+            status: 'SUCCESS',
+            unchanged: true,
+            state_anchor: {
+              same_as_screenshot: last.id,
+              popup_detected: getPopupState(),
+              context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
+              change_gate: `screen identical to #${last.id} (dHash distance <= ${config.stableScreenDistance})`,
+            },
+            next_step: 'Screen is UNCHANGED since the referenced screenshot. Reuse it for grounding; ' +
+              'do NOT re-capture. If you expected a change, the previous action had no effect — see its effect report.',
+          }, null, 2);
+        }
+        if (!cap.buffer) {
+          throw new Error('capture returned no image (gate miss without reference?)');
+        }
+        // diff_view 的默认对比对：登记本次帧环 id（服务端 frame_diff 消费）
+        backend.noteFrameForDiff(cap.frameId);
 
-        // 6. 存入滑动窗口（携带指纹）；驱逐通告原样透传给模型（上下文收缩全透明）
-        const base64Image = `data:image/jpeg;base64,${compressedBuffer.toString('base64')}`;
+        // 4. 存入滑动窗口（携带指纹）；驱逐通告原样透传给模型
+        const base64Image = `data:image/jpeg;base64,${cap.buffer.toString('base64')}`;
         const { currentId, message } = await contextManager.addScreenshot(base64Image, rawHash);
 
-        // 7. 弹窗传感（B-8 双模）：几何 + 语义证据融合，popupGuard 据此拦截盲操作
-        const popup = await detectPopup(compressedBuffer, {
+        // 4.5 图像投递（rc.6 事件面）：附件服务保存 → 工具结果携带 image 块
+        const attachment = await saveScreenshotAttachment(cap.buffer, `screenshot-${currentId}.jpg`);
+
+        // 5. 弹窗传感（B-8 双模）：几何（服务端帧统计）+ 语义（OCR）证据融合
+        const popup = await detectPopup(cap.buffer, {
           enableOcr: config.enableOcr,
           popupKeywords: config.popupKeywords,
           ocrLang: config.ocrLang,
-        });
+        }, cap.frameId);
         updatePopupState(popup.popup);
 
-        // 9. C-3 观察登记：截图锚点喂给因果链 —— 后续动作的 [观察] 字段引用此摘要
+        // 6. C-3 观察登记：截图锚点喂给因果链
         journal.noteObservation(`#${currentId} dHash=${rawHash.slice(0, 8)} popup=${popup.popup}`);
 
-        // 8. 状态锚点：让模型对输入保真度有元认知，next_step 依据世界状态分支
+        // 7. 状态锚点：让模型对输入保真度有元认知
         return JSON.stringify({
           status: 'SUCCESS',
+          image_attachment: attachment ?? undefined,
           state_anchor: {
             screenshot_id: currentId,
             active_display: {
@@ -143,30 +167,37 @@ export function createTakeScreenshotTool(config: Config) {
               origin: { x: display.x, y: display.y }, // 多屏坐标换算的契约
             },
             popup_detected: popup.popup,
-            // B-8：弹窗判定证据链 —— 模型可据此区分「几何疑似」与「语义确认」
             popup_evidence: popup.semantic
               ? `semantic keywords: ${popup.matchedKeywords.join(', ')}`
               : popup.geometric
                 ? 'geometric heuristic: bright uniform center panel'
                 : 'none',
-            // D-3 感知相位：模型对当前感知模式有元认知（叠加态 = 白盒标注已烧入图）
             ...(config.enableQuantumSense
               ? { sense: quantum.status() }
               : {}),
-            original_resolution: `${rawMeta.width}x${rawMeta.height}`,
-            compressed_resolution: `${compressedMeta.width}x${compressedMeta.height}`,
+            original_resolution: `${size.width}x${size.height}`,
+            compressed_resolution: `${cap.width}x${cap.height}`,
             format: `JPEG (quality: ${config.jpegQuality})`,
             region,
             visual_overlay: `${config.gridDivisions}x${config.gridDivisions} SoM Grid + Crosshair` +
               (elements.length ? ' + Element Boxes' : '') +
               (quantumOverlays.length ? ` + ${quantumOverlays.length} Structured-Sense Annotations` : ''),
-            // Token 仪表盘（B-7 双预算）：张数 + 体积余量，模型随时知道上下文预算水位
+            // Y-1 中央凹视觉：热点区清单（熵降序）—— 模型优先在热点区内估坐标
+            ...(cap.salience && cap.salience.zones.length
+              ? {
+                foveal_zones: cap.salience.zones.slice(0, 3).map(z =>
+                  `bbox=(${z.x.toFixed(2)},${z.y.toFixed(2)})-(${(z.x + z.width).toFixed(2)},${(z.y + z.height).toFixed(2)}) entropy=${z.entropy}`),
+                foveal_note: 'These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.',
+              }
+              : {}),
             context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
             context_image_kb: `${contextManager.imageKb()}/${config.maxContextImageKb}`,
-            // 图层图例（来自「视觉纪元」的图文双通道教学）：教模型「怎么读」这张图
             overlay_legend: [
               `Blue lines: a ${config.gridDivisions}x${config.gridDivisions} grid. Count cells to estimate normalized coordinates (0.0-1.0).`,
               'Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.',
+              ...(cap.salience && cap.salience.zones.length
+                ? ['Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coordinates inside them — their grid is twice as fine.']
+                : []),
               elements.length
                 ? 'Blue boxes: clickable elements. The number in the blue tag is the element ID usable with click_element.'
                 : 'No element boxes in this mode. Rely on grid estimation.',
@@ -194,9 +225,20 @@ export function createTakeScreenshotTool(config: Config) {
         return JSON.stringify({
           status: 'FAILED',
           error: error.message,
-          next_step: 'Screenshot capture failed. Check system permissions (screen recording / accessibility) or try again.',
+          next_step: 'Screenshot capture failed. Check the D-5 physical service (python deps: pyautogui/pillow) ' +
+            'or system permissions (screen recording / accessibility).',
         }, null, 2);
       }
     },
   });
+}
+
+/** 位串 → hex（服务端 gate 比对域）。已是 hex 则透传。 */
+function lastHashBitsToHex(bits: string): string {
+  if (/^[0-9a-f]+$/i.test(bits) && bits.length === 16) return bits;
+  try {
+    return BigInt(`0b${bits}`).toString(16).padStart(16, '0');
+  } catch {
+    return '';
+  }
 }

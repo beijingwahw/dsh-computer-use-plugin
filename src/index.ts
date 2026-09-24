@@ -13,6 +13,8 @@ import { failureMemory } from './failureMemory';
 import { telemetry } from './telemetry';
 import { loadCheckpoint, saveCheckpoint } from './checkpoint';
 import { disposeOcr } from './textReader';
+import { stopBackend } from './physicalBackend';
+import { setImageDeliveryStore } from './imageDelivery';
 import { swarm } from './swarm';
 import { coordinator } from './subAgent';
 import { shaper } from './environmentShaper';
@@ -96,10 +98,83 @@ function tryInjectPrompt(ctx: Context): void {
   sp.section({ name: 'popup-handling-rules', order: 12, text: POPUP_HANDLING_PROMPT });
 }
 
-/** 可选服务查询：llm 存在且方法签名匹配时构造 ChatFn，否则返回 undefined（Planner 响亮降级） */
+/**
+ * 可选服务查询：llm 存在且方法签名匹配时构造 ChatFn，否则返回 undefined（Planner 响亮降级）。
+ * 双纪元适配：
+ *   rc.6 表面 ctx.llm.stream(GenerateOptions) —— 流式，text-delta 聚合；
+ *   旧表面 llm.chat(messages) —— 直接文本返回。
+ * cordis 4：未 inject 的服务经 reflect.get 可选读取（缺席返回 undefined 不抛错）。
+ */
 function resolvePlannerChat(ctx: Context): PlannerChatFn | undefined {
-  const llm = ctx.get('llm') as any;
-  if (llm && typeof llm.chat === 'function') {
+  let llm: any;
+  try {
+    llm = (ctx as any).reflect?.get?.('llm') ?? ctx.get?.('llm');
+  } catch { llm = undefined; }
+  if (!llm) return undefined;
+
+  if (typeof llm.stream === 'function') {
+    // rc.6：流式 API。Planner 只需任意能用的模型 —— 目录全路由按序试，
+    // 某路由空输出/报错则换下一个（真机战果：deepseek-v4-flash 恒空文本，
+    // 单路由无重试 = Planner 永久瘫痪）。
+    type LlmRoute = { provider: string; model: string };
+    let cachedRoutes: LlmRoute[] | null = null;
+    const listRoutes = async (): Promise<LlmRoute[]> => {
+      if (cachedRoutes) return cachedRoutes;
+      const routes: LlmRoute[] = [];
+      try {
+        const providers = (llm.listProviders?.() ?? []) as any[];
+        for (const p of providers) {
+          const pid = p?.id ?? p?.provider ?? (typeof p === 'string' ? p : null);
+          if (!pid) continue;
+          const models = (await llm.listModels?.(pid)) ?? [];
+          for (const m of models) {
+            const mid = m?.id ?? (typeof m === 'string' ? m : null);
+            if (mid) routes.push({ provider: pid, model: mid });
+          }
+        }
+      } catch { /* 目录不可用：routes 保持已收集部分 */ }
+      cachedRoutes = routes;
+      return routes;
+    };
+    return async (systemPrompt, user) => {
+      const routes = await listRoutes();
+      if (routes.length === 0) {
+        throw new Error('[Planner] no llm provider/model resolvable from ctx.llm directory');
+      }
+      const errors: string[] = [];
+      for (const route of routes) {
+        try {
+          let text = '';
+          let reasoningTail = '';
+          for await (const chunk of llm.stream({
+            provider: route.provider,
+            model: route.model,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+            // 推理模型默认把预算烧在思考上（真机战果：raw len=0）。effort='off'
+            // 对支持它的模型关停思考；maxTokens 不设 —— 人为小预算会把输出全
+            // 部烧在思考段（真机战果 #2：2048 全被 reasoning 吃掉，text 空）。
+            reasoningEffort: 'off' as never,
+          })) {
+            if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
+            if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') {
+              reasoningTail = (reasoningTail + chunk.text).slice(-4000);
+            }
+          }
+          // 兜底：个别 thinkingFormat 网关把最终内容留在 reasoning 流 —— text 空
+          // 而思考尾部含 JSON 数组时取之（诚实回退，非模拟成功）
+          const finalText = text.trim() ? text : (reasoningTail.includes('[') ? reasoningTail : '');
+          if (finalText.trim()) return finalText;
+          errors.push(`${route.model}: empty text`);
+        } catch (e: any) {
+          errors.push(`${route.model}: ${String(e?.message ?? e).slice(0, 80)}`);
+        }
+      }
+      throw new Error(`[Planner] all ${routes.length} route(s) failed: ${errors.join('; ')}`);
+    };
+  }
+
+  if (typeof llm.chat === 'function') {
     return async (systemPrompt, user) => {
       const res = await llm.chat([
         { role: 'system', content: systemPrompt },
@@ -112,7 +187,37 @@ function resolvePlannerChat(ctx: Context): PlannerChatFn | undefined {
 }
 
 export async function apply(ctx: Context, config: Config) {
+  // 图像投递通道（rc.6 事件面）：附件服务在场则截图直达模型；缺席诚实降级为文本锚点。
+  // cordis 4：未声明 inject 的服务属性直接访问会抛错 —— reflect.get 是无 inject 的可选读取面。
+  let attachmentsSvc: unknown = null;
+  try {
+    attachmentsSvc = (ctx as any).reflect?.get?.('attachments') ?? null;
+  } catch { attachmentsSvc = null; }
+  setImageDeliveryStore(attachmentsSvc);
+  if (!attachmentsSvc) {
+    console.log('[Vision Plugin] attachments 服务不可用 —— 截图将只以文本锚点呈现（视觉通道降级）。');
+  }
+
   console.log('[Vision Plugin] Initializing Pure Vision Computer Use...');
+
+  // Y6：用户回合边界。旧实现的 markTaskStart 只在 start_complex_task 里调用，
+  // 普通会话的 sinceTaskStart() 从会话起点切片 —— save_skill 把整个会话的
+  // 历史动作（真机战果：95 步）全部录进一个本应两三步的技能，run_skill
+  // 重放注定跑偏且后置条件必然稀释。订阅 session/event，用户每发一条
+  // 消息即重置任务边界 —— 技能归纳的切片与"最近动作"语义对齐。
+  let turnBoundaryDisposer: (() => void) | null = null;
+  try {
+    const off = (ctx as any).on('session/event', (_session: unknown, ev: any) => {
+      try {
+        if (ev?.type !== 'user/message') return;
+        const text = (ev.data?.content ?? []).map((p: any) => p?.text ?? '').join('');
+        journal.markTaskStart(String(text).slice(0, 200) || 'user turn');
+      } catch { /* 边界打标是旁路义务：事件形状异常不毒化主流程 */ }
+    });
+    if (typeof off === 'function') turnBoundaryDisposer = off;
+  } catch {
+    console.log('[Vision Plugin] session/event 面不可用 —— 技能切片退回 start_complex_task 边界。');
+  }
 
   // 1. 配置注入系统层与上下文层（一切魔法数字由 cordis.yml 决定）
   system.configure(config);
@@ -143,6 +248,8 @@ export async function apply(ctx: Context, config: Config) {
       system.setWindowDelegate(async keyword => {
         const r = await shaper.apply({ kind: 'raise_window', titleHint: keyword });
         if (!r.ok) throw new Error(r.reason ?? 'raise_window failed');
+        // Y6：命中标题随行 —— focus_handoff 取证在委托路径同样在场
+        return { matched: r.matchedTitle ?? null };
       });
     }
   }
@@ -218,6 +325,8 @@ export async function apply(ctx: Context, config: Config) {
               id: m.id,
               // Laplace 可靠度（与肌肉记忆同律）：未经真实验证的 0/0 = 0.5 不入场
               reliability: (m.successCount + 1) / (m.attemptCount + 2),
+              // Y6：匹配分随行 —— Actor 侧据此拦截"可靠但无关"的技能顶替子任务
+              score: m.score,
               steps: m.steps.map(s => ({ tool: s.tool, args: s.args as Record<string, unknown> })),
             }))
           : [],
@@ -359,6 +468,7 @@ export async function apply(ctx: Context, config: Config) {
       contextManager.reset();      // 清空截图滑动窗口
       uiMemory.reset();            // 清空场景记忆（可选保留跨会话记忆：删除此行）
       journal.reset();             // 清空行动日志
+      try { turnBoundaryDisposer?.(); } catch { /* already disposed */ }
       updatePopupState(false);     // 复位弹窗传感状态
       resetPopupBelief();          // F-3 复位贝叶斯弹窗信念（迟滞滤波器归零）
       resetDiffPersistence();      // G-1 复位差分持续性观测史（TDA 环归零）
@@ -370,6 +480,7 @@ export async function apply(ctx: Context, config: Config) {
       shaper.clearUndoLog();       // D-2 弃责记账（复原义务已在 restoreAll 执行或随 checkpoint 交棒）
       quantum.reset();             // D-3 感知相位归零（快照已随 checkpoint 交棒）
       void disposeOcr();           // 终止 OCR worker（语言数据有磁盘缓存，重载后即用）
+      void stopBackend();          // D-5 物理微服务优雅关停（SIGTERM→SIGKILL；被收养的外部实例不受影响）
     };
   });
 

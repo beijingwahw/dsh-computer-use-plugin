@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "python_service",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",

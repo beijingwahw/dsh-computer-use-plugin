@@ -10,6 +10,28 @@ import { getSharp } from './_legacyDeps';
 const HASH_BITS = 64; // 8x8 有效比较位
 
 /**
+ * 服务端指纹（D-5 Python 端计算的 16 位 hex）→ Node 位串域。
+ * 物理/逻辑位序与 dhash() 一致由「同一进制展开」保证 —— 所有服务端指纹
+ * 经同一函数转换后，与本地指纹共用 hammingDistance/similarity 比较器。
+ * 已是位串（64×'0'/'1'）则原样透传（混合部署时的宽容性）。
+ */
+export function hexToBits(hex: string): string {
+  if (/^[01]+$/.test(hex) && hex.length === HASH_BITS) return hex;
+  let n: bigint;
+  try {
+    n = BigInt(`0x${hex}`);
+  } catch {
+    return '0'.repeat(HASH_BITS);
+  }
+  return n.toString(2).padStart(hex.length * 4, '0');
+}
+
+/** 宽容归一：本地 dhash 位串 / 服务端 hex 统一进位串域 */
+export function normalizeHash(h: string): string {
+  return /^[01]+$/.test(h) ? h : hexToBits(h);
+}
+
+/**
  * 计算图像 dHash 指纹，返回 64 位 '0'/'1' 字符串。
  * 缩放到 (hashSize+1) x hashSize：每行比较左右相邻像素，右 > 左 记 1。
  */

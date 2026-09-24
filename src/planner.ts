@@ -13,18 +13,72 @@ export const PLANNER_SYSTEM_PROMPT = `
 1. 你只能输出合法的 JSON 数组格式，不要包含任何其他解释性文本。
 2. 每个子任务必须是一个独立的、可以在单个屏幕内完成的动作。
 3. 如果任务需要跨应用，请在子任务中明确说明。
+4. 用 "deps" 声明子任务间的依赖（必须先完成的子任务 id 列表）；无依赖用空数组。
+   只声明真正的先序关系 —— 编号顺序本身不构成依赖。
 
 ## 输出格式
 [
-  {"id": 1, "action": "打开 Chrome 浏览器并导航到 GitHub 首页"},
-  {"id": 2, "action": "在搜索框中输入 'DeepSeek Harness' 并点击搜索"},
-  {"id": 3, "action": "点击第一个搜索结果链接"}
+  {"id": 1, "action": "打开 Chrome 浏览器并导航到 GitHub 首页", "deps": []},
+  {"id": 2, "action": "在搜索框中输入 'DeepSeek Harness' 并点击搜索", "deps": [1]},
+  {"id": 3, "action": "点击第一个搜索结果链接", "deps": [2]}
 ]
 `;
 
 export interface SubTask {
   id: number;
   action: string;
+  /** Y-9 依赖 DAG：必须先完成的子任务 id（缺省 = 按编号顺序） */
+  deps?: number[];
+}
+
+// ─── Y-9 拓扑执行序（Epoch Y：从「流水线」到「依赖图」）───
+//
+// 数学：Kahn 拓扑排序 —— 入度表 + 就绪队列；无前驱的子任务出队执行序。
+// 独立子任务（无互相依赖）在序中相邻出现，执行器可视作可并行批（本实现
+// 保守串行，但序的语义已声明并行性）。环 ⇒ cycle=true 诚实上报（拒绝执行
+// —— 而非静默截断：部分执行一个循环依赖的计划只会制造垃圾状态）。
+
+export interface TopoOrder {
+  order: SubTask[];
+  /** 依赖图含环（order 只含无环前缀 —— 调用方必须拒绝执行） */
+  cycle: boolean;
+  cyclicIds: number[];
+}
+
+export function topoSortSubTasks(tasks: SubTask[]): TopoOrder {
+  const byId = new Map(tasks.map(t => [t.id, t]));
+  // 依赖清洗：指向不存在 id 的边剔除（Planner 幻觉防御）
+  const depsOf = new Map<number, number[]>();
+  for (const t of tasks) {
+    depsOf.set(t.id, (t.deps ?? []).filter(d => byId.has(d) && d !== t.id));
+  }
+  const indegree = new Map<number, number>();
+  for (const t of tasks) indegree.set(t.id, (depsOf.get(t.id) ?? []).length);
+
+  const ready = tasks.filter(t => (indegree.get(t.id) ?? 0) === 0).map(t => t.id);
+  // 稳定性：同入度层按原编号排序（确定性输出 —— 测试可断言）
+  ready.sort((a, b) => a - b);
+  const order: SubTask[] = [];
+  const done = new Set<number>();
+  while (ready.length) {
+    const id = ready.shift()!;
+    const t = byId.get(id)!;
+    order.push(t);
+    done.add(id);
+    for (const u of tasks) {
+      const du = depsOf.get(u.id) ?? [];
+      if (du.includes(id) && !done.has(u.id)) {
+        const remaining = du.filter(d => !done.has(d));
+        indegree.set(u.id, remaining.length);
+        if (remaining.length === 0) {
+          ready.push(u.id);
+          ready.sort((a, b) => a - b);
+        }
+      }
+    }
+  }
+  const cyclicIds = tasks.filter(t => !done.has(t.id)).map(t => t.id);
+  return { order, cycle: cyclicIds.length > 0, cyclicIds };
 }
 
 /** 对话函数抽象：屏蔽 DSH llm 服务的具体签名，测试时可注入桩函数 */
@@ -42,7 +96,10 @@ export async function planTasks(userPrompt: string, chat?: ChatFn): Promise<SubT
   const text = raw.replace(/```(json)?/g, '').trim();
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
-  if (start === -1 || end === -1 || end <= start) return [];
+  if (start === -1 || end === -1 || end <= start) {
+    console.warn(`[Planner] raw output has no JSON array (len=${raw.length}): ${raw.slice(0, 200)}`);
+    return [];
+  }
 
   try {
     const parsed = JSON.parse(text.slice(start, end + 1));
@@ -51,7 +108,14 @@ export async function planTasks(userPrompt: string, chat?: ChatFn): Promise<SubT
     // orchestrator 会打出 "Task #undefined"（下游 results 格式化失真）。
     return parsed
       .filter((t: any) => t && typeof t.action === 'string')
-      .map((t: any, i: number) => ({ ...t, id: typeof t.id === 'number' ? t.id : i + 1 }));
+      .map((t: any, i: number) => ({
+        ...t,
+        id: typeof t.id === 'number' ? t.id : i + 1,
+        // Y-9：deps 归一为数字数组（字符串/缺失容错），未知 id 由 topo 边清洗剔除
+        deps: Array.isArray(t.deps)
+          ? t.deps.filter((d: unknown) => typeof d === 'number').map((d: number) => d)
+          : undefined,
+      }));
   } catch {
     return [];
   }

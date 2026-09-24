@@ -6,6 +6,9 @@
 // 检索打分 = 文本重合度 + 成功次数加成 + 时间衰减 + 场景指纹匹配加成，全部本地零成本。
 import { similarity } from './perceptualHash';
 
+/** Y-8：地标放射性半衰期（小时）—— 一周（测试的事实源） */
+export const LANDMARK_HALF_LIFE_H = 168;
+
 export interface Landmark {
   id: number;
   description: string;            // 模型对目标的自然语言描述
@@ -117,14 +120,19 @@ class UIMemory {
         // S 纪元（S-4）：Beta(1,1) 后验信任 —— (s+1)/(s+2) 取代线性截断 min(s,6)。
         // 同域 [0.05→0.3]：贝叶斯 grounded（一次成功不配满信任；渐近饱和），
         // 曲率由后验自带而非硬帽。0.3 = 0.05×6 的旧上界保持量纲。
-        const trust = 0.3 * ((l.successCount + 1) / (l.successCount + 2)) * (1 / 3) + 0.05;
+        // Y 纪元（Y-8）：放射性衰变半衰期 —— 信任再高也要随时间衰变：
+        // w(t) = 2^(-t/T½)，T½ = 168h（一周）。UI 演化令旧地标的先验价值
+        // 指数衰减；成功使用重置衰变时钟（remember 强化时 lastUsedAt 已滚动）。
         const ageH = (now - l.lastUsedAt) / 3_600_000;
+        const decay = Math.pow(2, -ageH / 168);
+        const trust = (0.3 * ((l.successCount + 1) / (l.successCount + 2)) * (1 / 3) + 0.05) * decay;
         const recency = 0.1 * Math.exp(-ageH / 24);
+        const stale = ageH > 2 * 168;
         let sceneBonus = 0;
         if (currentSceneHash && l.sceneHash && similarity(currentSceneHash, l.sceneHash) >= 0.9) {
           sceneBonus = 0.3;
         }
-        return { ...l, score: Math.round((text + trust + recency + sceneBonus) * 1000) / 1000 };
+        return { ...l, stale, decay: Math.round(decay * 1000) / 1000, score: Math.round((text + trust + recency + sceneBonus) * 1000) / 1000 };
       })
       // 设计决策（J 纪元立法，此前无文档）：信任/新近分量可独立过线 —— 零文本
       // 重合的地标允许作为 top-k 填充（探索性召回：老位置即使换任务也有先验价值）。

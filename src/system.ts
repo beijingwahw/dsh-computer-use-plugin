@@ -1,27 +1,28 @@
 // src/system.ts
 // 系统层：所有平台差异与底层 IO 的唯一归宿（防腐层）。
 //
-// 批次 E 迁移：废弃 nut-js / screenshot-desktop 等原生二进制依赖，
-// 默认实现路径改为 D-5 物理微服务（Python + FastAPI），详见 knowledge/index.ts。
-// 本文件保留 D-1 老工具的调用表面，底层做两种降级：
-//   1. 运行时懒动态导入老依赖（若宿主环境确实还安装了）；
-//   2. 导入失败 → 抛出带迁移指引的错误，引导调用方切 D-7 执行工位。
+// 批次 E 迁移后的接线路由（本轮修复）：
+//   默认 → D-5 物理微服务（physicalBackend：截图叠加/指纹/键鼠/感知全在服务端）
+//   DSH_FORCE_LEGACY_SYSTEM=1 → 原生依赖懒加载（宿主自行安装 nut-js 等时可用）
 //
-// D-7 主路径（KnowledgePipelineOrchestrator → StubExecutionStation → D7PhysicalHostPort）
-// 不再触达本文件，是推荐的物理执行入口。
+// 教训（真机执法战果）：批次 E 删除了四个原生依赖却只留下迁移指引错误——
+// D-1 工具层（模型实际调用的 20+ 工具）从未接到 D-5，真机安装里
+// take_screenshot / click_mouse 100% 抛错。防腐层的意义正是在于：换底层
+// 只改本文件，全部工具无感继承。
 import type { Config } from './config';
 import { serialize } from './ioMutex';
+import * as backend from './physicalBackend';
+import type { OverlayBox } from './physicalBackend';
 
 export { serialize };
 
-// ─── 迁移常量：错误消息集中管理，保证所有路径给出一致指引 ───
+// ─── legacy 路径（DSH_FORCE_LEGACY_SYSTEM=1 时启用）───
 
 const MIGRATION_NOTICE =
   'Legacy native dependency (@nut-tree/nut-js / screenshot-desktop / sharp / tesseract.js) ' +
-  'removed in batch E. Use the D-7 default execution path (KnowledgePipelineOrchestrator → ' +
-  'StubExecutionStation → D7PhysicalHostPort → D-5 Python microservice) instead. If you must ' +
-  'use the old D-1 tools layer, reinstall the 4 removed packages and set ' +
-  'DSH_FORCE_LEGACY_SYSTEM=1 as environment variable.';
+  'removed in batch E. The default execution path is now the D-5 Python microservice ' +
+  '(physicalBackend). If you must use the old D-1 native stack, reinstall the 4 removed ' +
+  'packages and set DSH_FORCE_LEGACY_SYSTEM=1 as environment variable.';
 
 function legacyError(dep: string, extraHint?: string): Error {
   const envOk = process.env.DSH_FORCE_LEGACY_SYSTEM === '1';
@@ -37,7 +38,9 @@ function legacyError(dep: string, extraHint?: string): Error {
   );
 }
 
-// ─── 懒加载辅助：@nut-tree/nut-js 的导出形状 ───
+function forceLegacy(): boolean {
+  return process.env.DSH_FORCE_LEGACY_SYSTEM === '1';
+}
 
 interface NutJSApi {
   mouse: any;
@@ -68,15 +71,12 @@ async function _getNutJS(): Promise<NutJSApi> {
     _nutJS = api;
     return api;
   } catch (e: any) {
-    // J 纪元：保留原始根因（对齐 _legacyDeps 的 .cause 纪律 —— 排障不丢线索）
     _nutJSError = legacyError('@nut-tree/nut-js',
       'Mouse/keyboard actions now route through D-5 Python microservice by default.');
     _nutJSError.cause = e;
     throw _nutJSError;
   }
 }
-
-// ─── 懒加载辅助：screenshot-desktop ───
 
 let _screenshotFn: (() => Promise<Buffer>) | null = null;
 let _screenshotError: Error | null = null;
@@ -91,20 +91,17 @@ async function _getScreenshotFn(): Promise<() => Promise<Buffer>> {
     return _screenshotFn;
   } catch (e: any) {
     _screenshotError = legacyError('screenshot-desktop',
-      'Use D-5 adapter.takeScreenshotHandle() for screenshots (mmap-file zero-copy transport).');
+      'The default path uses the D-5 service for capture + overlay + hashes.');
+    _screenshotError.cause = e;
     throw _screenshotError;
   }
 }
-
-// ─── 键位白名单 / 按钮翻译：动态从 nut-js Key / Button 取枚举，缺省回退字符串字面量 ───
 
 async function _getKey(keyName: string): Promise<any> {
   const fallbackMap: Record<string, string> = {
     ctrl: 'LeftControl', cmd: 'LeftSuper', alt: 'LeftAlt', shift: 'LeftShift',
     enter: 'Enter', tab: 'Tab', space: 'Space', backspace: 'Backspace',
     delete: 'Delete', esc: 'Escape',
-    // J 纪元：补齐 f6-f10（与 Python 端 _KEY_MAP 双向同步 —— 白名单缺段
-    // 会让这些键在两端都永远不可用）
     f1: 'F1', f2: 'F2', f3: 'F3', f4: 'F4', f5: 'F5',
     f6: 'F6', f7: 'F7', f8: 'F8', f9: 'F9', f10: 'F10',
     f11: 'F11', f12: 'F12',
@@ -113,22 +110,9 @@ async function _getKey(keyName: string): Promise<any> {
   const name = keyName.toLowerCase();
   try {
     const nj = await _getNutJS();
-    // NutJs Key 枚举
     return nj.Key[name] ?? fallbackMap[name] ?? keyName;
   } catch {
     return fallbackMap[name] ?? keyName;
-  }
-}
-
-async function _getButton(button: string): Promise<any> {
-  const fallbackMap: Record<string, string> = {
-    left: 'LEFT', right: 'RIGHT', middle: 'MIDDLE',
-  };
-  try {
-    const nj = await _getNutJS();
-    return nj.Button[button as 'LEFT' | 'RIGHT' | 'MIDDLE'] ?? fallbackMap[button];
-  } catch {
-    return fallbackMap[button] ?? button;
   }
 }
 
@@ -143,7 +127,7 @@ export interface DisplayInfo {
 // ─── 模块级状态（保持原有可变模式 —— 插件单例）───
 
 let dryRun = false;
-let windowDelegate: ((keyword: string) => Promise<void>) | null = null;
+let windowDelegate: ((keyword: string) => Promise<void | { matched?: string | null }>) | null = null;
 
 function guardDryRun(action: string, detail: unknown): boolean {
   if (!dryRun) return false;
@@ -152,48 +136,75 @@ function guardDryRun(action: string, detail: unknown): boolean {
 }
 
 export const system = {
-  /** 应用插件配置 —— 兼容老调用；无 nut-js 时仅设置 dryRun，不抛错 */
+  /** 应用插件配置；D-5 路径下仅 dryRun 生效（服务端无鼠标速度概念） */
   async configure(config: Config): Promise<void> {
     dryRun = config.dryRun;
-    try {
-      const nj = await _getNutJS();
-      if (nj.mouse?.config?.mouseSpeed != null) {
-        nj.mouse.config.mouseSpeed = config.mouseSpeed;
-      }
-    } catch { /* 无 nut-js：静默跳过，执行时会给出清晰错误 */ }
+    if (forceLegacy()) {
+      try {
+        const nj = await _getNutJS();
+        if (nj.mouse?.config?.mouseSpeed != null) {
+          nj.mouse.config.mouseSpeed = config.mouseSpeed;
+        }
+      } catch { /* 无 nut-js：静默跳过，执行时会给出清晰错误 */ }
+    }
   },
 
-  /** 屏幕截图 —— 优先 screenshot-desktop，失败给迁移指引 */
+  /** 屏幕截图（纯净 PNG，无叠加层）—— OCR/记忆预验等下游消费 */
   async captureScreen(): Promise<Buffer> {
-    const fn = await _getScreenshotFn();
-    return await fn();
+    if (forceLegacy()) {
+      const fn = await _getScreenshotFn();
+      return await fn();
+    }
+    return backend.captureCleanPng();
   },
 
-  /** 屏幕尺寸 —— 无 nut-js 时给出清晰错误 */
+  /**
+   * 处理截图（D-5 默认路径主入口）：服务端一次往返完成
+   * SoM 叠加（网格/准星/元素框）+ 缩放 + JPEG 编码 + 指纹 + 变化门控。
+   */
+  async captureScreenWithOverlay(opts: backend.CaptureOptions = {}): Promise<backend.ProcessedCapture> {
+    return backend.captureProcessed(opts);
+  },
+
+  /** 屏幕尺寸 */
   async getScreenSize(): Promise<{ width: number; height: number }> {
-    const nj = await _getNutJS();
-    return {
-      width: typeof nj.screen.width === 'function' ? await nj.screen.width() : (nj.screen.width as number),
-      height: typeof nj.screen.height === 'function' ? await nj.screen.height() : (nj.screen.height as number),
-    };
+    if (forceLegacy()) {
+      const nj = await _getNutJS();
+      return {
+        width: typeof nj.screen.width === 'function' ? await nj.screen.width() : (nj.screen.width as number),
+        height: typeof nj.screen.height === 'function' ? await nj.screen.height() : (nj.screen.height as number),
+      };
+    }
+    return backend.getScreenSize();
   },
 
   async getMousePosition(): Promise<{ x: number; y: number }> {
-    const nj = await _getNutJS();
-    return await nj.mouse.getPosition();
+    if (forceLegacy()) {
+      const nj = await _getNutJS();
+      return await nj.mouse.getPosition();
+    }
+    // 像素域（与旧 nut-js 语义一致 —— crosshair/多屏感知的调用方都按像素消费）
+    return backend.getCursor();
   },
 
   async getAllDisplays(): Promise<DisplayInfo[]> {
-    const nj = await _getNutJS();
-    const raw = await nj.screen.getAllDisplays();
-    return raw.map((d: any) => ({
-      name: d.name ?? `Display@${d.x},${d.y}`,
-      x: d.x, y: d.y, width: d.width, height: d.height,
+    if (forceLegacy()) {
+      const nj = await _getNutJS();
+      const raw = await nj.screen.getAllDisplays();
+      return raw.map((d: any) => ({
+        name: d.name ?? `Display@${d.x},${d.y}`,
+        x: d.x, y: d.y, width: d.width, height: d.height,
+      }));
+    }
+    const displays = await backend.getDisplays();
+    return displays.map(d => ({
+      name: d.name, x: d.x, y: d.y, width: d.width, height: d.height,
     }));
   },
 
   async getActiveDisplay(): Promise<DisplayInfo> {
     const [pos, displays] = await Promise.all([this.getMousePosition(), this.getAllDisplays()]);
+    // pos 与 displays 均为像素域（与旧 nut-js 语义一致）
     return displays.find(d =>
       pos.x >= d.x && pos.x <= d.x + d.width &&
       pos.y >= d.y && pos.y <= d.y + d.height,
@@ -202,80 +213,150 @@ export const system = {
 
   async clickMouse(x: number, y: number, button: string = 'left'): Promise<void> {
     if (guardDryRun('clickMouse', { x, y, button })) return;
-    const [nj, btn] = await Promise.all([_getNutJS(), _getButton(button)]);
-    if (!btn) throw new Error(`Unknown mouse button: ${button}`);
-    await serialize(async () => {
-      await nj.mouse.move([{ x, y }]);
-      await nj.mouse.click(btn);
-    });
+    if (forceLegacy()) {
+      const [nj, btn] = await Promise.all([_getNutJS(), _getButton(button)]);
+      if (!btn) throw new Error(`Unknown mouse button: ${button}`);
+      await serialize(async () => {
+        await nj.mouse.move([{ x, y }]);
+        await nj.mouse.click(btn);
+      });
+      return;
+    }
+    // 像素 → 归一化（D-5 契约域）；越界夹取防微浮点溢出
+    const size = await backend.getScreenSize();
+    const nx = Math.min(1, Math.max(0, x / size.width));
+    const ny = Math.min(1, Math.max(0, y / size.height));
+    await backend.clickMouse(nx, ny, button as 'left' | 'right' | 'middle', dryRun);
   },
 
   async typeText(text: string, clearFirst: boolean = false): Promise<void> {
     if (guardDryRun('typeText', { text: text.substring(0, 30), clearFirst })) return;
-    const nj = await _getNutJS();
-    const isMac = process.platform === 'darwin';
-    const modKey = await _getKey(isMac ? 'cmd' : 'ctrl');
-    const keyA = await _getKey('a');
-    const keyBack = await _getKey('backspace');
-    await serialize(async () => {
-      if (clearFirst) {
-        await nj.keyboard.pressKey(modKey, keyA);
-        await nj.keyboard.releaseKey(modKey, keyA);
-        await nj.keyboard.pressKey(keyBack);
-        await nj.keyboard.releaseKey(keyBack);
-      }
-      await nj.keyboard.type(text);
-    });
+    if (forceLegacy()) {
+      const nj = await _getNutJS();
+      const isMac = process.platform === 'darwin';
+      const modKey = await _getKey(isMac ? 'cmd' : 'ctrl');
+      const keyA = await _getKey('a');
+      const keyBack = await _getKey('backspace');
+      await serialize(async () => {
+        if (clearFirst) {
+          await nj.keyboard.pressKey(modKey, keyA);
+          await nj.keyboard.releaseKey(modKey, keyA);
+          await nj.keyboard.pressKey(keyBack);
+          await nj.keyboard.releaseKey(keyBack);
+        }
+        await nj.keyboard.type(text);
+      });
+      return;
+    }
+    await serialize(() => backend.typeText(text, clearFirst, dryRun));
   },
 
   async dragMouse(start: { x: number; y: number }, end: { x: number; y: number }): Promise<void> {
     if (guardDryRun('dragMouse', { start, end })) return;
-    const [nj, btnLeft] = await Promise.all([_getNutJS(), _getButton('left')]);
-    await serialize(async () => {
-      await nj.mouse.move([{ x: start.x, y: start.y }]);
-      await nj.mouse.pressButton(btnLeft);
-      await nj.mouse.move([{ x: end.x, y: end.y }]);
-      await nj.mouse.releaseButton(btnLeft);
-    });
+    if (forceLegacy()) {
+      const [nj, btnLeft] = await Promise.all([_getNutJS(), _getButton('left')]);
+      await serialize(async () => {
+        await nj.mouse.move([{ x: start.x, y: start.y }]);
+        await nj.mouse.pressButton(btnLeft);
+        await nj.mouse.move([{ x: end.x, y: end.y }]);
+        await nj.mouse.releaseButton(btnLeft);
+      });
+      return;
+    }
+    // 像素 → 归一化（D-5 契约域）
+    const size = await backend.getScreenSize();
+    const clamp01 = (v: number, max: number) => Math.min(1, Math.max(0, v / max));
+    await serialize(() => backend.dragMouse(
+      { x: clamp01(start.x, size.width), y: clamp01(start.y, size.height) },
+      { x: clamp01(end.x, size.width), y: clamp01(end.y, size.height) },
+      dryRun,
+    ));
   },
 
   async scroll(direction: 'up' | 'down' | 'left' | 'right', amount: number): Promise<void> {
     if (guardDryRun('scroll', { direction, amount })) return;
-    const nj = await _getNutJS();
-    await serialize(async () => {
-      switch (direction) {
-        case 'up': await nj.mouse.scrollUp(amount); break;
-        case 'down': await nj.mouse.scrollDown(amount); break;
-        case 'left': await nj.mouse.scrollLeft(amount); break;
-        case 'right': await nj.mouse.scrollRight(amount); break;
-      }
-    });
+    if (forceLegacy()) {
+      const nj = await _getNutJS();
+      await serialize(async () => {
+        switch (direction) {
+          case 'up': await nj.mouse.scrollUp(amount); break;
+          case 'down': await nj.mouse.scrollDown(amount); break;
+          case 'left': await nj.mouse.scrollLeft(amount); break;
+          case 'right': await nj.mouse.scrollRight(amount); break;
+        }
+      });
+      return;
+    }
+    await backend.scrollPage(direction, amount, dryRun);
   },
 
   async pressHotkey(keys: string[]): Promise<void> {
     if (guardDryRun('pressHotkey', { keys })) return;
-    const [nj, ...mapped] = await Promise.all([
-      _getNutJS(),
-      ...keys.map(k => _getKey(k)),
-    ]);
-    if (mapped.some(m => m == null)) {
-      throw new Error(`Unrecognized key names in combination: [${keys.join(', ')}]`);
+    if (forceLegacy()) {
+      const [nj, ...mapped] = await Promise.all([
+        _getNutJS(),
+        ...keys.map(k => _getKey(k)),
+      ]);
+      if (mapped.some(m => m == null)) {
+        throw new Error(`Unrecognized key names in combination: [${keys.join(', ')}]`);
+      }
+      await serialize(async () => {
+        await nj.keyboard.pressKey(...mapped);
+        await nj.keyboard.releaseKey(...mapped);
+      });
+      return;
     }
-    await serialize(async () => {
-      await nj.keyboard.pressKey(...mapped);
-      await nj.keyboard.releaseKey(...mapped);
-    });
+    await backend.pressHotkey(keys, dryRun);
   },
 
-  setWindowDelegate(fn: ((keyword: string) => Promise<void>) | null): void {
+  setWindowDelegate(fn: ((keyword: string) => Promise<void | { matched?: string | null }>) | null): void {
     windowDelegate = fn;
   },
 
-  async switchWindowByTitle(keyword: string): Promise<void> {
-    if (windowDelegate) return await windowDelegate(keyword);
-    throw new Error(
-      'Window management is not available in this environment. ' +
-      'Install a window-management provider, or switch windows via the press_hotkey tool.',
-    );
+  async switchWindowByTitle(keyword: string): Promise<{ method: string; matched: string | null }> {
+    // Y6 通道仲裁修正：原生 python 后端优先，D-2 委托降为后备。
+    // 旧实现委托一经注入即独占 —— 而 raise_window 委托（PowerShell）无标题
+    // 回执（focus_handoff 取证因此永远缺席）、无本地化别名、失败时不给可用
+    // 窗口清单。原生路径（pygetwindow）三样俱全。委托保留给"无 python 后端"
+    // 的环境 —— 那才是 D-2 设计它的场景。
+    const ABSENCE = /window_unavailable|spawn_failed|startup_timeout|adapter unavailable|ECONNREFUSED/;
+    if (!forceLegacy()) {
+      try {
+        const r = await backend.switchWindow(keyword);
+        if (r.method !== 'hotkey_only') {
+          return { method: r.method, matched: r.matched ?? null };
+        }
+      } catch (e: any) {
+        // 后端缺席（无 python 服务/窗口后端不可用）→ 委托接管；
+        // element_not_found 是真实未命中 → 如实上抛（错误里带可用窗口清单）。
+        if (!ABSENCE.test(String(e?.message ?? ''))) throw e;
+      }
+    }
+    if (windowDelegate) {
+      const r = await windowDelegate(keyword);
+      // 委托方言无标题回执时 matched=null —— 取证降级到工具层 OCR 路径
+      return { method: 'delegate', matched: r?.matched ?? null };
+    }
+    if (forceLegacy()) {
+      throw new Error(
+        'Window management is not available in this environment. ' +
+        'Install a window-management provider, or switch windows via the press_hotkey tool.',
+      );
+    }
+    throw new Error('native window switch unavailable; use press_hotkey alt+tab');
   },
 };
+
+async function _getButton(button: string): Promise<any> {
+  const fallbackMap: Record<string, string> = {
+    left: 'LEFT', right: 'RIGHT', middle: 'MIDDLE',
+  };
+  try {
+    const nj = await _getNutJS();
+    return nj.Button[button as 'LEFT' | 'RIGHT' | 'MIDDLE'] ?? fallbackMap[button];
+  } catch {
+    return fallbackMap[button] ?? button;
+  }
+}
+
+export type { OverlayBox };

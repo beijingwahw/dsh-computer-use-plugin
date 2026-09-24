@@ -356,6 +356,15 @@ class L2OCRBackend:
 
             img = Image.open(io.BytesIO(image_bytes))
             img_w, img_h = img.size
+
+            # Y6 真机战果：区域裁剪后的小图（如 read_text half=0.1 → ~250px 高）
+            # 里的小号 UI 文字对 OCR 引擎太小 —— 英文被拼错、无关中文词混入
+            # （"Sbeaany"/"beadify"）。短边 < 640px 时 LANCZOS 放大 2 倍再识别，
+            # bbox 坐标按放大倍数除回，坐标方言不变。
+            scale = 2 if min(img_w, img_h) < 640 else 1
+            if scale > 1:
+                img = img.resize((img_w * scale, img_h * scale), Image.LANCZOS)
+
             arr = np.array(img)
 
             loop = asyncio.get_running_loop()
@@ -377,11 +386,17 @@ class L2OCRBackend:
 
             elements: list[UIElement] = []
             for box, text, score in result:
-                if not text or score < 0.5:
+                # rapidocr 1.2.x 的 score 是字符串（'0.8307…'）—— 与浮点比较
+                # 前必须归一（真机战果：str < float 直接 TypeError，L2 全灭）
+                try:
+                    score_f = float(score)
+                except (TypeError, ValueError):
                     continue
-                # box = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]（四点多边形）
-                xs = [p[0] for p in box]
-                ys = [p[1] for p in box]
+                if not text or score_f < 0.5:
+                    continue
+                # box = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]（四点多边形；放大后坐标除回）
+                xs = [p[0] / scale for p in box]
+                ys = [p[1] / scale for p in box]
                 x, y = min(xs), min(ys)
                 w, h = max(xs) - x, max(ys) - y
                 if sw <= 0 or sh <= 0:

@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+import asyncio
+import sys
+import time
 from typing import Any, Literal
 
 from fastapi import APIRouter
@@ -68,6 +71,33 @@ class ScreenshotRequest(BaseModel):
     # J 纪元统一：截图 region 与 UiTree 的 RegionSpec 同一强类型校验
     # （旧实现截图侧是裸 dict，靠 screen._crop_region 手工校验 —— 同概念双轨）
     region: RegionSpec | None = None
+    # ── D-1 工具层接线扩展（无原生图像依赖的 Node 端）──
+    overlay: dict | None = None          # SoM 叠加层（draw_overlay 契约，全屏归一化坐标）
+    max_width: int | None = Field(default=None, ge=64, le=8192)
+    upscale: float | None = Field(default=None, ge=1.0, le=8.0)
+    want_hashes: bool = False            # 返回干净帧 dhash/phash
+    want_region_hash: dict | None = None  # {x, y, r}（全屏归一化）→ 区域 dhash
+    gate: dict | None = None             # {dhash_ref, distance} 变化门控
+    keep_frame: bool = False             # 干净帧入环（frame_stats/frame_diff 用）
+    meta_only: bool = False              # 只取指纹/帧缓存，不编码不传图（轮询用）
+    want_salience: bool = False          # 块级梯度熵图（Y-1 中央凹 / Y-2 金字塔）
+
+
+class FrameStatsRequest(BaseModel):
+    frame_id: int
+    regions: list[dict] = Field(default_factory=list)
+
+
+class FrameRowmeansRequest(BaseModel):
+    frame_id: int
+    grid: int = Field(default=16, ge=4, le=256)
+
+
+class FrameDiffRequest(BaseModel):
+    frame_a: int
+    frame_b: int
+    block: int = Field(default=24, ge=8, le=128)
+    annotate: bool = False
 
 
 class UiTreeRequest(BaseModel):
@@ -141,7 +171,7 @@ async def health() -> dict:
 
     return success({
         "status": "ok",
-        "version": "0.1.0",
+        "version": "0.3.0",
         "platform": sys.platform,
         "python": platform.python_version(),
         "screen": screen_info,
@@ -214,9 +244,22 @@ async def take_screenshot(req: ScreenshotRequest) -> dict:
     """截屏 → 写入 shm → 返回 ShmHandle 元数据。
 
     零字节图像传输（shm 模式）；base64 模式才内联数据。
+    gate 命中（屏幕未变）时无 handle，响应携带 ``unchanged=true``。
     """
     screen_ctrl: ScreenCapture = _get("screen")
-    handle = await screen_ctrl.capture(req.format, req.quality, req.region)
+    region_dict = req.region.model_dump() if req.region else None
+    handle, extras = await screen_ctrl.capture(
+        req.format, req.quality, region_dict,
+        overlay=req.overlay, max_width=req.max_width, upscale=req.upscale,
+        want_hashes=req.want_hashes, want_region_hash=req.want_region_hash,
+        gate=req.gate, keep_frame=req.keep_frame, meta_only=req.meta_only,
+        want_salience=req.want_salience,
+    )
+    if handle is None:
+        return success({**extras, "transport": "none", "name": "", "size": 0,
+                        "shape": [0, 0, 0], "dtype": "", "stride": 0,
+                        "format": "", "width": 0, "height": 0,
+                        "captured_at": time.time(), "image_base64": ""})
     return {
         "transport": handle.transport,
         "name": handle.name,
@@ -230,6 +273,7 @@ async def take_screenshot(req: ScreenshotRequest) -> dict:
         "captured_at": handle.captured_at,
         # 仅 base64 模式才有 base64_data；shm/mmap-file 模式为空字符串
         "image_base64": handle.base64_data if handle.transport == "base64" else "",
+        **extras,
     }
 
 
@@ -283,6 +327,109 @@ async def switch_window(req: SwitchWindowRequest) -> dict:
     """按标题关键词切窗。"""
     window_ctrl: WindowManager = _get("window")
     return await window_ctrl.switch_by_title(req.keyword)
+
+
+# ─── 感知辅助端点（D-1 工具层接线：无原生依赖的 Node 端所需）───
+
+
+@router.get("/cursor")
+@safe_call
+async def cursor() -> dict:
+    """当前鼠标位置（全屏像素）—— SoM 准星与多屏感知的数据源。"""
+    import pyautogui
+
+    loop = asyncio.get_running_loop()
+    pos = await loop.run_in_executor(None, pyautogui.position)
+    return {"x": float(pos.x), "y": float(pos.y)}
+
+
+@router.get("/displays")
+@safe_call
+async def displays() -> dict:
+    """显示器清单（全屏虚拟坐标系）—— 多屏感知与边界守卫的数据源。
+
+    Windows：Win32 EnumDisplayMonitors；其余平台诚实降级为主屏单条。
+    """
+    import platform
+
+    result: list[dict] = []
+    if platform.system() == "Windows":
+        def _enum() -> list[dict]:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            user32 = ctypes.windll.user32
+            monitors: list[dict] = []
+            MonitorEnumProc = ctypes.WINFUNCTYPE(
+                ctypes.c_int, wt.HMONITOR, wt.HDC, ctypes.POINTER(wt.RECT), ctypes.c_void_p,
+            )
+
+            def _cb(hmon, _hdc, rect, _lparam):
+                info = wt.MONITORINFO()
+                info.cbSize = ctypes.sizeof(wt.MONITORINFO)
+                if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                    r = info.rcMonitor
+                    monitors.append({
+                        "name": f"Monitor@{r.left},{r.top}",
+                        "x": int(r.left), "y": int(r.top),
+                        "width": int(r.right - r.left), "height": int(r.bottom - r.top),
+                        "primary": bool(info.dwFlags & 1),
+                    })
+                return 1
+
+            user32.EnumDisplayMonitors(None, None, MonitorEnumProc(_cb), 0)
+            return monitors
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _enum)
+
+    if not result:
+        screen_ctrl: ScreenCapture = _get("screen")
+        size = await screen_ctrl.get_screen_size()
+        result = [{
+            "name": "Primary", "x": 0, "y": 0,
+            "width": int(size["width"]), "height": int(size["height"]),
+            "primary": True,
+        }]
+    return {"displays": result}
+
+
+@router.post("/frame_stats")
+@safe_call
+async def frame_stats(req: FrameStatsRequest) -> dict:
+    """缓存帧区域统计（intent.ts 物理规则 / popupDetector 几何传感的躯体）。"""
+    screen_ctrl: ScreenCapture = _get("screen")
+    stats = await asyncio.get_running_loop().run_in_executor(
+        None, screen_ctrl.frame_stats, req.frame_id, req.regions,
+    )
+    return {"frame_id": req.frame_id, "stats": stats}
+
+
+@router.post("/frame_rowmeans")
+@safe_call
+async def frame_rowmeans(req: FrameRowmeansRequest) -> dict:
+    """缓存帧行亮度序列（内容平移检测 —— scroll 物理规则）。"""
+    screen_ctrl: ScreenCapture = _get("screen")
+    rows = await asyncio.get_running_loop().run_in_executor(
+        None, screen_ctrl.frame_rowmeans, req.frame_id, req.grid,
+    )
+    return {"frame_id": req.frame_id, "rows": rows}
+
+
+@router.post("/frame_diff")
+@safe_call
+async def frame_diff(req: FrameDiffRequest) -> dict:
+    """两缓存帧差分 → 变化区域清单 + 可选红框标注 JPEG（diff_view 的躯体）。"""
+    import base64
+
+    screen_ctrl: ScreenCapture = _get("screen")
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, screen_ctrl.frame_diff, req.frame_a, req.frame_b, req.block, req.annotate,
+    )
+    annotated = result.pop("annotated_jpeg")
+    if annotated is not None:
+        result["annotated_image_base64"] = base64.b64encode(annotated).decode("ascii")
+    return result
 
 
 # ─── /v1/shm/{name}：共享内存显式释放（DELETE 方法）───
