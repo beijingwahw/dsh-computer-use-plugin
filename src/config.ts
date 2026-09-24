@@ -59,6 +59,27 @@ export interface Config {
   enableOcr: boolean;
   /** OCR 语言，如 'eng'、'chi_sim+eng' */
   ocrLang: string;
+  // ─── Z 纪元（Z-1 世界行动引擎）───
+  /** 启用交互性探针：find_text 命中先做悬停物理实验（光标形态 + 悬停重绘），对话文本不再被当成入口 */
+  enableInteractivityProbe: boolean;
+  /** 探针悬停停留(ms)：低于常见 tooltip 延迟，足够 hover 高亮生效 */
+  probeDwellMs: number;
+  /** 探针区域指纹半径（屏幕比例）：按钮级邻域，小而准 */
+  probeRegionRadius: number;
+  /** 悬停重绘判定阈值：区域相似度低于此值 ⇒ 判定 hover 高亮出现 */
+  probeRepaintThreshold: number;
+  /** find_text 单次探针目标上限：控制物理实验时长（每点 ≈ dwell + 2 次指纹） */
+  probeMaxTargets: number;
+  /** Z-1d 判决记忆化：同场景（指纹相似度 ≥ 阈值）复用判决，实验成本摊销到每场景一次 */
+  enableProbeMemory: boolean;
+  /** 判决记忆 TTL(ms)：超时即失效重实验（场景漂移的双保险） */
+  probeMemoryTtlMs: number;
+  /** 判决记忆容量（LRU 驱逐） */
+  probeMemoryCapacity: number;
+  /** 判决记忆场景匹配阈值（整屏指纹相似度） */
+  probeMemorySceneSimilarity: number;
+  /** 判决召回的点距半径（归一化）：OCR bbox 微抖的容忍带 */
+  probeRecallRadius: number;
   // ─── 第五轮创新 ───
   /** 启用自进化技能库（save_skill / match_skill / run_skill + 自动归纳） */
   enableSkillLibrary: boolean;
@@ -176,6 +197,16 @@ export const Config: Schema<Config> = Schema.object({
   focusMaxAgeMs: Schema.number().default(30000).description('Focus validity window for region verification'),
   enableOcr: Schema.boolean().default(false).description('Enable local OCR (read_text/find_text + semantic verification)'),
   ocrLang: Schema.string().default('eng').description('OCR language, e.g. eng / chi_sim+eng'),
+  enableInteractivityProbe: Schema.boolean().default(true).description('Hover-probe OCR hits (cursor shape + hover repaint) so conversation text is never mistaken for a clickable entry'),
+  probeDwellMs: Schema.number().default(350).description('Probe hover dwell in ms'),
+  probeRegionRadius: Schema.number().default(0.06).description('Probe region-hash radius as screen fraction'),
+  probeRepaintThreshold: Schema.number().default(0.985).description('Region similarity below this during hover = repaint detected'),
+  probeMaxTargets: Schema.number().default(4).description('Max find_text hits probed per call'),
+  enableProbeMemory: Schema.boolean().default(true).description('Memoize probe verdicts per scene fingerprint; repeat scenes reuse verdicts with zero experiments'),
+  probeMemoryTtlMs: Schema.number().default(300000).description('Probe-verdict memory TTL in ms'),
+  probeMemoryCapacity: Schema.number().default(128).description('Probe-verdict memory capacity (LRU)'),
+  probeMemorySceneSimilarity: Schema.number().default(0.9).description('Scene-fingerprint similarity required to recall a verdict'),
+  probeRecallRadius: Schema.number().default(0.015).description('Normalized point-distance radius for verdict recall (OCR bbox jitter tolerance)'),
   enableSkillLibrary: Schema.boolean().default(true).description('Self-evolving skill library (induce/match/run)'),
   skillLibraryPath: Schema.string().default('').description('Skill library JSON path; empty = memory only. Set a path for cross-session learning'),
   autoInduceSkills: Schema.boolean().default(true).description('Auto-induce skills from successful complex tasks'),

@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'fs';
 import path from 'path';
 import { uiMemory } from './uiMemory';
+import { probeMemory } from './probeMemory';
 import { skillLibrary } from './skillLibrary';
 import { failureMemory } from './failureMemory';
 import { telemetry } from './telemetry';
@@ -34,6 +35,8 @@ interface Checkpoint {
   version: number;
   savedAt: number;
   uiMemory: ReturnType<typeof uiMemory.dump>;
+  /** Z-1d 判决记忆（原地扩展：快照存活 ⇒ 崩溃后免重实验） */
+  probeMemory?: ReturnType<typeof probeMemory.dump>;
   skillLibrary: ReturnType<typeof skillLibrary.dump>;
   failureMemory: ReturnType<typeof failureMemory.dump>;
   journal: { entries: JournalEntry[]; chainTip: string; chainBase: string };
@@ -83,6 +86,7 @@ function collect(): Checkpoint {
     version: CHECKPOINT_VERSION,
     savedAt: Date.now(),
     uiMemory: uiMemory.dump(),
+    probeMemory: probeMemory.dump(),
     skillLibrary: skillLibrary.dump(),
     failureMemory: failureMemory.dump(),
     journal: { entries: journal.list(false), chainTip: journal.tip, chainBase: journal.base },
@@ -139,6 +143,7 @@ export function loadCheckpoint(filePath: string): { restored: boolean; report: s
 
   const sections: Array<[string, () => void]> = [
     ['uiMemory', () => uiMemory.restore(cp.uiMemory)],
+    ['probeMemory', () => probeMemory.restore(cp.probeMemory)],
     ['skillLibrary', () => skillLibrary.restore(cp.skillLibrary)],
     ['failureMemory', () => failureMemory.restore(cp.failureMemory)],
     ['journal', () => {

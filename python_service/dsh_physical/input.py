@@ -392,6 +392,31 @@ class InputController:
 
         return {"pressed": mapped}
 
+    async def move(self, x: float, y: float, duration_ms: float = 0.0) -> dict:
+        """移动鼠标（不点击）—— Z-1 交互性探针的悬停动作。
+
+        与 ``click`` 的差异：无 ``pause_after_action_ms`` 等待 —— 探针自己
+        控制悬停停留与复位时序（dwell 在调用方）。
+        """
+        size = await self.get_screen_size()
+        px, py = self._normalize_to_pixel(x, y)
+
+        if self._dry_run:
+            return {
+                "pixel": {"x": px, "y": py},
+                "screen": {"width": size[0], "height": size[1]},
+                "dry_run": True,
+            }
+
+        async with _get_lock():
+            pa = _get_pyautogui()
+            await _run_in_executor(
+                pa.moveTo, px, py,
+                duration=duration_ms / 1000.0, _pause=False,
+            )
+
+        return {"pixel": {"x": px, "y": py}}
+
     async def drag(self, start: dict, end: dict) -> dict:
         """拖拽鼠标：start/end 都是归一化 {x, y}。
 

@@ -19,6 +19,7 @@ import { createZoomInspectTool } from './zoomInspect';
 import { createRememberUiTool, createRecallUiTool } from './uiMemoryTools';
 import { createReplayActionsTool } from './replayActions';
 import { createReadTextTool, createFindTextTool } from './textTools';
+import { createProbeInteractivityTool } from './probeInteractivity';
 import { createDiffViewTool } from './diffView';
 import { createSaveSkillTool, createMatchSkillTool, createRunSkillTool } from './skillTools';
 import { createRequestApprovalTool, createGrantApprovalTool } from './approvalTools';
@@ -62,6 +63,11 @@ export function buildAllTools(config: Config): ToolDefinition[] {
   // 第四轮创新：文字感知（OCR 定位与读取）
   if (config.enableOcr) {
     tools.push(createReadTextTool(config), createFindTextTool(config));
+  }
+
+  // Z 纪元（Z-1 世界行动引擎）：交互性探针 —— 对话文本 ≠ 可点击入口
+  if (config.enableInteractivityProbe) {
+    tools.push(createProbeInteractivityTool(config));
   }
 
   // 第五轮创新：自进化技能库（轨迹归纳 / 语义匹配 / DNA 重组 / 一键执行）

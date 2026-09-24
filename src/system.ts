@@ -229,6 +229,23 @@ export const system = {
     await backend.clickMouse(nx, ny, button as 'left' | 'right' | 'middle', dryRun);
   },
 
+  /**
+   * 移动鼠标（无点击）—— Z-1 交互性探针的悬停动作。
+   * 零破坏语义：绝不按下；探针调用方负责 dwell 观察与位置复位。
+   */
+  async moveMouse(x: number, y: number, durationMs = 0): Promise<void> {
+    if (guardDryRun('moveMouse', { x, y })) return;
+    if (forceLegacy()) {
+      const nj = await _getNutJS();
+      await serialize(() => nj.mouse.move([{ x, y }]));
+      return;
+    }
+    const size = await backend.getScreenSize();
+    const nx = Math.min(1, Math.max(0, x / size.width));
+    const ny = Math.min(1, Math.max(0, y / size.height));
+    await backend.moveMouse(nx, ny, durationMs, dryRun);
+  },
+
   async typeText(text: string, clearFirst: boolean = false): Promise<void> {
     if (guardDryRun('typeText', { text: text.substring(0, 30), clearFirst })) return;
     if (forceLegacy()) {

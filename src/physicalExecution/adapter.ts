@@ -16,8 +16,8 @@
 //   - 运行层 health/clickMouse/typeText/...：永不抛错，失败入 Result.error
 //   - 契约驱动：所有跨进程通信为强类型 JSON Payload
 import type {
-  ClickResult, DragResult, HealthInfo, HotkeyResult, PhysicalError,
-  PhysicalExecutionAdapter, PhysicalExecutionConfig, Result,
+  ClickResult, CursorKindInfo, DragResult, HealthInfo, HitTestResult, HotkeyResult,
+  MoveResult, PhysicalError, PhysicalExecutionAdapter, PhysicalExecutionConfig, Result,
   ScreenshotResult, ScrollResult, SwitchWindowResult, TypeResult, UiTreeResult,
 } from './contracts.js';
 import { ALL_CAPS, PhysicalErrorKind } from './contracts.js';
@@ -221,6 +221,17 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     });
   }
 
+  /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
+  async moveMouse(args: {
+    x: number; y: number; durationMs?: number; dryRun?: boolean;
+  }): Promise<Result<MoveResult, PhysicalError>> {
+    return this.call('/move_mouse', {
+      x: args.x, y: args.y,
+      duration_ms: args.durationMs ?? 0,
+      dry_run: args.dryRun ?? false,
+    });
+  }
+
   async takeScreenshot(args?: {
     format?: 'png' | 'jpeg';
     quality?: number;
@@ -254,6 +265,16 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
   /** 感知辅助（D-1 工具层接线）：当前鼠标位置（全屏像素） */
   async getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>> {
     return this.callGet('/cursor');
+  }
+
+  /** 感知辅助（Z-1 交互性探针）：当前全局光标形态 —— OS 的交互性判决 */
+  async getCursorKind(): Promise<Result<CursorKindInfo, PhysicalError>> {
+    return this.callGet('/cursor_kind');
+  }
+
+  /** 感知辅助（Z-1 第三通道）：UIA 单点结构查询 —— 零物理副作用的结构层判决 */
+  async hitTest(args: { x: number; y: number }): Promise<Result<HitTestResult, PhysicalError>> {
+    return this.call('/hit_test', { x: args.x, y: args.y });
   }
 
   /** 感知辅助：显示器清单（全屏虚拟坐标系） */

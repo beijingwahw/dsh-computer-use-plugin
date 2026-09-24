@@ -4,9 +4,16 @@
 //   find_text  — 文字→坐标定位：带文字标签的元素获得精确 ground truth，
 //                彻底消灭「按按钮文字估坐标」的幻觉源
 // 本轮接线：OCR 双路径 —— D-5 服务端 L2（RapidOCR）优先，tesseract.js 兜底。
+// Z 纪元（Z-1）：find_text 集成交互性探针 —— OCR 命中先过悬停物理实验
+// （光标形态 + 悬停重绘），标注 interactivity=control/text/unprobed。
+// 对症：「对话文本被误识别为可点击的入口」——聊天记录里写着「点击登录」
+// 的文字与真按钮像素等价，但悬停上去 OS 会给出 ibeam 与 hand 两种
+// 截然不同的回答。文字坐标从此携带交互性判决，不再是裸坐标。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { readTextAny } from '../textReader';
+import type { OcrWord } from '../textReader';
+import { classifyWordShape, probePoints, type ProbeResult } from '../interactivityProbe';
 
 export function createReadTextTool(config: Config) {
   return defineTool({
@@ -80,9 +87,13 @@ export function createFindTextTool(config: Config) {
   return defineTool({
     name: 'find_text',
     description:
-      'Locates on-screen text and returns PRECISE normalized coordinates for each match. ' +
-      'This is the most reliable way to ground any element that has a visible text label — ' +
-      'prefer it over estimating coordinates from a screenshot.',
+      'Locates on-screen text and returns PRECISE normalized coordinates for each match, ' +
+      'annotated with an INTERACTIVITY verdict from a zero-impact hover experiment ' +
+      '(cursor shape + hover repaint): interactivity=control means the OS confirms it is a ' +
+      'clickable element (hand cursor / hover highlight); interactivity=text means it is ' +
+      'static selectable text (chat messages, documents) — NOT a clickable entry. ' +
+      'IMPORTANT: a match is a LOCATION, not a permission to click — never click a match ' +
+      'marked text when you are looking for a button/entry.',
     parameters: {
       keyword: {
         type: 'string', required: true,
@@ -107,18 +118,60 @@ export function createFindTextTool(config: Config) {
           }, null, 2);
         }
 
-        const lines = hits.slice(0, 8).map(w =>
-          `- "${w.text}" center=(${w.center_normalized.x.toFixed(3)}, ${w.center_normalized.y.toFixed(3)}) confidence=${Math.round(w.confidence)}`,
-        );
+        // Z-1：几何先验分类 + 悬停物理实验。探针优先级：ambiguous（最需实验）
+        // > content-like（本 bug 的危险形态）> control-like（先验已足）。
+        const shaped = hits.slice(0, 8).map(w => ({ word: w, shape: classifyWordShape(w) }));
+        const probeOrder = { 'ambiguous': 0, 'content-like': 1, 'control-like': 2 } as const;
+        let probes = new Map<string, ProbeResult>();
+        if (config.enableInteractivityProbe) {
+          const targets = [...shaped]
+            .sort((a, b) => probeOrder[a.shape] - probeOrder[b.shape])
+            .slice(0, config.probeMaxTargets);
+          const results = await probePoints(config, targets.map(t => ({
+            x: t.word.center_normalized.x, y: t.word.center_normalized.y,
+          })));
+          targets.forEach((t, i) => probes.set(`${t.word.center_normalized.x.toFixed(4)},${t.word.center_normalized.y.toFixed(4)}`, results[i]));
+        }
+
+        const lines = shaped.map(({ word: w, shape }) => {
+          const key = `${w.center_normalized.x.toFixed(4)},${w.center_normalized.y.toFixed(4)}`;
+          const p = probes.get(key);
+          let tag = `shape=${shape}`;
+          if (p) {
+            // 通道透明律：判决来自哪个世界通道，证据链可追溯
+            const viaTag = p.evidence.via === 'uia'
+              ? `via=uia(${p.evidence.hit_test?.control_type ?? '?'}`
+                + (p.evidence.hit_test?.matched_depth ? `, ancestor+${p.evidence.hit_test.matched_depth}` : '') + ')'
+              : p.evidence.via === 'memory'
+                ? 'via=memory(scene-matched recall)'
+                : `via=hover(cursor=${p.evidence.cursor_kind}`
+                  + (p.evidence.repaint_similarity != null ? `, repaint=${p.evidence.hover_repaint}` : '') + ')';
+            tag += ` interactivity=${p.verdict} [${viaTag}, conf=${p.confidence.toFixed(2)}]`;
+          } else {
+            tag += ' interactivity=unprobed (budget; trust shape with caution)';
+          }
+          return `- "${w.text}" center=(${w.center_normalized.x.toFixed(3)}, ${w.center_normalized.y.toFixed(3)}) confidence=${Math.round(w.confidence)} ${tag}`;
+        });
+
+        const anyControl = [...probes.values()].some(p => p.verdict === 'control');
+        const anyText = [...probes.values()].some(p => p.verdict === 'text');
         return JSON.stringify({
           status: 'SUCCESS',
           state_anchor: {
             keyword: args.keyword,
             matches: hits.length,
+            probed: probes.size,
             locations: lines,
           },
-          next_step: `Click the most relevant match with click_mouse using its EXACT center coordinates. ` +
-            `If multiple matches exist, disambiguate by their vertical/horizontal position before clicking.`,
+          next_step:
+            'ONLY click a match with interactivity=control (OS-confirmed clickable). ' +
+            'Matches with interactivity=text are static content — chat messages or document ' +
+            'text that merely MENTIONS the keyword; clicking them is always a mistake. ' +
+            'unprobed matches: rely on shape (content-like full-width rows are text; ' +
+            'compact labels are likely controls) and verify with zoom_inspect or ' +
+            'probe_interactivity before clicking. If NO match is a control, the real entry ' +
+            'is elsewhere: scroll_page, open the right menu, or take_screenshot and search visually.' +
+            (anyControl ? ' A control match exists in this result.' : anyText ? ' WARNING: only text matches were found — do not click any of them.' : ''),
         }, null, 2);
       } catch (error: any) {
         return `[Error]: OCR failed (${error.message}). Fall back to visual grounding via take_screenshot + zoom_inspect.`;

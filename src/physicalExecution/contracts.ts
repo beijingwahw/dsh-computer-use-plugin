@@ -136,6 +136,41 @@ export interface DragResult {
   end_pixel: { x: number; y: number };
 }
 
+/** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
+export interface MoveResult {
+  pixel: { x: number; y: number };
+}
+
+/**
+ * 当前全局光标形态 —— OS 对「指针下是什么」的原生判决。
+ * hand=可点击热区；ibeam=可选择文本（正文/聊天消息）；
+ * arrow/custom=未知（原生按钮常保持箭头，需悬停重绘旁证）。
+ */
+export interface CursorKindInfo {
+  kind: 'arrow' | 'ibeam' | 'hand' | 'wait' | 'busy' | 'resize' | 'cross'
+    | 'unavailable' | 'hidden' | 'custom' | 'error' | 'unsupported';
+  handle?: number;
+  detail?: string;
+  platform?: string;
+}
+
+/**
+ * UIA 单点结构查询（Z-1 第三通道：判别力天花板）。
+ * classification：control=命中交互控件（含祖先链）；text=Text/Edit/Document
+ * 且无交互祖先；unknown=Pane/Custom 等（交回悬停双通道）；
+ * unavailable=库缺席/COM 失败/l1 门控关闭。
+ */
+export interface HitTestResult {
+  available: boolean;
+  control_type?: string | null;
+  name?: string;
+  matched_depth?: number | null;
+  chain?: Array<{ type: string; name: string; depth: number }>;
+  classification: 'control' | 'text' | 'unknown' | 'unavailable';
+  reason?: string;
+  pixel?: { x: number; y: number };
+}
+
 export interface ScreenshotResult {
   transport: 'shm' | 'mmap-file' | 'base64' | 'none';
   /** shm 模式：shm 对象名；mmap-file 模式：文件路径；base64 模式：空串 */
@@ -246,6 +281,10 @@ export interface PhysicalExecutionAdapter {
     end: { x: number; y: number };
     dryRun?: boolean;
   }): Promise<Result<DragResult, PhysicalError>>;
+  /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
+  moveMouse(args: {
+    x: number; y: number; durationMs?: number; dryRun?: boolean;
+  }): Promise<Result<MoveResult, PhysicalError>>;
   takeScreenshot(args?: {
     format?: 'png' | 'jpeg';
     quality?: number;
@@ -277,6 +316,10 @@ export interface PhysicalExecutionAdapter {
   // ─── 感知辅助端点（D-1 工具层接线 —— 只读，与截图同能力位）───
   /** 当前鼠标位置（全屏像素）—— SoM 准星与多屏感知的数据源 */
   getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>>;
+  /** 当前全局光标形态（hand/ibeam/arrow/...）—— Z-1 交互性探针的 OS 判决通道 */
+  getCursorKind(): Promise<Result<CursorKindInfo, PhysicalError>>;
+  /** UIA 单点结构查询 —— Z-1 第三通道（结构层判决，零物理副作用） */
+  hitTest(args: { x: number; y: number }): Promise<Result<HitTestResult, PhysicalError>>;
   /** 显示器清单（全屏虚拟坐标系） */
   getDisplays(): Promise<Result<{
     displays: Array<{ name: string; x: number; y: number; width: number; height: number; primary?: boolean }>;

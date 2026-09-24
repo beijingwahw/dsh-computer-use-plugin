@@ -21,8 +21,8 @@ import { tmpdir } from 'node:os';
 import { ScreenshotHandle, ScreenshotBatch } from '../src/physicalExecution/screenshotHandle.ts';
 import { resolvePythonBin } from '../src/physicalExecution/pythonBin.ts';
 import type {
-  ClickResult, DragResult, HealthInfo, HotkeyResult, PhysicalError,
-  PhysicalExecutionAdapter, Result, ScreenshotResult, ScrollResult,
+  ClickResult, CursorKindInfo, DragResult, HealthInfo, HitTestResult, HotkeyResult, MoveResult,
+  PhysicalError, PhysicalExecutionAdapter, Result, ScreenshotResult, ScrollResult,
   SwitchWindowResult, TypeResult, UiTreeResult,
 } from '../src/physicalExecution/contracts.ts';
 
@@ -51,6 +51,9 @@ class MockAdapter implements PhysicalExecutionAdapter {
   async getUiTree(): Promise<Result<UiTreeResult, PhysicalError>> { return { ok: true, value: {} as UiTreeResult }; }
   async switchWindow(): Promise<Result<SwitchWindowResult, PhysicalError>> { return { ok: true, value: {} as SwitchWindowResult }; }
   async getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>> { return { ok: true, value: { x: 0, y: 0 } }; }
+  async getCursorKind(): Promise<Result<CursorKindInfo, PhysicalError>> { return { ok: true, value: { kind: 'arrow' } }; }
+  async hitTest(): Promise<Result<HitTestResult, PhysicalError>> { return { ok: true, value: { available: false, classification: 'unavailable' } }; }
+  async moveMouse(): Promise<Result<MoveResult, PhysicalError>> { return { ok: true, value: { pixel: { x: 0, y: 0 } } }; }
   async getDisplays(): Promise<Result<{ displays: Array<{ name: string; x: number; y: number; width: number; height: number; primary?: boolean }> }, PhysicalError>> { return { ok: true, value: { displays: [] } }; }
   async frameStats(): Promise<Result<{ frame_id: number; stats: Array<{ mean: number | null; stdev: number | null }> }, PhysicalError>> { return { ok: true, value: { frame_id: 0, stats: [] } }; }
   async frameRowmeans(): Promise<Result<{ frame_id: number; rows: number[] }, PhysicalError>> { return { ok: true, value: { frame_id: 0, rows: [] } }; }

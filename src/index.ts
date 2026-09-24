@@ -7,6 +7,7 @@ import type { Config } from './config';
 import { system } from './system';
 import { contextManager } from './contextManager';
 import { uiMemory } from './uiMemory';
+import { probeMemory } from './probeMemory';
 import { journal } from './journal';
 import { skillLibrary } from './skillLibrary';
 import { failureMemory } from './failureMemory';
@@ -260,6 +261,7 @@ export async function apply(ctx: Context, config: Config) {
     if (config.enableElementIdMode) quantum.setProvider(new UiExtractorWhitebox());
   }
   uiMemory.configure(config.uiMemoryCapacity);
+  probeMemory.configure(config.probeMemoryCapacity); // Z-1d 判决记忆容量
   telemetry.configure(config.enableTelemetry);
   // 技能库：配置后从磁盘载入 —— 上一个会话学会的技能在本会话直接可用
   skillLibrary.configure(config.enableSkillLibrary, config.skillLibraryPath);
@@ -467,6 +469,7 @@ export async function apply(ctx: Context, config: Config) {
       telemetry.reset();         // 指标与生命周期同归
       contextManager.reset();      // 清空截图滑动窗口
       uiMemory.reset();            // 清空场景记忆（可选保留跨会话记忆：删除此行）
+      probeMemory.reset();          // Z-1d 同律：清空判决记忆
       journal.reset();             // 清空行动日志
       try { turnBoundaryDisposer?.(); } catch { /* already disposed */ }
       updatePopupState(false);     // 复位弹窗传感状态

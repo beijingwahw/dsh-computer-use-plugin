@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'fs';
 import path from 'path';
 import { uiMemory } from './uiMemory.js';
+import { probeMemory } from './probeMemory.js';
 import { skillLibrary } from './skillLibrary.js';
 import { failureMemory } from './failureMemory.js';
 import { telemetry } from './telemetry.js';
@@ -53,6 +54,7 @@ function collect() {
         version: CHECKPOINT_VERSION,
         savedAt: Date.now(),
         uiMemory: uiMemory.dump(),
+        probeMemory: probeMemory.dump(),
         skillLibrary: skillLibrary.dump(),
         failureMemory: failureMemory.dump(),
         journal: { entries: journal.list(false), chainTip: journal.tip, chainBase: journal.base },
@@ -113,6 +115,7 @@ export function loadCheckpoint(filePath) {
     }
     const sections = [
         ['uiMemory', () => uiMemory.restore(cp.uiMemory)],
+        ['probeMemory', () => probeMemory.restore(cp.probeMemory)],
         ['skillLibrary', () => skillLibrary.restore(cp.skillLibrary)],
         ['failureMemory', () => failureMemory.restore(cp.failureMemory)],
         ['journal', () => {

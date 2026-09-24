@@ -152,8 +152,9 @@ async function adoptExisting(port: number): Promise<boolean> {
   unwrap(await adapter.init(), 'adapter.init(adopt)');
   const health = await adapter.health();
   if (!health.ok) return false;
-  // 版本闸门：旧版本服务（旧键表/旧端点面）不收养 —— 宁可换端口 spawn 新码
-  const MIN_SVC_VERSION = '0.3.0';
+  // 版本闸门：旧版本服务（旧键表/旧端点面）不收养 —— 宁可换端口 spawn 新码。
+  // 0.4.0：Z-1 世界行动端点（/move_mouse、/cursor_kind）入伍
+  const MIN_SVC_VERSION = '0.4.0';
   if ((health.value.version ?? '0.0.0') < MIN_SVC_VERSION) return false;
   // 鉴权握手验证（收养的前提是同一密钥）：cursor 是最便宜的已鉴权端点
   const cursor = await adapter.getCursor();
@@ -293,6 +294,24 @@ export async function pressHotkey(keys: string[], dryRun = false): Promise<void>
 export async function dragMouse(start: { x: number; y: number }, end: { x: number; y: number }, dryRun = false): Promise<void> {
   const a = await adapter();
   unwrap(await a.dragMouse({ start, end, dryRun }), 'drag_mouse');
+}
+
+/** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
+export async function moveMouse(x: number, y: number, durationMs = 0, dryRun = false): Promise<void> {
+  const a = await adapter();
+  unwrap(await a.moveMouse({ x, y, durationMs, dryRun }), 'move_mouse');
+}
+
+/** 当前全局光标形态 —— Z-1 交互性探针的 OS 判决通道 */
+export async function getCursorKind(): Promise<import('./physicalExecution/contracts.js').CursorKindInfo> {
+  const a = await adapter();
+  return unwrap(await a.getCursorKind(), 'cursor_kind');
+}
+
+/** UIA 单点结构查询 —— Z-1 第三通道（结构层判决，零物理副作用） */
+export async function hitTest(x: number, y: number): Promise<import('./physicalExecution/contracts.js').HitTestResult> {
+  const a = await adapter();
+  return unwrap(await a.hitTest({ x, y }), 'hit_test');
 }
 
 export async function switchWindow(keyword: string): Promise<{ method: string; matched: string | null; next_step?: string }> {

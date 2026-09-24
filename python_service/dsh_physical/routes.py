@@ -58,6 +58,22 @@ class DragRequest(BaseModel):
     dry_run: bool = False
 
 
+class MoveRequest(BaseModel):
+    """鼠标移动（无点击）—— Z-1 交互性探针的悬停躯体。"""
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    duration_ms: float = Field(default=0.0, ge=0.0, le=2000.0)
+    dry_run: bool = False
+
+
+class HitTestRequest(BaseModel):
+    """UIA 点查询（归一化坐标）—— Z-1 第三通道：结构层单点判决。"""
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+
+
 class RegionSpec(BaseModel):
     x: float = Field(ge=0.0, le=1.0)
     y: float = Field(ge=0.0, le=1.0)
@@ -171,7 +187,7 @@ async def health() -> dict:
 
     return success({
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "platform": sys.platform,
         "python": platform.python_version(),
         "screen": screen_info,
@@ -236,6 +252,20 @@ async def drag_mouse(req: DragRequest) -> dict:
     ctrl: InputController = _get("input")
     ctrl.set_dry_run(req.dry_run)
     return await ctrl.drag(req.start, req.end)
+
+
+@router.post("/move_mouse")
+@safe_call
+async def move_mouse(req: MoveRequest) -> dict:
+    """移动鼠标到归一化坐标（不点击）。
+
+    Z-1 世界行动引擎：探针悬停 → 读光标形态 → 观察悬停重绘 → 复位。
+    独立成端点（而非复用 click）是因为探针需要「移动但绝不按下」的
+    零破坏语义 —— 复用 click 路径总有一天会带上按钮参数穿进来。
+    """
+    ctrl: InputController = _get("input")
+    ctrl.set_dry_run(req.dry_run)
+    return await ctrl.move(req.x, req.y, duration_ms=req.duration_ms)
 
 
 @router.post("/take_screenshot")
@@ -341,6 +371,49 @@ async def cursor() -> dict:
     loop = asyncio.get_running_loop()
     pos = await loop.run_in_executor(None, pyautogui.position)
     return {"x": float(pos.x), "y": float(pos.y)}
+
+
+@router.get("/cursor_kind")
+@safe_call
+async def cursor_kind() -> dict:
+    """当前全局光标形态（hand/ibeam/arrow/...）—— 交互性探针的 OS 判决通道。
+
+    操作系统对「指针下是什么」的原生判断：手型 = 可点击热区，
+    I 型 = 可选择文本。纯视觉架构中唯一无需 a11y 树的交互性 ground truth。
+    """
+    from .cursor import cursor_kind as read_cursor_kind
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, read_cursor_kind)
+
+
+@router.post("/hit_test")
+@safe_call
+async def hit_test(req: HitTestRequest) -> dict:
+    """UIA 单点结构查询 —— Z-1 第三通道（判别力天花板）。
+
+    ``ControlFromPoint``：坐标处官方登记的控件类型（Button/Text/Edit...），
+    含祖先链（按钮里的 Text 标签沿祖先找到 Button）。零物理副作用——
+    不动鼠标、不截图。门控：``DSH_PHYSICAL_L1_BACKEND=disabled`` 时缺席。
+    """
+    from .hit_test import hit_test as run_hit_test
+
+    config: AppConfig = _get("config")
+    if config.funnel.l1_backend == "disabled":
+        return {
+            "available": False,
+            "reason": "l1_backend disabled (pure-vision ideology; opt-in via DSH_PHYSICAL_L1_BACKEND)",
+            "classification": "unavailable",
+        }
+
+    input_ctrl: InputController = _get("input")
+    w, h = await input_ctrl.get_screen_size()
+    px = min(int(round(req.x * w)), w - 1)
+    py = min(int(round(req.y * h)), h - 1)
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, run_hit_test, px, py)
+    return {**result, "pixel": {"x": px, "y": py}}
 
 
 @router.get("/displays")

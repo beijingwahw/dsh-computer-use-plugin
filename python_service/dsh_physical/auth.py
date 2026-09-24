@@ -57,11 +57,16 @@ ENDPOINT_CAPABILITY: dict[str, Capability] = {
     "/v1/scroll_page": "scroll",
     "/v1/press_hotkey": "hotkey",
     "/v1/drag_mouse": "drag",
+    # 移动属指针物理动作（与点击同级 —— 探针悬停的躯体）
+    "/v1/move_mouse": "click",
     "/v1/take_screenshot": "screenshot",
     "/v1/get_ui_tree": "ui_tree",
     "/v1/switch_window": "switch_window",
     # 感知辅助端点（只读，与截图同能力位 —— D-1 工具层接线）
     "/v1/cursor": "screenshot",
+    "/v1/cursor_kind": "screenshot",
+    # UIA 点查询属结构感知族（与 UI 树同能力位 —— Z-1 第三通道）
+    "/v1/hit_test": "ui_tree",
     "/v1/displays": "screenshot",
     "/v1/frame_stats": "screenshot",
     "/v1/frame_rowmeans": "screenshot",

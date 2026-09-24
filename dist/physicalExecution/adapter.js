@@ -155,6 +155,14 @@ export class PhysicalExecutionAdapterImpl {
             dry_run: args.dryRun ?? false,
         });
     }
+    /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
+    async moveMouse(args) {
+        return this.call('/move_mouse', {
+            x: args.x, y: args.y,
+            duration_ms: args.durationMs ?? 0,
+            dry_run: args.dryRun ?? false,
+        });
+    }
     async takeScreenshot(args) {
         return this.call('/take_screenshot', {
             format: args?.format ?? 'png',
@@ -174,6 +182,14 @@ export class PhysicalExecutionAdapterImpl {
     /** 感知辅助（D-1 工具层接线）：当前鼠标位置（全屏像素） */
     async getCursor() {
         return this.callGet('/cursor');
+    }
+    /** 感知辅助（Z-1 交互性探针）：当前全局光标形态 —— OS 的交互性判决 */
+    async getCursorKind() {
+        return this.callGet('/cursor_kind');
+    }
+    /** 感知辅助（Z-1 第三通道）：UIA 单点结构查询 —— 零物理副作用的结构层判决 */
+    async hitTest(args) {
+        return this.call('/hit_test', { x: args.x, y: args.y });
     }
     /** 感知辅助：显示器清单（全屏虚拟坐标系） */
     async getDisplays() {

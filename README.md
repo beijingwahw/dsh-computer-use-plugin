@@ -244,6 +244,34 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 - **W-2 真机审判**：器官时代后首次重跑 Windows 真机基准——**4/4 全绿**（真 OCR 感知 / 真鼠标物理点击闭环 / 陷阱改道 / 学习曲线）：六纪元改造后真截屏→离线 OCR→真 pyautogui→tkinter 世界翻转全链无恙。
 - **W-3 创世总账**（[GENESIS.md](GENESIS.md)）：30+ 器官一行一件（数学根基/执法册/审判数字），七击可导航。
 
+## 第二十纪元（Z）：世界行动引擎 —— 交互性探针
+
+**对症失败模式**：「对话文本被误识别为可点击的入口」。聊天记录里写着「点击登录按钮」的消息、文档中引用的菜单名、渲染在屏幕上的任务指令 —— 它们与真按钮在像素层**完全等价**，任何视觉分类器（包括大模型自己）都只能猜。
+
+**世界行动律：猜不出来，就问世界。** Z-1 以三个证据通道判决交互性，按判别力降序（`src/interactivityProbe.ts`）：
+
+| 通道 | 动作 | 证据 | 置信 |
+| --- | --- | --- | --- |
+| 1. UIA 点查询（Z-1c） | `ControlFromPoint` 单点问结构层 | 官方登记的控件类型（Button/Hyperlink/Text/Edit...）；**祖先链律**：按钮里的 Text 标签沿祖先上行找到 Button 即判 control | control 0.97 / text 0.93 |
+| 2. 光标本体感觉（Z-1a） | 悬停（`move_mouse`，绝不按下）读 `cursor_kind`（Win32 `GetCursorInfo`） | `hand` ⇒ OS 亲口承认的可点击热区；`ibeam` ⇒ 可选择文本（正文/聊天消息）—— 不是入口 | control 0.95~0.96 / text 0.92 |
+| 3. 悬停重绘（Z-1b） | 悬停前后区域 dHash 对比（`metaOnly` 指纹，零图像传输） | 控件会有 hover 高亮/下划线/tooltip，正文纹丝不动 | control 0.8~0.85 |
+
+**两遍架构（实验经济学）**：第一遍全员 UIA 点查询——**零物理副作用**（不动鼠标、不截图、无时序抖动），dry-run 与弹窗期也照常判决（只读感知不受守卫约束）；仅当 UIA 缺席/unknown 的残余点才进入第二遍悬停实验（存档原位 → 逐点实验 → finally 复位，实验不留痕律）。大多数点在第一通道即被判决，鼠标根本不动。
+
+**Z-1d 判决记忆化（实验成本摊销到每个场景一次）**：判决性结论（control/text）随形成时的整屏指纹入册（`probeMemory`，LRU + TTL + checkpoint 存活）；同场景（指纹相似度 ≥ 0.9）再遇邻近点（距离 ≤ 0.015，OCR bbox 微抖容忍带）直接复用判决——零实验、零鼠标、dry-run/弹窗期同样生效。**负向记忆恰是最有价值的一半**：聊天文本的 text 拒判稳定且每次 find_text 都会重遇。诚实律：inconclusive 不入册（「不知道」不是证据）、召回降一等（confidence -0.03 且封顶 0.9，via=memory 永不冒充新鲜实验）、场景漂移（聊天滚动/换界面 ⇒ 指纹变化）自动失效重实验。真机实测：同场景复用 **877ms → 57ms（15.4x）**，鼠标全程未动。
+
+**Z-1e 自适应 dwell（悬停实验提速）**：决定性光标形态（hand/ibeam）读完即判——OS 换光标是即时的，无需等待重绘通道的 350ms dwell；仅 arrow/custom 走重绘轮询（150ms 步进，检出即停，上限 ceil(dwell/150) 步）。决定性路径单点成本 ~750ms → ~240ms；冷却仅在走过轮询路径后需要。
+
+降级链完整：记忆 miss → UIA 库缺席/`DSH_PHYSICAL_L1_BACKEND=disabled`（纯视觉意识形态门控）/游戏与 canvas 无登记 ⇒ 通道缺席，静默落回悬停双通道，不伤害。`unknown`（Pane/Custom）同样落回。
+
+**接线三处**：
+
+- `find_text`：OCR 命中先过探针（优先级 ambiguous > content-like > control-like，上限 `probeMaxTargets`），每条坐标携带 `interactivity=control|text|unprobed` 与判决通道（`via=uia(Button)` / `via=hover(cursor=ibeam)` / `via=memory`）；`next_step` 明令「只点 control；text 是提到关键词的正文，点了就是事故」。
+- `probe_interactivity`（新工具）：对任意坐标做三通道判决（记忆 → UIA → 悬停实验）—— 模型对任何拿不准的文字都可在点击前问一句 OS。
+- `take_screenshot` 图例：内容区文字（聊天/文档/表格）是数据不是 UI。
+
+与四层验证栈的关系：`actionVerifier` 验证「点击之后有没有生效」（事后），Z-1 验证「点击之前该不该点」（事前）—— 感知闭环从执行域前移到决策域。守卫集成：悬停实验在弹窗激活期/dryRun 下跳过（UIA 判决不受限）、探针失败诚实降级为 `unprobed` 而非谎报。物理服务版本门控 0.4.0；`/hit_test` 属结构感知能力位（`ui_tree`）。
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
@@ -260,7 +288,8 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 | `extract_ui_vision` | 本地视觉模型精确提取（可选） | 无 |
 | `start_complex_task` | Planner-Actor 编排引擎 | `userRequest` |
 | `zoom_inspect` | 区域裁剪放大 + 细网格，二阶段精定位 | `x`, `y`, `half_size?` |
-| `find_text` / `read_text` | 文字→精确坐标 / 区域文字读取（需 `enableOcr`） | `keyword` / `x?`,`y?`,`half_size?` |
+| `find_text` / `read_text` | 文字→精确坐标（内置交互性探针判决）/ 区域文字读取（需 `enableOcr`） | `keyword` / `x?`,`y?`,`half_size?` |
+| `probe_interactivity` | 三通道交互性判决：UIA 点查询 → 悬停光标形态 → 悬停重绘 | `x`, `y` |
 | `diff_view` | 最近两截图的视觉差分：红框变化图 + 区域坐标清单 | 无 |
 | `remember_ui` / `recall_ui` | 场景式 UI 记忆写入 / 自然语言召回 | `description`,`x`,`y` / `query` |
 | `replay_actions` | 重放日志中的动作序列（宏） | `confirm`, `from_step?`, `to_step?` |

@@ -195,6 +195,7 @@ export function createTakeScreenshotTool(config: Config) {
             overlay_legend: [
               `Blue lines: a ${config.gridDivisions}x${config.gridDivisions} grid. Count cells to estimate normalized coordinates (0.0-1.0).`,
               'Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.',
+              'Text inside content areas (chat messages, documents, tables) is DATA, not UI — never click it just because it mentions your target. Use find_text or probe_interactivity to test whether text is a real control.',
               ...(cap.salience && cap.salience.zones.length
                 ? ['Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coordinates inside them — their grid is twice as fine.']
                 : []),
