@@ -2,6 +2,10 @@ import * as backend from './physicalBackend.js';
 import { similarity } from './perceptualHash.js';
 import { getPopupState } from './guards/popupGuard.js';
 import { probeMemory, isDecisive } from './probeMemory.js';
+// Z-2 迁出转发：几何先验独立成纯模块（wordShape.ts）—— 反射弧场景源
+// （零二进制依赖的工位桩）需要同一把尺子过滤正文词，import 本文件会连带
+// physicalBackend 污染桩纪元。既有 import 面（textTools/测试）零变更。
+export { classifyWordShape } from './wordShape.js';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 /** OS 换光标所需的最小沉降时间（WM_SETCURCUR 即时生效，60ms 足够裕量） */
 const CURSOR_SETTLE_MS = 60;
@@ -57,18 +61,8 @@ export function uiaVerdict(classification) {
 /**
  * OCR 词元几何先验（探针缺席时的降级判据，也用于排序探针目标）：
    宽行/多行 ⇒ 正文（聊天消息/文档段落）；紧凑短标签 ⇒ 控件候选。
+ * Z-2 起实现迁至 wordShape.ts（纯模块），此处转发再导出保持既有 import 面。
  */
-export function classifyWordShape(w) {
-    const width = w.bbox_normalized.x1 - w.bbox_normalized.x0;
-    const height = w.bbox_normalized.y1 - w.bbox_normalized.y0;
-    // 整行宽（聊天气泡/正文行）或多行高（段落块）⇒ 正文
-    if (width >= 0.45 || height >= 0.055)
-        return 'content-like';
-    // 紧凑短标签：按钮/链接的典型形状
-    if (width <= 0.16 && height <= 0.03)
-        return 'control-like';
-    return 'ambiguous';
-}
 /** 悬停实验守卫：只有动真实指针的实验才受约束（UIA 只读感知不受限） */
 function hoverGuardSkip(config) {
     if (config.dryRun)
@@ -246,4 +240,55 @@ export async function probePoints(config, points) {
 export async function probeInteractivity(config, nx, ny) {
     const [r] = await probePoints(config, [{ x: nx, y: ny }]);
     return r;
+}
+// ─── Z-2 点击闸门：世界的回答先于指针落下 ───
+/** text 判决的拦截地板：只有决定性判决（UIA text 0.93 / ibeam 0.92）够格
+ *  拦截点击；inconclusive（0~0.3）是诚实弃权，不是证据 —— 弃权不执法。 */
+export const TEXT_CLICK_REFUSE_FLOOR = 0.9;
+/**
+ * 点击闸门判决（Z-2，纯函数）：世界已回答「这个点是正文」时，点击放行与否。
+ *
+ * 对症失败模式：「模型将输出的正文当作点击的按钮」—— 聊天记录里写着
+ * 「点击登录按钮」的文本、文档里引用的菜单名与真按钮像素等价，模型猜不出
+ * 差别；但 OS 结构层/光标形态知道（Z-1 三通道探针）。Z-1 只把判决标注在
+ * find_text 的结果里（模型可以不看）；Z-2 把同一判决前移到 click_mouse 的
+ * 执行前 —— 猜不出来就问世界，问了就听世界的。
+ *
+ * 拦截条件（缺一放行）：
+ *   1. verdict === 'text' 且 confidence ≥ TEXT_CLICK_REFUSE_FLOOR
+ *   2. 证据不是 Edit 控件 —— UIA 的 Edit 是输入框，点击聚焦是合法动作
+ *      （Text/Document 才是静态正文）；悬停 ibeam 无法区分两者时不在此
+ *      例外（Edit 场景由 allowTextClick 自证通道兜底）
+ *   3. 模型未显式声明 allowTextClick（自证通道：明知点正文的合法场景）
+ *
+ * control / inconclusive / 探针缺席 ⇒ 一律放行 —— 闸门只根除「把正文当
+ * 按钮」这一种错误，不新增任何错误（零回归铁律）。
+ */
+export function gateTextClick(probe, input = {}) {
+    if (!probe)
+        return { blocked: false };
+    if (input.allowTextClick)
+        return { blocked: false };
+    if (probe.verdict !== 'text' || probe.confidence < TEXT_CLICK_REFUSE_FLOOR) {
+        return { blocked: false };
+    }
+    const via = probe.evidence.via;
+    if (via === 'uia') {
+        // Edit = 输入框（点击聚焦合法）；Text/Document = 静态正文（拦截）
+        if (probe.evidence.hit_test?.control_type === 'Edit')
+            return { blocked: false };
+        const ct = probe.evidence.hit_test?.control_type ?? '?';
+        return {
+            blocked: true,
+            reason: `OS structure layer registers this point as static content (${ct}, no interactive ancestor within 4 levels)`,
+            evidence: `uia control_type=${ct} name="${probe.evidence.hit_test?.name ?? ''}" conf=${probe.confidence.toFixed(2)}`,
+        };
+    }
+    const cursor = probe.evidence.cursor_kind;
+    return {
+        blocked: true,
+        reason: `cursor shape over this point is '${cursor}' (text-selection I-beam) — the OS treats it as selectable content, not a clickable control`,
+        evidence: `hover cursor=${cursor} conf=${probe.confidence.toFixed(2)}` +
+            (via === 'memory' ? ' (scene-matched probe memory)' : ''),
+    };
 }

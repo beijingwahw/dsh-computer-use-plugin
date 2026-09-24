@@ -3,6 +3,7 @@ import { embed, cosine } from '../semanticHash.js';
 import { trustOf } from './knowledgeBase.js';
 import { P } from './params.js';
 import { SANDBOX_ACTION_KINDS } from '../sandbox/types.js';
+import { classifyWordShape } from '../wordShape.js';
 import { classifyMotor, extractQuotedSpans, residueTokens, extractScroll, extractHotkey, } from '../intentGrammar.js';
 // ─── 网格分区铸造（'g{col}x{row}' —— D-6 坐标同一性方案复刻，跨轮稳定）───
 function gridRegions(grid) {
@@ -60,12 +61,35 @@ export function dispatchElementsToGrid(els, grid, depth, sourceLabel) {
     });
 }
 /**
+ * L2 OCR 词元 → 点击候选元素（Z-2 正文剔除，纯函数 —— 测试面）。
+ * content-like（宽行/多行段落形态：聊天消息、文档正文）不参选 —— 反射弧
+ * 的落点选举不允许正文入场，「输出的正文被当作点击的按钮」在零模型路径
+ * 上失去燃料。剔除是保守降级不是死刑：极宽的真按钮被形态误判时，反射弧
+ * 诚实接地（比错点正文便宜 —— 精确性优先，与运动弧拒绝语义同律）。
+ * wordShape 纯模块引入（非 interactivityProbe）：工位桩零二进制依赖红线。
+ */
+export function ocrWordsToClickCandidates(words) {
+    return words
+        .filter(w => classifyWordShape(w) !== 'content-like')
+        .map(w => ({
+        role: 'text',
+        name: w.text.slice(0, 20),
+        rect: {
+            x: w.bbox_normalized.x0, y: w.bbox_normalized.y0,
+            width: w.bbox_normalized.x1 - w.bbox_normalized.x0,
+            height: w.bbox_normalized.y1 - w.bbox_normalized.y0,
+        },
+    }));
+}
+/**
  * 能力回退场景源（P1-4）：'dsh.vision.station' 外部服务缺席时，用插件自身
  * 视觉能力顶上 —— L1 无障碍树优先（uiExtractor 纯 JS 静态引入），
  * L1 不可用/为空 ⇒ L2 全屏 OCR（textReader 惰性动态引入 —— 原生依赖隔离，
  * 沙箱环境零污染）分派到网格分区。双缺席 ⇒ 抛错（工位 catch 转 fault 补丁
  * —— 「看不见」是 fault，不是真空）。
  * 元素 rect 归一化域 = 全屏（像素 ÷ 屏幕尺寸 —— 归一化责任在适配器）。
+ * Z-2：L2 路径的词元先过正文剔除（ocrWordsToClickCandidates）—— OCR 是
+ * 纯视觉，看不见交互性；几何先验是它唯一免费的自卫。
  */
 export async function createCapabilitySceneSource(opts) {
     const { extractInteractiveElements, hasAccessibilityProvider } = await import('../uiExtractor.js');
@@ -92,15 +116,7 @@ export async function createCapabilitySceneSource(opts) {
             const { readText } = await import('../textReader.js');
             const buffer = await opts.capture();
             const ocr = await readText(buffer, opts.lang ?? 'eng');
-            return ocr.words.map(w => ({
-                role: 'text',
-                name: w.text.slice(0, 20),
-                rect: {
-                    x: w.bbox_normalized.x0, y: w.bbox_normalized.y0,
-                    width: w.bbox_normalized.x1 - w.bbox_normalized.x0,
-                    height: w.bbox_normalized.y1 - w.bbox_normalized.y0,
-                },
-            }));
+            return ocrWordsToClickCandidates(ocr.words);
         }
         catch {
             return []; // OCR/截屏故障 ⇒ 空集（双缺席 ⇒ 抛错转 fault）

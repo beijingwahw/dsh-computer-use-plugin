@@ -2,11 +2,20 @@
 // 第六轮创新之一：一次性审批令牌（One-shot Approval Token）。
 // 不可逆操作（发送/删除/支付/提交订单…）需要显式授权：模型先 request_approval
 // 生成令牌并告知用户，用户在对话中同意后，模型携令牌重试动作。
-// 令牌四性质：一次性（用后即焚）、短时效（默认 120s）、带用途（描述随行）、
-// **须授予**（J 纪元：grant_approval(token, true) 是执行的必要条件 ——
-// 旧协议"从未 grant"与"grant=true"对执行层无区别，审批闸门的同意环节形同虚设）。
+// 令牌四性质：一次性（用后即焚）、短时效（默认 10min，覆盖整个任务的重试窗口）、
+// 带用途（描述随行）、**须授予**（J 纪元：grant_approval(token, true) 是执行的
+// 必要条件 —— 旧协议"从未 grant"与"grant=true"对执行层无区别，审批闸门的
+// 同意环节形同虚设）。
 //
 // Y 纪元（Y-10）：审批令牌桶 —— 同意本身也是有限资源。
+//
+// V 纪元（验收式消费）：用户的同意锚定在**任务意图**上，而非单次点击派发。
+// 旧语义在「点击已派发但世界未变」（落错窗口/坐标漂移）时也焚毁令牌 ——
+// 一次用户确认只换来一次物理尝试，重试即二次打扰（实测：发一封邮件被问了
+// 三次 yes）。新语义：**令牌只在验收通过（世界出现预期变化）时焚毁**；
+// 未生效的尝试不消耗同意（no-op 不是不可逆操作），登记后自动续期供重试，
+// 直到验收通过、尝试次数超限或生命周期硬顶到期。安全性不降反升：
+// 每次「验收通过」的世界变化仍恰好消耗一枚令牌 + 一枚 Y-10 桶令牌。
 import { randomBytes } from 'node:crypto';
 
 export interface PendingApproval {
@@ -17,10 +26,23 @@ export interface PendingApproval {
   granted: boolean;
   /** Y-10：速率闸门拒绝时附带的冷静期毫秒数（锚点透明化） */
   rateLimitedForMs?: number;
+  /** V 纪元：已派发的物理尝试次数（验收失败递增；验收通过即焚毁） */
+  attempts: number;
+  /** V 纪元：尝试次数上限 —— 一次同意覆盖的自动重试预算 */
+  maxAttempts: number;
+  /** V 纪元：重试续期不可越过的生命周期硬顶（铸造时锚定） */
+  lifetimeCapAt: number;
+  /** V 纪元：铸造时的初始有效期（重试续期复用同一宽度） */
+  ttlMs: number;
 }
 
 const pending = new Map<string, PendingApproval>();
-const TTL_MS = 120_000;
+/** 初始有效期：一次确认覆盖整个任务（重定位目标/切窗重试）的窗口 */
+const TTL_MS = 600_000;
+/** 单令牌尝试次数上限（物理点击数）—— 超限焚毁，重新审批 */
+const MAX_ATTEMPTS = 5;
+/** 生命周期硬顶 = 铸造时 TTL 的 3 倍：重试续期的总天花板 */
+const LIFETIME_MULTIPLIER = 3;
 
 function newToken(): string {
   // CSPRNG（对齐 capToken.ensureKey 的密钥强度标准）：令牌门禁的是不可逆操作，
@@ -97,9 +119,21 @@ export function approvalBudget(): number {
 }
 
 export const approval = {
-  /** 发起审批：返回待确认的令牌（未生效 —— granted=false 直到 grant） */
-  request(description: string): PendingApproval {
-    const pa: PendingApproval = { token: newToken(), description, expiresAt: Date.now() + TTL_MS, granted: false };
+  /** 发起审批：返回待确认的令牌（未生效 —— granted=false 直到 grant）。
+   *  V 纪元：ttlMs/maxAttempts 可由部署配置注入（config.approvalTokenTtlMs /
+   *  approvalMaxAttempts），缺省用本模块常量。 */
+  request(description: string, opts?: { ttlMs?: number; maxAttempts?: number }): PendingApproval {
+    const ttl = Math.max(1_000, opts?.ttlMs ?? TTL_MS);
+    const pa: PendingApproval = {
+      token: newToken(),
+      description,
+      expiresAt: Date.now() + ttl,
+      granted: false,
+      attempts: 0,
+      maxAttempts: Math.max(1, opts?.maxAttempts ?? MAX_ATTEMPTS),
+      ttlMs: ttl,
+      lifetimeCapAt: Date.now() + ttl * LIFETIME_MULTIPLIER,
+    };
     pending.set(pa.token, pa);
     return pa;
   },
@@ -129,10 +163,16 @@ export const approval = {
   },
 
   /** 令牌状态（未消费）：granted 且未过期才有效。 */
-  status(token: string): { present: boolean; granted: boolean; expired: boolean } {
+  status(token: string): { present: boolean; granted: boolean; expired: boolean; attempts?: number; remainingAttempts?: number } {
     const pa = pending.get((token || '').trim());
     if (!pa) return { present: false, granted: false, expired: false };
-    return { present: true, granted: pa.granted, expired: Date.now() > pa.expiresAt };
+    return {
+      present: true,
+      granted: pa.granted,
+      expired: Date.now() > pa.expiresAt,
+      attempts: pa.attempts,
+      remainingAttempts: Math.max(0, pa.maxAttempts - pa.attempts),
+    };
   },
 
   /** 非消费校验（阶段一 validate）：granted 且未过期才有效，令牌保留可重试。 */
@@ -141,12 +181,35 @@ export const approval = {
     return !!pa && pa.granted && Date.now() <= pa.expiresAt;
   },
 
-  /** 消费令牌（click_mouse 成功路径调用）：granted 且未过期才放行，用后即焚。 */
+  /** 消费令牌（验收通过路径调用）：granted 且未过期才放行，用后即焚。
+   *  V 纪元：这是「验收通过」的落点 —— 世界出现了预期变化，用户的这一份
+   *  同意已被兑现为一次不可逆操作，用后即焚。 */
   consume(token: string): boolean {
     const pa = pending.get((token || '').trim());
     if (!pa) return false;
     pending.delete(pa.token); // 用后即焚：即使校验失败也不留第二次机会
     return pa.granted && Date.now() <= pa.expiresAt;
+  },
+
+  /** V 纪元·验收失败登记：物理点击已派发但世界未出现预期变化（点空/落错窗口/
+   *  变化不是预期的）。未生效的尝试没有消耗用户的同意 —— 令牌保留，TTL 续期
+   *  （不越生命周期硬顶），模型在同一份授权内自动重试，**不得再打扰用户**。
+   *  尝试次数超限 ⇒ 焚毁令牌并要求重新审批（反复失败本身就该让人看一眼）。 */
+  attemptFailed(token: string, reason?: string): { valid: boolean; remainingAttempts: number; reArmedMs: number; reason?: string } {
+    const pa = pending.get((token || '').trim());
+    if (!pa || !pa.granted || Date.now() > pa.expiresAt) {
+      if (pa) pending.delete(pa.token); // 过期/无效即焚，不留僵尸
+      return { valid: false, remainingAttempts: 0, reArmedMs: 0, reason };
+    }
+    pa.attempts += 1;
+    if (pa.attempts > pa.maxAttempts) {
+      pending.delete(pa.token); // 重试预算耗尽：重新审批（新描述应说明为何屡试不中）
+      return { valid: false, remainingAttempts: 0, reArmedMs: 0, reason };
+    }
+    // 续期：给重试留出与初始等宽的窗口，但不越过铸造时锚定的生命周期硬顶
+    const now = Date.now();
+    pa.expiresAt = Math.min(now + pa.ttlMs, pa.lifetimeCapAt);
+    return { valid: true, remainingAttempts: pa.maxAttempts - pa.attempts, reArmedMs: pa.expiresAt - now, reason };
   },
 
   /** 作废令牌：用户拒绝（grant=false）时立即调用，防止误用 */

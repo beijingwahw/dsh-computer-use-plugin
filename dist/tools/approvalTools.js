@@ -14,7 +14,9 @@ export function createRequestApprovalTool(config) {
     return defineTool({
         name: 'request_approval',
         description: 'Requests user approval for an irreversible action (send/delete/pay/submit order...). ' +
-            'Returns a one-shot token that must accompany the subsequent click_mouse call. ' +
+            'ONE consent covers the WHOLE task: the returned token stays valid across retries until a VERIFIED ' +
+            'effect (or the retry budget expires) — if click_mouse reports acceptance=retry-allowed, retry under ' +
+            'the SAME token without asking the user again. ' +
             'Workflow: call this tool -> relay the message to the user -> wait for consent -> ' +
             'call grant_approval if they agree (or stop if they refuse) -> re-invoke click_mouse with the token.',
         parameters: {
@@ -36,7 +38,11 @@ export function createRequestApprovalTool(config) {
                 return '[System]: Approval gate disabled — no token needed.';
             }
             approval.sweep(); // 顺手清理过期令牌
-            const pa = approval.request(args.description);
+            // V 纪元：TTL 与重试预算来自部署配置（一次确认覆盖整个任务的重试窗口）
+            const pa = approval.request(args.description, {
+                ttlMs: config.approvalTokenTtlMs,
+                maxAttempts: config.approvalMaxAttempts,
+            });
             const consequence = args.consequence
                 ? ` Consequence: ${args.consequence}.`
                 : ' This action is likely irreversible.';
@@ -46,13 +52,17 @@ export function createRequestApprovalTool(config) {
                     token: pa.token,
                     action: args.description,
                     expires_in_seconds: Math.round((pa.expiresAt - Date.now()) / 1000),
+                    retry_budget: pa.maxAttempts,
                 },
                 message_to_relay: `I am about to: ${args.description}.${consequence} ` +
                     'Do you approve? (yes / no)',
                 next_step: 'RELAY the message_to_relay to the user VERBATIM and WAIT for their reply. ' +
                     'If they approve, call grant_approval with the token, then re-invoke click_mouse with ' +
                     'approval_token set. If they refuse, do NOT proceed — propose an alternative or stop. ' +
-                    'Never fabricate or reuse a token; each token is single-use and expires in 120 seconds.',
+                    'Never fabricate or reuse a token. ONE consent covers the whole task: if a click does not ' +
+                    `take verified effect, the token stays valid for up to ${pa.maxAttempts} attempts within ` +
+                    `${Math.round((pa.expiresAt - Date.now()) / 1000)}s — retry WITHOUT asking the user again; ` +
+                    'only call request_approval anew if the retry budget is exhausted, the token expired, or the task changed.',
             }, null, 2);
         },
     });
@@ -102,7 +112,9 @@ export function createGrantApprovalTool(config) {
                 status: 'GRANTED',
                 state_anchor: { token: args.token, granted: true },
                 next_step: 'User consent recorded. Re-invoke click_mouse NOW with approval_token="' +
-                    args.token + '" — the token is single-use and expires soon.',
+                    args.token + '". ONE consent covers the WHOLE task: if the result reports ' +
+                    'acceptance=retry-allowed (no verified effect yet), fix and RETRY with the same token — ' +
+                    'do NOT ask the user again. When acceptance=verified, report the acceptance result to the user.',
             }, null, 2);
         },
     });

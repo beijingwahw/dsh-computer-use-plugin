@@ -14,6 +14,7 @@ import type { Config } from '../config';
 import { readTextAny } from '../textReader';
 import type { OcrWord } from '../textReader';
 import { classifyWordShape, probePoints, type ProbeResult } from '../interactivityProbe';
+import { extractUrls } from '../urlSense';
 
 export function createReadTextTool(config: Config) {
   return defineTool({
@@ -65,6 +66,10 @@ export function createReadTextTool(config: Config) {
             next_step: 'No readable text in scope. If the area contains text, it may be too small — try zoom_inspect or a larger half_size.',
           }, null, 2);
         }
+        // AA-1 URL 感知：正文里的链接自动浮出 —— 「自动跳转」的感知面。
+        // 屏幕上的 URL 不是控件（点击被 Z-2 闸门否决），跳转的正确出口是
+        // open_url；read_text 顺手把燃料备好，模型不必再手抄。
+        const urls = extractUrls(clean);
         return JSON.stringify({
           status: 'SUCCESS',
           state_anchor: {
@@ -73,8 +78,13 @@ export function createReadTextTool(config: Config) {
             char_count: clean.length,
             // 文本本身也做预算：超长截断
             text: clean.length > 1500 ? clean.slice(0, 1500) + '...[truncated]' : clean,
+            ...(urls.length > 0 ? { urls_detected: urls } : {}),
           },
-          next_step: 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.',
+          next_step: urls.length > 0
+            ? `URLs detected in the text. To FOLLOW one, call 'open_url' with it — do NOT click the text ` +
+              `(it is static content; the interactivity gate will refuse). ` +
+              `Use the text content for your reasoning; call find_text when you need clickable coordinates for any label.`
+            : 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.',
         }, null, 2);
       } catch (error: any) {
         return `[Error]: OCR failed (${error.message}). The OCR engine may be unavailable (rapidocr for the service path, tesseract.js for the legacy path); fall back to take_screenshot.`;

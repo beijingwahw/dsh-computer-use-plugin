@@ -264,20 +264,43 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 
 降级链完整：记忆 miss → UIA 库缺席/`DSH_PHYSICAL_L1_BACKEND=disabled`（纯视觉意识形态门控）/游戏与 canvas 无登记 ⇒ 通道缺席，静默落回悬停双通道，不伤害。`unknown`（Pane/Custom）同样落回。
 
-**接线三处**：
+**接线四处**：
 
 - `find_text`：OCR 命中先过探针（优先级 ambiguous > content-like > control-like，上限 `probeMaxTargets`），每条坐标携带 `interactivity=control|text|unprobed` 与判决通道（`via=uia(Button)` / `via=hover(cursor=ibeam)` / `via=memory`）；`next_step` 明令「只点 control；text 是提到关键词的正文，点了就是事故」。
 - `probe_interactivity`（新工具）：对任意坐标做三通道判决（记忆 → UIA → 悬停实验）—— 模型对任何拿不准的文字都可在点击前问一句 OS。
 - `take_screenshot` 图例：内容区文字（聊天/文档/表格）是数据不是 UI。
+- `click_mouse`（Z-2 点击闸门）：见下。
 
-与四层验证栈的关系：`actionVerifier` 验证「点击之后有没有生效」（事后），Z-1 验证「点击之前该不该点」（事前）—— 感知闭环从执行域前移到决策域。守卫集成：悬停实验在弹窗激活期/dryRun 下跳过（UIA 判决不受限）、探针失败诚实降级为 `unprobed` 而非谎报。物理服务版本门控 0.4.0；`/hit_test` 属结构感知能力位（`ui_tree`）。
+**Z-2 点击闸门（判决前移到指针落下之前）**：Z-1 的判决只标注在 `find_text` 结果里——模型可以不看。Z-2 把同一三通道判决接到 `click_mouse` 执行前（`gateTextClick` 纯函数 + `src/tools/clickMouse.ts`）：左键点击前先探针目标点，判决为 `text` 且置信 ≥ 0.9（决定性判决）且证据不是 Edit 输入框 ⇒ 结构化拒绝（`ACTION_REQUIRED`），告知模型「此点是正文——文字只是*提到*了你要找的标签」，并给出改道指引（find_text 找 control 命中 / 截图重定位 / 滚动）。例外通道全部显式：**Edit 放行**（点击输入框聚焦是合法动作）、**右键放行**（正文上的上下文菜单合法）、**`allow_text_click: true` 自证放行**（模型明知点正文：文档放置光标/选中文本）、dry-run/探针缺席零回归。闸门在 `captureBefore` 之前执行——悬停实验可能触发 hover 高亮，before 帧必须在探针后取，否则污染「无变化」基线。
+同法根除零模型路径：反射弧场景源的 L2 OCR 词元先过几何先验剔除（`ocrWordsToClickCandidates`，`wordShape.ts` 纯模块）——宽行/多行段落形态不参选落点选举，「正文被当作按钮」在脊髓反射层失去燃料（误剔真入口 ⇒ 诚实接地，比错点正文便宜）。
+
+与四层验证栈的关系：`actionVerifier` 验证「点击之后有没有生效」（事后），Z-1/Z-2 验证「点击之前该不该点」（事前）—— 感知闭环从执行域前移到决策域。守卫集成：悬停实验在弹窗激活期/dryRun 下跳过（UIA 判决不受限）、探针失败诚实降级为 `unprobed` 而非谎报。物理服务版本门控 0.4.0；`/hit_test` 属结构感知能力位（`ui_tree`）。
+
+## 第廿三纪元（AA）：世界跳转引擎 —— open_url
+
+**对症需求**：「自动跳转网页链接」。屏幕上的 URL（聊天正文里、文档里、OCR 噪声里）不是控件 —— 点击要么被 Z-2 闸门否决（正文），要么点不中。世界行动律的答案：**链接不靠点，交给 OS 壳层**。
+
+**AA-1 URL 感知（`src/urlSense.ts`，纯函数零依赖）**：
+
+- **提取无损**：从自由文本（OCR 全文/控件名）提取完整 URL 子串；尾随标点剥离（中文句号/全角括号是 OCR 粘连）带**括号平衡律** —— 维基百科式 `…wiki/Python_(lang)` 的成对括号是 URL 的一部分，不许误剥；
+- **归一无猜**：`www.` 前缀补 `https://`（www 是显式网页自声明，唯一被授权的猜测）；裸域名（`example.com`）拒绝 —— 精确性优先，与运动弧引号锚定同律；
+- **安检无情**：scheme 白名单 `[http, https]` —— `file://`（本地文件系统）、`javascript:`（脚本执行）、`data:`/`vbscript:`（数据/脚本载荷）一律结构化拒绝。跳转引擎只把模型带向公开网页，**不做任意协议启动器**；无点主机拒绝（`http://foo` 是词不是站），localhost 例外；超长（>2048）拒绝。
+
+**AA-1 跳转躯体（`system.openUrl`）**：平台 opener（win=`cmd start` / darwin=`open` / linux=`xdg-open`），fire-and-forget —— 回执证明的是「壳层请求已发出」而非「页面已加载」，验证交给世界（take_screenshot / switch_window）。Windows 引号转义在 spawn 层手工完成（`windowsVerbatimArguments`）—— 查询参数里的 `&` 是常态，Node 默认 argv 引用不覆盖它，裸露会被 cmd 当命令分隔符。真机战果：`https://example.com/?a=1&b=2` 完整落地（Edge 窗口标题取证）。
+
+**接线四处**：
+
+- `open_url`（新工具，`enableOpenUrl` 默认开）：入参可以是裸 URL 或含 URL 的自由文本（OCR 行直接粘贴）；提取精确、多候选歧义结构化拒绝（绝不掷硬币打开一个）；`ACTION_TOOLS` 在册 —— 跳转可重放、可审计、可归纳进技能。
+- `read_text`：OCR 全文里的 URL 自动浮出（`urls_detected` 字段 + next_step 指引 open_url）—— 「自动跳转」的感知面，模型不必手抄链接。
+- Z-2 点击闸门：被否决的正文若含 URL（UIA 控件名回执，零成本复用），拒绝信息直接给出改道出口：「别点，用 open_url 跳」。
+- 弹窗守卫：popup 激活期 open_url 一并冻结（先处理弹窗，世界秩序不破）。
 
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
 | --- | --- | --- |
 | `take_screenshot` | 截屏 + SoM 叠加 + 压缩 + 滑动窗口 + 弹窗传感 + 变化门控 | `region`, `force?` |
-| `click_mouse` | 归一化坐标点击，内置 dHash 效果验证 + 自动记忆 | `x`, `y`, `button`, `confidence?`, `target_description?` |
+| `click_mouse` | 归一化坐标点击，内置 dHash 效果验证 + 自动记忆 + Z-2 交互性闸门（静态正文上的左键点击被结构化拒绝） | `x`, `y`, `button`, `confidence?`, `target_description?`, `allow_text_click?` |
 | `type_text` | 焦点处输入文本，支持跨平台一键清空 | `text`, `clearFirst` |
 | `scroll_page` | 四方向滚动 | `direction`, `amount` |
 | `press_hotkey` | 组合键（键位白名单，防注入） | `keys` (数组) |
@@ -288,8 +311,9 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 | `extract_ui_vision` | 本地视觉模型精确提取（可选） | 无 |
 | `start_complex_task` | Planner-Actor 编排引擎 | `userRequest` |
 | `zoom_inspect` | 区域裁剪放大 + 细网格，二阶段精定位 | `x`, `y`, `half_size?` |
-| `find_text` / `read_text` | 文字→精确坐标（内置交互性探针判决）/ 区域文字读取（需 `enableOcr`） | `keyword` / `x?`,`y?`,`half_size?` |
+| `find_text` / `read_text` | 文字→精确坐标（内置交互性探针判决）/ 区域文字读取（需 `enableOcr`；URL 自动浮出） | `keyword` / `x?`,`y?`,`half_size?` |
 | `probe_interactivity` | 三通道交互性判决：UIA 点查询 → 悬停光标形态 → 悬停重绘 | `x`, `y` |
+| `open_url` | URL 安检（scheme 白名单 http/https + 噪声提取）→ 系统默认浏览器跳转 | `url`（裸 URL 或含 URL 文本）, `reasoning?` |
 | `diff_view` | 最近两截图的视觉差分：红框变化图 + 区域坐标清单 | 无 |
 | `remember_ui` / `recall_ui` | 场景式 UI 记忆写入 / 自然语言召回 | `description`,`x`,`y` / `query` |
 | `replay_actions` | 重放日志中的动作序列（宏） | `confirm`, `from_step?`, `to_step?` |
@@ -609,7 +633,7 @@ Every remaining item from the post-campaign ledger, delivered in recommended ord
 | Tool | Description | Key parameters |
 | --- | --- | --- |
 | `take_screenshot` | Capture + SoM overlay + compression + sliding window + popup sensing + change gating | `region`, `force?` |
-| `click_mouse` | Normalized-coordinate click with built-in dHash effect verification + auto memory | `x`, `y`, `button`, `confidence?`, `target_description?` |
+| `click_mouse` | Normalized-coordinate click with built-in dHash effect verification + auto memory + Z-2 interactivity gate (left-clicks on static text are structurally refused) | `x`, `y`, `button`, `confidence?`, `target_description?`, `allow_text_click?` |
 | `type_text` | Type text at the focus; cross-platform clear-first | `text`, `clearFirst` |
 | `scroll_page` | Four-direction scrolling | `direction`, `amount` |
 | `press_hotkey` | Key combos (whitelisted, injection-proof) | `keys` (array) |
@@ -620,7 +644,8 @@ Every remaining item from the post-campaign ledger, delivered in recommended ord
 | `extract_ui_vision` | Precise extraction via local vision model (optional) | none |
 | `start_complex_task` | Planner–Actor orchestration engine | `userRequest` |
 | `zoom_inspect` | Region crop + enlarge + fine grid, two-stage precise grounding | `x`, `y`, `half_size?` |
-| `find_text` / `read_text` | Text → exact coordinates / region text read (needs `enableOcr`) | `keyword` / `x?`, `y?`, `half_size?` |
+| `find_text` / `read_text` | Text → exact coordinates / region text read (needs `enableOcr`; URLs auto-surfaced) | `keyword` / `x?`, `y?`, `half_size?` |
+| `open_url` | URL security check (http/https scheme allowlist + noise-tolerant extraction) → jump via the OS default browser | `url` (bare URL or text containing one), `reasoning?` |
 | `diff_view` | Visual diff of the last two screenshots: red-box diff image + changed-region list | none |
 | `remember_ui` / `recall_ui` | Scene-based UI memory write / natural-language recall | `description`, `x`, `y` / `query` |
 | `replay_actions` | Replay an action sequence from the journal (macro) | `confirm`, `from_step?`, `to_step?` |

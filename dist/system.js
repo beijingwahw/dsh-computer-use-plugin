@@ -319,6 +319,37 @@ export const system = {
         }
         throw new Error('native window switch unavailable; use press_hotkey alt+tab');
     },
+    /**
+     * 用操作系统默认浏览器打开 URL（AA-1 世界跳转引擎的躯体）。
+     *
+     * 壳层动作，非屏幕交互 —— 不经 D-5 物理微服务（那里是键鼠/截图的躯体），
+     * 直接调用平台 opener：win=cmd start / darwin=open / linux=xdg-open。
+     * 调用方（open_url 工具）负责 URL 安检（scheme 白名单）；本层只管
+     * 忠实把已安检的 URL 交给壳层并报告启动方式。fire-and-forget：浏览器
+     * 的启动成败由世界回击（take_screenshot / switch_window）验证，本层
+     * 不伪造「已打开」。
+     */
+    async openUrl(url) {
+        if (guardDryRun('openUrl', { url }))
+            return { method: 'dry-run' };
+        const { spawn } = await import('child_process');
+        if (process.platform === 'win32') {
+            // windowsVerbatimArguments：URL 由本层手工加引号 —— Node 默认的 argv
+            // 引用只在含空格时触发，`&`（查询参数常态）裸露会被 cmd 当命令分隔符
+            const quoted = `"${url.replace(/"/g, '')}"`;
+            spawn('cmd.exe', ['/c', 'start', '""', quoted], {
+                detached: true, stdio: 'ignore',
+                windowsVerbatimArguments: true,
+            }).unref();
+            return { method: 'shell:start' };
+        }
+        if (process.platform === 'darwin') {
+            spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+            return { method: 'open' };
+        }
+        spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+        return { method: 'xdg-open' };
+    },
 };
 async function _getButton(button) {
     const fallbackMap = {

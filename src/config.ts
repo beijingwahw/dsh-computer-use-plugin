@@ -80,6 +80,9 @@ export interface Config {
   probeMemorySceneSimilarity: number;
   /** 判决召回的点距半径（归一化）：OCR bbox 微抖的容忍带 */
   probeRecallRadius: number;
+  // ─── AA 纪元（AA-1 世界跳转引擎）───
+  /** 启用 open_url 工具：URL 感知（提取/归一/scheme 白名单）+ 系统默认浏览器跳转 */
+  enableOpenUrl: boolean;
   // ─── 第五轮创新 ───
   /** 启用自进化技能库（save_skill / match_skill / run_skill + 自动归纳） */
   enableSkillLibrary: boolean;
@@ -96,6 +99,10 @@ export interface Config {
   enableApprovalGate: boolean;
   /** 不可逆操作词（逗号分隔）：target_description 命中即需 request_approval 令牌 */
   dangerPatterns: string;
+  /** 审批令牌初始有效期(ms)：一次用户确认覆盖整个任务的重试窗口（V 纪元：验收式消费） */
+  approvalTokenTtlMs: number;
+  /** 单令牌物理尝试次数上限：验收失败自动重试免二次确认，超限焚毁需重新审批 */
+  approvalMaxAttempts: number;
   // ─── 第七轮创新：工程卓越（可观测/可审计/可恢复） ───
   /** 启用遥测：per-tool 成败/noop 率/延迟分位 + 记忆命中率 + get_metrics/self_diagnose 工具 */
   enableTelemetry: boolean;
@@ -207,6 +214,7 @@ export const Config: Schema<Config> = Schema.object({
   probeMemoryCapacity: Schema.number().default(128).description('Probe-verdict memory capacity (LRU)'),
   probeMemorySceneSimilarity: Schema.number().default(0.9).description('Scene-fingerprint similarity required to recall a verdict'),
   probeRecallRadius: Schema.number().default(0.015).description('Normalized point-distance radius for verdict recall (OCR bbox jitter tolerance)'),
+  enableOpenUrl: Schema.boolean().default(true).description('open_url tool: URL sensing (extract/normalize/scheme allowlist) + jump via the OS default browser'),
   enableSkillLibrary: Schema.boolean().default(true).description('Self-evolving skill library (induce/match/run)'),
   skillLibraryPath: Schema.string().default('').description('Skill library JSON path; empty = memory only. Set a path for cross-session learning'),
   autoInduceSkills: Schema.boolean().default(true).description('Auto-induce skills from successful complex tasks'),
@@ -214,6 +222,8 @@ export const Config: Schema<Config> = Schema.object({
   riskPatterns: Schema.string().default('password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥').description('Comma-separated risk keywords'),
   enableApprovalGate: Schema.boolean().default(true).description('Approval gate: irreversible actions need a one-shot token from request_approval'),
   dangerPatterns: Schema.string().default('send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,confirm,确认订单,format,格式化,erase,抹掉,uninstall,卸载,reset,重置,清空,withdraw,提现,transfer,转账').description('Comma-separated irreversible-action keywords triggering approval'),
+  approvalTokenTtlMs: Schema.number().default(600000).description('Approval-token TTL (ms). ONE user consent covers the whole task retry window; each failed attempt re-arms it (capped at 3x TTL from mint)'),
+  approvalMaxAttempts: Schema.number().default(5).description('Max physical attempts per approval token: failed (unverified) clicks retry under the same consent without re-asking; beyond this a fresh approval is required'),
   enableTelemetry: Schema.boolean().default(true).description('Telemetry: per-tool success/no-op rates, latency percentiles, memory hit rates'),
   checkpointPath: Schema.string().default('').description('Cognitive-state checkpoint JSON (atomic). Auto-restore on start, auto-save on unload. Empty = disabled'),
   // ─── 创世纪（B-5~B-8） ───

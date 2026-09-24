@@ -19,6 +19,8 @@ import { cohensH } from './knowledge/metrics';
 export const ACTION_TOOLS = [
   'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
   'drag_mouse', 'click_element', 'switch_tab', 'switch_window', 'dismiss_popup',
+  // AA-1：跳转可重放（同 URL 再跳）—— 审计与技能归纳覆盖世界跳转
+  'open_url',
 ];
 
 /**

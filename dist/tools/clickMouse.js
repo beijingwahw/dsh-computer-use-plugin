@@ -12,6 +12,8 @@ import { uiMemory } from '../uiMemory.js';
 import { regionDhash, similarity } from '../perceptualHash.js';
 import { parseExpectation } from '../intent.js';
 import { quantum } from '../quantumSense.js';
+import { probePoints, gateTextClick } from '../interactivityProbe.js';
+import { extractUrls } from '../urlSense.js';
 import { toolErr } from '../toolResult.js';
 export function createClickMouseTool(config) {
     return defineTool({
@@ -64,13 +66,19 @@ export function createClickMouseTool(config) {
                 type: 'string',
                 description: 'Why you chose this action (one sentence). Recorded into the causal journal for later counterfactual analysis.',
             },
+            allow_text_click: {
+                type: 'boolean',
+                description: 'Set true ONLY when you DELIBERATELY intend to click static text — place a caret in a document, ' +
+                    'select a text span. The OS interactivity gate refuses left-clicks on static content by default: ' +
+                    'conversation/document text that merely MENTIONS a label ("点击登录按钮" rendered in a chat) is NOT a clickable entry.',
+            },
         },
         output: {
             schema: { type: 'string' },
             render: (_args, value) => [{ type: 'text', text: value }],
         },
         async execute(args) {
-            const { x, y, button = 'left', confidence, target_description, expected_change, expected_text, from_memory_id, approval_token, expected_effect, reasoning } = args;
+            const { x, y, button = 'left', confidence, target_description, expected_change, expected_text, from_memory_id, approval_token, expected_effect, reasoning, allow_text_click } = args;
             // 双保险校验（Guard 已在前线，工具自查兜底）
             if (x < 0 || x > 1 || y < 0 || y > 1) {
                 return toolErr('Click validation failed.', `Invalid normalized coordinates (${x}, ${y}). X and Y must be between 0.0 and 1.0.`, 'Re-estimate the target center from the latest screenshot; zoom_inspect can refine the estimate.');
@@ -152,6 +160,49 @@ export function createClickMouseTool(config) {
                         preVerified = true;
                     }
                 }
+                // ── Z-2 交互性闸门：指针落下之前，先问世界「这是控件还是正文」──
+                // 对症失败模式：「模型将输出的正文当作点击的按钮」。Z-1 的判决只标注
+                // 在 find_text 结果里（模型可以不看）；此处把同一三通道探针（UIA 结构层
+                // > 悬停光标 > 场景记忆）前移到点击执行前 —— 静态正文（Text/Document，
+                // 非 Edit 输入框）上的左键点击被结构化否决。右键（正文上的上下文菜单
+                // 是合法动作）与 dry-run（无物理世界可问）不适用；模型明知点正文时可
+                // 以 allow_text_click 自证（文档放置光标/选中文本）。
+                // 顺序：闸门必须在 captureBefore 之前 —— 悬停实验可能触发 hover 高亮，
+                // before 帧只能在探针之后取，否则高亮会污染「无变化」基线。
+                if (config.enableInteractivityProbe && !config.dryRun && button === 'left') {
+                    const [probe] = await probePoints(config, [{ x, y }]);
+                    const gate = gateTextClick(probe, { allowTextClick: allow_text_click === true });
+                    if (gate.blocked) {
+                        console.warn(`[Interactivity Gate] Blocked click on static text: ${gate.evidence}`);
+                        // AA-1 跳转出口：被否决的正文里若含 URL，拒绝即改道指引 ——
+                        // 「别点，跳」。UIA 的控件名是该点文字内容的官方回执（≤40 字符），
+                        // 零成本复用；悬停通道无文本回执，保持原语义。
+                        const textContent = probe?.evidence.hit_test?.name;
+                        const urls = textContent ? extractUrls(textContent) : [];
+                        const jumpHint = urls.length > 0
+                            ? ` The static text contains a URL: ${urls[0]} — if your goal is to open it, call 'open_url' with it instead of clicking.`
+                            : '';
+                        return JSON.stringify({
+                            status: 'ACTION_REQUIRED',
+                            state_anchor: {
+                                target: target_description ?? '(undescribed target)',
+                                interactivity_gate: {
+                                    verdict: 'text',
+                                    reason: gate.reason,
+                                    evidence: gate.evidence,
+                                    note: probe?.note,
+                                },
+                            },
+                            next_step: 'This point is STATIC CONTENT (chat message / document text), not a clickable control — the text merely ' +
+                                'MENTIONS the label you are looking for. Do NOT retry the same coordinates. ' +
+                                "Re-locate the real control: call 'find_text' with the label keyword and click ONLY a match with " +
+                                'interactivity=control; or take_screenshot and search visually; the entry may need scroll_page or a ' +
+                                'menu to be opened first. ' +
+                                'If you DELIBERATELY want to click static text (place a caret in a document, select a span), ' +
+                                're-invoke click_mouse with allow_text_click: true.' + jumpHint,
+                        }, null, 2);
+                    }
+                }
                 // ── 效果验证（双尺度 + C-1 意图感知）：动作前同时取全屏 + 点击点区域指纹 ──
                 // 区域指纹放大局部反馈（光标/高亮/展开），弥补全屏 dHash 的局部盲区
                 // C-1：声明了 expected_effect 时保留动作前帧 —— 物理规则需要前后两帧对比
@@ -220,10 +271,72 @@ export function createClickMouseTool(config) {
                     nextStep = 'SENSITIVE FIELD: this looks like a credentials/input-secret area. ' +
                         'Do NOT type secrets via type_text here — ask the USER to enter them personally, then continue with take_screenshot.';
                 }
-                // ── 阶段二（B-3）：动作成功，令牌用后即焚 ──
-                // 放在 SUCCESS return 前的最后一步：点击抛异常走 catch 路径，令牌不烧可重试
-                if (dangerous && approval_token)
-                    approval.consume(approval_token);
+                // ── 阶段二（B-3 + V 纪元·验收式消费）：令牌只在验收通过时焚毁 ──
+                // 验收判定 —— 世界说「成了」才算成了：
+                //   验证关闭/dry-run（effect=null）⇒ 无法验收，退回派发即消费（保守：
+                //     不能把「无法验收」当成「没生效」而放行无限制重试）；
+                //   effect.detected=false ⇒ 点击未生效（点空/落错窗口）—— 世界没有发生
+                //     不可逆变化，用户的同意未被消耗，令牌保留供同一授权内自动重试；
+                //   intentBetrayed / semantic mismatch ⇒ 世界变了但不是预期的 —— 同样
+                //     保留令牌让模型纠正后重试。
+                // 一次用户确认覆盖整个任务：验收失败 ⇒ attemptFailed 登记（TTL 续期，
+                // 次数递减），重试不再打扰用户；预算耗尽/超期 ⇒ 焚毁，重新审批。
+                let acceptance;
+                if (dangerous && approval_token) {
+                    const semanticMismatched = !!(semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed);
+                    if (!effect) {
+                        // 验证通道关闭：无从验收，维持旧方言（派发即消费，用后即焚）
+                        approval.consume(approval_token);
+                        acceptance = {
+                            verdict: 'unverified-dispatch-consumed',
+                            detail: 'Effect verification unavailable (verifyActions off / dry-run); token consumed on dispatch.',
+                        };
+                    }
+                    else if (!effect.detected) {
+                        const r = approval.attemptFailed(approval_token, 'no-effect');
+                        acceptance = r.valid
+                            ? {
+                                verdict: 'retry-allowed', reason: 'no-effect', remaining_attempts: r.remainingAttempts,
+                                detail: 'No verified world change — the click did NOT take effect (missed target / wrong window). ' +
+                                    `Token STILL VALID (${r.remainingAttempts} attempts left): fix coordinates or focus and RETRY within the SAME approval. ` +
+                                    'Do NOT ask the user again — their consent covers this task until a verified effect.',
+                            }
+                            : {
+                                verdict: 'budget-exhausted', reason: 'no-effect',
+                                detail: 'Retry budget exhausted with no verified effect. The token is void. ' +
+                                    'Call request_approval again and explain to the user why the action keeps failing.',
+                            };
+                    }
+                    else if (intentBetrayed || semanticMismatched) {
+                        const reason = semanticMismatched ? 'semantic-mismatch' : 'intent-betrayed';
+                        const r = approval.attemptFailed(approval_token, reason);
+                        acceptance = r.valid
+                            ? {
+                                verdict: 'retry-allowed', reason, remaining_attempts: r.remainingAttempts,
+                                detail: 'The screen changed but NOT in the expected way — the click probably landed on the wrong element. ' +
+                                    `Token STILL VALID (${r.remainingAttempts} attempts left): re-examine and RETRY within the SAME approval. ` +
+                                    'Do NOT ask the user again.',
+                            }
+                            : {
+                                verdict: 'budget-exhausted', reason,
+                                detail: 'Retry budget exhausted with repeated wrong-element clicks. The token is void. ' +
+                                    'Call request_approval again and explain to the user what keeps going wrong.',
+                            };
+                    }
+                    else {
+                        // 验收通过：世界出现了变化且与预期一致（或无更严苛的期望可核对）
+                        approval.consume(approval_token);
+                        acceptance = {
+                            verdict: 'verified',
+                            detail: 'Verified world change consistent with the expectation — user consent consumed by this irreversible effect. ' +
+                                'Report the acceptance result to the user.',
+                        };
+                    }
+                }
+                // 重试指引前置：验收失败且令牌仍有效时，下一步就是纠偏重试（免二次确认）
+                if (acceptance && acceptance.verdict === 'retry-allowed') {
+                    nextStep = acceptance.detail + ' ' + nextStep;
+                }
                 return JSON.stringify({
                     status: 'SUCCESS',
                     action: `Mouse ${button} clicked.`,
@@ -243,6 +356,9 @@ export function createClickMouseTool(config) {
                         sensitive_focus: sensitive || undefined,
                         // J 纪元：审批网覆盖情况透明化（described / blind-spot / gate-disabled）
                         approval_gate: gateCoverage,
+                        // V 纪元：验收裁决 —— verified（通过，令牌已焚毁）/ retry-allowed
+                        // （未生效，令牌保留，重试免确认）/ budget-exhausted（预算耗尽，需重新审批）
+                        acceptance: acceptance || undefined,
                         semantic: semantic
                             ? (semantic === 'ocr-unavailable'
                                 ? 'ocr-unavailable'

@@ -20,6 +20,7 @@ import { createRememberUiTool, createRecallUiTool } from './uiMemoryTools';
 import { createReplayActionsTool } from './replayActions';
 import { createReadTextTool, createFindTextTool } from './textTools';
 import { createProbeInteractivityTool } from './probeInteractivity';
+import { createOpenUrlTool } from './openUrl';
 import { createDiffViewTool } from './diffView';
 import { createSaveSkillTool, createMatchSkillTool, createRunSkillTool } from './skillTools';
 import { createRequestApprovalTool, createGrantApprovalTool } from './approvalTools';
@@ -68,6 +69,12 @@ export function buildAllTools(config: Config): ToolDefinition[] {
   // Z 纪元（Z-1 世界行动引擎）：交互性探针 —— 对话文本 ≠ 可点击入口
   if (config.enableInteractivityProbe) {
     tools.push(createProbeInteractivityTool(config));
+  }
+
+  // AA 纪元（AA-1 世界跳转引擎）：URL 安检 + 默认浏览器跳转 —— 屏幕上的
+  // 链接不靠点击，交给 OS 壳层（Z-2 闸门拒绝点击正文时的正确出口）
+  if (config.enableOpenUrl) {
+    tools.push(createOpenUrlTool(config));
   }
 
   // 第五轮创新：自进化技能库（轨迹归纳 / 语义匹配 / DNA 重组 / 一键执行）

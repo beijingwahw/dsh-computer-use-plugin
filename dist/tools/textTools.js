@@ -12,6 +12,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { readTextAny } from '../textReader.js';
 import { classifyWordShape, probePoints } from '../interactivityProbe.js';
+import { extractUrls } from '../urlSense.js';
 export function createReadTextTool(config) {
     return defineTool({
         name: 'read_text',
@@ -60,6 +61,10 @@ export function createReadTextTool(config) {
                         next_step: 'No readable text in scope. If the area contains text, it may be too small — try zoom_inspect or a larger half_size.',
                     }, null, 2);
                 }
+                // AA-1 URL 感知：正文里的链接自动浮出 —— 「自动跳转」的感知面。
+                // 屏幕上的 URL 不是控件（点击被 Z-2 闸门否决），跳转的正确出口是
+                // open_url；read_text 顺手把燃料备好，模型不必再手抄。
+                const urls = extractUrls(clean);
                 return JSON.stringify({
                     status: 'SUCCESS',
                     state_anchor: {
@@ -68,8 +73,13 @@ export function createReadTextTool(config) {
                         char_count: clean.length,
                         // 文本本身也做预算：超长截断
                         text: clean.length > 1500 ? clean.slice(0, 1500) + '...[truncated]' : clean,
+                        ...(urls.length > 0 ? { urls_detected: urls } : {}),
                     },
-                    next_step: 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.',
+                    next_step: urls.length > 0
+                        ? `URLs detected in the text. To FOLLOW one, call 'open_url' with it — do NOT click the text ` +
+                            `(it is static content; the interactivity gate will refuse). ` +
+                            `Use the text content for your reasoning; call find_text when you need clickable coordinates for any label.`
+                        : 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.',
                 }, null, 2);
             }
             catch (error) {

@@ -2,7 +2,7 @@
 // 安全与自愈子系统：一次性审批令牌 / 失败记忆 / 振荡检测 / 风险词闸门。
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { approval } from '../src/approval.ts';
+import { approval, resetApproval } from '../src/approval.ts';
 import { failureMemory } from '../src/failureMemory.ts';
 import { oscillationTracker } from '../src/oscillationTracker.ts';
 import { matchesRiskPatterns, matchesDangerPatterns, parseRiskPatterns } from '../src/riskGate.ts';
@@ -10,6 +10,9 @@ import { matchesRiskPatterns, matchesDangerPatterns, parseRiskPatterns } from '.
 beforeEach(() => {
   failureMemory.reset();
   oscillationTracker.reset();
+  // V 纪元：审批簿记（含 Y-10 同意速率桶）随用例归零 —— grant 是全文件共享的
+  // 有限资源，不重置则第 4 个用到 grant 的用例会被限流误伤
+  resetApproval();
 });
 
 // ─── 一次性审批令牌 ───
@@ -29,6 +32,76 @@ test('approval: revoke 立即作废；伪造令牌一律拒绝', () => {
   assert.equal(approval.consume(pa.token), false);
   assert.equal(approval.consume('APR-FAKE1234'), false);
   assert.equal(approval.consume(''), false);
+});
+
+// ─── V 纪元：验收式消费（一次确认覆盖整个任务） ───
+// 场景回归：发一封邮件被问三次 yes —— 点击落错窗口（无效果）也烧令牌。
+// 新语义：未生效的尝试不消耗同意，令牌保留可重试；验收通过才焚毁。
+
+test('approval V: 验收失败保留令牌（同一次同意内免二次确认地重试）', () => {
+  const pa = approval.request('click 发送 to submit the email');
+  approval.grant(pa.token, true);
+  // 第一次点击落错窗口：世界没有变化 —— 令牌必须还在
+  const r1 = approval.attemptFailed(pa.token, 'no-effect');
+  assert.equal(r1.valid, true, '未生效的尝试不得消耗用户的同意');
+  assert.ok(r1.remainingAttempts >= 1);
+  assert.equal(approval.validate(pa.token), true, '令牌仍可放行重试');
+  // 第二次仍未生效：继续保留
+  const r2 = approval.attemptFailed(pa.token, 'no-effect');
+  assert.equal(r2.valid, true);
+  assert.equal(approval.validate(pa.token), true);
+  // 第三次点击验收通过（世界出现预期变化）：焚毁
+  assert.equal(approval.consume(pa.token), true);
+  assert.equal(approval.validate(pa.token), false, '验收通过后用后即焚');
+});
+
+test('approval V: 重试预算耗尽 ⇒ 焚毁并要求重新审批', () => {
+  const pa = approval.request('click Send', { maxAttempts: 2 });
+  approval.grant(pa.token, true);
+  assert.equal(approval.attemptFailed(pa.token, 'no-effect').valid, true);
+  assert.equal(approval.attemptFailed(pa.token, 'no-effect').valid, true); // 第 2 次 = 上限
+  const r3 = approval.attemptFailed(pa.token, 'no-effect');                // 第 3 次：超限
+  assert.equal(r3.valid, false, '超限尝试后令牌焚毁');
+  assert.equal(approval.validate(pa.token), false);
+  assert.equal(approval.consume(pa.token), false);
+});
+
+test('approval V: 验收失败续期 TTL，但不可越过生命周期硬顶', () => {
+  const pa = approval.request('click 支付', { ttlMs: 60_000 }); // 硬顶 = 180s
+  approval.grant(pa.token, true);
+  const before = pa.expiresAt;
+  approval.attemptFailed(pa.token, 'no-effect');
+  assert.ok(pa.expiresAt >= before, '失败重试续期：有效期不缩短');
+  // 反复失败直至硬顶：续期被 cap 住，令牌最终过期焚毁
+  for (let i = 0; i < 10; i++) approval.attemptFailed(pa.token, 'no-effect');
+  assert.ok(pa.expiresAt <= pa.lifetimeCapAt + 1, '续期不越生命周期硬顶');
+});
+
+test('approval V: 未授予的令牌 attemptFailed 不放行', () => {
+  const pa = approval.request('click 删除');
+  const r = approval.attemptFailed(pa.token, 'no-effect');
+  assert.equal(r.valid, false, '请求≠同意：未 grant 的令牌不可借重试通道续命');
+  assert.equal(approval.validate(pa.token), false);
+});
+
+test('approval V: TTL / 重试预算可由部署配置注入（缺省 10min × 5 次）', () => {
+  const pa = approval.request('click 提交订单');
+  assert.ok(pa.ttlMs >= 600_000 - 5_000, '缺省 TTL 覆盖整个任务窗口（≈10min）');
+  assert.equal(pa.maxAttempts, 5);
+  const custom = approval.request('x', { ttlMs: 2_000, maxAttempts: 1 });
+  assert.equal(custom.ttlMs, 2_000);
+  assert.equal(custom.maxAttempts, 1);
+});
+
+test('approval V: status 暴露剩余重试预算（锚点透明化）', () => {
+  const pa = approval.request('click 发送');
+  approval.grant(pa.token, true);
+  let st = approval.status(pa.token);
+  assert.equal(st.remainingAttempts, 5);
+  approval.attemptFailed(pa.token, 'no-effect');
+  st = approval.status(pa.token);
+  assert.equal(st.attempts, 1);
+  assert.equal(st.remainingAttempts, 4);
 });
 
 // ─── 失败记忆（Anti-Skill） ───

@@ -39,6 +39,7 @@ export const Config = Schema.object({
     probeMemoryCapacity: Schema.number().default(128).description('Probe-verdict memory capacity (LRU)'),
     probeMemorySceneSimilarity: Schema.number().default(0.9).description('Scene-fingerprint similarity required to recall a verdict'),
     probeRecallRadius: Schema.number().default(0.015).description('Normalized point-distance radius for verdict recall (OCR bbox jitter tolerance)'),
+    enableOpenUrl: Schema.boolean().default(true).description('open_url tool: URL sensing (extract/normalize/scheme allowlist) + jump via the OS default browser'),
     enableSkillLibrary: Schema.boolean().default(true).description('Self-evolving skill library (induce/match/run)'),
     skillLibraryPath: Schema.string().default('').description('Skill library JSON path; empty = memory only. Set a path for cross-session learning'),
     autoInduceSkills: Schema.boolean().default(true).description('Auto-induce skills from successful complex tasks'),
@@ -46,6 +47,8 @@ export const Config = Schema.object({
     riskPatterns: Schema.string().default('password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥').description('Comma-separated risk keywords'),
     enableApprovalGate: Schema.boolean().default(true).description('Approval gate: irreversible actions need a one-shot token from request_approval'),
     dangerPatterns: Schema.string().default('send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,confirm,确认订单,format,格式化,erase,抹掉,uninstall,卸载,reset,重置,清空,withdraw,提现,transfer,转账').description('Comma-separated irreversible-action keywords triggering approval'),
+    approvalTokenTtlMs: Schema.number().default(600000).description('Approval-token TTL (ms). ONE user consent covers the whole task retry window; each failed attempt re-arms it (capped at 3x TTL from mint)'),
+    approvalMaxAttempts: Schema.number().default(5).description('Max physical attempts per approval token: failed (unverified) clicks retry under the same consent without re-asking; beyond this a fresh approval is required'),
     enableTelemetry: Schema.boolean().default(true).description('Telemetry: per-tool success/no-op rates, latency percentiles, memory hit rates'),
     checkpointPath: Schema.string().default('').description('Cognitive-state checkpoint JSON (atomic). Auto-restore on start, auto-save on unload. Empty = disabled'),
     // ─── 创世纪（B-5~B-8） ───
