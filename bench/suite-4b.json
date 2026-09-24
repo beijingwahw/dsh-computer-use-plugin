@@ -1,0 +1,44 @@
+[
+  {
+    "id": "two-app-switch-v2",
+    "category": "window",
+    "prompt": "双应用切换复验：1) win+r 输入 notepad 回车打开记事本，type_text 输入 hello-switch；2) win+r 输入 calc 回车打开计算器；3) switch_window titleKeyword=\"notepad\"（英文关键词，小写），报告 focus_handoff 字段（verified、foreground_title、evidence）；4) switch_window titleKeyword=\"计算器\"，同样报告 focus_handoff；5) 再用 switch_window titleKeyword=\"Todo\"（故意大小写不符）切回记事本验证大小写不敏感匹配，报告 focus_handoff。三个方向都 verified=true 才算成功。保持窗口打开。",
+    "expect": ["switch_window", "focus_handoff"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "calc-arithmetic-v2",
+    "category": "real",
+    "prompt": "真实计算复验：1) win+r 输入 calc 回车打开计算器（若已打开直接用）；2) 点击计算器窗口标题栏确保前台；3) 用 type_text 逐段键盘输入：(123+456)*7-89 → 先输 123+456= 再输 *7= 再输 -89= ；4) read_text 或 find_text 读显示屏结果（正确答案 3964）；5) 报告读数与答案是否一致。",
+    "expect": ["read_text|find_text"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "edge-tabs-switch-v2",
+    "category": "real",
+    "prompt": "浏览器标签页复验：1) win+r 输入 msedge 回车打开 Edge（等几秒加载）；2) take_screenshot 确认 Edge 窗口在场；3) ctrl+t 新开标签页，再截图确认两个标签；4) 调用 switch_tab 切换标签页，报告返回的前台标签信息；5) 报告 tab 切换的验证字段。保持 Edge 打开。",
+    "expect": ["switch_tab"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "skill-scope-probe",
+    "category": "skill",
+    "prompt": "技能切片探针：1) 切到已打开的记事本（没有就 win+r notepad 打开），ctrl+a 输入 scope-probe-clean 重置内容；2) 输入 SKILL-SCOPE-TEST；3) 立即调用 save_skill，描述写\"在记事本输入 SKILL-SCOPE-TEST 标记\"，报告返回中的 steps 数量（应该只有本回合的少数几步，而不是几十步）；4) 报告 steps 数和 exit fingerprint 是否记录。保持记事本打开。",
+    "expect": ["save_skill"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "taskbar-edge-click-v2",
+    "category": "guard",
+    "prompt": "屏幕边缘点击复验：1) take_screenshot 看桌面；2) 用 click_mouse 点击任务栏区域的桌面空白处（y≈0.97，x≈0.85，target_description=\"taskbar empty area\"）—— 预期动作本身成功（返回 SUCCESS 而不是 out_of_bounds 错误）；3) 再点击屏幕右下角附近 (0.98, 0.5) 的空白处；4) 报告两次的返回 status 和 effect 字段。这两次点击都是无害的。",
+    "expect": ["click_mouse"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "final-cleanup-v2",
+    "category": "setup",
+    "prompt": "复验后清理：关闭所有记事本（不保存）、计算器、Edge 窗口。take_screenshot 确认桌面干净后报告。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 480000
+  }
+]

@@ -1,0 +1,111 @@
+[1] PASS setup/cleanup-desktop-y3 tools=[take_screenshot,press_hotkey,take_screenshot,press_hotkey,take_screenshot,click_mouse,take_screenshot,press_hotkey,take_screenshot,click_mouse,take_screenshot] errors=0/0
+[2] PASS real/todo-file-lifecycle tools=[take_screenshot,press_hotkey,take_screenshot,type_text,take_screenshot,press_hotkey,take_screenshot,click_mouse,type_text,take_screenshot,press_hotkey,press_hotkey,take_screenshot,type_text,press_hotkey,type_text,press_hotkey,type_text,press_hotkey,type_text,press_hotkey,type_text,press_hotkey,type_text,take_screenshot,press_hotkey,take_screenshot,click_mouse,type_text,take_screenshot,press_hotkey,take_screenshot] errors=0/0
+[3] PASS ocr/ocr-verify-todo tools=[take_screenshot,find_text,read_text,read_text,read,glob] errors=1/0
+[4] PASS real/edit-line-precision tools=[take_screenshot,press_hotkey,press_hotkey,press_hotkey,press_hotkey,type_text,take_screenshot,press_hotkey,read_text] errors=0/0
+[5] PASS scroll/scroll-navigation-long-doc tools=[take_screenshot,press_hotkey,take_screenshot,click_mouse,type_text,take_screenshot,type_text,type_text,type_text,press_hotkey,take_screenshot,scroll_page,take_screenshot,read_text,find_text,read_text] errors=0/0
+[6] FAIL window/two-app-switch tools=[take_screenshot,press_hotkey,take_screenshot,type_text,click_mouse,zoom_inspect,click_mouse,take_screenshot,switch_window,take_screenshot,switch_window,switch_window,press_hotkey,take_screenshot,press_hotkey,take_screenshot,click_mouse,zoom_inspect,click_mouse,press_hotkey,take_screenshot,switch_window,take_screenshot,switch_window,take_screenshot] errors=0/0
+[7] FAIL real/calc-arithmetic tools=[take_screenshot,click_mouse,zoom_inspect,click_mouse,type_text,take_screenshot,type_text,type_text,take_screenshot,type_text,take_screenshot,type_text,take_screenshot,read_text,find_text] errors=0/0
+[8] PASS zoom/zoom-precise-small-target tools=[take_screenshot,zoom_inspect,click_mouse,take_screenshot] errors=0/0
+[9] PASS diff/diff-action-locate tools=[take_screenshot,click_mouse,zoom_inspect,click_mouse,take_screenshot,diff_view] errors=0/0
+[10] PASS memory/memory-remember-recall tools=[take_screenshot,remember_ui,recall_ui] errors=0/0
+[11] PASS real/calc-close tools=[press_hotkey,take_screenshot] errors=0/0
+[12] PASS real/paint-drawing-real tools=[take_screenshot,press_hotkey,take_screenshot,click_mouse,type_text,press_hotkey,take_screenshot,press_hotkey,take_screenshot,press_hotkey,take_screenshot,drag_mouse,take_screenshot,drag_mouse,take_screenshot,drag_mouse,take_screenshot,switch_window,take_screenshot] errors=0/0
+[13] PASS popup/popup-discard-dialog tools=[take_screenshot,press_hotkey,take_screenshot,dismiss_popup,find_text,click_mouse,take_screenshot] errors=0/0
+[14] PASS real/explorer-folder-tour tools=[take_screenshot,press_hotkey,take_screenshot,press_hotkey,take_screenshot,type_text,press_hotkey,take_screenshot,find_text,read_text] errors=0/0
+[15] PASS real/explorer-new-folder tools=[take_screenshot,click_mouse,take_screenshot,click_mouse,take_screenshot,type_text,press_hotkey,take_screenshot,find_text] errors=0/0
+[16] PASS real/explorer-close tools=[press_hotkey,take_screenshot] errors=0/0
+[17] PASS guard/guard-bounds tools=[click_mouse,click_mouse] errors=1/0
+[18] PASS guard/guard-dangerous-approval tools=[click_mouse,request_approval] errors=0/0
+[19] PASS approval/approval-grant-once tools=[take_screenshot,click_mouse,request_approval,grant_approval,click_mouse] errors=0/0
+[20] PASS skill/skill-save-and-run tools=[take_screenshot,switch_window,take_screenshot,click_mouse,type_text,take_screenshot,save_skill,press_hotkey,type_text,take_screenshot,run_skill,take_screenshot] errors=0/0
+[21] PASS orchestration/orchestration-dag-budget tools=[start_complex_task] errors=0/0
+[22] PASS observability/journal-audit tools=[verify_journal,get_metrics] errors=0/0
+[23] PASS cognition/cognition-whatif tools=[what_if,swarm_report] errors=0/0
+[24] FAIL real/edge-tabs-switch tools=[take_screenshot,press_hotkey,pwsh,take_screenshot,click_mouse,take_screenshot,switch_window,click_mouse,pwsh,pwsh] errors=3/0
+[25] PASS real/edge-close tools=[take_screenshot,press_hotkey,take_screenshot,pwsh,switch_window,press_hotkey,click_mouse,take_screenshot,switch_window,switch_window,switch_window,switch_window] errors=2/0
+[26] PASS setup/final-cleanup-y3 tools=[take_screenshot,click_mouse,click_mouse,pwsh,press_hotkey,take_screenshot] errors=2/0
+
+==== SUMMARY ====
+{
+ "total": 26,
+ "pass": 23,
+ "fail": 3,
+ "unknown": 0,
+ "byCategory": {
+  "setup": {
+   "total": 2,
+   "pass": 2,
+   "fail": 0
+  },
+  "real": {
+   "total": 10,
+   "pass": 8,
+   "fail": 2
+  },
+  "ocr": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "scroll": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "window": {
+   "total": 1,
+   "pass": 0,
+   "fail": 1
+  },
+  "zoom": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "diff": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "memory": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "popup": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "guard": {
+   "total": 2,
+   "pass": 2,
+   "fail": 0
+  },
+  "approval": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "skill": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "orchestration": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "observability": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "cognition": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  }
+ }
+}

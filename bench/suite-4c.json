@@ -1,0 +1,30 @@
+[
+  {
+    "id": "two-app-switch-v3",
+    "category": "window",
+    "prompt": "双应用切换终验：1) win+r 输入 notepad 回车打开记事本，type_text 输入 final-switch-test；2) win+r 输入 calc 回车打开计算器；3) switch_window titleKeyword=\"notepad\"，报告返回的 focus_handoff 字段（verified、foreground_title、evidence）全部内容；4) switch_window titleKeyword=\"计算器\"，同样报告 focus_handoff；5) switch_window titleKeyword=\"Todo\"（大小写混合）切回记事本，报告 focus_handoff。三个方向都要求 verified=true。保持窗口打开。",
+    "expect": ["switch_window", "focus_handoff", "verified"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "skill-scope-probe-v2",
+    "category": "skill",
+    "prompt": "技能切片终验：1) switch_window 切到记事本（titleKeyword 用 notepad，没有就 win+r notepad 打开）；2) ctrl+a 输入 scope-v2-clean；3) 输入 SKILL-SCOPE-V2；4) 立即调用 save_skill，描述写\"在记事本输入 SKILL-SCOPE-V2 标记\"；5) 报告返回里的 steps 数量（应该只有本回合的少数几步）和 exit fingerprint 是否记录。保持记事本打开。",
+    "expect": ["save_skill"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "miss-feedback-probe",
+    "category": "window",
+    "prompt": "未命中反馈终验：调用 switch_window titleKeyword=\"绝不存在的窗口ABC123\"（预期失败），把返回错误信息里\"Visible windows\"后列出的窗口标题清单报告出来，并指出清单里是否有记事本（Notepad）。",
+    "expect": ["switch_window", "Visible windows"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "final-cleanup-y6",
+    "category": "setup",
+    "prompt": "终验清理：用 switch_window + alt+f4 依次关闭所有记事本（不保存）、计算器、Edge、PowerShell 窗口（每个窗口关闭前先 switch_window 切到它）。全部关闭后 take_screenshot 确认桌面干净，报告结果。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 540000
+  }
+]

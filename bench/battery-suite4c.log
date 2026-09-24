@@ -1,0 +1,29 @@
+[1] PASS window/two-app-switch-v3 tools=[press_hotkey,take_screenshot,type_text,click_mouse,take_screenshot,press_hotkey,take_screenshot,click_mouse,type_text,take_screenshot,press_hotkey,take_screenshot,type_text,press_hotkey,take_screenshot,switch_window,switch_window,switch_window,take_screenshot] errors=0/0
+[2] PASS skill/skill-scope-probe-v2 tools=[take_screenshot,switch_window,take_screenshot,click_mouse,press_hotkey,type_text,take_screenshot,press_hotkey,type_text,take_screenshot,save_skill] errors=0/0
+[3] PASS window/miss-feedback-probe tools=[switch_window] errors=0/0
+[4] PASS setup/final-cleanup-y6 tools=[press_hotkey,switch_window,press_hotkey,switch_window,press_hotkey,switch_window,press_hotkey,take_screenshot,switch_window,press_hotkey,switch_window,press_hotkey,take_screenshot,click_mouse,take_screenshot,switch_window,press_hotkey,take_screenshot,click_mouse,take_screenshot,click_mouse,take_screenshot,switch_window,press_hotkey,switch_window,press_hotkey,take_screenshot,switch_window,press_hotkey,switch_window,press_hotkey,take_screenshot,switch_window,press_hotkey,take_screenshot,click_mouse,take_screenshot,click_mouse,take_screenshot,zoom_inspect,click_mouse,press_hotkey,take_screenshot,switch_window,switch_window,press_hotkey,take_screenshot,switch_window,take_screenshot] errors=0/0
+
+==== SUMMARY ====
+{
+ "total": 4,
+ "pass": 4,
+ "fail": 0,
+ "unknown": 0,
+ "byCategory": {
+  "window": {
+   "total": 2,
+   "pass": 2,
+   "fail": 0
+  },
+  "skill": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  },
+  "setup": {
+   "total": 1,
+   "pass": 1,
+   "fail": 0
+  }
+ }
+}

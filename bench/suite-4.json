@@ -1,0 +1,184 @@
+[
+  {
+    "id": "cleanup-desktop-y3",
+    "category": "setup",
+    "prompt": "开场清理：关闭所有可能残留的记事本、画图、计算器、资源管理器、Edge 窗口（alt+f4，遇到保存提示选择不保存）。用 take_screenshot 确认桌面干净后报告。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 420000
+  },
+  {
+    "id": "todo-file-lifecycle",
+    "category": "real",
+    "prompt": "真实任务：创建一份待办清单文件。1) win+r 输入 notepad 回车打开记事本；2) 用 type_text 输入 6 行待办事项（第一行是 TODO-LIST，后面 5 行分别是 Task1 到 Task5，行间真实换行）；3) ctrl+s 保存，在保存对话框的文件名框里输入完整路径 D:\\dsh3\\test-runs\\playground\\todo-a.md 并回车保存；4) 截图确认标题栏变成 todo-a.md。完成后报告保存证据。",
+    "expect": ["press_hotkey", "type_text", "take_screenshot"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "ocr-verify-todo",
+    "category": "ocr",
+    "prompt": "OCR 核对：记事本当前打开着 todo-a.md。1) 用 find_text 查找 \"TODO-LIST\"，报告命中几个位置及坐标；2) 用 read_text 读取记事本文档区域，报告提取到的行数和内容；3) 判断是否与 6 行待办一致。不要修改内容。",
+    "expect": ["find_text", "read_text"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "edit-line-precision",
+    "category": "real",
+    "prompt": "精确编辑任务：记事本打开着 todo-a.md。1) ctrl+home 回到文首；2) 用方向键下移到第 3 行（Task2 那行）；3) shift+end 选中整行；4) type_text 输入 Task2-DONE-EDITED 替换；5) ctrl+s 保存；6) 用 read_text 验证第 3 行已变成 Task2-DONE-EDITED。报告验证结果。",
+    "expect": ["press_hotkey", "read_text"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "scroll-navigation-long-doc",
+    "category": "scroll",
+    "prompt": "长文档导航：记事本打开着 todo-a.md。1) ctrl+end 跳到文末，在末尾追加输入 40 行（LINE001 到 LINE040，真实换行，可以分多次输入）；2) ctrl+home 回顶部；3) scroll_page direction=down amount=10 滚动若干次直到文末；4) read_text 读屏幕确认能看到 LINE040；5) 报告 closed_loop.at_boundary 是否为 true 以及滚动轮数。不要保存文件。",
+    "expect": ["scroll_page", "read_text"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "two-app-switch",
+    "category": "window",
+    "prompt": "双应用切换（重点检验）：1) win+r 打开 calc 计算器；2) 用 switch_window titleKeyword 匹配记事本（关键词用 todo-a 或 记事本 或 Notepad，选你能匹配的），报告 focus_handoff.verified 和 foreground_title；3) 再 switch_window 切到计算器，同样报告取证字段；4) 两个方向都要 verified=true 才算成功。保持两个窗口都打开。",
+    "expect": ["switch_window", "focus_handoff"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "calc-arithmetic",
+    "category": "real",
+    "prompt": "真实计算任务：计算器已打开。1) 用键盘输入算式 (123+456)*7-89 —— 可以用 type_text 逐段输入（123+456= 然后 *7= 然后 -89=），也可以按 press_hotkey；2) 用 read_text 或 find_text 读取计算器显示屏上的结果数字；3) 报告读到的结果（正确答案是 3964）。如果读数和答案不符，用 take_screenshot 复核并报告实际显示。",
+    "expect": ["read_text|find_text"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "zoom-precise-small-target",
+    "category": "zoom",
+    "prompt": "小目标精定位：计算器打开中。1) 先 take_screenshot 观察布局；2) 用 zoom_inspect 检查等号 = 按钮或任意一个小按钮所在区域（估算它的大致归一化坐标，half_size=0.08）；3) 根据返回的 crop_bounds 映射公式算出该按钮在全屏的精确坐标；4) 用 click_mouse 点击它；5) 报告 effect 验证字段和 zoom 前后坐标差异。",
+    "expect": ["zoom_inspect", "click_mouse"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "diff-action-locate",
+    "category": "diff",
+    "prompt": "变化定位：计算器打开中。1) take_screenshot 记录当前画面；2) 按数字键 7；3) 调用 diff_view 对比最近两张截图；4) 报告返回的变化区域数量、bbox 和中心坐标，判断变化区域是否落在计算器显示屏区域内。保持计算器打开。",
+    "expect": ["take_screenshot", "diff_view"],
+    "timeoutMs": 420000
+  },
+  {
+    "id": "memory-remember-recall",
+    "category": "memory",
+    "prompt": "场景记忆：1) 在计算器界面用 remember_ui 记住等号按钮（或你刚点过的小按钮）：描述写英文如 equals button，填归一化坐标和 target_kind=button；2) 调用 recall_ui query=\"equals sign button\"，报告召回的坐标、score 和场景指纹匹配情况；3) 对比记忆坐标与 recall 坐标是否一致。",
+    "expect": ["remember_ui", "recall_ui"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "calc-close",
+    "category": "real",
+    "prompt": "关闭计算器：alt+f4 关闭计算器窗口，take_screenshot 确认只剩记事本。报告。",
+    "expect": ["press_hotkey", "take_screenshot"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "paint-drawing-real",
+    "category": "real",
+    "prompt": "绘画任务：1) win+r 输入 mspaint 回车打开画图；2) win+up 最大化；3) 用 drag_mouse 画三笔：一笔从 (0.3,0.3) 到 (0.55,0.45)，一笔从 (0.35,0.45) 到 (0.35,0.3)（近似 L 形），一笔从 (0.6,0.6) 到 (0.75,0.7)；4) take_screenshot 验证画布上出现线条；5) 报告每笔 drag_mouse 的 effect 和 transport 字段要点。保持画图打开。",
+    "expect": ["drag_mouse", "take_screenshot"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "popup-discard-dialog",
+    "category": "popup",
+    "prompt": "弹窗处理：画图打开且有未保存线条。1) alt+f4 触发关闭；2) 会弹出\"是否保存\"对话框 —— 用 dismiss_popup 处理（选不保存），如果 dismiss_popup 不可用就 find_text 定位\"不保存\"按钮再 click_mouse；3) take_screenshot 验证画图已关闭。报告弹窗处理方式与结果。",
+    "expect": ["dismiss_popup|find_text|click_mouse", "take_screenshot"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "explorer-folder-tour",
+    "category": "real",
+    "prompt": "资源管理器导航：1) win+e 打开资源管理器；2) ctrl+l 聚焦地址栏（或直接点击地址栏），type_text 输入 D:\\dsh3\\test-runs\\playground 回车；3) find_text 查找 todo-a，报告是否在文件列表中命中；4) read_text 读取文件列表区域，报告看到的文件名。保持资源管理器打开。",
+    "expect": ["type_text", "find_text|read_text"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "explorer-new-folder",
+    "category": "real",
+    "prompt": "创建文件夹：资源管理器当前在 playground 目录。1) 点击工具栏\"新建\"按钮（或右键空白处选新建-文件夹）；2) 命名为 dsh-made 并回车；3) find_text 查找 dsh-made 验证文件夹已出现。报告过程和验证结果。",
+    "expect": ["find_text|read_text|take_screenshot"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "explorer-close",
+    "category": "real",
+    "prompt": "关闭资源管理器：alt+f4 关闭所有资源管理器窗口，take_screenshot 确认。报告。",
+    "expect": ["press_hotkey", "take_screenshot"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "guard-bounds",
+    "category": "guard",
+    "prompt": "边界守卫测试（无害）：调用 click_mouse x=1.7 y=-0.2 —— 这是越界坐标，应被坐标边界守卫拦截。报告返回的拦截信息原文。再用合法坐标 x=0.5 y=0.5 点一次桌面空白处（无危害），报告两次调用结果差异。",
+    "expect": ["click_mouse"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "guard-dangerous-approval",
+    "category": "guard",
+    "prompt": "危险操作审批测试（不会真执行）：1) 调用 click_mouse x=0.8 y=0.5 target_description=\"立即格式化所有磁盘并永久删除数据的按钮\"，预期返回 ACTION_REQUIRED 审批令牌；2) 调用 request_approval 说明该操作；3) 不要 grant，保持未批准状态；4) 报告整个审批链路的返回字段。",
+    "expect": ["ACTION_REQUIRED", "request_approval"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "approval-grant-once",
+    "category": "approval",
+    "prompt": "审批通过流程（实际无害）：1) 调用 click_mouse x=0.5 y=0.95 target_description=\"清空回收站并粉碎文件的破坏性按钮\"（实际是任务栏空白处，无危害）；2) 收到 ACTION_REQUIRED 后 request_approval；3) grant_approval token 同意一次；4) 报告 grant 返回是否 SUCCESS 及审批剩余额度。",
+    "expect": ["grant_approval"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "skill-save-and-run",
+    "category": "skill",
+    "prompt": "技能全流程：记事本应仍打开着。1) 在记事本输入 SKILL-E2E-MARK；2) save_skill 描述\"在记事本输入标记文本\"，报告 exit fingerprint 是否记录；3) ctrl+a 后输入 CHANGED-SCENE-BREAK（改变场景指纹）；4) run_skill 用刚才的技能名（confirm=true）；5) 报告 postcondition 字段全部内容和最终状态（SUCCESS / SUCCESS_UNVERIFIED / BLOCKED）。保持记事本打开。",
+    "expect": ["save_skill", "run_skill"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "orchestration-dag-budget",
+    "category": "orchestration",
+    "prompt": "预算感知编排：调用 start_complex_task 执行\"打开一个新的记事本窗口，输入 ORCH-DONE-2026，然后关闭该窗口（不保存）\"，参数 time_budget_sec=240。报告：编排器拆出的子任务列表（含依赖关系）、每步执行状态、最终结果标记、是否超时。",
+    "expect": ["start_complex_task"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "journal-audit",
+    "category": "observability",
+    "prompt": "行动日志审计：调用 verify_journal，报告日志条目数、校验和状态；再调用 get_metrics，报告当前会话的工具调用统计和健康指标。只观察不操作。",
+    "expect": ["verify_journal", "get_metrics"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "cognition-whatif",
+    "category": "cognition",
+    "prompt": "反事实推理：调用 what_if，问题：\"如果刚才画图任务中第一笔 drag_mouse 的终点坐标错了一半，会发生什么？\" 基于 journal 的真实轨迹回答。再调用 swarm_report 拿一份群体智慧报告。报告两者的关键输出。",
+    "expect": ["what_if", "swarm_report"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "edge-tabs-switch",
+    "category": "real",
+    "prompt": "浏览器标签页：1) win+r 输入 msedge 回车打开 Edge（首页没网也能开）；2) ctrl+t 新开一个标签页；3) 调用 switch_tab 切换标签页，报告返回的前台标签信息；4) 报告 tab 切换的验证字段。保持 Edge 打开。",
+    "expect": ["switch_tab", "press_hotkey"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "edge-close",
+    "category": "real",
+    "prompt": "关闭 Edge：ctrl+w 或 alt+f4 关闭所有 Edge 窗口（若提示\"关闭全部标签页\"则确认关闭），take_screenshot 确认桌面只剩记事本。报告。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "final-cleanup-y3",
+    "category": "setup",
+    "prompt": "最终清理：关闭所有记事本（todo-a.md 已保存的直接关，改动过未保存的不保存关闭）、Edge、画图、计算器、资源管理器全部窗口。take_screenshot 确认桌面干净，报告清理结果。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 480000
+  }
+]

@@ -1,0 +1,1059 @@
+{
+ "summary": {
+  "total": 4,
+  "pass": 4,
+  "fail": 0,
+  "unknown": 0,
+  "byCategory": {
+   "window": {
+    "total": 2,
+    "pass": 2,
+    "fail": 0
+   },
+   "skill": {
+    "total": 1,
+    "pass": 1,
+    "fail": 0
+   },
+   "setup": {
+    "total": 1,
+    "pass": 1,
+    "fail": 0
+   }
+  }
+ },
+ "results": [
+  {
+   "id": "two-app-switch-v3",
+   "category": "window",
+   "prompt": "双应用切换终验：1) win+r 输入 notepad 回车打开记事本，type_text 输入 final-switch-test；2) win+r 输入 calc 回车打开计算器；3) switch_window titleKeywor",
+   "startedAt": "2026-09-24T03:34:07.015Z",
+   "sessionId": "session-7b100b17-e4a0-45d4-b94c-69c128815092",
+   "timedOut": false,
+   "waitedMs": 181515,
+   "events": [
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"win\",\"r\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey win + r pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"win\",\n      \"r\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:ef21ddead03bb581d4ce6cd95a72fb0711e3f7a7dad87986f548a4c4270dfe5a\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 147248,\n    \"name\": \"screenshot-1790220854445.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790220854445,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 0,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.75)-(0.17,0.88) entropy=2.918\",\n      \"bbox=(0.42,0.25)-(0.92,0.75) entropy=2.864\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.4\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"2/3\",\n    \"context_image_kb\": \"385/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coord…"
+    },
+    {
+     "ev": "call",
+     "name": "type_text",
+     "args": "{\"text\":\"notepad\",\"clearFirst\":false,\"expected_change\":\"运行对话框的输入框显示 notepad\"}"
+    },
+    {
+     "ev": "result",
+     "name": "type_text",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Text typed successfully.\",\n  \"state_anchor\": {\n    \"typed_content\": \"notepad\",\n    \"char_count\": 7,\n    \"cleared_existing\": false,\n    \"input_state\": \"Appended to existing content\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100,\n      \"verified_around_focus\": true,\n      \"focus_source\": \"mouse-position\"\n    },\n    \"expected_change\": \"运行对话框的输入框显示 notepad\",\n    \"typed_semantic\": {\n      \"confirmed\": false,\n      \"region_text_snippet\": \"口快捷方式 H1\"\n    }\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"x\":0.1414,\"y\":0.8389,\"target_description\":\"运行对话框的输入框\",\"expected_change\":\"输入框获得焦点\"}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.1414,\n      \"y\": 0.8389\n    },\n    \"absolute_pixels\": {\n      \"x\": 362,\n      \"y\": 1208\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100\n    },\n    \"expected_change\": \"输入框获得焦点\",\n    \"approval_gate\": \"described\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. Call 'zoom_inspect' around this point to refine coordinates, then retry.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:8004da6b5633559d825dba9d5ec3b177b7506385fc0d061b860cc053ca9de300\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 148705,\n    \"name\": \"screenshot-1790220876419.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790220876419,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 2,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 0,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.75)-(0.17,0.88) entropy=2.881\",\n      \"bbox=(0.42,0.25)-(0.92,0.75) entropy=2.864\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.4\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"578/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coord…"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"Return\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey Return pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"Return\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:9ac5193e6e5651ffdf03808829e576af87d9106ae315a0e6a23501f724b02855\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 139690,\n    \"name\": \"screenshot-1790220888793.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790220888793,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 2,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 0,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.42,0.25)-(1.00,0.75) entropy=2.863\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.41\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.41\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"567/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coord…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"x\":0.2188,\"y\":0.375,\"target_description\":\"记事本文本编辑区域\",\"expected_change\":\"文本光标出现在记事本中\"}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.2188,\n      \"y\": 0.375\n    },\n    \"absolute_pixels\": {\n      \"x\": 560,\n      \"y\": 540\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100\n    },\n    \"expected_change\": \"文本光标出现在记事本中\",\n    \"approval_gate\": \"described\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. Call 'zoom_inspect' around this point to refine coordinates, then retry.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "type_text",
+     "args": "{\"clearFirst\":false,\"expected_change\":\"文本 \\\"final-switch-test\\\" 出现在记事本中\",\"text\":\"final-switch-test\"}"
+    },
+    {
+     "ev": "result",
+     "name": "type_text",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Text typed successfully.\",\n  \"state_anchor\": {\n    \"typed_content\": \"final-switch-test\",\n    \"char_count\": 17,\n    \"cleared_existing\": false,\n    \"input_state\": \"Appended to existing content\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100,\n      \"verified_around_focus\": true,\n      \"focus_source\": \"click-tracked\"\n    },\n    \"expected_change\": \"文本 \\\"final-switch-test\\\" 出现在记事本中\",\n    \"typed_semantic\": \"ocr-unavailable\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:5a85cc578fc043d238dbe17af5d4862c04d0e45651537fb8a4dfc6ce855a3297\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 141903,\n    \"name\": \"screenshot-1790220921902.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790220921902,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 4,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 2,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.42,0.25)-(1.00,0.75) entropy=2.863\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.41\",\n      \"bbox=(0.00,0.00)-(0.08,0.25) entropy=2.382\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"560/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coor…"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"win\",\"r\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey win + r pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"win\",\n      \"r\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:0304b8750688ffcf9f1191a0117dd51a93571fd4a49859b2a4ae958bd8640a2d\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 143030,\n    \"name\": \"screenshot-1790220946403.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790220946403,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 4,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 2,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.75)-(0.17,0.88) entropy=2.918\",\n      \"bbox=(0.42,0.25)-(1.00,0.75) entropy=2.864\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.413\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"553/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "type_text",
+     "args": "{\"clearFirst\":false,\"expected_change\":\"运行对话框显示 calc\",\"text\":\"calc\"}"
+    },
+    {
+     "ev": "result",
+     "name": "type_text",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Text typed successfully.\",\n  \"state_anchor\": {\n    \"typed_content\": \"calc\",\n    \"char_count\": 4,\n    \"cleared_existing\": false,\n    \"input_state\": \"Appended to existing content\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100,\n      \"verified_around_focus\": true,\n      \"focus_source\": \"mouse-position\"\n    },\n    \"expected_change\": \"运行对话框显示 calc\",\n    \"typed_semantic\": \"ocr-unavailable\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"Return\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey Return pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"Return\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:37c17757d17bc0890f53ee5838ef736fc9115987570db5c312994d2188c957e4\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 151300,\n    \"name\": \"screenshot-1790220963098.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790220963098,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 5,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 3,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.42,0.25)-(1.00,0.75) entropy=2.863\",\n      \"bbox=(0.00,0.00)-(0.08,0.25) entropy=2.558\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.41\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"568/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coor…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"notepad\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"notepad\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"notepad\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*final-switch-test - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"计算器\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"计算器\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"计算器\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"计算器\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"Todo\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"Todo\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"Todo\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*TODO-LIST.txt - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:a10b4d51dc6f0319d4a2afacb832c7ff17619550f8fc0cfce158fd01760fe828\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 178394,\n    \"name\": \"screenshot-1790221000217.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221000217,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 5,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 3,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.50,0.25)-(0.83,0.63) entropy=2.882\",\n      \"bbox=(0.17,0.38)-(0.50,0.63) entropy=2.774\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.555\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"2/3\",\n    \"context_image_kb\": \"429/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    }
+   ],
+   "toolCalls": [
+    "press_hotkey",
+    "take_screenshot",
+    "type_text",
+    "click_mouse",
+    "take_screenshot",
+    "press_hotkey",
+    "take_screenshot",
+    "click_mouse",
+    "type_text",
+    "take_screenshot",
+    "press_hotkey",
+    "take_screenshot",
+    "type_text",
+    "press_hotkey",
+    "take_screenshot",
+    "switch_window",
+    "switch_window",
+    "switch_window",
+    "take_screenshot"
+   ],
+   "toolErrors": 0,
+   "turnErrors": 0,
+   "pass": true,
+   "failedExpectations": [],
+   "finishedAt": "2026-09-24T03:37:10.680Z"
+  },
+  {
+   "id": "skill-scope-probe-v2",
+   "category": "skill",
+   "prompt": "技能切片终验：1) switch_window 切到记事本（titleKeyword 用 notepad，没有就 win+r notepad 打开）；2) ctrl+a 输入 scope-v2-clean；3) 输入 SKILL-SCOPE",
+   "startedAt": "2026-09-24T03:37:12.185Z",
+   "sessionId": "session-94bd8864-0dab-46b9-9b0a-7c12fabb33b3",
+   "timedOut": false,
+   "waitedMs": 109793,
+   "events": [
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:f3219936ce6a6423b415f89d463a2a8ff572c7ba4bf4103d0e369109d5ae59b0\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 178407,\n    \"name\": \"screenshot-1790221038193.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221038193,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 5,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 3,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.50,0.25)-(0.83,0.63) entropy=2.882\",\n      \"bbox=(0.17,0.38)-(0.50,0.63) entropy=2.774\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.555\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"2/3\",\n    \"context_image_kb\": \"465/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"notepad\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"notepad\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"notepad\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*TODO-LIST.txt - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:f3219936ce6a6423b415f89d463a2a8ff572c7ba4bf4103d0e369109d5ae59b0\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 178407,\n    \"name\": \"screenshot-1790221053066.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221053066,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 5,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 3,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.50,0.25)-(0.83,0.63) entropy=2.882\",\n      \"bbox=(0.17,0.38)-(0.50,0.63) entropy=2.774\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.555\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"2/3\",\n    \"context_image_kb\": \"465/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"x\":0.333,\"y\":0.52,\"target_description\":\"记事本文本编辑区域\",\"expected_change\":\"文本区域获得焦点\"}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.333,\n      \"y\": 0.52\n    },\n    \"absolute_pixels\": {\n      \"x\": 852,\n      \"y\": 749\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100\n    },\n    \"expected_change\": \"文本区域获得焦点\",\n    \"approval_gate\": \"described\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. Call 'zoom_inspect' around this point to refine coordinates, then retry.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"ctrl\",\"a\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey ctrl + a pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"ctrl\",\n      \"a\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "type_text",
+     "args": "{\"text\":\"scope-v2-clean\",\"clearFirst\":false,\"expected_change\":\"记事本中的文本被替换为 \\\"scope-v2-clean\\\"\"}"
+    },
+    {
+     "ev": "result",
+     "name": "type_text",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Text typed successfully.\",\n  \"state_anchor\": {\n    \"typed_content\": \"scope-v2-clean\",\n    \"char_count\": 14,\n    \"cleared_existing\": false,\n    \"input_state\": \"Appended to existing content\",\n    \"effect\": {\n      \"detected\": true,\n      \"scale\": \"page-level\",\n      \"screen_similarity_pct\": 89.1,\n      \"region_similarity_pct\": 0,\n      \"verified_around_focus\": true,\n      \"focus_source\": \"click-tracked\"\n    },\n    \"expected_change\": \"记事本中的文本被替换为 \\\"scope-v2-clean\\\"\",\n    \"typed_semantic\": {\n      \"confirmed\": true,\n      \"region_text_snippet\": \"编辑 205 scope-v2-clean 字符\"\n    }\n  },\n  \"next_step\": \"MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field. Confirm: \\\"记事本中的文本被替换为 \\\"scope-v2-clean\\\"\\\".\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:7c961f4cda8fbe913e6016a7b54d6a4b6f1a93838a93cd24cdba6565918e5203\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 144271,\n    \"name\": \"screenshot-1790221079955.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221079955,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.50,0.25)-(1.00,0.75) entropy=2.882\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.555\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.389\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"2/3\",\n    \"context_image_kb\": \"420/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"Return\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey Return pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"Return\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "type_text",
+     "args": "{\"expected_change\":\"记事本第二行出现 \\\"SKILL-SCOPE-V2\\\"\",\"text\":\"SKILL-SCOPE-V2\"}"
+    },
+    {
+     "ev": "result",
+     "name": "type_text",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Text typed successfully.\",\n  \"state_anchor\": {\n    \"typed_content\": \"SKILL-SCOPE-V2\",\n    \"char_count\": 14,\n    \"cleared_existing\": false,\n    \"input_state\": \"Appended to existing content\",\n    \"effect\": {\n      \"detected\": true,\n      \"scale\": \"element-level\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100,\n      \"verified_around_focus\": true,\n      \"focus_source\": \"mouse-position\"\n    },\n    \"expected_change\": \"记事本第二行出现 \\\"SKILL-SCOPE-V2\\\"\",\n    \"typed_semantic\": {\n      \"confirmed\": true,\n      \"region_text_snippet\": \"编辑 205 scope-v2-clean SKILL-SCOPE-V2 字符\"\n    }\n  },\n  \"next_step\": \"MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field. Confirm: \\\"记事本第二行出现 \\\"SKILL-SCOPE-V2\\\"\\\".\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:9011945ef5e347240d2bad2d91396b53a9db16e022e76586c38bd0545e39f2b5\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 144863,\n    \"name\": \"screenshot-1790221103358.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221103358,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 1,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.50,0.25)-(1.00,0.75) entropy=2.882\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.555\",\n      \"bbox=(0.58,0.75)-(0.67,0.88) entropy=2.389\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"2/3\",\n    \"context_image_kb\": \"377/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "save_skill",
+     "args": "{\"description\":\"在记事本输入 SKILL-SCOPE-V2 标记\"}"
+    },
+    {
+     "ev": "result",
+     "name": "save_skill",
+     "isError": false,
+     "text": "[System]: Skill #4 \"skill-4\" saved with 21 step(s). Reliability 1/1. [exit fingerprint recorded] Reuse via match_skill + run_skill."
+    }
+   ],
+   "toolCalls": [
+    "take_screenshot",
+    "switch_window",
+    "take_screenshot",
+    "click_mouse",
+    "press_hotkey",
+    "type_text",
+    "take_screenshot",
+    "press_hotkey",
+    "type_text",
+    "take_screenshot",
+    "save_skill"
+   ],
+   "toolErrors": 0,
+   "turnErrors": 0,
+   "pass": true,
+   "failedExpectations": [],
+   "finishedAt": "2026-09-24T03:39:04.111Z"
+  },
+  {
+   "id": "miss-feedback-probe",
+   "category": "window",
+   "prompt": "未命中反馈终验：调用 switch_window titleKeyword=\"绝不存在的窗口ABC123\"（预期失败），把返回错误信息里\"Visible windows\"后列出的窗口标题清单报告出来，并指出清单里是否有记事本（Notepad",
+   "startedAt": "2026-09-24T03:39:05.617Z",
+   "sessionId": "session-a6f8f2a3-9036-4185-8b14-bd68d61c3a8a",
+   "timedOut": false,
+   "waitedMs": 19269,
+   "events": [
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"绝不存在的窗口ABC123\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"FAILED\",\n  \"action\": \"Window switch (\\\"绝不存在的窗口ABC123\\\") failed.\",\n  \"state_anchor\": {\n    \"error\": \"[physicalBackend] switch_window failed: element_not_found: no window with title containing '绝不存在的窗口ABC123' (tried aliases: ['绝不存在的窗口abc123']). Visible windows: *TODO-LIST.txt - Notepad; 计算器; *final-switch-test - Notepad; 无标题 - Notepad; 新建标签页 和另外 1 个页面 - 个人 - Microsoft​ Edge; 计算器; *hello-switch - Notepad; ZCode; *todo-a.md - Notepad; Windows PowerShell; Windows 输入体验; Program Manager\"\n  },\n  \"next_step\": \"Fallback: use 'press_hotkey' with [\\\"alt\\\", \\\"tab\\\"] (Windows/Linux) or [\\\"cmd\\\", \\\"tab\\\"] (macOS) to cycle windows, then verify with take_screenshot.\"\n}"
+    }
+   ],
+   "toolCalls": [
+    "switch_window"
+   ],
+   "toolErrors": 0,
+   "turnErrors": 0,
+   "pass": true,
+   "failedExpectations": [],
+   "finishedAt": "2026-09-24T03:39:26.986Z"
+  },
+  {
+   "id": "final-cleanup-y6",
+   "category": "setup",
+   "prompt": "终验清理：用 switch_window + alt+f4 依次关闭所有记事本（不保存）、计算器、Edge、PowerShell 窗口（每个窗口关闭前先 switch_window 切到它）。全部关闭后 take_screenshot 确认",
+   "startedAt": "2026-09-24T03:39:28.492Z",
+   "sessionId": "session-dbedaba2-427d-4616-9f56-b49189b6e3c9",
+   "timedOut": false,
+   "waitedMs": 492121,
+   "events": [
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"TODO-LIST\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"TODO-LIST\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"TODO-LIST\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*TODO-LIST.txt - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"Edge\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"Edge\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"Edge\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"新建标签页 和另外 1 个页面 - 个人 - Microsoft​ Edge\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"PowerShell\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"PowerShell\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"PowerShell\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"Windows PowerShell\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:f37f3a7ba0a67882f6dcaf4dfb4e13daf36c0ddc23f62b36800b5f101f73beed\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 119413,\n    \"name\": \"screenshot-1790221245373.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221245373,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 1,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.25) entropy=2.578\",\n      \"bbox=(0.50,0.25)-(0.58,0.38) entropy=2.493\",\n      \"bbox=(0.17,0.88)-(0.50,1.00) entropy=2.394\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"530/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"final-switch-test\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"final-switch-test\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"final-switch-test\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*final-switch-test - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"TODO-LIST\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"TODO-LIST\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"TODO-LIST\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*TODO-LIST.txt - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:f29ab8cff3b161f5fca5085a068a603f0294179fc285b73a88ebb500c434b3bf\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 115754,\n    \"name\": \"screenshot-1790221267684.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221267684,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 1,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.25) entropy=2.578\",\n      \"bbox=(0.00,0.63)-(0.17,0.88) entropy=2.211\",\n      \"bbox=(0.17,0.88)-(0.25,1.00) entropy=2.201\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"493/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"x\":0.328,\"y\":0.596,\"target_description\":\"不保存按钮\"}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.328,\n      \"y\": 0.596\n    },\n    \"absolute_pixels\": {\n      \"x\": 840,\n      \"y\": 858\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": true,\n      \"scale\": \"page-level\",\n      \"screen_similarity_pct\": 84.4,\n      \"region_similarity_pct\": 67.2\n    },\n    \"approval_gate\": \"described\"\n  },\n  \"memory\": \" Landmark #1 saved.\",\n  \"next_step\": \"MANDATORY: Call 'take_screenshot' to verify the UI state change.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:d8575a4bcf8f095325344cfc22ef271b07878ac695a98e390879602ac0347c2a\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 110508,\n    \"name\": \"screenshot-1790221281565.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221281565,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.25) entropy=2.612\",\n      \"bbox=(0.00,0.63)-(0.25,0.75) entropy=2.214\",\n      \"bbox=(0.17,0.88)-(0.25,1.00) entropy=2.086\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"450/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"final-switch-test\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"final-switch-test\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"final-switch-test\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*final-switch-test - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:d6203dbc72e26b2ec5ab174731fd7501e740cd3ad2d63a57d50f8697c4618cdd\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 110520,\n    \"name\": \"screenshot-1790221297352.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221297352,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.25) entropy=2.612\",\n      \"bbox=(0.00,0.63)-(0.25,0.75) entropy=2.214\",\n      \"bbox=(0.17,0.88)-(0.25,1.00) entropy=2.086\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"439/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"x\":0.393,\"y\":0.059,\"target_description\":\"final-switch-test 窗口关闭按钮\"}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.393,\n      \"y\": 0.059\n    },\n    \"absolute_pixels\": {\n      \"x\": 1006,\n      \"y\": 85\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": true,\n      \"scale\": \"page-level\",\n      \"screen_similarity_pct\": 90.6,\n      \"region_similarity_pct\": 100\n    },\n    \"approval_gate\": \"described\"\n  },\n  \"memory\": \" Landmark #2 saved.\",\n  \"next_step\": \"MANDATORY: Call 'take_screenshot' to verify the UI state change.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:cb09329bd4b75a4d90d19c1222051dbd5a3ae22bb3e8edcb06f11aad86aea291\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 112568,\n    \"name\": \"screenshot-1790221319286.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221319286,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.25) entropy=2.249\",\n      \"bbox=(0.17,0.88)-(0.25,1.00) entropy=2.086\",\n      \"bbox=(0.00,0.63)-(0.17,0.75) entropy=2.079\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"434/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"target_description\":\"不保存按钮\",\"x\":0.215,\"y\":0.396}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.215,\n      \"y\": 0.396\n    },\n    \"absolute_pixels\": {\n      \"x\": 550,\n      \"y\": 570\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": true,\n      \"scale\": \"page-level\",\n      \"screen_similarity_pct\": 85.9,\n      \"region_similarity_pct\": 65.6\n    },\n    \"approval_gate\": \"described\"\n  },\n  \"memory\": \" Landmark #3 saved.\",\n  \"next_step\": \"MANDATORY: Call 'take_screenshot' to verify the UI state change.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:6f08826d4715568659a2818b5352c89b72a33bb8333f38dab23adc26035fbf11\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 112489,\n    \"name\": \"screenshot-1790221337031.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221337031,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.17,0.00)-(0.42,0.38) entropy=3.028\",\n      \"bbox=(0.00,0.00)-(0.08,0.13) entropy=2.681\",\n      \"bbox=(0.17,0.88)-(0.25,1.00) entropy=2.16\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"437/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coor…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"计算器\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"计算器\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"计算器\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"计算器\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"无标题\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"无标题\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"无标题\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"无标题 - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:042edcdcd5c2282fe12857a63a80a7620310589c7f32a20c1d45756076041586\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 115694,\n    \"name\": \"screenshot-1790221377362.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221377362,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.25)-(0.42,0.50) entropy=2.876\",\n      \"bbox=(0.17,0.88)-(0.25,1.00) entropy=2.148\",\n      \"bbox=(0.17,0.00)-(0.42,0.13) entropy=1.949\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"444/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"hello-switch\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"hello-switch\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"hello-switch\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*hello-switch - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"无标题\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"无标题\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"无标题\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"无标题 - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:0ebf9d6aa49edf18e96db3c90a57f4564a1c07ce1749014a63e893072dc923d0\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 116879,\n    \"name\": \"screenshot-1790221416982.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221416982,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.25)-(0.42,0.50) entropy=2.786\",\n      \"bbox=(0.50,0.25)-(0.58,0.38) entropy=2.184\",\n      \"bbox=(0.17,0.00)-(0.42,0.13) entropy=1.905\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"449/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"hello-switch\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"hello-switch\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"hello-switch\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*hello-switch - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:49807c1521e712989082d8430e875d1bb9c193c60432d9a10738e1f8e976bec5\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 117884,\n    \"name\": \"screenshot-1790221447381.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221447381,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.42,0.50) entropy=2.786\",\n      \"bbox=(0.50,0.25)-(0.58,0.38) entropy=2.184\",\n      \"bbox=(0.17,0.00)-(0.42,0.13) entropy=1.905\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"456/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"target_description\":\"hello-switch 窗口关闭按钮\",\"x\":0.531,\"y\":0.298}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.531,\n      \"y\": 0.298\n    },\n    \"absolute_pixels\": {\n      \"x\": 1359,\n      \"y\": 429\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": true,\n      \"scale\": \"element-level\",\n      \"screen_similarity_pct\": 98.4,\n      \"region_similarity_pct\": 96.9\n    },\n    \"approval_gate\": \"described\"\n  },\n  \"memory\": \" Landmark #4 saved.\",\n  \"next_step\": \"MANDATORY: Call 'take_screenshot' to verify the UI state change.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:ee658ff27a5d9e04599efe7ff0183b6633982004e86a712dee5ea8d934d4b5e7\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 108350,\n    \"name\": \"screenshot-1790221469831.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221469831,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 0,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.17,0.25)-(0.42,0.38) entropy=2.526\",\n      \"bbox=(0.00,0.38)-(0.17,0.50) entropy=2.15\",\n      \"bbox=(0.25,0.50)-(0.33,0.75) entropy=2.137\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"447/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coor…"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"target_description\":\"不保存按钮\",\"x\":0.349,\"y\":0.644}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.349,\n      \"y\": 0.644\n    },\n    \"absolute_pixels\": {\n      \"x\": 893,\n      \"y\": 927\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100\n    },\n    \"approval_gate\": \"described\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. Call 'zoom_inspect' around this point to refine coordinates, then retry.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:4baeec7a024f152dc4cc5fdc9ec44c985797cbd7e9682c23aba86e3837cb2296\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 109541,\n    \"name\": \"screenshot-1790221493730.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221493730,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 1,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.17,0.25)-(0.42,0.38) entropy=2.526\",\n      \"bbox=(0.00,0.38)-(0.17,0.50) entropy=2.15\",\n      \"bbox=(0.25,0.50)-(0.33,0.75) entropy=2.137\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"437/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coor…"
+    },
+    {
+     "ev": "call",
+     "name": "zoom_inspect",
+     "args": "{\"x\":0.35,\"y\":0.645,\"half_size\":0.15}"
+    },
+    {
+     "ev": "result",
+     "name": "zoom_inspect",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:e0793b10617a50ee8be022a7cd0e82865fac3f81eee5e44d3cbfc7fb5cd52751\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 768,\n    \"height\": 432,\n    \"bytes\": 34560,\n    \"name\": \"zoom-1790221513345.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221513345,\n    \"zoom\": \"REGION_CROP_UPSCALED\",\n    \"crop_bounds_normalized\": {\n      \"x0\": 0.19999999999999998,\n      \"y0\": 0.495,\n      \"x1\": 0.5,\n      \"y1\": 0.795\n    },\n    \"requested_bounds_normalized\": {\n      \"x0\": 0.19999999999999998,\n      \"y0\": 0.495,\n      \"x1\": 0.5,\n      \"y1\": 0.795\n    },\n    \"fine_grid\": \"20x20\",\n    \"pyramid_descent\": [\n      \"L0: bbox=(0.20,0.49)-(0.50,0.80) H=2.53\"\n    ],\n    \"pyramid_note\": \"The crop center was refined level-by-level toward the highest-information sub-region (entropy-guided).\",\n    \"mapping_formula\": \"full_x = x0 + fx * (x1 - x0); full_y = y0 + fy * (y1 - y0)\",\n    \"mapping_hint\": \"where (fx, fy) is the target position estimated INSIDE this zoomed image (0.0-1.0).\"\n  },\n  \"next_step\": \"Locate the target inside this zoomed image, estimate (fx, fy), map back with the formula above, then call click_mouse with the FULL-screen normalized coordinates.\"\n}\n"
+    },
+    {
+     "ev": "call",
+     "name": "click_mouse",
+     "args": "{\"target_description\":\"不保存按钮\",\"x\":0.416,\"y\":0.441}"
+    },
+    {
+     "ev": "result",
+     "name": "click_mouse",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Mouse left clicked.\",\n  \"state_anchor\": {\n    \"normalized\": {\n      \"x\": 0.416,\n      \"y\": 0.441\n    },\n    \"absolute_pixels\": {\n      \"x\": 1065,\n      \"y\": 635\n    },\n    \"screen_resolution\": \"2560x1440\",\n    \"effect\": {\n      \"detected\": false,\n      \"scale\": \"none\",\n      \"screen_similarity_pct\": 100,\n      \"region_similarity_pct\": 100\n    },\n    \"approval_gate\": \"described\"\n  },\n  \"next_step\": \"WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. Call 'zoom_inspect' around this point to refine coordinates, then retry.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"n\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + n pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"n\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:7189fdf2b8db7f51a352979a22dfc2a08a9f98a94c05cbb06593a632539b3e41\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 129214,\n    \"name\": \"screenshot-1790221546704.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221546704,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 2,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.50) entropy=2.33\",\n      \"bbox=(0.00,0.63)-(0.08,0.75) entropy=1.98\",\n      \"bbox=(0.17,0.00)-(0.42,0.13) entropy=1.976\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"356/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coord…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"Edge\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"FAILED\",\n  \"action\": \"Window switch (\\\"Edge\\\") failed.\",\n  \"state_anchor\": {\n    \"error\": \"[physicalBackend] switch_window failed: element_not_found: no window with title containing 'Edge' (tried aliases: ['edge', 'microsoft edge']). Visible windows: ZCode; *todo-a.md - Notepad; Windows 输入体验; Program Manager\"\n  },\n  \"next_step\": \"Fallback: use 'press_hotkey' with [\\\"alt\\\", \\\"tab\\\"] (Windows/Linux) or [\\\"cmd\\\", \\\"tab\\\"] (macOS) to cycle windows, then verify with take_screenshot.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"todo-a\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Switched to window containing \\\"todo-a\\\".\",\n  \"state_anchor\": {\n    \"matched_keyword\": \"todo-a\",\n    \"focus_handoff\": {\n      \"verified\": true,\n      \"foreground_title\": \"*todo-a.md - Notepad\",\n      \"evidence\": \"native-title\"\n    }\n  },\n  \"next_step\": \"Call 'take_screenshot' to confirm the expected window is now in the foreground.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "press_hotkey",
+     "args": "{\"keys\":[\"alt\",\"f4\"]}"
+    },
+    {
+     "ev": "result",
+     "name": "press_hotkey",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"action\": \"Hotkey alt + f4 pressed.\",\n  \"state_anchor\": {\n    \"keys\": [\n      \"alt\",\n      \"f4\"\n    ],\n    \"note\": \"keys are whitelist-enforced at the system layer\"\n  },\n  \"next_step\": \"Call 'take_screenshot' to verify the shortcut took effect.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:0917c870017e7cd79d79be7b72a0456108642f28a7483aaa756511a4d903a1b9\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 127538,\n    \"name\": \"screenshot-1790221589223.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221589223,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 2,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.50) entropy=2.291\",\n      \"bbox=(0.17,0.00)-(0.42,0.13) entropy=1.949\",\n      \"bbox=(0.00,0.63)-(0.08,0.75) entropy=1.937\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"379/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    },
+    {
+     "ev": "call",
+     "name": "switch_window",
+     "args": "{\"titleKeyword\":\"PowerShell\"}"
+    },
+    {
+     "ev": "result",
+     "name": "switch_window",
+     "isError": false,
+     "text": "{\n  \"status\": \"FAILED\",\n  \"action\": \"Window switch (\\\"PowerShell\\\") failed.\",\n  \"state_anchor\": {\n    \"error\": \"[physicalBackend] switch_window failed: element_not_found: no window with title containing 'PowerShell' (tried aliases: ['powershell']). Visible windows: ZCode; Windows 输入体验; Program Manager\"\n  },\n  \"next_step\": \"Fallback: use 'press_hotkey' with [\\\"alt\\\", \\\"tab\\\"] (Windows/Linux) or [\\\"cmd\\\", \\\"tab\\\"] (macOS) to cycle windows, then verify with take_screenshot.\"\n}"
+    },
+    {
+     "ev": "call",
+     "name": "take_screenshot",
+     "args": "{}"
+    },
+    {
+     "ev": "result",
+     "name": "take_screenshot",
+     "isError": false,
+     "text": "{\n  \"status\": \"SUCCESS\",\n  \"image_attachment\": {\n    \"attachmentId\": \"sha256:83683e41d5eb1a718ae6d5f8d98457c64617c281e0324503764a0c4a9db49fb6\",\n    \"mediaType\": \"image/jpeg\",\n    \"width\": 1440,\n    \"height\": 810,\n    \"bytes\": 127553,\n    \"name\": \"screenshot-1790221623968.jpg\"\n  },\n  \"state_anchor\": {\n    \"screenshot_id\": 1790221623968,\n    \"active_display\": {\n      \"name\": \"Primary\",\n      \"resolution\": \"2560x1440\",\n      \"origin\": {\n        \"x\": 0,\n        \"y\": 0\n      }\n    },\n    \"popup_detected\": false,\n    \"popup_evidence\": \"none\",\n    \"sense\": {\n      \"mode\": \"black_box\",\n      \"failStreak\": 2,\n      \"successStreak\": 0,\n      \"degradeBlocked\": 4,\n      \"providerName\": null\n    },\n    \"original_resolution\": \"2560x1440\",\n    \"compressed_resolution\": \"1440x810\",\n    \"format\": \"JPEG (quality: 75)\",\n    \"region\": \"full\",\n    \"visual_overlay\": \"10x10 SoM Grid + Crosshair\",\n    \"foveal_zones\": [\n      \"bbox=(0.00,0.00)-(0.50,0.50) entropy=2.291\",\n      \"bbox=(0.17,0.00)-(0.42,0.13) entropy=1.949\",\n      \"bbox=(0.00,0.63)-(0.08,0.75) entropy=1.937\"\n    ],\n    \"foveal_note\": \"These regions have the highest visual information density — targets are most likely INSIDE them; their grid is 2x finer.\",\n    \"context_images\": \"3/3\",\n    \"context_image_kb\": \"500/600\",\n    \"overlay_legend\": [\n      \"Blue lines: a 10x10 grid. Count cells to estimate normalized coordinates (0.0-1.0).\",\n      \"Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.\",\n      \"Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coo…"
+    }
+   ],
+   "toolCalls": [
+    "press_hotkey",
+    "switch_window",
+    "press_hotkey",
+    "switch_window",
+    "press_hotkey",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "switch_window",
+    "press_hotkey",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "click_mouse",
+    "take_screenshot",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "click_mouse",
+    "take_screenshot",
+    "click_mouse",
+    "take_screenshot",
+    "switch_window",
+    "press_hotkey",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "switch_window",
+    "press_hotkey",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "click_mouse",
+    "take_screenshot",
+    "click_mouse",
+    "take_screenshot",
+    "zoom_inspect",
+    "click_mouse",
+    "press_hotkey",
+    "take_screenshot",
+    "switch_window",
+    "switch_window",
+    "press_hotkey",
+    "take_screenshot",
+    "switch_window",
+    "take_screenshot"
+   ],
+   "toolErrors": 0,
+   "turnErrors": 0,
+   "pass": true,
+   "failedExpectations": [],
+   "finishedAt": "2026-09-24T03:47:42.704Z"
+  }
+ ]
+}

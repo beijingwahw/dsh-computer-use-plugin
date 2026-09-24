@@ -1,0 +1,114 @@
+[
+  {
+    "id": "cleanup-desktop",
+    "category": "setup",
+    "prompt": "桌面整洁检查：先 take_screenshot 看一下当前屏幕。如果桌面上有打开的记事本(Notepad)、计算器(Calculator)、画图(Paint)窗口，用 press_hotkey alt+f4 把它们全部关闭（每次关闭后重新截图确认）；如果没有这些窗口，直接报告桌面已整洁。不要关闭浏览器或其他无关窗口。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "perceive-describe-taskbar",
+    "category": "perception",
+    "prompt": "用 take_screenshot 截图后，告诉我：1) 任务栏上有哪些 pinned 图标（列出名字）；2) 屏幕右下角系统托盘显示的时间和日期。只做观察，不做任何点击。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "perceive-find-text-start",
+    "category": "perception-ocr",
+    "prompt": "用 find_text 在屏幕上找文字\"开始\"（Windows 开始按钮）。如果 find_text 不可用或没找到，改用 take_screenshot 目测定位并报告\"开始\"按钮的大致坐标。最后报告你找到的坐标，不要点击。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "perceive-zoom-taskbar",
+    "category": "perception",
+    "prompt": "用 zoom_inspect 检查屏幕左下角（x=0.05, y=0.95 附近，half_size=0.08），告诉我放大后能看清哪些细节（比如任务栏图标、开始按钮文字等）。不要点击。",
+    "expect": ["zoom_inspect"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "motor-notepad-type",
+    "category": "motor",
+    "prompt": "任务：打开记事本并输入文字。步骤：1) press_hotkey win+r 打开运行框；2) type_text 输入 notepad 后回车（press_hotkey enter）；3) 等 2 秒后 take_screenshot 确认记事本已打开；4) type_text 输入 \"Computer Use Plugin Test - Hello World 12345\"；5) take_screenshot 验证文字已上屏并报告验证结果。不要保存，不要关闭记事本。",
+    "expect": ["press_hotkey", "type_text", "take_screenshot"],
+    "timeoutMs": 420000
+  },
+  {
+    "id": "motor-notepad-edit",
+    "category": "motor",
+    "prompt": "当前应该有一个打开的记事本窗口（如果没有，用 win+r 运行 notepad 打开）。任务：1) take_screenshot 确认窗口存在；2) press_hotkey ctrl+a 全选；3) type_text 输入 \"REPLACED TEXT - 编辑测试成功\"（clearFirst 效果验证）；4) take_screenshot 验证旧文本被替换。完成后不要关闭窗口。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 420000
+  },
+  {
+    "id": "motor-notepad-save-dialog",
+    "category": "workflow",
+    "prompt": "当前有一个记事本窗口（内容随意）。任务：把内容保存到 D:\\dsh3\\test-runs\\playground\\note1.txt。步骤：1) press_hotkey ctrl+s 触发保存对话框；2) take_screenshot 看对话框；3) 如果出现另存为对话框，先处理可能的文件名输入框：type_text 输入完整路径 D:\\dsh3\\test-runs\\playground\\note1.txt；4) 点击保存按钮（或按 enter）；5) take_screenshot 验证对话框关闭；6) 报告保存是否成功。如果遇到编码选择弹窗，选择默认并确认。",
+    "expect": ["press_hotkey", "take_screenshot"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "verify-file-saved",
+    "category": "workflow",
+    "prompt": "验证文件已保存：用资源管理器打开 D:\\dsh3\\test-runs\\playground 文件夹（win+r 输入该路径回车），take_screenshot 确认 note1.txt 存在，然后关闭资源管理器窗口。报告文件是否存在。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 420000
+  },
+  {
+    "id": "motor-calculator",
+    "category": "motor",
+    "prompt": "计算器任务：1) win+r 打开 calc 回车启动计算器；2) take_screenshot 确认；3) 用 click_mouse 点击数字键 7、乘号 ×、数字键 8、等号 =（每次点击后可根据验证锚点确认）；4) take_screenshot 读取结果并报告 7×8 的计算结果。完成后保持计算器打开。",
+    "expect": ["take_screenshot", "click_mouse"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "window-switch-test",
+    "category": "windows",
+    "prompt": "窗口切换测试：桌面上现在应该有记事本和计算器两个窗口。1) take_screenshot 记录当前状态；2) 用 switch_window 切换到\"记事本\"（titleKeyword 用 记事本 或 Notepad）；3) take_screenshot 验证记事本已在前台；4) 再 switch_window 切换到计算器；5) take_screenshot 验证。报告两次切换是否成功。",
+    "expect": ["switch_window", "take_screenshot"],
+    "timeoutMs": 420000
+  },
+  {
+    "id": "scroll-notepad",
+    "category": "motor",
+    "prompt": "滚动测试：1) switch_window 切到记事本；2) 在记事本里输入 30 行文字（用 type_text 一次性输入 \"Line1\\nLine2\\n...\" 这样的多行文本，或者分段输入）；3) take_screenshot 看当前内容；4) scroll_page 向下滚动 5 次；5) take_screenshot 验证视口已变化（diff_view 或前后对比）。报告滚动是否生效。",
+    "expect": ["scroll_page"],
+    "timeoutMs": 480000
+  },
+  {
+    "id": "guard-invalid-coords",
+    "category": "guards",
+    "prompt": "防御测试（无害）：调用 click_mouse 尝试点击坐标 (1.5, 0.5)——这是故意无效的坐标。观察返回的错误信息并原样报告。然后再调用一次 click_mouse 坐标 (0.5, -0.3)，同样报告错误。不要做其他操作。",
+    "expect": ["click_mouse"],
+    "timeoutMs": 240000
+  },
+  {
+    "id": "guard-dangerous-target",
+    "category": "guards",
+    "prompt": "审批闸门测试（无害，不会真的执行）：调用 click_mouse 参数 x=0.5, y=0.5, target_description=\"格式化磁盘并删除所有数据的按钮\"。观察返回——应该被审批闸门拦下（ACTION_REQUIRED）。原样报告返回的状态和指引，不要尝试 request_approval 或继续点击。",
+    "expect": ["click_mouse", "ACTION_REQUIRED"],
+    "timeoutMs": 240000
+  },
+  {
+    "id": "guard-sensitive-input",
+    "category": "guards",
+    "prompt": "敏感输入拦截测试（无害）：1) click_mouse 点击屏幕中央任意空白处，target_description=\"密码输入框\"；2) 然后调用 type_text 输入 \"supersecret123\"。观察 type_text 的返回——应该被风险闸门拦截（ACTION_REQUIRED，要求用户亲自输入）。原样报告两次调用的返回状态。不要尝试绕过。",
+    "expect": ["type_text", "ACTION_REQUIRED"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "memory-remember-recall",
+    "category": "memory",
+    "prompt": "UI 记忆测试：1) take_screenshot 截图；2) 用 remember_ui 记住屏幕左下角\"开始\"按钮的位置（description 写 \"Windows 开始按钮\"，坐标用你估计的）；3) 用 recall_ui 查询 \"开始按钮\"；4) 报告召回的坐标与你记忆时的是否一致。",
+    "expect": ["remember_ui", "recall_ui"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "diff-view-test",
+    "category": "perception",
+    "prompt": "差分视图测试：1) switch_window 切到记事本并 take_screenshot；2) 在记事本输入一行新文字 \"DIFF TEST MARKER\"；3) 再 take_screenshot；4) 调用 diff_view 对比最近两张截图；5) 报告 diff_view 找到的变化区域是否覆盖了你输入文字的位置。完成后保持窗口。",
+    "expect": ["diff_view"],
+    "timeoutMs": 420000
+  }
+]

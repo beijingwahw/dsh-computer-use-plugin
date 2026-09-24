@@ -1,0 +1,65 @@
+[
+  {
+    "id": "foveated-screenshot",
+    "category": "epoch-y",
+    "prompt": "调用 take_screenshot 截图，然后报告返回锚点中的 foveal_zones 字段：有几个热点区、它们的 bbox 和熵值分别是多少。再用一句话说明图上哪些区域网格更密。只观察不点击。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "pyramid-zoom",
+    "category": "epoch-y",
+    "prompt": "调用 zoom_inspect 检查屏幕中央（x=0.5, y=0.4, half_size=0.2），自动下降开启（默认）。报告锚点中的 pyramid_descent 字段：下降了几层、每层的 bbox 和熵值、最终裁剪框与请求框是否不同。",
+    "expect": ["zoom_inspect"],
+    "timeoutMs": 300000
+  },
+  {
+    "id": "closed-loop-scroll",
+    "category": "epoch-y",
+    "prompt": "闭环滚动测试：1) win+r 打开 notepad 回车；2) type_text 输入 25 行文字（每行 Line1...Line25，真实换行）；3) 调用 scroll_page direction=down amount=8，报告返回锚点 closed_loop 字段的全部数值（content_shift_rows/residual/effective/direction_consistent/at_boundary）；4) 再连续 scroll_page down 很多次直到 closed_loop.at_boundary 变成 true，报告滚到边界用了几轮。完成后保持记事本打开。",
+    "expect": ["scroll_page", "closed_loop"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "window-title-proof",
+    "category": "epoch-y",
+    "prompt": "切窗取证测试：当前有记事本打开。1) 调用 switch_window titleKeyword=\"记事本\"，报告返回锚点中 focus_handoff 字段（verified 和 foreground_title）；2) 再调用 switch_window titleKeyword=\"完全不存在的窗口XYZ\"，报告失败信息里是否包含前台标题证据；3) 总结两次的取证结果。",
+    "expect": ["switch_window"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "transport-verify-drag",
+    "category": "epoch-y",
+    "prompt": "拖拽运输验证：1) win+r 打开 mspaint 回车启动画图；2) take_screenshot 确认画图打开；3) 用 drag_mouse 在画布上从 (0.4, 0.4) 拖到 (0.6, 0.55) 画一条线（如果画图工具栏挡住就先最大化窗口）；4) 报告 drag_mouse 返回锚点中 effect 和 transport 字段的全部内容；5) take_screenshot 验证画布上出现了线条。完成后 alt+f4 关闭画图（不保存）。",
+    "expect": ["drag_mouse", "take_screenshot"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "replay-gate-skill-postcondition",
+    "category": "epoch-y",
+    "prompt": "重放门控+技能后置条件测试：1) 在当前记事本里输入 \"GATE TEST ALPHA\"；2) 调用 save_skill 保存最近动作为技能，描述写\"在记事本输入文字\"，报告是否显示 exit fingerprint recorded；3) 先在记事本里 ctrl+a 输入 \"完全不同的内容\"（改变场景）；4) 调用 run_skill 执行刚才保存的技能（confirm=true），报告返回中 postcondition 字段的全部内容和状态（SUCCESS 还是 SUCCESS_UNVERIFIED），以及 execution_log 里是否有 [GATE] 步骤被拦截。完成后保持窗口。",
+    "expect": ["save_skill", "run_skill"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "planner-dag",
+    "category": "epoch-y",
+    "prompt": "DAG 编排测试：调用 start_complex_task 执行：\"在记事本中输入 DAG-TEST 完成后关闭记事本（不保存）\"。报告编排器拆解出的子任务列表（注意是否带依赖声明）与最终结果标记。",
+    "expect": ["start_complex_task"],
+    "timeoutMs": 540000
+  },
+  {
+    "id": "approval-bucket",
+    "category": "epoch-y",
+    "prompt": "审批速率闸门测试（无害，不会真的执行任何危险操作）：连续四次执行以下序列：click_mouse x=0.5 y=0.5 target_description=\"删除所有数据的危险按钮\" → 收到 ACTION_REQUIRED 后调用 request_approval → 再调用 grant_approval(token, true)。观察第四次 grant_approval 的返回是否被速率闸门拒绝（应提示同意额度耗尽/冷静期）。报告四次 grant 的结果。",
+    "expect": ["grant_approval"],
+    "timeoutMs": 360000
+  },
+  {
+    "id": "final-cleanup-y",
+    "category": "setup",
+    "prompt": "最终清理：关闭所有记事本、画图、计算器、资源管理器窗口（alt+f4，不保存）。用 take_screenshot 确认桌面干净后报告。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 480000
+  }
+]
