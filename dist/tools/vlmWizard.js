@@ -13,9 +13,12 @@ import { toolOk, toolErr } from '../toolResult.js';
 import { startOnboarding } from '../vlm/onboarding.js';
 /** 模块级向导服务单例 —— closed/缺席 ⇒ 下次调用重起（同一地址跨调用稳定） */
 let wizardHandle = null;
+/** 在途启动去重：并发首次调用共享同一次 startOnboarding（「绝不双起服务」的并发执法） */
+let wizardStarting = null;
 /** 测试专用：清空模块级向导单例（生产代码不调用；先例 textReader._setServerOcrFailedAt_forTest） */
 export function _resetVlmWizardForTest() {
     wizardHandle = null;
+    wizardStarting = null;
 }
 export function createVlmWizardTool(_config, deps = {}) {
     return defineTool({
@@ -33,10 +36,12 @@ export function createVlmWizardTool(_config, deps = {}) {
         },
         async execute() {
             try {
-                // 1) 确保向导服务在跑：模块级单例，closed/缺席 ⇒ 重起（绝不双起）
+                // 1) 确保向导服务在跑：模块级单例，closed/缺席 ⇒ 重起（绝不双起 ——
+                //    并发首次调用经 wizardStarting 去重共享同一次启动）
                 const server = deps.server ?? (() => startOnboarding(deps.port !== undefined ? { port: deps.port } : undefined));
                 if (wizardHandle === null || wizardHandle.closed) {
-                    wizardHandle = await server();
+                    wizardStarting ??= server().finally(() => { wizardStarting = null; });
+                    wizardHandle = await wizardStarting;
                 }
                 const handle = wizardHandle;
                 // 2) 浏览器打开向导地址 —— system.openUrl（fire-and-forget 壳层；

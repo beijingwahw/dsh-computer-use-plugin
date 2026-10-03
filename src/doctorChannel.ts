@@ -17,6 +17,7 @@ import type { DoctorVerdictPayload } from './doctorEvents';
 import { SANDBOX_EVENTS } from './sandbox/events';
 import type { SandboxDoctorView } from './sandbox/types';
 import type { RehearsalEndPayload } from './sandbox/events';
+import { setConfirmCodeChannel, armApprovalQueue, createApprovalQueueFileStorage, type ConfirmCodeDelivery } from './approval';
 
 /** 判决阈值（D-4 通道主权立法）：approved 的分数下限。
  *  三重前置（缺一即 needs_review）：genesisVerdict='intact' + 零 critical/major
@@ -93,6 +94,67 @@ export function toSandboxDoctorView(doc: { reportPath(): string | null; memory()
   };
 }
 
+// ─── W1-2（S2 带外人证通道）：审批确认码的带外投递挂点 ───
+//
+// 威胁模型：审批协议的旧软肋是「同意」与「人」之间只隔着模型的转述 —— 被注入
+// 的模型可以谎称"用户同意了"。S2 给同意加一道带外人证：request_approval 铸造
+// 6 位确认码，码只经**模型上下文不可见**的通道投给人类（控制台 / 宿主事件总
+// 线的弹窗、toast、推送），grant_approval 必须携带人类读码后交回的码。
+// 挂点选择（实读裁定）：本文件是插件唯一既有的「宿主侧通知通道」事实源
+// （D-4 判决回执即走宿主 console + ctx.emit），S2 的带外面复用同一主权 ——
+// 通道缺席（未武装 / 投递故障）时 approval 侧自动降级旧式无码 grant 并记
+// degraded，现有宿主流零破坏。本段一切路径永不 throw。
+
+/** W1-2（S2）：确认码带外事件（宿主 UI 的挂点 —— 弹窗/toast/推送）。
+ *  载荷含明文码：事件总线是宿主进程内总线，不在模型上下文里。 */
+export const APPROVAL_CONFIRM_CODE_EVENT = 'approval/confirm-code';
+
+/** W1-2（S2）：带外投递载荷（与 approval.ConfirmCodeDelivery 同形） */
+export interface ApprovalConfirmCodePayload {
+  token: string;
+  description: string;
+  confirmCode: string;
+  expiresAt: number;
+}
+
+/**
+ * W1-2（S2）：武装带外人证通道（幂等；组合根调用一次）。投递面双通道，
+ * 均对模型上下文不可见（out-of-band 的安全本质）：
+ *   1. 宿主进程控制台 —— 永远在场的人证面；
+ *   2. cordis 事件总线 approval/confirm-code（ctx 可选）—— 宿主 UI 挂点。
+ * 任一通道成功即视为已投递（返回 true ⇒ 审批进入带码模式）；
+ * 武装失败 ⇒ 通道缺席 ⇒ approval 侧降级（防御式：本函数绝不抛）。
+ */
+export function armOutOfBandConfirmChannel(ctx?: Context): void {
+  try {
+    setConfirmCodeChannel((d: ConfirmCodeDelivery) => {
+      const ttl = Math.max(0, Math.round((d.expiresAt - Date.now()) / 1000));
+      let consoleOk = false;
+      try {
+        // 主通道：控制台。刻意声明「绝无必要转述给模型」—— 码属于人类。
+        console.log(
+          `[Approval OOB] "${d.description}" — user confirm code: ${d.confirmCode} ` +
+          `(token ${d.token}, expires in ${ttl}s). This code is for the HUMAN ONLY — ` +
+          'it must never be relayed into the model conversation.',
+        );
+        consoleOk = true;
+      } catch { /* 控制台故障 ⇒ 副通道仍可投递 */ }
+      try {
+        (ctx as unknown as { emit?: (event: string, payload: unknown) => void } | undefined)
+          ?.emit?.(APPROVAL_CONFIRM_CODE_EVENT, {
+            token: d.token,
+            description: d.description,
+            confirmCode: d.confirmCode,
+            expiresAt: d.expiresAt,
+          } satisfies ApprovalConfirmCodePayload);
+      } catch { /* 事件总线故障：主通道已投 ⇒ 不算投递失败 */ }
+      return consoleOk;
+    });
+  } catch {
+    /* 装配失败 ⇒ 通道缺席 ⇒ approval 侧自动降级（武装永不抛） */
+  }
+}
+
 export function wireDoctorVerdictChannel(ctx: Context, config: Config): void {
   let busy = false;
   const pendingReceipts: RehearsalEndPayload[] = [];
@@ -140,5 +202,18 @@ export function wireDoctorVerdictChannel(ctx: Context, config: Config): void {
     await runReceipt(p);
     void drain(); // 队列排空（fire-and-forget：drain 内部自持 busy 标志）
   });
+  armOutOfBandConfirmChannel(ctx); // W1-2（S2）：组合根既有的接线点顺带武装带外人证通道（幂等）
+  // W2-1（H4）：暂存式离线批准队列武装 —— 与带外通道同一组合根挂点（宿主在
+  // 场 ⇒ 通道在 ⇒ 暂存资格在；stageAction 自行执法通道缺席 = 维持阻塞审批）。
+  // 持久化锚点派生自 checkpointPath（同目录同寿命 —— 快照在则队列在）：
+  // checkpointPath 缺省 ⇒ 仅内存队列（跨进程不保，但 checkpoint 段照常随档 ——
+  // 诚实降级而非静默丢失）。武装绝不抛。
+  try {
+    const ckpt = (config as { checkpointPath?: unknown }).checkpointPath;
+    const queuePath = typeof ckpt === 'string' && ckpt ? ckpt + '.approval-queue.json' : '';
+    armApprovalQueue(queuePath ? { storage: createApprovalQueueFileStorage(queuePath) } : {});
+  } catch {
+    /* 队列武装失败 ⇒ 暂存不可用 ⇒ 阻塞审批原样（诚实降级） */
+  }
   console.log('[DoctorChannel] D-4 verdict receipt channel armed (sandbox/rehearsal-end → doctor/verdict).');
 }

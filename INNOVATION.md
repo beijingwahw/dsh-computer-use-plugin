@@ -202,3 +202,180 @@
 ## 五、结语
 
 这个项目最难得的不是任何单项技术，而是**"每个主张都有执法测试、每次降级都诚实"的宪章文化**。七大创新全部生长在这套文化上：每个纪元交付时，GENESIS.md 登记器官与数学根基、test/ 落执法测试、test/reports/ 出报告——这套仪式本身就是别人抄不走的部分。
+
+---
+
+## 六、实施状态（2026-10-03 四波施工全部完成）
+
+**总验收（第四波终局）：tsc --noEmit 0 错误；smoke 189 模块导入干净；全量 node:test 1295 用例 / 1290 通过 / 0 失败 / 5 跳过（平台依赖基线项）；python compileall 双解释器过。**
+
+四波共落地：地基速修 6 项 + 纪元 Ρ/Γ/Υ/Η/Κ/Π/Μ/Ι/Τ/Χ/Γ2/Ε/Β/Ν/Μ2/Ζ/PyS 十七项，新增 20 个执法测试文件（163 用例全绿）、六个新模块（sleep/notary/federation/selfmodel/prophecy/refute+aggregate+server.mjs）、新工具 federation_sync、新配置 25 键。创世登记已入 GENESIS.md（器官册 20 行 + 缝隙诚实六缝已闭/五缝在册）。
+
+**第四波（世界性创新·续）明细**：
+- **Ε 预言引擎（5 测试，默认启用）**：自主环动作前经世界模型铸预言、动作后对账三态落账（hit/miss/no-model），错题本 topMisses 自动生成、结算回灌世界模型（Dyna 式）——agent 的世界观第一次有了考试。纯审计旁路，PilotResult 与关闭面 deepEqual。
+- **Β 反驳法院（7 测试，默认启用·单脑缺席）**：不可逆动作派发前请异构第二脑「请反驳」——refuted 即拦（令牌不烧）、upheld 放行注记、uncertain 缺席审判零行为。注入现在必须同时骗过主脑+像素公证+异构反驳脑三道防线。
+- **Ν 探索经济学（15 测试，默认启用）**：探针通道按学习到的 bits/ms 后验择序 + 熵减足额即停（数学上保证永不砍掉还能改写判决的通道）；判决语义零变化。
+- **Μ2 拜占庭鲁棒聚合（6 测试）**：逐格中位数聚合（50% 崩溃点）+ 离群检疫喂信任账 + 贡献份额帽；参考聚合端 federation-server.mjs 环回实测与 TS 核心 deepEqual——「聚合端未部署」缝隙闭合计。
+- **Ζ 持久化与标定（4 测试）**：checkpoint 收编自我模型（加性段免版本跃迁）；睡眠④幕产出标定建议书（GPD A² 吃 telemetry、Kalman Q/R 吃 journal 漂移对——睡眠出建议、白天做决定）。
+- **PyS 真值跨线（5 测试）**：python UIElement 增 score 字段、TS 双态语义（真值⇒×100 无 assumed 标记 / 缺席⇒90+assumed 旧方言）——OCR 置信终于从「假设值」升格「测量值」。
+
+**第三波（大开发）明细**：
+- **Ι 自我模型（9 测试，默认启用）**：按（动作类×场景桶）维护衰减 Beta 胜任度后验，认识论闸门从"模型自报置信"升级为"经验校准置信"——agent 在自己历史上反复失败的格子前真正知道怕；get_metrics 新增自省面（最擅长/最不擅长格子）；index.ts 已接生产喂食（onToolPost 观察位，resultContract 唯一读侧判成败）。
+- **Τ 干预即教育（9 测试，默认启用）**：验收式消费成功 = 特权正示范（用户背书+世界验证双证据强化技能信任）；用户拒绝 = 负示范（回避清单，match 降档）；隐私铁律执法——type_text 只记长度桶。
+- **Χ 沙箱重放证词（4 测试）**：虚拟屏确定性重放逐位比对指纹序列，Π 公证的第四绿章从 n/a 转绿（沙箱段可复现性证明；真机段保持诚实 n/a）。
+- **P2a VLM 栈加固（13 测试）**：单例-池贯通（主力路径失败自动切备脑，Ψ 纪元"双轨互不感知"缺陷闭合计）；计量台账 5000 环形封顶（内存无界闭合计）；OCR 置信 confidenceAssumed 诚实标记。
+- **P2b 杂项加固（11 测试）**：通道 EMA 卸载归零（W-1 隔离律）；uiMemory 驱逐评分修复（成功计数获得真实话语权）；click_element 验收式消费闭环。
+- **Γ2 注视经济 inset（10 测试 + bench）**：主图 1/2 降采样+中央原生凹窗+分段坐标反算；bench 实测 token −75%、字节 −67.8%、凹窗保真 ≤JPEG 级——Γ 的 −40% 目标兑现且超额，外围保真损失如实呈报。
+
+| 纪元 | 落地内容 | 执法测试 | 状态 |
+|---|---|---|---|
+| P1 地基 | ioMutex 排队超时（[TIMEOUT] 方言、队列不毒化）；sandbox 重放令牌换 CSPRNG；系统级热键黑名单（win/meta 别名折叠、和弦排序无关匹配） | p1-fixes.test.ts（17 用例） | ✅ 完工，ioTimeout 已在 index.ts 接线 |
+| Ρ 双钥公证锁 | actionGate 四通道 fail-heavy（模型自述∪OCR 实读∪白盒控件名，全过 normalizeForRisk 混淆免疫）；语义握手（描述与屏幕实读不符 ⇒ 拒绝并要求重述）；click_element 安全洼地收编；GUARD_BLOCKED 链上留痕 | epochR.notarization.test.ts（8 用例） | ✅ 完工（默认开） |
+| Γ 注视经济 | 编码坐标→源图坐标反算纯函数 + grounding/vlmOcr 出口统一反算（coordinateSpace 诚实标注，修正 docstring 自认的坐标系错位）；中央凹加权编码（中央原生、外围降采样、sharp 缺席诚实回退）；config 三键经 index.ts 铸入内核注册表（可被 Ξ 进化调参） | epochGamma.fovea.test.ts（15 用例） | ✅ 完工（foveatedEncoding 默认关，坐标反算默认生效） |
+| Υ 认知睡眠 | src/sleep/index.ts 六幕剧（回放→蒸馏→免疫→校准→审计→晨报），幂等水位线（同状态二睡零新增）、JSONL 落盘断行容忍、逐幕预算"宁短勿挂"；index.ts dispose 前 fire-and-forget 接线（先于一切 reset） | epochUpsilon.sleep.test.ts（4 用例） | ✅ 完工（enableSleepCycle 默认关） |
+| Η 认识论闭环 | autoPilot 环内 constitution 前插 adviseAction 闸门（ask_human⇒escalated / abort⇒aborted，理由 epistemic-gate）；policyEngine 并列带用 Φ-9 效用分破平；runtime 感知接 sceneSemantics 同屏缓存 | epochEta.epistemic.test.ts（6 用例） | ✅ 完工（默认开、执法面收窄为 destructive×低置信；全幅执法=显式注入 epistemicGate） |
+| Κ 惊异课程 | worldModel.surpriseSpectrum 谱聚合（复用唯一惊讶实现）；gym.sampleCurriculumWorld 软最大加权采样（减 max 数值稳定、坏谱均匀回退、rng 注入确定性）；GymRoundResult.curriculum 可观测面 | epochKappa.curriculum.test.ts（4 用例） | ✅ 完工（curriculumEnabled 默认关；宿主接线面=GymCurriculumOptions，待生产 gym 入口出现时铸造——天然挂点是睡眠周期未来增設的训练幕） |
+| Π 行为公证 | 锚自链（sha256(canonical 含 prev)）+ 零依赖 DER/RFC3161 客户端（TimeStampReq 定点构造、imprint+nonce 信封/物证双核验、诚实边界=回执在册非 TSA 身份已验）+ verifyNotary 四绿章（链完整/MMR 在册/时间戳锚/重放诚实 n/a）+ quality_checkup 第五动作 notarize + index.ts 卸载自动锚接线 | epochPi.notary.test.ts（5 用例） | ✅ 完工（2026-10-03 第二波；notaryAutoAnchor 默认关，endpoint 空=本地锚零网络） |
+| Μ 万脑联邦 | EvidenceLedger 每 key 铸 Laplace(1/ε) 噪声直方图摘要 + secure-agg 逐格合并 + 三道闸掺入（零证据不掺/份额上限/信任折减，绝不直写 registry 值）+ federation_sync 工具（digest/sync/status） | epochMu.federation.test.ts（6 用例） | ✅ 完工（2026-10-03 第二波；endpoint 空=零网络纯本地） |
+
+**本波已知诚实边界**：① 重放层（replayOne）不采集公证证据，走 degraded 旧语义（有意留白）；② 睡眠免疫幕在生产缺 knowledgeBase 单例（D-7 属独立插件面），晨报标 skipped；③ click_element 的审批令牌未接验收式消费（闸门已过，消费闭环仍只在 click_mouse）；④ foveated 编码的 config→codec 已接线，但未做 grounding 精度/token 消费的 A/B 基准（INNOVATION Γ 节目标"token −40%"待 bench 纪元兑现）。
+
+---
+
+## 七、W1 执行与感知韧性潮（2026-10-03 第1批九器官 + W2-0 集成接线完工）
+
+不新增旗舰命题——把既有旗舰命题（Γ 注视经济、V 验收式审批、Θ/Ξ 进化）推向执行层与感知韧性的
+深水区：九器官并行交付（执法册 169 用例全绿），W2-0 集成接线把六条血脉接进生产面
+（test/w2wire.test.ts 执法 10 用例；接线后全库 0 失败、typecheck 0 错）。
+
+| 器官（执法册） | 一句话根基 | 接线状态（W2-0） |
+|---|---|---|
+| W1-1 执行层四连改（37 用例） | ROI 三区判决 / UIA 预检 × 焦点短路 / 词级质心 + 网格重试 / 稳态门 | ✅ buildAutonomyStack 注入 probe（懒点亮——物理服务已存活才生效，绝不主动拉起）+ focus（跑环起点清账，W-1 隔离律）；16 调参经 autonomyW1* 组字段入 config |
+| W1-2 带外确认码（13 用例） | CSPRNG 无偏 6 位码 + 恒定时间比较 + 模型可见面绝无码 | 器官内自洽（approval 产权域），无跨域接线需求 |
+| W1-3 免看门控（15 用例） | 期望三档 × 五重与门 ⇒ dHash 未变跳过重型感知 | ✅ frameHash（capture→dhash 轻实现，失败 null 降级）+ perceptionGate 配置随栈入环；autonomyW1FrameGate 缺省开 |
+| W1-4 噪声诊所（10 用例） | 四维感知噪声注入 + 分辨力单调性 | 训练营内部（gym 产权域），零生产接线面 |
+| W1-5 EXP4（8 用例） | 上下文老虎机重要性加权（θ=0 退化旧规则） | 进化引擎内部，零生产接线面 |
+| W1-6 根因归因（31 用例） | 三类根因鉴别试验 + 证据链 + 降级兜底 | guards/failureMemory 产权域内自洽 |
+| W1-7 稀疏 SoM（20 用例） | 置信 × 相关度 Top-K + 四向避让 + 稳定染色 | ⏸ somSparseBudget 已入 config（缺省 0=关）——renderSomOverlay 尚无生产调用面，翻转稀疏默认改变标注输出面，留待消费方落地（GENESIS 缝隙在册） |
+| W1-8 Zoom 复核（12 用例） | 三触发 ⇒ ROI 放大重 grounding + OCR 交叉验证 + 8 次任务级预算 | ✅ verifyClient 两处接线（orchestration L3 适配器 + runtime 缺省接地）受 grounding.verifyZoom 内核键控制（config.vlmZoomVerify 铸入，缺省开）；resetVerifyGateBudget 挂用户回合边界与卸载清理 |
+| W1-9 视觉经济（23 用例） | 三路注视路由 + 任务锚点 + requote 两级钳制防抖 | ✅ 点击命中 recordTaskAnchor(bbox+viewport)；ask_vlm 编码消费 suggestFoveaCenter().center 与 requote 建议档（original 档不显式传参——缺省编码逐字节不变） |
+
+**激活策略（审慎立法）**：probe / focus / frameHash 门控 / verifyClient 四线默认开——安全性经
+执法册与全量回归验证（含焦点短路跨 run 污染的修复：跑环起点焦点清账）；somSparseBudget
+默认关（输出面变更，证据链未跑满）。焦点短路步补零成本判据核对（declare 同律——
+textDigest 子串匹配免截屏），「目标字面早已在屏」的达成不再被短路推迟到保险丝之后。
+
+---
+
+## 八、W2 离线韧性与成本自律潮（2026-10-04 第2批九器官 + W3-0 集成接线完工）
+
+不新增旗舰命题——把「人不在场时的安全」与「每次云脑调用的钱」推向制度深水区：九器官并行交付
+（执法册 173 用例全绿），W3-0 集成接线把五条血脉接进生产面（test/w3wire.test.ts 执法 10 用例；
+接线后全库 0 失败——cancelled 6 与基线同款，经独立导入图复跑证实与本批无关；typecheck 本批
+产权文件 0 错）。
+
+| 器官（执法册） | 一句话根基 | 接线状态（W3-0） |
+|---|---|---|
+| W2-1 离线批准队列（8 用例） | 用户离开 ⇒ 不可逆动作连同证据链入暂存队列（TTL/封顶/幂等/独立持久化），晨报列清单 + 批注式批量裁决（每项 grant 耗一枚同意预算 + 各铸 amendment） | ✅ adjudicate_approval_queue 与 request/grant 同门挂载（enableApprovalGate，工具内另有开关纵深防御）；睡眠晨报 deps 注入 approvalQueue（待批清单源——队列另有独立持久化） |
+| W2-2 fail-closed 审计 + 新鲜度探针（17 用例） | 审计 fail-closed（无审计行的动作是契约违反）× 探针 fail-open（叠加防御故障不下沉为可用性故障）的刻意不对称；grounding 指纹 vs metaOnly 快图，<0.85 阻断派发（令牌未烧） | ✅ 启动 setFreshnessPort(defaultFreshnessPort())（grounding 指纹源 = contextManager 最近截图；当前帧源 = physicalBackend metaOnly 零孵化）；卸载 setFreshnessPort(null)（W-1 单例隔离律） |
+| W2-3 bench 可信度（14 用例） | E2 契约核查器 + E3 方差感知 SPRT 回归门（bench .mjs 工作台独立自检 + node:test 同批挂载） | 工作台内部（bench/ 产权域），零生产接线面 |
+| W2-4 租约黑板 + 实证仲裁（23 用例） | 有界共享黑板 claim 防重复 + 未过期租约让位；verdict 证据归因 + 争点正典分词 | 器官内自洽（subAgent/orchestrator 只读消费已在器官内接线），零跨域接线需求 |
+| W2-5 恢复疗效账本（23 用例） | (症候 × 根因 × 动作) Beta 后验 + 回合划定状态机 + 冷启动梯子→后验降序（确定性）+ LRU 有界 + 原子持久化/防御恢复 | ✅ 启动 restore + setPersistence（回合闭合自动落盘）；卸载 persist 兜底 + reset 归零（checkpoint 同律）；config.recoveryEfficacyPath 缺省空 = 纯内存零行为 |
+| W2-6 记忆操作老虎机（16 用例） | 分类级 Thompson 采样（Beta 独立记账 / n<门限零行为 / seed 重放一致 / kernel 键 + EvidenceLedger） | 进化引擎内部（kernel 产权域），零生产接线面 |
+| W2-7 金丝雀试演（24 用例） | proceed×high 的可逆微探针先演后 commit（错误代价先验替代直觉阈值） | 认识论闸内部（uncertainty 产权域），零生产接线面 |
+| W2-8 成本级联路由（38 用例） | 三因子分诊 + 便宜臂确定性校验（bbox/schema/OCR 三谓词集）+ 升级主力重做；未拨号计 0；无 cheap 档恒弃权 | ✅ configureVlm 铸池注入 tiers（CSV "id=tier"）+ attachCascadeFace 接 glmClient.chatJson 最前置咨询闸；双钥激活（tiers 标 cheap + dangerMax ≥ 0.6），缺省恒弃权（保守静态因子 danger 0.6 > 0.35）零行为变化 |
+
+**激活策略（审慎立法）**：freshness 端口默认武装（fail-open + 缺席诚实注记，降级路径零回归）；
+recoveryEfficacyPath 缺省空（纯内存——restore/落盘均 no-op）；adjudicate 随审批门挂载（无额外
+开关）；cascade 两钥保守（tiers 缺省空 + 接线层因子源为保守静态因子——桥不携带逐调用分诊物料，
+缺省阈值下恒弃权，绝不静默便宜）；runPilotLoop 起点清零 Zoom 复核预算（W1-8 已知取舍闭合：
+单回合多 run 不再共享 8 次预算，autonomy_resume 同脊梁同律）；somSparseBudget 维持 0 关
+（本批复读确认 renderSomOverlay 仍无生产调用面——与 visualOverlay 同为测试面，不伪造调用点）。
+
+---
+
+## 九、W3 活意图与自纠偏潮（2026-10-05 第3批九器官 + W4-0 集成接线完工）
+
+不新增旗舰命题——把「agent 在长跑中知道自己错没错、错了怎么回头」推向制度深水区：
+九器官并行交付（执法册 155 用例全绿），W4-0 集成接线把七条血脉接进生产面
+（test/w4wire.test.ts 执法 8 用例；接线后本批产权文件 tsc 0 错、w4wire 全绿——
+全量 0 fail 的硬门槛受并行批次在途文件（riskGate/rollbackPlanner/w4mobile/w4pcg/
+python_service 预热）瞬时红干扰，见报告遗留申报）。
+
+| 器官（执法册） | 一句话根基 | 接线状态（W4-0） |
+|---|---|---|
+| W3-1 逆转托管（26 用例） | 动作级 WAL + 补偿预案（策略命中铸造自包含预案、WAL 先行落盘、无预案 fail-closed 拒派、结算多态诚实记账） | guards 派发面消费（器官产权域内自洽），零跨域接线需求 |
+| W3-2 参数化技能（10 用例） | DTW 对齐 + 反统一（同值→常量、同型异值→参数洞）+ 抗过拟合门 + 运行时绑定 | 技能库内部（skillLibrary 产权域——W4-7 领地），本批未动 |
+| W3-3 增量编码（22 用例） | 脏矩形 P 帧式感知（三系坐标往返 ≤1px、补丁几何、账本分诊：关键帧/补丁/向量+条带） | 编码管线内部（vlm 产权域），零生产接线面 |
+| W3-4 DAG 流水线（17 用例） | Kahn 就绪层并行（读写分离三防线 + 深度 1..2 预注）+ takeGranted 续跑（stepCursor 对账 journal 步账只重演其后步骤） | ✅ start_complex_task 透传 { parallel: orchestratorParallel }（缺省 false——显式 opt-in 是并行重排的最保守兼容姿态）；request_approval 补 stage 参数 ⇒ stageAction 携带 stepCursor = journal.list(false).length（续跑步账的入队计量面） |
+| W3-5 活意图漂移（32 用例） | 评分律纯函数（0.7·语义距离 + 0.3·停滞，纯停滞封顶 0.3 永不单独出题）+ 结构化三选一（A/B/C 单键应答）+ 降级律/节流律 | ✅ steer_choice/steer_answer 与 autonomous_run 同门挂载（autonomyEnabled），会话转发面环外诚实空转；driveLoop 环内消费（autonomySteerEnabled 缺省 false）——每步 maybeCheckAndAsk（stepIndex+最近校准熵），出题 ⇒ steer-drift 升级提问，会话跨环存续供 steer_answer 结算 |
+| W3-6 岔路卡（9 用例） | 岔路账环形 8 步（Top-K + 诚实效用 + 支点锚）⇒ 失败终局相铸三候选卡 ⇒ applyBranchChoice 支点防御校验 + 偏置只改选择不改预测 + 12 步重放预算 | ✅ driveLoop 每步决策既定 branchLedger.record（goalKeywords/triedActionKeys 与 policyEngine 并列破平同一方言）；goal failed/aborted ⇒ generateBranchCard 经 lastBranchCard() 出口；buildAutonomyStack 注入单例适配（纯簿记零门控——PilotResult 分毫不动） |
+| W3-7 探索前沿（11 用例） | (区域×模态×策略) Beta 计数 + UCB 前沿分（−riskGate 代价 − failureMemory 负先验 − 同模态连打惩罚），确定性 argmax 无 RNG，只在恢复态出手 | ✅ enableExploration（缺省 false）⇒ buildAutonomyStack 铸共享 ExplorationLedger 入 deps.exploration（③″ 恢复态拦截 + 步落账回报——器官内已就绪）；persistPath ⇒ beginSession('restore') 跨会话延续，run 级状态随铸栈归零 |
+| W3-8 过程评分器（28 用例） | 步级四通道 credit assignment（effect=detected×scale / intent 证据阶梯 intent>phash>thought / oscillation / wait），缺席=中性 0.5 + 缺席计数 | ✅ journal 动作行顶层直录 state_anchor.effect 的 scale/intent/phashCorroborates（四通道的链上实证数据面；canonical 稳定序列化自动入哈希域——旧链无此字段哈希不变，链语义零变更，verify 仍绿） |
+| W3-0 第三批接线（10 用例） | freshness 武装 + 疗效账本复载/落盘 + 晨报待批清单 + 级联咨询面 + 跑环边界预算清零 | 前批已完工（w3wire 10/0 在册） |
+
+**W4-0 另两接线**：① 睡眠第④幕校准旁挂——index.ts 卸载路径 deps 补
+memoryOpsConverger: () => convergeMemoryOps({ seed: journal 水位线（`条数:链尖前16`，
+sleep computeWatermark 同源式）}），晨报 memoryOps 段 28 臂对账、种子如实申报
+（同账本态跨夜重放一致）；② config 四新字段缺省落位（enableExploration=false /
+explorationPersistPath='' / autonomySteerEnabled=false / orchestratorParallel=false）。
+
+**激活策略（审慎立法）**：探索 / 环内漂移消费 / 编排并行三开关缺省关（出题升级、
+恢复态换路、并行重排都是行为面变更——opt-in 是最保守兼容姿态）；branchLedger
+簿记面无门（纯旁路零 PilotResult 变更）；steer 工具挂载随 autonomyEnabled（环未
+启用则漂移检查无语义，工具在而诚实空转）；journal 三字段随 effect 锚点自然落
+（无锚点旧工具零污染）；stage 参数缺省不出场（与接线前逐字节一致）。
+
+**本批已知诚实边界**：① 岔路账支点锚的 journalLength/chainTip 由 record 的调用方
+供给（环内落账暂只携 stepIndex——journal 面在 driveLoop 不可达，锚值待
+autonomousRun 工具层供给即自然补全，applyBranchChoice 的校验锚语义已就绪）；
+② steer 出题升级后用户应答经工具结算，但「应答回灌重启 run」的自动续跑通道
+留白（模型读 escalateReason 后自主决定重跑，与 epistemic-gate ask_human 同律）；
+③ 全量验收窗口内并行批次在途文件（riskGate/rollbackPlanner/w4mobile/w4pcg/
+python_service 预热共 3 例）出现瞬时红——均在本批禁改领地，经产权归零 +
+逐文件复跑证实与本批无关（本批产权文件 tsc 0 错、w4wire 8/0）。
+
+---
+
+## 十、W4 第四批器官潮（2026-10-03 第4批九器官 + W5-0 集成接线收官）
+
+把「身体的外延、预算的经济学、证据的物理学」推向深水区：移动设备入列、零 API
+设备面（采集卡之眼 + HID 棒之手）、程序化无限训练营、技能本身的联邦、可逆性
+分级派发、步数拍卖市场、声学非语义证据。九器官并行交付（执法册 133/0 全绿 +
+Python 自测 58 断言），W5-0 集成接线收官把五条血脉接进生产面
+（test/w5wire.test.ts 执法 14 用例；接线后本批产权文件 tsc 0 错、w5wire 全绿——
+全量 0 fail 的硬门槛受并行批次在途文件瞬时红干扰，见报告遗留申报）。
+
+| 器官（执法册） | 一句话根基 | 接线状态（W5-0） |
+|---|---|---|
+| W4-0 集成接线（8 用例） | 第三批七血脉接进生产面（steer 挂载门 / 探索入栈 / 岔路账消费 / memoryOpsConverger / journal 实证字段 / stage 步账 / 并行透传） | 前批已完工（w4wire 8/0 在册） |
+| W4-1 宏重放（37 用例） | kind:'macro' 扩展字（skillId 直取 / templateId 绑洞 + 重锚定）+ 可靠度 <0.5 先虚拟排练 + 感知链顺带接增量账本消费（总闸缺省关） | ✅ kernelRegistry 铸 visualDiff.incremental（0/1，缺省 0——「生产由 index.ts 铸入」兑现）+ buildAutonomyStack 总闸开时就地补挂 deps.incrementalObserver（runtime 注入缝在铸栈面接通——该文件禁改）；run_skill 排练场景源接通（uiMemory 元素面 + contextManager 场景指纹加成——低可靠度技能可虚拟排练而非恒诚实拒绝）；MacroTrace/MacroAnchorElement 桶导出补全 |
+| W4-2 策略联邦（12 用例） | 差分隐私上传（指纹 + 槽统计 + Laplace）+ k≥3 中位数聚合与 IQR 检疫 + 注入三律（Thompson / dormant / 本地命中 2 次激活——联邦无直达匹配池的写径） | ✅ index.ts 装载处一次 wireSwarmSkillFederation(skillLibrary 适配端口)（联邦草案→库登记方言：skillId=fed-<指纹>、origin='federated'、槽统计→数值步摘要）；match_skill 命中处 noteLocalHit(同键指纹)（未知指纹 no-op 纯记账）；卸载 wireSwarmSkillFederation(null) 摘线（W-1 隔离律） |
+| W4-3 可逆性体系（32 用例） | 三级分级（未知默认最高）+ Beta 证据门在线校准（只升不降）+ dispatchLaneFor 三道 + 有界回滚（良好态定位→LIFO 逆映射→审批闸→复原验证→分支注入） | ✅ 派发四工具（click_mouse/click_element/drag_mouse/type_text）执行前 classify → dispatchLaneFor 三路（compensable 在 beginAttempt 前先 mintPlan 带 approvalToken；irreversible 交还人类；reversible 快道）——enableReversibilityLanes 缺省 false 零回归；index.ts arm({ negativeEvidenceQuery: failureMemory.match 计数 })（纯读注入）；分道注记进 state_anchor.reversibility_lane |
+| W4-4 PCG 训练营（12 用例） | 文法产生式派生场景（同 seed 字节级一致）+ 课程权重按 ground-truth 对账更新 + 无限流水 × 有界消费 | 训练营内部（gym 产权域——W5-5 领地），零生产接线面 |
+| W4-5 移动 Surface（12 用例） | Android 设备以虚拟显示器入列（surface id 方言 TS/Py 双镜像）+ 归一化坐标换算只在服务端 + 帧源降级链 + dhash 帧门控复用 | physicalBackend 透传面在器官内接线（surface 键缺省缺席 = 字节等同现状），零跨域接线需求 |
+| W4-6 零 API 设备面（0 TS 用例；Python 自测 58 断言） | HDMI 采集卡 UVC 帧管线（四角校准）+ CH9329 串口 HID 协议（SUM/CRC-16 双校验）——目标设备视角是一只真鼠键 | python --selftest 通道（无硬件 CI 的诚实自测）；routes.py 注册落盘由 W5-1 并行批次接手 |
+| W4-7 步数拍卖（11 用例） | 全局步数池每 K=10 步重拍卖：bid = shrinkRate 收敛先验 × 自报未完成度 + 纯整数最大余数法配额 + 饿死防护 + 低进展优雅退场 | ✅ config.enableStepAuction（缺省 false）+ stepAuctionBudget（缺省 0=名册推导 Σ maxSteps）⇒ index.ts coordinator.enableStepAuction({ budget, port })——port 从经验晶体按代理出生场景指纹（focus.seedSceneHash）counterfactual 聚合 successes/attempts（缺席 ⇒ 零证据诚实降级）；swarm_dispatch spawn/status 附 auctionStatus()/auctionLedger() 摘要面（市场关 ⇒ 附段缺席逐字节旧输出） |
+| W4-8 声学通道（9 用例） | 音频只作非语义物理证据、权重恒低于视觉（成功音 ⇒ 视觉阴性升级 probable_effect；错误音 ⇒ 复核不改判；置信封顶 0.5；端口缺席逐字节不变） | actionVerifier 端口注入面在器官内接线（缺省缺席零行为），零跨域接线需求 |
+
+**W5-0 收官血脉**：config 三新字段（enableReversibilityLanes=false /
+enableStepAuction=false / stepAuctionBudget=0——两行为面开关缺省关，opt-in 是最
+保守兼容姿态）；index.ts 组合根五接线（铸键 / 联邦 wire / arm 负证据 / 拍卖开市 /
+卸载双摘线）；swarmDispatch 的 SubAgentSpec 拆 import type（Node strip 装载器接口
+按值导入地雷——测试可直连本模块）。
+
+**激活策略（审慎立法）**：分道与拍卖缺省关（开闸后 irreversible 级别的已批准
+派发也将交还人类亲办——这是 W4-3 的立法语义不是回归）；unknown-default 不分道
+（分级知识缺席交回已验证的危险词闸门——两道保守律各守各的门）；type_text 非
+审批路径只注记不铸预案（无结算语义的铸造 = 无结算的在途预案，泄漏面为零结算
+TTL）；增量总闸内核键缺省 0；联邦 arm/noteLocalHit/排练场景源为纯记账或注入面
+（零行为差直接激活）；拍卖摘要面只读（市场关 ⇒ 逐字节旧输出）。
+
+**本批已知诚实边界**：① text-input/navigation 两 compensable 语义不在 escrow
+补偿策略表（S5-5d 只对齐了六个交叠键）⇒ 执法路径 fail-closed 拒绝——扩表是
+部署知识决策，接线层不代立法（已入 GENESIS 缝隙清单）；② 增量 observer 的
+生产消费方（宿主编码层取投递产物决定关键帧/补丁/条带的下游编排）尚未落位——
+观察槽已接通，消费面待真实编码管线；③ 拍卖证据端口以代理出生场景指纹为键，
+冷启动（seedSceneHash 空）⇒ 零证据均匀分配（诚实降级非缺陷）；④ 全量验收窗口
+内并行批次（W5-1..W5-5）在途文件瞬时红不由本批背书（本批产权文件 tsc 0 错、
+w5wire 14/0）。

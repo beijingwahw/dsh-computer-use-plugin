@@ -9,16 +9,53 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `battery.mjs` | 任务矩阵执行器：`node battery.mjs <suite.json>`，结果写 `results/battery-{partial,final}.json` |
+| `battery.mjs` | 任务矩阵执行器：`node battery.mjs <suite.json>`，结果写 `results/battery-{partial,final}.json`；W2-3 起内建 E2 独立核查 + E3 SPRT 回归门 |
 | `dsh-drive.mjs` | 单会话驱动器（new/send/wait/hist/cancel），交互排障用 |
 | `suite-1/2/3.json` | Epoch X 及之前的套件（感知/运动/守卫/记忆/OCR/技能首轮） |
 | `suite-4.json` | Epoch Y 主电池：26 个真实任务 × 15 类（本轮九处修复的来源） |
 | `suite-4b.json` | 修复后复跑（含任务栏边缘点击回归 —— 区域 clamp 修复的首个真机验证） |
 | `suite-4c.json` | 终验：切窗取证（focus_handoff）+ 技能切片 + 未命中反馈，4/4 通过 |
+| `suite-w2.json` | W2-3 示范套件：任务带 `verify` 块（文件哈希/进程/窗口/注册表谓词） |
+| `verifyCore.mjs` | W2-3 E2 契约核查器核心：谓词 DSL + 可注入观察 world + 证据落盘 + doctor 规则候选草稿 |
+| `sprtCore.mjs` | W2-3 E3 统计核心：Wald SPRT（伯努利通过率）+ Wilson CI + 两比例 z 检验 + McNemar 精确 |
+| `verify.selftest.mjs` | W2-3 离线自检：`node bench/verify.selftest.mjs`，93 断言全过 exit 0（无网络/无 DSH） |
 | `sync-and-restart.sh` | 构建产物 → DSH 双路径（store 物化源 + profile 加载点）同步 + 重启 + 指纹校验 |
 | `battery-suite4*.log` | 三轮电池的逐任务判定日志（PASS/FAIL + 工具轨迹摘要） |
 | `journal*.jsonl` | 插件行动日志（动作/效果/场景指纹）—— 真机战果的原始证据 |
 | `results/` | 电池判定 JSON（注意：battery-final.json 会被最后一轮覆盖，全量证据以 log 为准） |
+| `reports/` | W2-3 电池报告根：每轮 `<runId>/report.json` + `evidence/`（逐谓词原始观察）+ `screenshots/` + `doctor-rule-candidates/` |
+
+## W2-3：bench 可信度包（E2 契约核查 + E3 SPRT 回归门）
+
+**E2 独立契约核查器** —— 旧 `expect` 正则只看 agent 自己的工具轨迹（自报通道）。
+任务现可声明 `verify` 块，会话结束后由**独立通道**（直查文件系统 / tasklist /
+注册表 / 窗口枚举 / 截图，不经 agent、不信自报）终判；终判 = 轨迹 ∧ 核查。
+谓词登记表（未登记 kind 拒绝，resultContract 同律）：`fileExists`（contains /
+containsRegex / sha256 / min·maxBytes）、`fileAbsent`、`dirExists`、`processRunning` /
+`processAbsent`（name|names）、`windowExists` / `windowAbsent`（titleRegex）、
+`registryKey`（exists=false 断言缺席）、`registryValue`（equals/contains）、`envVar`、
+组合子 `not` / `allOf` / `anyOf` 与块级 `mode: all|any`。路径支持 `%VAR%` 展开。
+「查了但不成立」（fail）与「核查通道坏了」（error）严格分离 —— 通道坏则整体不放行。
+中文 Windows 控制台输出按 OEM/GBK 还原（`reg` 的「键不存在」是合法观察而非通道错误）。
+证据落盘 `bench/reports/<runId>/`：逐谓词原始观察 txt + verify.json + 截图引用；
+核查失败的任务自动产出 doctor 规则候选草稿（`needs-human-distillation`，不自动入库）。
+
+**E3 方差感知 SPRT 回归门** —— FAIL 触发复跑（上限 5 次），Wald SPRT 序贯收口三态：
+`deterministic-pass`（零失败观测）/ `flaky`（p̂ + Wilson 95% CI；分 high-rate 与
+indifference-zone 两味）/ `deterministic-fail`（SPRT 接受 H0: p≤0.30）。α=β=0.05、
+H1: p≥0.80 为模块常量；边界公式与 `src/popupDetector.ts` 的 SprtPopupFilter 同式
+（A=ln((1−β)/α)、B=ln(β/(1−α))；popupDetector 的证据模型是弹窗传感帧而非伯努利
+通过率，且 bench 是纯 .mjs 不能加载 src/*.ts，故按任务指示实现等价小 SPRT）。
+`--compare <prev-report.json>` 输出跨版本通过率比例差检验（两比例合并 z 检验 p 值，
+配对任务集另附 McNemar 精确检验）。
+
+```bash
+# 带核查与回归门的一轮电池
+node bench/battery.mjs bench/suite-w2.json --compare bench/reports/<旧runId>/report.json
+
+# 离线自检（可信度包自身的测试证据）
+node bench/verify.selftest.mjs
+```
 
 ## 轮次结果
 

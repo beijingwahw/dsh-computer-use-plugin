@@ -71,6 +71,18 @@ ENDPOINT_CAPABILITY: dict[str, Capability] = {
     "/v1/frame_stats": "screenshot",
     "/v1/frame_rowmeans": "screenshot",
     "/v1/frame_diff": "screenshot",
+    # W5-1（W4-8 落盘）：L4 声学证据通道（只读感知族，与截图同能力位）
+    "/v1/audio_events": "screenshot",
+    # W5-1（W4-6 落盘）：L2 零 API 设备面 —— 能力位复用既有位图（不加新位：
+    # Node 端 capToken 的 Capability 是闭集字面联合，新位 = 铸不出合法 token）。
+    # UVC 采集属视觉感知族；HID 六端点与同名主机动作同能力位。
+    "/v1/uvc/capture": "screenshot",
+    "/v1/hid/click": "click",
+    "/v1/hid/move": "click",
+    "/v1/hid/drag": "drag",
+    "/v1/hid/scroll": "scroll",
+    "/v1/hid/hotkey": "hotkey",
+    "/v1/hid/type_text": "type",
 }
 
 

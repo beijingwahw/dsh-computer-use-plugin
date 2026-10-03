@@ -84,6 +84,31 @@ class WindowConfig:
 
 
 @dataclass(frozen=True)
+class AndroidConfig:
+    """W4-5 L1 移动 Surface —— scrcpy/ADB 设备入列虚拟显示器。
+
+    真机缺席的诚实降级全部由本配置驱动：``enabled=False`` 时控制器不
+    发任何子进程调用，``/v1/devices`` 返回空清单 + ``degraded`` 标记。
+    帧源降级链：scrcpy（≥ ``scrcpy_min_version``，``--screenshot`` 经设备
+    编码器取帧，带宽受 ``scrcpy_max_frame_size`` 约束）→ 缺席/失败降级
+    ``adb exec-out screencap`` 单帧。
+    """
+
+    enabled: bool = True
+    adb_path: str = "adb"
+    scrcpy_path: str = "scrcpy"
+    command_timeout_ms: int = 15_000        # 单条 adb/scrcpy 子进程墙钟上限
+    scrcpy_min_version: str = "2.0.0"       # --screenshot 自 v2.0 起可用
+    scrcpy_max_frame_size: int = 1280       # scrcpy --max-size（带宽门控的第一道）
+    long_press_threshold_ms: int = 600      # 按 ≥ 此时长 = 长按（Android 惯例）
+    long_press_min_px: int = 8              # 位移低于此像素视为原地（长按候选）
+    swipe_duration_ms: int = 300            # drag/swipe 缺省时长
+    scroll_px_per_tick: int = 120           # host 滚轮 1 tick 的设备像素换算
+    clear_first_backspaces: int = 64        # clear_first 的退格近似（设备无 Ctrl+A）
+    resolution_cache_s: float = 30.0        # wm size 结果缓存 TTL
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """应用配置根。所有字段的唯一事实源。"""
 
@@ -93,6 +118,7 @@ class AppConfig:
     actions: ActionConfig = field(default_factory=ActionConfig)
     funnel: FunnelConfig = field(default_factory=FunnelConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
+    android: AndroidConfig = field(default_factory=AndroidConfig)
 
 
 def _env(name: str, default: str) -> str:
@@ -211,6 +237,31 @@ def load_config_from_env() -> AppConfig:
         backend=_env("DSH_PHYSICAL_WINDOW_BACKEND", "auto").lower(),  # type: ignore[arg-type]
     )
 
+    # ── android（W4-5 移动 Surface）──
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError as e:
+            raise ValueError(f"env {name} must be float, got {raw!r}") from e
+
+    android = AndroidConfig(
+        enabled=_env_bool("DSH_PHYSICAL_ANDROID_ENABLED", True),
+        adb_path=_env("DSH_PHYSICAL_ANDROID_ADB_PATH", "adb"),
+        scrcpy_path=_env("DSH_PHYSICAL_ANDROID_SCRCPY_PATH", "scrcpy"),
+        command_timeout_ms=_env_int("DSH_PHYSICAL_ANDROID_CMD_TIMEOUT_MS", 15_000),
+        scrcpy_min_version=_env("DSH_PHYSICAL_ANDROID_SCRCPY_MIN_VERSION", "2.0.0"),
+        scrcpy_max_frame_size=max(64, _env_int("DSH_PHYSICAL_ANDROID_SCRCPY_MAX_SIZE", 1280)),
+        long_press_threshold_ms=_env_int("DSH_PHYSICAL_ANDROID_LONG_PRESS_MS", 600),
+        long_press_min_px=max(0, _env_int("DSH_PHYSICAL_ANDROID_LONG_PRESS_MIN_PX", 8)),
+        swipe_duration_ms=_env_int("DSH_PHYSICAL_ANDROID_SWIPE_MS", 300),
+        scroll_px_per_tick=max(1, _env_int("DSH_PHYSICAL_ANDROID_SCROLL_PX_PER_TICK", 120)),
+        clear_first_backspaces=max(0, _env_int("DSH_PHYSICAL_ANDROID_CLEAR_BACKSPACES", 64)),
+        resolution_cache_s=_env_float("DSH_PHYSICAL_ANDROID_RESOLUTION_TTL_S", 30.0),
+    )
+
     return AppConfig(
         server=server,
         auth=auth,
@@ -218,4 +269,5 @@ def load_config_from_env() -> AppConfig:
         actions=actions,
         funnel=funnel,
         window=window,
+        android=android,
     )

@@ -39,8 +39,6 @@ const MAX_VERDICT_INDEX = 500;
 const intentIdGen = createDefaultIdGenerator();
 const inflightReports = new Map();
 const attemptVerdicts = new Map(); // key: verdict.subject（三方言）
-/** 进程内序号：同毫秒并发 run 的 intent id 不再碰撞（J 纪元修正） */
-let intentSeq = 0;
 /** 有界 Map 写入：重写刷新插入序，超限 FIFO 淘汰最旧键（Map 迭代序 = 插入序） */
 function boundedSet(map, key, value, cap) {
     map.delete(key);
@@ -323,7 +321,7 @@ export async function apply(ctx, config) {
                 });
             }
             catch (e) {
-                return JSON.stringify({ status: 'FAILED', reason: `malformed input: ${e.message}` });
+                return JSON.stringify({ status: 'FAILED', reason: `malformed input: ${e?.message ?? 'unknown error'}` });
             }
         },
     }));

@@ -20,7 +20,19 @@
 //     · 长度防御：text 超过 maxTextLength ⇒ 拒绝（防注入超长文本）；
 //     · 风险闸门：焦点被标记为敏感区（点击密码框后）或文本自身命中风险语义
 //       ⇒ 拒绝（凭据类输入不代劳）。
-import { matchesRiskPatterns, matchesDangerPatterns, DEFAULT_RISK_PATTERNS, DEFAULT_DANGER_PATTERNS } from '../riskGate';
+//
+// 纪元 Ρ（双钥公证锁）：多通道语义公证。
+// 背景审计：危险判定此前只信模型自述（target_description/expected_text）——
+// 被提示注入的模型谎报目标（"press the button"）即可绕过 dangerPatterns 词表。
+// 修法：assertActionAllowed 签名兼容扩展可选 evidence 参数，三通道 fail-heavy：
+//   模型自述（现有双通道）∪ OCR 实读（ocrLabel）∪ 白盒控件名（structuralName），
+//   任一通道经 normalizeForRisk 归一后命中 dangerPatterns ⇒ 按危险处理（需已授予令牌）。
+// 配套语义握手（notarySemanticHandshake）：ocrLabel 与模型描述同时在场时，归一化后
+// 须 fuzzyIncludes 双向宽松印证；不符 ⇒ 'notary-mismatch' 拒绝并要求以屏幕实读文字
+// 重新描述目标。零回归律：evidence 缺席/两新通道全 null ⇒ 判定逐字段同旧版，仅加
+// notarization:'degraded' 诚实标注；总开关 enableNotarizationLock=false ⇒ 完全旧路径。
+import { matchesRiskPatterns, matchesDangerPatterns, normalizeForRisk, DEFAULT_RISK_PATTERNS, DEFAULT_DANGER_PATTERNS } from '../riskGate';
+import { fuzzyIncludes } from '../fuzzy';
 import { approval } from '../approval';
 import { focusTracker } from '../focusTracker';
 
@@ -33,7 +45,8 @@ export type ActionGateReason =
   | 'token-not-granted-or-expired'   // click：令牌在场但未授予/已过期
   | 'undescribed-click'              // click：双信号通道全沉默（N 纪元硬前置）
   | 'text-too-long'                  // type：超长文本
-  | 'sensitive-input';               // type：凭据/验证码语义
+  | 'sensitive-input'                // type：凭据/验证码语义
+  | 'notary-mismatch';               // Ρ：OCR 实读与模型自述不符（要求以屏幕实读文字重述）
 
 export interface ActionGateDecision {
   allowed: boolean;
@@ -44,8 +57,26 @@ export interface ActionGateDecision {
   /** click 专属：危险词命中且审批闸门开启（带有效令牌放行时仍为 true ——
    *  下游的验收式消费/派发预留逻辑据此挂钩） */
   dangerous: boolean;
-  /** click 专属：触发的危险信号通道（J-14 锚点归因用） */
-  dangerSignalChannel?: 'target_description' | 'expected_text';
+  /** click 专属：触发的危险信号通道（J-14 锚点归因用；Ρ 纪元扩至公证双通道） */
+  dangerSignalChannel?: 'target_description' | 'expected_text' | 'ocr_label' | 'structural_name';
+  /** Ρ 纪元：公证锁参与情况。undefined = 总开关关闭（完全旧路径，键不入场）；
+   *  'degraded' = 锁开但证据缺席/通道全空（判定同旧版，仅诚实标注）或握手被
+   *  跳过（短标签防误杀）；'engaged' = 至少一条公证通道在场参与判定。 */
+  notarization?: 'engaged' | 'degraded';
+  /** Ρ 纪元：degraded/拒因的诚实注记（如 'handshake-skipped:ocr-label-too-short'） */
+  notaryNote?: string;
+}
+
+/**
+ * Ρ 纪元（双钥公证锁）：点击落点的独立取证证据。
+ * 由调用方（clickMouse/clickElement）在物理派发前采集；本模块保持纯判定 ——
+ * 取证失败一律 null（诚实缺席），锁只在「通道在场且见危险/不符」时收紧。
+ */
+export interface NotaryEvidence {
+  /** OCR 实读通道：点击落点邻域的屏幕实读文字（null/空 = 通道缺席） */
+  ocrLabel?: string | null;
+  /** 白盒结构通道：UIA 点查询返回的控件登记名（null/空 = 通道缺席） */
+  structuralName?: string | null;
 }
 
 /** 闸门判定所需的配置子集（Config 的结构子类型 —— 工具层直接传全量 config） */
@@ -56,6 +87,10 @@ export interface ActionGateConfig {
   riskPatterns: string;
   maxTextLength: number;
   focusMaxAgeMs: number;
+  /** Ρ 纪元：双钥公证锁总开关（false = 完全旧路径，evidence 一律无视） */
+  enableNotarizationLock: boolean;
+  /** Ρ 纪元：语义握手 —— OCR 实读与模型描述的宽松双向印证，不符 ⇒ notary-mismatch */
+  notarySemanticHandshake: boolean;
 }
 
 /** 缺省闸门配置：与 Config 缺省同值 —— 重放层未透传配置时不得静默失守 */
@@ -66,21 +101,76 @@ export const DEFAULT_ACTION_GATE_CONFIG: ActionGateConfig = {
   riskPatterns: DEFAULT_RISK_PATTERNS,
   maxTextLength: 1000,
   focusMaxAgeMs: 30_000,
+  enableNotarizationLock: true,
+  notarySemanticHandshake: true,
 };
 
 /** 重放/技能步骤被闸门拦截的稳定标记（replay_actions 据此 fail-fast 中止；
  *  run_skill 据 FAILED 前缀计失败步） */
 export const SAFETY_GATE_BLOCK = 'safety-gate-blocked';
 
+// ─── 纪元 Ρ：语义握手（纯函数，测试面） ───
+
+/** OCR 实读标签的最小可用长度：低于此（图标按钮的「×」「+」）跳过握手 ——
+ *  单字符标签对任何描述都无法印证，执法即误杀 */
+const NOTARY_LABEL_MIN_CHARS = 2;
+
+/** 词元切分：空白分词 + 风险域归一化；归一后 <2 字符的词元剔除 ——
+ *  单字符 pattern 在 fuzzyIncludes 的容差（⌈1/6⌉=1）下对空串也命中，必须过滤 */
+function notaryTokens(raw: string): string[] {
+  return raw
+    .toLowerCase()
+    .split(/\s+/)
+    .map(t => normalizeForRisk(t))
+    .filter(t => t.length >= 2);
+}
+
+/**
+ * 双钥握手（Ρ-2）：屏幕实读标签与模型描述的宽松双向印证。
+ * 判据（任一成立即通过）：
+ *   1. 整串双向：归一化后的标签与描述互为（OCR 容错）子串 —— 长串的容差
+ *      ⌈m/6⌉ 吸收 OCR 噪声；
+ *   2. 词元双向：一侧的任一实义词元**精确**出现在另一侧的归一化全文中 ——
+ *      词元级不走编辑距离（2 字符词元配容差 1 会把 'ok' 匹配到 'ow' 这类
+ *      无关邻接对上）；混淆免疫已由 normalizeForRisk 在双侧完成。
+ * 跳过（ok=true 且 skipped 注明理由，调用方记 degraded 注记）：
+ *   标签过短（<2 字符）/ 纯标点（归一化后为空）/ 描述不可归一 —— 防误杀。
+ * 纯函数：两侧输入同过 normalizeForRisk（leet/同形字/全角在归一域内对齐）。
+ */
+export function notaryHandshake(rawLabel: string, rawDesc: string): { ok: boolean; skipped: string | null } {
+  const label = rawLabel.trim();
+  if (label.length < NOTARY_LABEL_MIN_CHARS) return { ok: true, skipped: 'ocr-label-too-short' };
+  const labelNorm = normalizeForRisk(label);
+  if (!labelNorm) return { ok: true, skipped: 'ocr-label-pure-punctuation' };
+  const descNorm = normalizeForRisk(rawDesc);
+  if (!descNorm) return { ok: true, skipped: 'description-unnormalizable' };
+  // 整串双向：描述里能找到屏幕实读标签（或反之）即印证。容差只授予够长的
+  // pattern（≥3 字符）：2 字符串配 ⌈m/6⌉=1 的容差会把 'ok' 匹配到无关邻接
+  // 对 'ow' 上 —— 短串退回精确包含（混淆免疫仍由归一化双侧完成）。
+  const wholeHit = (p: string, hay: string) => (p.length >= 3 ? fuzzyIncludes(p, hay) : hay.includes(p));
+  if (wholeHit(labelNorm, descNorm) || wholeHit(descNorm, labelNorm)) {
+    return { ok: true, skipped: null };
+  }
+  // 词元双向：实读标签的词元（归一化后精确）出现在描述里，或反之
+  for (const t of notaryTokens(label)) if (descNorm.includes(t)) return { ok: true, skipped: null };
+  for (const t of notaryTokens(rawDesc)) if (labelNorm.includes(t)) return { ok: true, skipped: null };
+  return { ok: false, skipped: null };
+}
+
 /**
  * 断言一个动作（live 工具调用或日志/技能重放步）是否被放行。
  * 纯判定 + 与旧工具内实现一致的副作用谱（仅审批域阻断路径 sweep 过期令牌）。
  * 不派发任何物理动作 —— 派发与验收式消费仍是调用方（clickMouse/replayOne）的职责。
+ *
+ * Ρ 纪元签名兼容扩展：可选 evidence 携带点击落点的独立取证（OCR 实读 +
+ * 白盒控件名）。三通道 fail-heavy；缺席 ⇒ 判定与返回字段同旧版（仅加
+ * notarization:'degraded'）；enableNotarizationLock=false ⇒ 完全旧路径。
  */
 export function assertActionAllowed(
   kind: ActionKind,
   args: Record<string, any> | undefined,
   cfg?: Partial<ActionGateConfig>,
+  evidence?: NotaryEvidence,
 ): ActionGateDecision {
   const c: ActionGateConfig = { ...DEFAULT_ACTION_GATE_CONFIG, ...cfg };
   const a = args ?? {};
@@ -96,26 +186,85 @@ export function assertActionAllowed(
       typeof a.expected_text === 'string' ? a.expected_text : undefined;
     const approval_token: string | undefined =
       typeof a.approval_token === 'string' ? a.approval_token : undefined;
-    // J-14 跨通道法则：两条独立危险信号通道，任一命中即触发审批域
+
+    // ── 纪元 Ρ（双钥公证锁）：证据通道收口与总开关 ──
+    // 总开关关 ⇒ evidence 一律无视，返回值与 Ρ 之前逐字节同形（完全旧路径，
+    // 连 notarization 键都不入场）。空串证据 = 通道读到空 ⇒ 按缺席（degraded）。
+    const ocrLabel: string | null =
+      c.enableNotarizationLock && typeof evidence?.ocrLabel === 'string' && evidence.ocrLabel.length > 0
+        ? evidence.ocrLabel
+        : null;
+    const structuralName: string | null =
+      c.enableNotarizationLock && typeof evidence?.structuralName === 'string' && evidence.structuralName.length > 0
+        ? evidence.structuralName
+        : null;
+    // 公证参与态：锁开且至少一条新通道在场；否则诚实标注 degraded（判定同旧版）
+    const engaged = ocrLabel !== null || structuralName !== null;
+    // stamp：undefined（锁关，不添键）| 'degraded'（锁开无通道/握手跳过）| 'engaged'
+    let stamp: 'engaged' | 'degraded' | undefined = !c.enableNotarizationLock
+      ? undefined
+      : engaged ? 'engaged' : 'degraded';
+    let note: string | undefined;
+    /** 按参与态封存返回值：锁关不加键；有注记才加 notaryNote（键形稳定，deepEqual 可锚） */
+    const fin = (base: ActionGateDecision): ActionGateDecision => {
+      if (stamp === undefined) return note ? { ...base, notaryNote: note } : base;
+      const out: ActionGateDecision = { ...base, notarization: stamp };
+      if (note) out.notaryNote = note;
+      return out;
+    };
+
+    // J-14 跨通道法则 → Ρ 纪元四通道：模型自述双通道 ∪ OCR 实读 ∪ 白盒控件名，
+    // 任一命中（normalizeForRisk 同律归一）即触发审批域 —— 绕过须同时沉默四条
+    // 独立信号通道，其中两条不归模型管（注入谎报目标的根除点）。
     const descHit = target_description ? matchesDangerPatterns(target_description, c.dangerPatterns) : false;
     const textHit = expected_text ? matchesDangerPatterns(expected_text, c.dangerPatterns) : false;
-    const dangerous = c.enableApprovalGate && (descHit || textHit);
+    const ocrHit = engaged && ocrLabel ? matchesDangerPatterns(ocrLabel, c.dangerPatterns) : false;
+    const structHit = engaged && structuralName ? matchesDangerPatterns(structuralName, c.dangerPatterns) : false;
+    const dangerous = c.enableApprovalGate && (descHit || textHit || ocrHit || structHit);
     if (dangerous && !(approval_token && approval.validate(approval_token))) {
       approval.sweep(); // 顺手清理过期令牌（与旧工具内实现同律）
-      return {
+      // 归因优先级：老通道在前（既有锚点归因零回归），公证通道殿后
+      return fin({
         allowed: false,
         reason: approval_token ? 'token-not-granted-or-expired' : 'irreversible-action',
         requiresApproval: true,
         dangerous: true,
-        dangerSignalChannel: descHit ? 'target_description' : 'expected_text',
-      };
+        dangerSignalChannel: descHit ? 'target_description'
+          : textHit ? 'expected_text'
+          : ocrHit ? 'ocr_label'
+          : 'structural_name',
+      });
+    }
+    // ── Ρ-2 语义握手：OCR 实读与模型自述的双向宽松印证 ──
+    // 前置于 undescribed 前置、后于危险执法（Ρ-1 律：描述无害但屏读「删除」⇒
+    // 判危险需令牌，而非 mismatch）。危险通道在场时持有有效令牌也须过握手 ——
+    // 令牌授权的是「这个目标」，不是「随便哪个目标」。
+    if (engaged && c.notarySemanticHandshake && ocrLabel) {
+      const descs = [target_description, expected_text]
+        .filter((s): s is string => typeof s === 'string' && s.length > 0);
+      if (descs.length > 0) {
+        const verdicts = descs.map(d => notaryHandshake(ocrLabel, d));
+        if (verdicts.every(v => v.skipped)) {
+          // 标签过短/纯标点：跳过握手（防误杀图标按钮），记 degraded 注记
+          stamp = 'degraded';
+          note = `handshake-skipped:${verdicts[0].skipped}`;
+        } else if (!verdicts.some(v => v.ok && !v.skipped)) {
+          return fin({
+            allowed: false,
+            reason: 'notary-mismatch',
+            requiresApproval: false, // 重述可解，令牌不可解：谎报/漂移的目标不在授权域内
+            dangerous,
+            notaryNote: `ocr="${ocrLabel.slice(0, 60)}" vs desc="${descs[0].slice(0, 60)}"`,
+          });
+        }
+      }
     }
     // N 纪元（盲区根除）：闸门开启时描述是硬前置 —— 两条信号通道全沉默的点击
-    // 不再放行（审批闸门无法审判一个无名目标）。
+    // 不再放行（审批闸门无法审判一个无名目标；OCR 在场不能替代模型自述）。
     if (c.enableApprovalGate && !target_description && !expected_text) {
-      return { allowed: false, reason: 'undescribed-click', requiresApproval: false, dangerous: false };
+      return fin({ allowed: false, reason: 'undescribed-click', requiresApproval: false, dangerous: false });
     }
-    return { allowed: true, requiresApproval: dangerous, dangerous };
+    return fin({ allowed: true, requiresApproval: dangerous, dangerous });
   }
 
   // type_text

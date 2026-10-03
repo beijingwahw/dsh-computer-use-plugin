@@ -681,12 +681,16 @@ async function refreshState() {
 async function testConn() {
   if (!selectedId()) { show('testResult', '请先选择一个平台', 'bad'); return; }
   show('testResult', '测试中…', '');
-  var res = await postJson('/api/test', payload());
-  if (res.body && res.body.probe) {
-    show('testResult', res.body.probe.ok ? '✓ ' + res.body.probe.detail : '✗ ' + res.body.probe.detail,
-         res.body.probe.ok ? 'ok' : 'bad');
-  } else {
-    show('testResult', '✗ ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+  try {
+    var res = await postJson('/api/test', payload());
+    if (res.body && res.body.probe) {
+      show('testResult', res.body.probe.ok ? '✓ ' + res.body.probe.detail : '✗ ' + res.body.probe.detail,
+           res.body.probe.ok ? 'ok' : 'bad');
+    } else {
+      show('testResult', '✗ ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+    }
+  } catch (e) {
+    show('testResult', '✗ 请求失败：' + e, 'bad');
   }
 }
 async function loadModels() {
@@ -722,18 +726,26 @@ async function loadModels() {
 async function connect() {
   if (!selectedId()) { show('connectResult', '请先选择一个平台', 'bad'); return; }
   show('connectResult', '保存中…', '');
-  var res = await postJson('/api/connect', payload());
-  if (res.body && res.body.ok) {
-    show('connectResult', '已生效 ✓ 可关闭此页', 'ok');
-    refreshState();
-  } else {
-    show('connectResult', '✗ ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+  try {
+    var res = await postJson('/api/connect', payload());
+    if (res.body && res.body.ok) {
+      show('connectResult', '已生效 ✓ 可关闭此页', 'ok');
+      refreshState();
+    } else {
+      show('connectResult', '✗ ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+    }
+  } catch (e) {
+    show('connectResult', '✗ 请求失败：' + e, 'bad');
   }
 }
 async function disconnect() {
-  await postJson('/api/disconnect', {});
-  show('connectResult', '已断开', '');
-  refreshState();
+  try {
+    await postJson('/api/disconnect', {});
+    show('connectResult', '已断开', '');
+    refreshState();
+  } catch (e) {
+    show('connectResult', '✗ 请求失败：' + e, 'bad');
+  }
 }
 document.querySelectorAll('input[name=platform]').forEach(function (r) {
   r.addEventListener('change', onPick);

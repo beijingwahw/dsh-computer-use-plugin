@@ -75,19 +75,34 @@ async function readScreenTextServer(region) {
     serverOcrFailedAt = 0;
     const words = tree.elements
         .filter(el => el.source === 'L2-ocr')
-        .map(el => ({
-        text: el.name,
-        // 服务端已按 score≥0.5 过滤；这里给固定置信度（词级分数未跨线传）
-        confidence: 90,
-        bbox_normalized: {
-            x0: el.rect.x, y0: el.rect.y,
-            x1: el.rect.x + el.rect.width, y1: el.rect.y + el.rect.height,
-        },
-        center_normalized: {
-            x: el.rect.x + el.rect.width / 2,
-            y: el.rect.y + el.rect.height / 2,
-        },
-    }));
+        .map(el => {
+        // 缝隙闭合：词级真值跨线（PyS）—— 双态语义（P2a-3 的语义位兑现：
+        // 「python 端加 score 字段后此语义位可接真值」）：
+        //   真值态：UIElement.score 在场且为有限数 ⇒ 消毒律夹 [0,1] 后 ×100 换算
+        //     到 confidence 的 0-100 方言（tesseract 同尺度；autonomy/runtime.ts
+        //     消费按 confidence/100 归一），confidenceAssumed 缺席 —— 有真值
+        //     就不标假设；
+        //   旧态：score 缺席 / 非数 / 非有限（NaN/±∞）⇒ 90 + confidenceAssumed:
+        //     true 逐字节维持 P2a-3 方言（旧服务/旧帧真值缺席的诚实降级臂）。
+        const s = el.score;
+        const truth = typeof s === 'number' && Number.isFinite(s)
+            ? Math.min(Math.max(s, 0), 1) * 100
+            : null;
+        return {
+            text: el.name,
+            confidence: truth !== null ? truth : 90,
+            // P2a-3 语义位：仅旧态在场（真值态缺席 —— 有测量值不标假设值）
+            ...(truth === null ? { confidenceAssumed: true } : {}),
+            bbox_normalized: {
+                x0: el.rect.x, y0: el.rect.y,
+                x1: el.rect.x + el.rect.width, y1: el.rect.y + el.rect.height,
+            },
+            center_normalized: {
+                x: el.rect.x + el.rect.width / 2,
+                y: el.rect.y + el.rect.height / 2,
+            },
+        };
+    });
     return { text: words.map(w => w.text).join(' '), words };
 }
 /**
@@ -218,10 +233,13 @@ export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected
                 const sharp = await getSharp();
                 const meta = await sharp(fullBuf).metadata();
                 const W = meta.width, H = meta.height;
-                const pxLeft = Math.round(left * W);
-                const pxTop = Math.round(top * H);
-                const pxW = Math.max(1, Math.round(width * W));
-                const pxH = Math.max(1, Math.round(height * H));
+                // 左上/宽高都夹回帧内：边缘区域的取整和 (left+width)*W 的舍入可能把
+                // extract 盒推出帧外 1px —— sharp 对越界盒直接抛错，整条 legacy 路径
+                // 因此白白降级（vlmFallbackText 的 floor/ceil 夹取同律）
+                const pxLeft = Math.min(W - 1, Math.round(left * W));
+                const pxTop = Math.min(H - 1, Math.round(top * H));
+                const pxW = Math.max(1, Math.min(W - pxLeft, Math.round(width * W)));
+                const pxH = Math.max(1, Math.min(H - pxTop, Math.round(height * H)));
                 const crop = await sharp(fullBuf)
                     .extract({ left: pxLeft, top: pxTop, width: pxW, height: pxH })
                     .resize(1200)
@@ -232,10 +250,12 @@ export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected
                 text = null; // legacy 亦败 —— 落第三路径（不可用则 return null，同旧律）
             }
         }
-        if (text === null) {
-            // 纪元 Ω 第三路径：本地双路径皆败 + vlmAssistOcr 开启 + 云脑可用 ⇒ VLM 兜底读屏
+        if (!text) {
+            // 纪元 Ω 第三路径：本地双路径皆败（报错或空读皆算败 —— 空读对「预期文字
+            // 在场与否」不构成证据，小字号漏读常态）+ vlmAssistOcr 开启 + 云脑可用
+            // ⇒ VLM 兜底读屏；兜底不可用 ⇒ null（诚实缺席，同旧律）
             text = await vlmFallbackText(fullBuf, region, lang);
-            if (text === null)
+            if (!text)
                 return null;
         }
         const hay = normalize(text);

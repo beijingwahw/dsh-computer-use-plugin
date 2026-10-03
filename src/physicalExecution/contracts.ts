@@ -214,6 +214,11 @@ export interface UIElement {
   name: string;
   state?: 'enabled' | 'disabled' | 'masked' | 'checked' | 'unchecked' | null;
   rect: { x: number; y: number; width: number; height: number };
+  /** 缝隙闭合：词级真值跨线（PyS）—— L2 RapidOCR 词级置信度，[0,1] 浮点
+   *  （python 端已夹取；越界值消费方按消毒律自夹）。L1 结构树 / L3 VLM
+   *  路径无分数 ⇒ 键缺席（诚实方言 —— python 端 None 不出键）。可选字段：
+   *  防御解析必须容忍缺席（旧服务/旧帧无此字段照常工作）。 */
+  score?: number;
 }
 
 export interface UiTreeResult {

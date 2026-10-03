@@ -10,6 +10,7 @@ import { quantum } from '../quantumSense.js';
 import { focusTracker } from '../focusTracker.js';
 import { matchesDangerPatterns } from '../riskGate.js';
 import { approval } from '../approval.js';
+import { consumeApprovalAmendment, gateByReversibility, laneAnchorOf } from './clickMouse.js';
 export function judgeTransport(beforeStartHash, afterEndHash, afterStartHash, thresholds = { transported: 0.75, vacated: 0.85 }) {
     if (!beforeStartHash || !afterEndHash)
         return null;
@@ -55,10 +56,23 @@ export function createDragMouseTool(config) {
         },
         async execute(args) {
             const { startX, startY, endX, endY, target_description, approval_token } = args;
-            if (startX < 0 || startX > 1 || startY < 0 || startY > 1 ||
+            // NaN 卫兵：NaN 与任何比较皆为 false，会穿过四重 bounds 检查直达
+            // Math.round(NaN * size) —— 物理层收到 NaN 像素
+            if (!Number.isFinite(startX) || !Number.isFinite(startY) ||
+                !Number.isFinite(endX) || !Number.isFinite(endY) ||
+                startX < 0 || startX > 1 || startY < 0 || startY > 1 ||
                 endX < 0 || endX > 1 || endY < 0 || endY > 1) {
                 return `[Error]: Invalid drag coordinates. All four values must be between 0.0 and 1.0.`;
             }
+            // ── W1-2 批注消费接线（W2-2）：危险判定之前读 amendment patch 修正计划 ──
+            // 抓取点（start）与目标描述参与修正（RawActionShape 是单点形状 —— 拖拽的
+            // 抓取点先行；目的地语义修正走 target_description）。修正后的描述参与
+            // 危险判定（用户批注把拖拽改述为「拖进删除区」⇒ 按危险处理 —— 批注不得
+            // 成为绕闸通道）。无令牌/无批注 ⇒ 零行为（旧路径逐字节不变）。
+            const amendment = consumeApprovalAmendment(approval_token, { tool: 'drag_mouse', x: startX, y: startY, target_description });
+            const effStartX = amendment.x ?? startX;
+            const effStartY = amendment.y ?? startY;
+            const effTarget = amendment.target_description ?? target_description;
             // ── Δ 纪元（安全外围#6）：拖拽安检 —— 旧实现的零安检盲区 ──
             // 「拖进回收站/删除区」与「点击删除按钮」同属不可逆操作，但 drag 既无
             // target_description 也不查危险词 —— 审批闸门对整个 drag 动作面失明。
@@ -71,17 +85,17 @@ export function createDragMouseTool(config) {
             // 验证证据形状不同，不在此冒进复刻）。四坐标的 bounds 校验已在上方存在
             // （另有 boundsGuard 前置），不重复。
             const dangerous = config.enableApprovalGate
-                && !!target_description
-                && matchesDangerPatterns(target_description, config.dangerPatterns);
+                && !!effTarget
+                && matchesDangerPatterns(effTarget, config.dangerPatterns);
             if (dangerous && !(approval_token && approval.validate(approval_token))) {
                 approval.sweep(); // 顺手清理过期令牌（与 click 闸门同律）
                 return JSON.stringify({
                     status: 'ACTION_REQUIRED',
                     state_anchor: {
-                        target: target_description ?? '(undescribed drag)',
+                        target: effTarget ?? '(undescribed drag)',
                         danger_signal: 'target_description',
                         reason: approval_token ? 'token-not-granted-or-expired' : 'irreversible-action',
-                        normalized: { start: { x: startX, y: startY }, end: { x: endX, y: endY } },
+                        normalized: { start: { x: effStartX, y: effStartY }, end: { x: endX, y: endY } },
                         note: approval_token
                             ? 'The token exists but the user has not granted it yet (or it expired).'
                             : 'This drag destination looks irreversible (delete/recycle bin/send/pay...).',
@@ -92,15 +106,28 @@ export function createDragMouseTool(config) {
                         'Never proceed without consent.',
                 }, null, 2);
             }
+            // ── W5-0（C 接线 · W4-3 S5）：可逆性分道 —— 目的地语义即描述面 ──
+            // 「拖进回收站」与「点删除按钮」同属可补偿/不可逆族 —— 与 click 同律
+            // 三路执法（drag 的消费走派发即焚，escrow 道铸预案先行同样成立）。开关
+            // 关（缺省）⇒ applied:false 零行为。
+            const laneGate = await gateByReversibility(config, {
+                tool: 'drag_mouse',
+                ...(effTarget !== undefined ? { description: effTarget } : {}),
+                ...(approval_token !== undefined ? { approvalToken: approval_token } : {}),
+                enforceEscrow: !!(dangerous && approval_token),
+            });
+            if (laneGate.applied && laneGate.blocked !== null) {
+                return laneGate.blocked;
+            }
             try {
                 const size = await system.getScreenSize();
-                const startPixel = { x: Math.round(startX * size.width), y: Math.round(startY * size.height) };
+                const startPixel = { x: Math.round(effStartX * size.width), y: Math.round(effStartY * size.height) };
                 const endPixel = { x: Math.round(endX * size.width), y: Math.round(endY * size.height) };
                 // 效果验证（双尺度）：起点区域是「被抓取物」原来的位置，拖拽后必然剧变；
                 // 终点登记为新焦点，供后续输入类动作的区域验证使用
                 const verify = config.verifyActions && !config.dryRun;
                 const before = verify
-                    ? await captureBefore({ x: startX, y: startY }, config.regionVerifyRadius)
+                    ? await captureBefore({ x: effStartX, y: effStartY }, config.regionVerifyRadius)
                     : null;
                 await system.dragMouse(startPixel, endPixel);
                 focusTracker.set(endX, endY);
@@ -132,7 +159,7 @@ export function createDragMouseTool(config) {
                         });
                         const atStart = await backend.captureProcessed({
                             metaOnly: true,
-                            wantRegionHash: { x: startX, y: startY, r },
+                            wantRegionHash: { x: effStartX, y: effStartY, r },
                         });
                         transport = judgeTransport(before?.region ?? null, atEnd.regionDhash ?? null, atStart.regionDhash ?? null);
                     }
@@ -142,7 +169,7 @@ export function createDragMouseTool(config) {
                     status: 'SUCCESS',
                     action: 'Mouse dragged.',
                     state_anchor: {
-                        normalized: { start: { x: startX, y: startY }, end: { x: endX, y: endY } },
+                        normalized: { start: { x: effStartX, y: effStartY }, end: { x: endX, y: endY } },
                         absolute_pixels: { start: startPixel, end: endPixel },
                         screen_resolution: `${size.width}x${size.height}`,
                         effect: effect ? {
@@ -162,6 +189,10 @@ export function createDragMouseTool(config) {
                         // Δ#6 安检透明化：本次拖拽是否经审批令牌放行（危险目的地上的一发令牌
                         // 已随派发消费）
                         approval_gate: dangerous ? { described: true, token_consumed_on_dispatch: true } : undefined,
+                        // W2-2（W1-2）：批注修正透明化 —— 用户批注把计划修正成了什么
+                        amendment: amendment.stamp || undefined,
+                        // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
+                        reversibility_lane: laneAnchorOf(laneGate),
                     },
                     next_step: transport && !transport.transported && effect?.detected
                         ? 'PIXELS CHANGED BUT NO TRANSPORT: something moved, yet the content you grabbed is NOT at the destination — ' +

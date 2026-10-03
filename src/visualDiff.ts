@@ -4,7 +4,12 @@
 // 「哪些区域变了」：降采样 → 逐像素差 → 分块聚合 → 连通域合并 → 变化区域清单。
 // 输出归一化坐标的变化框，可叠加红框渲染成差分图 —— 模型一眼看到变化在哪。
 // 批次 E 迁移：sharp 懒动态导入（_legacyDeps.getSharp）。
+// W3-3 增量编码增补：内核注册表（模块开关）、运动估计器（滚动判定，只读导入）、
+// codec 的补丁几何（三系坐标换算的收口面 —— 单一权威源）。
 import { getSharp } from './_legacyDeps';
+import { kernelRegistry } from './kernel/registry';
+import { estimateRowShift, type RowShiftEstimate } from './motionEstimator';
+import { normalizedToPatchRect, type PatchRect } from './vlm/codec';
 
 export interface DiffRegion {
   index: number;
@@ -39,8 +44,30 @@ export async function computeDiffRegions(
     sharp(afterBuf).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
   ]);
 
-  // 分块变化图：像素级变化累积到块级，天然过滤零星噪点
   const rows = Math.max(6, Math.round(tileCols * H / W));
+  const { regions, changedFraction } = diffRegionsFromRaw(a, b, W, H, tileCols, rows);
+
+  return {
+    regions,
+    changed_fraction_pct: Math.round(changedFraction * 1000) / 10,
+    identical: changedFraction < 0.001,
+  };
+}
+
+/**
+ * 像素差核心（自 raw RGBA 缓冲）：分块变化图 → 连通域合并 → 区域清单。
+ * W3-3 从 computeDiffRegions 逐字节抽出（行为零变化）—— 屏幕状态账本与
+ * computeDiffRegions 共用同一判决核心，免二次解码。
+ */
+function diffRegionsFromRaw(
+  a: Buffer,
+  b: Buffer,
+  W: number,
+  H: number,
+  tileCols: number,
+  rows: number,
+): { regions: DiffRegion[]; changedFraction: number } {
+  // 分块变化图：像素级变化累积到块级，天然过滤零星噪点
   const tileW = Math.max(1, Math.floor(W / tileCols));
   const tileH = Math.max(1, Math.floor(H / rows));
   const changedTiles = new Uint8Array(tileCols * rows);
@@ -92,12 +119,7 @@ export async function computeDiffRegions(
 
   regions.sort((r1, r2) => r2.tiles_changed - r1.tiles_changed);
   regions.forEach((r, i) => { r.index = i + 1; });
-
-  return {
-    regions,
-    changed_fraction_pct: Math.round(changedFraction * 1000) / 10,
-    identical: changedFraction < 0.001,
-  };
+  return { regions, changedFraction };
 }
 
 /** 把变化区域以红色虚线框 + Δ编号 渲染到 after 图上（差分可视化） */
@@ -396,4 +418,602 @@ export function spatialDisplacement(
     nearestIndex,
     nearestDistance: Math.round(nearestDistance * 1000) / 1000,
   };
+}
+
+// ─── W3-3（P2+C3 脏矩形增量编码）：屏幕状态账本（视频 P 帧式感知） ───
+//
+// 设计（创新提案 P2+C3 融合）：把视觉差分的「哪块变了」升级为跨帧状态账本 ——
+// 账本维护上一投递关键帧；新帧到来先 diff，按脏面积分诊：
+//   · 脏面积 < patchDirtyPct（缺省 5%）⇒ 产出脏矩形补丁（连通域合并 + 外扩，
+//     原生分辨率裁出），锚点元数据声明「patch@(x,y,w,h) 替换主帧该区」；
+//   · 滚动场景（motionEstimator 行移判定成立）⇒ 产出「滚动向量 + 新入内容
+//     条带」—— 大面积位移用一句话向量解释，只有真正的新内容条带需要像素；
+//   · 累计脏面积 > 30% / surpriseBits ≥ 24（世界快照的惊异信号，只读消费）/
+//     账本 TTL 到期 ⇒ 发整帧关键帧并重置账本（视频 I 帧的漂移偿还律：P 帧
+//     重建误差随链长累积，周期性回到全量基准）。
+//
+// 诚实边界（视频编码的同款债务）：P 帧链的重建 = 关键帧 + 补丁序列，JPEG
+// 有损与差分阈值使长链漂移不可违 —— 30% 累计上限与 TTL 是漂移的硬天花板。
+// 一切经注入端口（分析/哈希/墙钟）离线可测；防御式绝不抛：任何端口抛错都
+// 诚实降级为整帧关键帧（增量是增益不是依赖）。
+
+/** W3-3：账本帧判决类型 —— keyframe（整帧重置）| patch（脏矩形补丁）| scroll（滚动向量+条带）| silent（无变化，免投递） */
+export type IncrementalKind = 'keyframe' | 'patch' | 'scroll' | 'silent';
+
+/** W3-3：滚动报告 —— 行移向量（源图像素系）+ 平移假设的可信度 */
+export interface ScrollReport {
+  /** 源图像素系行移：>0 = 内容下移（新内容从顶部进入）；<0 = 内容上移（底部进入） */
+  dyPx: number;
+  /** 差分分辨率下的亚行位移（motionEstimator 原始读数） */
+  shiftRows: number;
+  /** 归一化残差（0=完美平移 —— 平移假设的成立程度） */
+  residual: number;
+}
+
+/** W3-3：账本判决 —— ingest 的返回值（投递协议的直接输入） */
+export interface LedgerVerdict {
+  kind: IncrementalKind;
+  /** patch：脏矩形（源图像素系，合并外扩后）；scroll：[新入内容条带]；keyframe/silent：[] */
+  patches: PatchRect[];
+  /** scroll 独有：滚动向量；其余 null */
+  scroll: ScrollReport | null;
+  /** 本次帧 vs 上一帧的全屏变化占比（0..100，computeDiffRegions 同尺） */
+  changedPct: number;
+  /** 账本累计未解释（脏）面积占比（相对全屏，0..100 —— 关键帧重置归零） */
+  cumulativeDirtyPct: number;
+  /** 账本代数（每次关键帧重置 +1 —— 投递协议的锚点代际号） */
+  generation: number;
+  /** 判决依据（人类可读 —— 可观测面） */
+  reason: string;
+  /** 降级注记（端口缺席/抛错时的诚实申报；正常路径 null） */
+  degraded: string | null;
+}
+
+/** W3-3：帧分析结果 —— 分析端口的契约（默认实现 = sharp 480px 差分 + 行移估计） */
+export interface LedgerAnalysis {
+  /** 源图（after）像素宽高 —— 账本记账与补丁几何的基准 */
+  width: number;
+  height: number;
+  /** 变化区域清单（与 computeDiffRegions 同构，面积降序） */
+  regions: DiffRegion[];
+  /** 全屏变化占比 0..100 */
+  changedPct: number;
+  /** 逐像素意义上的无变化（computeDiffRegions.identical 同尺：<0.1%） */
+  identical: boolean;
+  /** 行移估计（差分分辨率行；缺席/不可用 = null —— 滚动判定跳过） */
+  rowShift: RowShiftEstimate | null;
+  /** 行移估计所用的行数（差分分辨率 —— dyPx 的换算基数；rowShift 缺席时无效） */
+  diffRows: number;
+}
+
+/** W3-3：注入端口 —— 分析（diff+行移）/ 帧哈希（快路径静默判定）/ 墙钟（TTL） */
+export interface LedgerPorts {
+  /** 帧分析端口：缺省 = 内置 sharp 管线；注入即离线可测（纯逻辑测试的确定性事实源） */
+  analyze?: (before: Buffer, after: Buffer) => Promise<LedgerAnalysis>;
+  /** 帧哈希端口：同哈希 ⇒ 静默快路径（免差分）；缺席 = 无快路径，全量差分判定 */
+  hashFrame?: (buf: Buffer) => string;
+  /** 墙钟端口（缺省 Date.now —— TTL 测试注入） */
+  now?: () => number;
+}
+
+/** W3-3：账本调参（全部带缺省 —— 构造时可覆写，测试的确定性面） */
+export interface LedgerTuning {
+  /** 单帧脏面积 ≥ 此值 ⇒ 关键帧（缺省 5% —— 补丁的经济性下限） */
+  patchDirtyPct: number;
+  /** 累计脏面积 > 此值 ⇒ 关键帧（缺省 30% —— P 帧链的漂移天花板） */
+  cumulativeDirtyPct: number;
+  /** surpriseBits ≥ 此值 ⇒ 关键帧（缺省 24 —— 世界快照惊异信号的重置线） */
+  surpriseBitsThreshold: number;
+  /** 账本 TTL（缺省 120s —— 关键帧的最大年龄） */
+  ttlMs: number;
+  /** 补丁外扩像素（缺省 8 —— 差分降采样的定位残差垫） */
+  expandPx: number;
+  /** 补丁合并间隙（缺省 24px —— 间隙 ≤ 此值的矩形并成一块） */
+  mergeGapPx: number;
+  /** 补丁最小边（缺省 32px —— 亚块噪声下限） */
+  minEdgePx: number;
+  /** 单帧补丁数上限（缺省 6 —— VLM 上下文里可同时消化的补丁数） */
+  maxPatches: number;
+  /** 滚动判定的最小变化占比（缺省 15% —— 滚动必然大面积变化，小变化不试） */
+  scrollMinChangedPct: number;
+  /** 滚动向量的最小源像素行移（缺省 4px —— 亚像素抖动不算滚动） */
+  scrollMinDyPx: number;
+  /** 滚动判定的残差上限（缺省 0.25 —— 真平移的行亮度拟合近完美；0.25-0.5 的
+   *  弱拟合是「大面积变亮/变暗被伪配准成位移」的假阳性带，judgeScroll 的 0.5
+   *  门在有滚动动作语境时才安全，无监督分诊必须更严） */
+  scrollResidualMax: number;
+  /** 滚动向量的最大行移占比（缺省 0.9 —— 换页级位移交关键帧） */
+  scrollMaxDyFrac: number;
+}
+
+/** W3-3：缺省调参（创新提案的建议值） */
+export const DEFAULT_LEDGER_TUNING: LedgerTuning = {
+  patchDirtyPct: 5,
+  cumulativeDirtyPct: 30,
+  surpriseBitsThreshold: 24,
+  ttlMs: 120_000,
+  expandPx: 8,
+  mergeGapPx: 24,
+  minEdgePx: 32,
+  maxPatches: 6,
+  scrollMinChangedPct: 15,
+  scrollMinDyPx: 4,
+  scrollResidualMax: 0.25,
+  scrollMaxDyFrac: 0.9,
+};
+
+/** W3-3：调参防御规整（脏值回声缺省 —— 绝不抛） */
+function cleanTuning(raw: Partial<LedgerTuning> | undefined): LedgerTuning {
+  const t = { ...DEFAULT_LEDGER_TUNING, ...(raw ?? {}) };
+  const pos = (v: number, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
+  return {
+    patchDirtyPct: pos(t.patchDirtyPct, 5),
+    cumulativeDirtyPct: pos(t.cumulativeDirtyPct, 30),
+    surpriseBitsThreshold: pos(t.surpriseBitsThreshold, 24),
+    ttlMs: pos(t.ttlMs, 120_000),
+    expandPx: pos(t.expandPx, 8),
+    mergeGapPx: pos(t.mergeGapPx, 24),
+    minEdgePx: pos(t.minEdgePx, 32),
+    maxPatches: Math.max(1, Math.floor(pos(t.maxPatches, 6))),
+    scrollMinChangedPct: pos(t.scrollMinChangedPct, 15),
+    scrollMinDyPx: pos(t.scrollMinDyPx, 4),
+    scrollResidualMax: Math.min(0.5, pos(t.scrollResidualMax, 0.25)),
+    scrollMaxDyFrac: Math.min(1, pos(t.scrollMaxDyFrac, 0.9)),
+  };
+}
+
+/**
+ * W3-3：增量编码模块开关（缺省关闭）。注册表键 visualDiff.incremental
+ * （0/1 数值语义，与 codec.foveated 同律 —— 未注册 ⇒ getOrDefault 回声 0，
+ * 缺省路径零行为变化；index.ts 的铸入由集成接线）。
+ */
+export function incrementalEncodingEnabled(): boolean {
+  return kernelRegistry.getOrDefault('visualDiff.incremental', 0) > 0.5;
+}
+
+/**
+ * W3-3 纯函数：变化区域清单 → 补丁矩形清单（源图像素系）。
+ * 合并与外扩策略：
+ *   1. 按面积取 Top maxPatches（面积降序已是 computeDiffRegions 的输出序）；
+ *   2. bbox_normalized → 源图像素（codec.normalizedToPatchRect —— 三系换算
+ *      的单一权威源），四周外扩 expandPx（差分 480px 降采样的定位残差垫）；
+ *   3. 最小边垫到 minEdgePx（居中外扩 —— 亚块噪声不产碎补丁）；
+ *   4. 迭代合并：间隙 ≤ mergeGapPx（两轴同时）的矩形并成一块，至不动点
+ *      （邻接变化一次投递 —— 补丁数的上下文经济）；
+ *   5. clamp 进画布、按 (y,x) 阅读序输出。
+ * 纯函数、零副作用、脏输入（空清单/脏维度）返回 []。
+ */
+export function regionsToPatchRects(
+  regions: readonly DiffRegion[],
+  srcW: number,
+  srcH: number,
+  tuning?: Partial<Pick<LedgerTuning, 'expandPx' | 'mergeGapPx' | 'minEdgePx' | 'maxPatches'>>,
+): PatchRect[] {
+  const W = Math.floor(srcW), H = Math.floor(srcH);
+  if (!Array.isArray(regions) || regions.length === 0 || !(W >= 1) || !(H >= 1)) return [];
+  const t = cleanTuning(tuning);
+  const rects: PatchRect[] = [];
+  for (const r of regions.slice(0, t.maxPatches)) {
+    const n = r?.bbox_normalized;
+    if (!n || typeof n !== 'object') continue;
+    // 归一化 → 源图像素（往返恒等面），再外扩 + 最小边垫
+    let { x, y, w, h } = normalizedToPatchRect(
+      { x0: n.x0, y0: n.y0, x1: n.x1, y1: n.y1 }, W, H);
+    x -= t.expandPx; y -= t.expandPx; w += 2 * t.expandPx; h += 2 * t.expandPx;
+    if (w < t.minEdgePx) { const d = t.minEdgePx - w; x -= Math.floor(d / 2); w += d; }
+    if (h < t.minEdgePx) { const d = t.minEdgePx - h; y -= Math.floor(d / 2); h += d; }
+    // clamp 进画布（收口而非拒绝 —— 边缘补丁合法）
+    x = Math.max(0, Math.min(x, W - 1)); y = Math.max(0, Math.min(y, H - 1));
+    w = Math.max(1, Math.min(w, W - x)); h = Math.max(1, Math.min(h, H - y));
+    rects.push({ x, y, w, h });
+  }
+  // 迭代合并至不动点：两轴间隙都 ≤ mergeGapPx ⇒ 并块
+  const gap = t.mergeGapPx;
+  let merged = true;
+  while (merged && rects.length > 1) {
+    merged = false;
+    outer:
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        const a = rects[i]!, b = rects[j]!;
+        const gapX = Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w));
+        const gapY = Math.max(a.y - (b.y + b.h), b.y - (a.y + a.h));
+        if (gapX <= gap && gapY <= gap) {
+          const x1 = Math.max(a.x + a.w, b.x + b.w), y1 = Math.max(a.y + a.h, b.y + b.h);
+          rects[i] = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: x1 - Math.min(a.x, b.x), h: y1 - Math.min(a.y, b.y) };
+          rects.splice(j, 1);
+          merged = true;
+          break outer;
+        }
+      }
+    }
+  }
+  rects.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  return rects;
+}
+
+/**
+ * W3-3：默认分析管线（sharp）—— 与 computeDiffRegions 同一判决核心
+ * （diffRegionsFromRaw 共用）+ 行亮度序列喂 motionEstimator.estimateRowShift
+ * （只读导入 —— 滚动判定的物理事实源）。before === after（冷启动探测）时
+ * 恒返回 identical。
+ */
+async function defaultAnalyze(before: Buffer, after: Buffer): Promise<LedgerAnalysis> {
+  const sharp = await getSharp();
+  const afterMeta = await sharp(after).metadata();
+  const W = DIFF_WIDTH;
+  const H = Math.max(1, Math.round(W * (afterMeta.height! / afterMeta.width!)));
+  const [a, b] = await Promise.all([
+    sharp(before).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
+    sharp(after).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
+  ]);
+  const tileCols = 16;
+  const rows = Math.max(6, Math.round(tileCols * H / W));
+  const { regions, changedFraction } = diffRegionsFromRaw(a, b, W, H, tileCols, rows);
+  // 行亮度序列（行平均亮度 —— 行移估计的输入方言）
+  const lumA = rowLuminance(a, W, H), lumB = rowLuminance(b, W, H);
+  // 行移搜索窗自适应：max(16, H/6) —— 480px 差分行下 16:9 屏一行差分行 ≈ 4
+  // 源行，固定 ±16 窗只覆盖 ~64 源行（半屏滚轮一格都不够）；H/6 ≈ 45 行
+  // （1080p 下 ~180 源行）覆盖常见滚动距离，残差闸门防宽窗伪匹配。
+  const searchRange = Math.max(16, Math.round(H / 6));
+  const rowShift = before.equals(after) ? { shift: 0, residual: 1, bestInteger: 0 } : estimateRowShift(lumA, lumB, searchRange);
+  return {
+    width: afterMeta.width ?? 0,
+    height: afterMeta.height ?? 0,
+    regions,
+    changedPct: Math.round(changedFraction * 1000) / 10,
+    identical: changedFraction < 0.001,
+    rowShift,
+    diffRows: H,
+  };
+}
+
+/** W3-3：raw RGBA 缓冲 → 行平均亮度序列（行移估计的输入） */
+function rowLuminance(buf: Buffer, W: number, H: number): number[] {
+  const out = new Array<number>(H);
+  for (let y = 0; y < H; y++) {
+    let sum = 0;
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      sum += (buf[i] + buf[i + 1] + buf[i + 2]) / 3;
+    }
+    out[y] = sum / W;
+  }
+  return out;
+}
+
+/**
+ * W3-3：屏幕状态账本 —— 跨帧增量编码的状态机。
+ * 生命周期由调用方（集成接线）持有：实例化即启用（模块开关由调用方在更外层
+ * 检查 incrementalEncodingEnabled —— 账本本身是被动的确定性机器）。
+ * 一切方法绝不抛：分析/哈希/墙钟端口抛错 ⇒ 诚实降级为整帧关键帧。
+ */
+export class ScreenStateLedger {
+  private readonly ports: LedgerPorts;
+  private readonly tuning: LedgerTuning;
+  private prev: Buffer | null = null;
+  private prevW = 0;
+  private prevH = 0;
+  private prevHash: string | null = null;
+  /** 累计脏面积掩码（关键帧时刻的归一化分块网格 —— 记账的最小单元） */
+  private mask: Uint8Array = new Uint8Array(0);
+  private maskCols = 0;
+  private maskRows = 0;
+  private maskMarked = 0;
+  private generation = 0;
+  private keyframeAt = -Infinity;
+
+  constructor(ports: LedgerPorts = {}, tuning: Partial<LedgerTuning> = {}) {
+    this.ports = ports && typeof ports === 'object' ? ports : {};
+    this.tuning = cleanTuning(tuning);
+  }
+
+  /** 账本归零（会话边界 / 显式重置 —— prev/mask/代数全清） */
+  reset(): void {
+    this.prev = null;
+    this.prevW = 0;
+    this.prevH = 0;
+    this.prevHash = null;
+    this.mask = new Uint8Array(0);
+    this.maskCols = 0;
+    this.maskRows = 0;
+    this.maskMarked = 0;
+    this.generation = 0;
+    this.keyframeAt = -Infinity;
+  }
+
+  /** 可观测面：账本状态快照（投递协议与测试的诊断口） */
+  stats(): {
+    generation: number;
+    hasPrev: boolean;
+    prevDims: { width: number; height: number } | null;
+    cumulativeDirtyPct: number;
+    keyframeAgeMs: number | null;
+  } {
+    let age: number | null = null;
+    if (this.prev) {
+      try {
+        age = Math.max(0, (this.ports.now?.() ?? Date.now()) - this.keyframeAt);
+      } catch { age = null; }
+    }
+    return {
+      generation: this.generation,
+      hasPrev: this.prev !== null,
+      prevDims: this.prev ? { width: this.prevW, height: this.prevH } : null,
+      cumulativeDirtyPct: this.maskPct(),
+      keyframeAgeMs: age,
+    };
+  }
+
+  /**
+   * 帧入账：diff → 分诊判决（keyframe/patch/scroll/silent）。
+   * 分诊序（先重置信号、后经济信号 —— 惊异与 TTL 是硬约束）：
+   *   冷启动/分辨率突变/forceKeyframe/surpriseBits≥阈/TTL 到期/分析端口抛错
+   *     ⇒ keyframe（重置账本）；
+   *   同哈希快路径（哈希端口在场且与上一帧同纹）⇒ silent；
+   *   行移判定成立（大面积 + 平移假设可信 + 行移在 [minDy, maxDyFrac] 窗内）
+   *     ⇒ scroll（向量 + 新入内容条带；条带入账累计掩码）；
+   *   单帧脏面积 ≥ patchDirtyPct ⇒ keyframe（大变不补丁）；
+   *   无变化 ⇒ silent；
+   *   其余 ⇒ patch（合并外扩后的脏矩形；入账累计掩码，累计超阈 ⇒ keyframe）。
+   * opts.surpriseBits：世界快照的惊异信号（只读消费 —— 语义跳变压过像素证据）。
+   */
+  async ingest(
+    frame: Buffer,
+    opts?: { surpriseBits?: number; forceKeyframe?: boolean },
+  ): Promise<LedgerVerdict> {
+    const now = this.safeNow();
+    // 缓冲体检：非缓冲/空 ⇒ 诚实关键帧（无像素可记账，账本不动）
+    if (!Buffer.isBuffer(frame) || frame.length === 0) {
+      return this.verdict('keyframe', [], null, 0, 'empty frame buffer — ledger untouched, deliver full frame', 'invalid frame buffer');
+    }
+    const surprise = typeof opts?.surpriseBits === 'number' && Number.isFinite(opts.surpriseBits)
+      ? opts.surpriseBits : 0;
+
+    // 冷启动：首帧即关键帧（自分析探测维度 —— before=after 恒 identical）
+    if (!this.prev) {
+      const probe = await this.safeAnalyze(frame, frame);
+      if (!probe.ok) {
+        return this.verdict('keyframe', [], null, 0,
+          `cold-start probe failed (${probe.error}) — deliver full frame`, 'analyze port failed at cold start');
+      }
+      return this.adoptKeyframe(frame, probe.analysis, now, 'ledger cold start: first frame is the keyframe');
+    }
+
+    // 重置信号 ①：显式逃生口（模型请求整帧 / 补丁模式显式关闭）
+    if (opts?.forceKeyframe === true) {
+      const probe = await this.safeAnalyze(frame, frame);
+      if (probe.ok) {
+        return this.adoptKeyframe(frame, probe.analysis, now, 'forceKeyframe requested (escape hatch to full frame)');
+      }
+      return this.adoptKeyframeDimsFree(frame, now, 'forceKeyframe requested (escape hatch; dims unknown — probe failed)', 'cold probe failed at forceKeyframe');
+    }
+    // 重置信号 ②：惊异（世界快照的语义跳变 —— 压过一切像素证据）
+    if (surprise >= this.tuning.surpriseBitsThreshold) {
+      const probe = await this.safeAnalyze(frame, frame);
+      if (probe.ok) {
+        return this.adoptKeyframe(frame, probe.analysis, now, `surpriseBits ${surprise} >= ${this.tuning.surpriseBitsThreshold} (world snapshot surprise)`);
+      }
+      return this.adoptKeyframeDimsFree(frame, now, `surpriseBits ${surprise} reset (probe failed)`, 'cold probe failed at surprise reset');
+    }
+    // 重置信号 ③：TTL 到期（关键帧的最大年龄 —— P 帧链漂移的时间天花板）
+    if (now - this.keyframeAt >= this.tuning.ttlMs) {
+      const probe = await this.safeAnalyze(frame, frame);
+      if (probe.ok) {
+        return this.adoptKeyframe(frame, probe.analysis, now, `ledger TTL expired (${Math.round(now - this.keyframeAt)}ms >= ${this.tuning.ttlMs}ms)`);
+      }
+      return this.adoptKeyframeDimsFree(frame, now, 'ledger TTL expired (probe failed)', 'cold probe failed at TTL reset');
+    }
+    // 快路径：哈希端口在场且与上一帧同纹 ⇒ 静默（免差分；TTL/惊异已在前面的
+    // 重置信号里检查过，此处静默是安全的）
+    const hash = this.safeHash(frame);
+    if (hash !== null && hash === this.prevHash) {
+      return this.verdict('silent', [], null, 0, 'same frame hash as last ingested — nothing to deliver', null);
+    }
+
+    // 全量分析（diff + 行移）
+    const analyzed = await this.safeAnalyze(this.prev, frame);
+    if (!analyzed.ok) {
+      // 端口缺席/抛错 ⇒ 降级整帧关键帧（增量是增益不是依赖 —— 绝不带崩主路径）
+      const probe = await this.safeAnalyze(frame, frame);
+      if (probe.ok) {
+        return this.adoptKeyframe(frame, probe.analysis, now, `analyze port failed (${analyzed.error}) — degraded to full frame`, 'analyze port failed');
+      }
+      return this.adoptKeyframeDimsFree(frame, now, `analyze port failed (${analyzed.error}) — degraded to full frame`, 'analyze port failed (dims unknown)');
+    }
+    const a = analyzed.analysis;
+    const srcW = Math.floor(a.width), srcH = Math.floor(a.height);
+    if (!(srcW >= 1) || !(srcH >= 1)) {
+      return this.adoptKeyframeDimsFree(frame, now, 'analysis returned no usable dimensions — degraded to full frame', 'analysis dims missing');
+    }
+    // 重置信号 ④：分辨率突变（跨屏切换/窗口 resize —— 坐标系整体失效）
+    if (srcW !== this.prevW || srcH !== this.prevH) {
+      return this.adoptKeyframe(frame, a, now, `resolution changed ${this.prevW}x${this.prevH} -> ${srcW}x${srcH}`);
+    }
+
+    // 滚动分诊：大面积 + 平移假设可信 + 行移在有效窗内
+    const rs = a.rowShift;
+    if (rs && typeof rs.shift === 'number' && Number.isFinite(rs.shift) &&
+        typeof rs.residual === 'number' && Number.isFinite(rs.residual) &&
+        a.changedPct >= this.tuning.scrollMinChangedPct &&
+        Math.abs(rs.shift) >= 1 && rs.residual < this.tuning.scrollResidualMax && a.diffRows >= 4) {
+      const dyPx = Math.round((rs.shift * srcH) / a.diffRows);
+      const absDy = Math.abs(dyPx);
+      if (absDy >= this.tuning.scrollMinDyPx && absDy <= this.tuning.scrollMaxDyFrac * srcH) {
+        // 新入内容条带：内容下移（dy>0）⇒ 新内容从顶部进入；上移 ⇒ 底部进入
+        const band: PatchRect = dyPx > 0
+          ? { x: 0, y: 0, w: srcW, h: absDy }
+          : { x: 0, y: srcH - absDy, w: srcW, h: absDy };
+        this.markRects([band]);
+        if (this.maskPct() > this.tuning.cumulativeDirtyPct) {
+          return this.adoptKeyframe(frame, a, now,
+            `scroll of ${dyPx}px pushed cumulative dirty ${this.maskPct().toFixed(1)}% > ${this.tuning.cumulativeDirtyPct}% — keyframe reset`);
+        }
+        this.advancePrev(frame, hash, srcW, srcH);
+        return this.verdict('scroll', [band], { dyPx, shiftRows: rs.shift, residual: rs.residual },
+          a.changedPct, `content scrolled ${dyPx > 0 ? 'down' : 'up'} by ${absDy}px (residual ${rs.residual}); band = newly revealed strip at ${dyPx > 0 ? 'top' : 'bottom'}`, null);
+      }
+    }
+
+    // 大变分诊：单帧脏面积 ≥ patchDirtyPct ⇒ 关键帧（补丁的经济性下限）
+    if (a.changedPct >= this.tuning.patchDirtyPct) {
+      return this.adoptKeyframe(frame, a, now,
+        `single-frame dirty area ${a.changedPct}% >= ${this.tuning.patchDirtyPct}% — too big to patch`);
+    }
+
+    // 静默分诊：逐像素无变化
+    if (a.identical || a.regions.length === 0 || a.changedPct < 0.1) {
+      return this.verdict('silent', [], null, a.changedPct, 'frame visually identical to last ingested — nothing to deliver', null);
+    }
+
+    // 补丁分诊：脏矩形合并外扩 → 入账累计掩码 → 超阈重置
+    const rects = regionsToPatchRects(a.regions, srcW, srcH, this.tuning);
+    if (rects.length === 0) {
+      return this.verdict('silent', [], null, a.changedPct, 'no usable patch rects from diff regions — nothing to deliver', null);
+    }
+    const coverage = rects.reduce((s, r) => s + r.w * r.h, 0) / (srcW * srcH);
+    if (coverage > 0.5) {
+      return this.adoptKeyframe(frame, a, now,
+        `merged patch coverage ${(coverage * 100).toFixed(1)}% exceeds sanity bound — keyframe reset`);
+    }
+    this.markRects(rects);
+    if (this.maskPct() > this.tuning.cumulativeDirtyPct) {
+      return this.adoptKeyframe(frame, a, now,
+        `cumulative dirty ${this.maskPct().toFixed(1)}% > ${this.tuning.cumulativeDirtyPct}% — keyframe reset (P-frame drift ceiling)`);
+    }
+    this.advancePrev(frame, hash, srcW, srcH);
+    const list = rects.map(r => `(${r.x},${r.y},${r.w}x${r.h})`).join(' ');
+    return this.verdict('patch', rects, null, a.changedPct,
+      `dirty area ${a.changedPct}% < ${this.tuning.patchDirtyPct}% — deliver ${rects.length} patch(es): ${list}`, null);
+  }
+
+  // ── 内部：判决铸造与账本操作 ──
+
+  private verdict(
+    kind: IncrementalKind,
+    patches: PatchRect[],
+    scroll: ScrollReport | null,
+    changedPct: number,
+    reason: string,
+    degraded: string | null,
+  ): LedgerVerdict {
+    return {
+      kind,
+      patches,
+      scroll,
+      changedPct: typeof changedPct === 'number' && Number.isFinite(changedPct) ? changedPct : 0,
+      cumulativeDirtyPct: this.maskPct(),
+      generation: this.generation,
+      reason,
+      degraded,
+    };
+  }
+
+  /** 关键帧收养：prev ← frame、掩码重建、代数 +1、TTL 时钟重置 */
+  private adoptKeyframe(
+    frame: Buffer,
+    a: LedgerAnalysis,
+    now: number,
+    reason: string,
+    degraded: string | null = null,
+  ): LedgerVerdict {
+    const srcW = Math.floor(a.width), srcH = Math.floor(a.height);
+    if (!(srcW >= 1) || !(srcH >= 1)) {
+      return this.adoptKeyframeDimsFree(frame, now, `${reason} (dims dirty)`, degraded ?? 'analysis dims missing at keyframe adoption');
+    }
+    this.prev = frame;
+    this.prevW = srcW;
+    this.prevH = srcH;
+    this.prevHash = this.safeHash(frame);
+    this.maskCols = 32;
+    this.maskRows = Math.max(8, Math.round((32 * srcH) / srcW));
+    this.mask = new Uint8Array(this.maskCols * this.maskRows);
+    this.maskMarked = 0;
+    this.generation += 1;
+    this.keyframeAt = now;
+    return this.verdict('keyframe', [], null, 0, `${reason} — deliver full keyframe (generation ${this.generation})`, degraded);
+  }
+
+  /** 关键帧收养（维度未知 —— 分析端口双重失败时的兜底路径：掩码退化为全清洁的 1×1 网格） */
+  private adoptKeyframeDimsFree(frame: Buffer, now: number, reason: string, degraded: string): LedgerVerdict {
+    this.prev = frame;
+    this.prevW = 0;
+    this.prevH = 0;
+    this.prevHash = this.safeHash(frame);
+    this.maskCols = 1;
+    this.maskRows = 1;
+    this.mask = new Uint8Array(1);
+    this.maskMarked = 0;
+    this.generation += 1;
+    this.keyframeAt = now;
+    return this.verdict('keyframe', [], null, 0, `${reason} — deliver full keyframe (generation ${this.generation})`, degraded);
+  }
+
+  /** 非关键帧前进：prev ← frame（哈希可能缺席 —— 快路径降级为全量差分） */
+  private advancePrev(frame: Buffer, hash: string | null, srcW: number, srcH: number): void {
+    this.prev = frame;
+    this.prevHash = hash ?? this.safeHash(frame);
+    this.prevW = srcW;
+    this.prevH = srcH;
+  }
+
+  /** 累计掩码标记（源图像素矩形 → 归一化分块网格的覆盖块全置位） */
+  private markRects(rects: readonly PatchRect[]): void {
+    if (this.maskCols < 1 || this.maskRows < 1 || !(this.prevW >= 1) || !(this.prevH >= 1)) return;
+    for (const r of rects) {
+      const cx0 = Math.max(0, Math.min(this.maskCols - 1, Math.floor((r.x / this.prevW) * this.maskCols)));
+      const cy0 = Math.max(0, Math.min(this.maskRows - 1, Math.floor((r.y / this.prevH) * this.maskRows)));
+      const cx1 = Math.max(0, Math.min(this.maskCols, Math.ceil(((r.x + r.w) / this.prevW) * this.maskCols)));
+      const cy1 = Math.max(0, Math.min(this.maskRows, Math.ceil(((r.y + r.h) / this.prevH) * this.maskRows)));
+      for (let cy = cy0; cy < cy1; cy++) {
+        for (let cx = cx0; cx < cx1; cx++) {
+          const i = cy * this.maskCols + cx;
+          if (!this.mask[i]) { this.mask[i] = 1; this.maskMarked += 1; }
+        }
+      }
+    }
+  }
+
+  /** 累计脏面积占比（掩码分块计数 / 总块数 ×100） */
+  private maskPct(): number {
+    const total = this.maskCols * this.maskRows;
+    return total > 0 ? Math.round((this.maskMarked / total) * 1000) / 10 : 0;
+  }
+
+  /** 墙钟安全读（端口抛错 ⇒ Date.now 兜底 —— 绝不因端口带崩入账） */
+  private safeNow(): number {
+    try {
+      const v = this.ports.now?.();
+      return typeof v === 'number' && Number.isFinite(v) ? v : Date.now();
+    } catch {
+      return Date.now();
+    }
+  }
+
+  /** 哈希端口安全读（缺席/抛错/非串 ⇒ null —— 快路径诚实关闭） */
+  private safeHash(buf: Buffer): string | null {
+    try {
+      const v = this.ports.hashFrame?.(buf);
+      return typeof v === 'string' ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 分析端口安全执行（缺省内置 sharp 管线；抛错/脏返回 ⇒ {ok:false,error}） */
+  private async safeAnalyze(
+    before: Buffer,
+    after: Buffer,
+  ): Promise<{ ok: true; analysis: LedgerAnalysis } | { ok: false; error: string }> {
+    try {
+      const analyze = this.ports.analyze ?? defaultAnalyze;
+      const r = await analyze(before, after);
+      if (!r || typeof r !== 'object' || !(r.width >= 1) || !(r.height >= 1)) {
+        return { ok: false, error: 'analysis returned no usable result' };
+      }
+      return { ok: true, analysis: r };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ? String(e.message) : String(e) };
+    }
+  }
 }

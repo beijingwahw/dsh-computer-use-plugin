@@ -10,6 +10,7 @@
 // take_screenshot / click_mouse 100% 抛错。防腐层的意义正是在于：换底层
 // 只改本文件，全部工具无感继承。
 import type { Config } from './config';
+import { Config as ConfigSchema } from './config';
 import { serialize } from './ioMutex';
 import * as backend from './physicalBackend';
 import type { OverlayBox } from './physicalBackend';
@@ -131,6 +132,81 @@ export interface DisplayInfo {
 let dryRun = false;
 let windowDelegate: ((keyword: string) => Promise<void | { matched?: string | null }>) | null = null;
 
+// ─── P1-3（地基速修）：系统级热键黑名单 ───
+// Alt+F4 关窗、Meta/Win 唤起系统壳层、Ctrl+Alt+Delete —— 这些和弦不是「在应用内
+// 操作」，而是把动作射向 OS 壳层/会话管理器：逃逸出纯视觉闭环的验证范围
+//（点了之后桌面发生了什么，模型看不见也验证不了），且多数不可逆。执法点放在
+// system.pressHotkey（全部热键调用方的唯一漏斗：工具层/shaper/autonomy/replay），
+// 拒绝 = 直接 throw（与「白名单外的键名被拒绝」同方言，由各调用方 catch 降级）。
+
+/** config.hotkeyBlacklist 缺省镜像：schema 不可载时的降级值（单一事实源仍是 config.ts） */
+const FALLBACK_HOTKEY_BLACKLIST = 'alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete';
+
+/**
+ * config schema 的规范化调用面（与 ioMutex.P1-1 同口径）：schemastery 运行时可调用，
+ * 项目内 TS 类型未暴露调用签名 —— 单点窄函数断言，不做 as-any 走私。
+ */
+type SchemaDefaults = (input?: Record<string, unknown>) => { hotkeyBlacklist?: unknown };
+
+/** 缺省黑名单：单一事实源是 config schema 声明的 hotkeyBlacklist 缺省 */
+let hotkeyBlacklistCsv: string = (() => {
+  try {
+    const v = (ConfigSchema as unknown as SchemaDefaults)({}).hotkeyBlacklist;
+    return typeof v === 'string' ? v : FALLBACK_HOTKEY_BLACKLIST;
+  } catch {
+    return FALLBACK_HOTKEY_BLACKLIST; // schema 调用失败：降级镜像值，绝不阻断装载
+  }
+})();
+
+/** P1-3 拒绝标记（工具层据此区分黑名单拦截与白名单拒绝/底层故障） */
+export const HOTKEY_BLACKLIST_MARKER = '[SYSTEM_HOTKEY_BLOCKED]';
+
+/** 键名等价归一表：win/meta/cmd/cmdsuper/super 同指 OS 壳层修饰键；长名折叠为白名单短名 */
+const HOTKEY_ALIASES: Record<string, string> = {
+  win: 'meta', meta: 'meta', cmd: 'meta', command: 'meta', super: 'meta', cmdsuper: 'meta',
+  escape: 'esc', control: 'ctrl', del: 'delete', return: 'enter',
+};
+
+/** 单键归一：小写 + 去空白 + 别名折叠（'Win'/'CMD'/'Escape' → 'meta'/'meta'/'esc'） */
+function normalizeHotkeyKey(k: unknown): string {
+  const n = String(k ?? '').trim().toLowerCase();
+  return HOTKEY_ALIASES[n] ?? n;
+}
+
+/**
+ * 黑名单命中裁决（纯函数，测试直测）：命中返回触发的黑名单条目原文，未命中返回 null。
+ * 两条判定律（与 config.hotkeyBlacklist 描述一致）：
+ *   1) 和弦整体归一（小写+别名折叠+排序无关）后与含 '+' 的条目全等 —— 如 'alt+f4'；
+ *   2) 和弦包含任一单键条目 —— 如 'meta'/'win'（任何含 OS 壳层修饰键的组合都拒）。
+ * 空黑名单（空串/全空白条目）= 全放行（部署明示不设防）。
+ */
+export function hotkeyBlacklistHit(keys: readonly unknown[], blacklistCsv: string): string | null {
+  const csv = String(blacklistCsv ?? '').trim();
+  if (!csv) return null; // 空黑名单 = 全放行
+  const normKeys = (Array.isArray(keys) ? keys : []).map(normalizeHotkeyKey).filter(Boolean);
+  const chordSig = [...normKeys].sort().join('+');
+  const keySet = new Set(normKeys);
+  for (const raw of csv.split(',')) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry.includes('+')) {
+      // 整体和弦条目：同律归一后全等比较（'cmd+q' 与 ['meta','Q'] 命中）
+      const sig = entry.split('+').map(normalizeHotkeyKey).filter(Boolean).sort().join('+');
+      if (sig && sig === chordSig) return raw.trim();
+    } else {
+      // 单键条目：和弦含此键即拒（'meta' ⇒ ['ctrl','shift','meta'] 也拒）
+      const single = normalizeHotkeyKey(entry);
+      if (single && keySet.has(single)) return raw.trim();
+    }
+  }
+  return null;
+}
+
+/** 程序化判别：这次 pressHotkey 失败是不是黑名单拦截（工具层据此给出针对性 next_step） */
+export function isHotkeyBlacklistError(e: unknown): boolean {
+  return e instanceof Error && e.message.includes(HOTKEY_BLACKLIST_MARKER);
+}
+
 function guardDryRun(action: string, detail: unknown): boolean {
   if (!dryRun) return false;
   console.log(`[dry-run] ${action}`, detail);
@@ -141,6 +217,8 @@ export const system = {
   /** 应用插件配置；D-5 路径下仅 dryRun 生效（服务端无鼠标速度概念） */
   async configure(config: Config): Promise<void> {
     dryRun = config.dryRun;
+    // P1-3：热键黑名单随配置接线（cordis.yml 的 hotkeyBlacklist 直达执法点）
+    if (typeof config.hotkeyBlacklist === 'string') hotkeyBlacklistCsv = config.hotkeyBlacklist;
     if (forceLegacy()) {
       try {
         const nj = await _getNutJS();
@@ -312,7 +390,18 @@ export const system = {
   },
 
   async pressHotkey(keys: string[]): Promise<void> {
+    // P1-3：dryRun 照旧只记录（不执行 = 无拦截必要；提示词调试要能看到完整热键轨迹）
     if (guardDryRun('pressHotkey', { keys })) return;
+    // P1-3：系统级热键黑名单执法 —— 归一和弦命中条目 / 含黑名单单键 ⇒ 拒绝。
+    // 在 legacy 与 D-5 两条路径之前拦截（逃逸动作哪条躯体都不许碰）
+    const hit = hotkeyBlacklistHit(keys, hotkeyBlacklistCsv);
+    if (hit !== null) {
+      throw new Error(
+        `${HOTKEY_BLACKLIST_MARKER} 系统级热键被黑名单拦截: chord "${keys.join('+')}" ` +
+        `hits blacklist entry "${hit}" — system-level hotkeys (window close / OS shell) are ` +
+        `rejected outright; use regular channels (click UI controls / switch_window / open_url)`,
+      );
+    }
     if (forceLegacy()) {
       const [nj, ...mapped] = await Promise.all([
         _getNutJS(),

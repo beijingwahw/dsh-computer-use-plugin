@@ -9,6 +9,7 @@ import { focusTracker } from '../focusTracker.js';
 import { semanticConfirm } from '../textReader.js';
 import { matchesRiskPatterns } from '../riskGate.js';
 import { assertActionAllowed } from './actionGate.js';
+import { gateByReversibility, laneAnchorOf } from './clickMouse.js';
 export function createTypeTextTool(config) {
     return defineTool({
         name: 'type_text',
@@ -56,6 +57,15 @@ export function createTypeTextTool(config) {
                 }, null, 2);
             }
             try {
+                // ── W5-0（C 接线 · W4-3 S5）：可逆性分道 —— text-input 恒落 compensable ──
+                // type_text 无审批令牌面（危险输入已被上方敏感闸拦截）⇒ 非执法路径：
+                // 只分道注记不铸预案（无 beginAttempt/consume 结算语义的铸造 = 无结算
+                // 的在途预案，诚实注记更安全 —— 见 gateByReversibility 法条）。开关关
+                //（缺省）⇒ applied:false，输出锚点逐字节旧路。
+                const laneGate = await gateByReversibility(config, {
+                    tool: 'type_text',
+                    enforceEscrow: false,
+                });
                 // 效果验证（焦点区域放大）：输入的变化几乎总发生在「最近点击的位置」——
                 // 焦点追踪器把上次点击坐标隐式传给本工具，文字出现这类局部变化
                 // 在全屏指纹里撑不动距离，但在焦点区域指纹里是巨变。
@@ -120,6 +130,8 @@ export function createTypeTextTool(config) {
                         char_count: text.length,
                         cleared_existing: clearFirst,
                         input_state: clearFirst ? 'Replaced all previous content' : 'Appended to existing content',
+                        // W5-0（C 接线）：可逆性分道注记（compensable 快照；未分道缺席）
+                        reversibility_lane: laneAnchorOf(laneGate),
                         effect: effect ? {
                             detected: effect.detected,
                             scale: effect.scale,

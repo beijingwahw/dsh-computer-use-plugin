@@ -67,8 +67,11 @@ export class PhysicalExecutionAdapterImpl {
             return { ok: true, value: undefined };
         }
         try {
-            const key = this.state.keyPromise ?? (this.state.keyPromise = this.loadKey());
-            this.state.key = await key;
+            // 与 loadKey 同律：await 期间 reset()/二次 configure 可能换掉 state ——
+            // 只写回快照，绝不把旧配置的密钥写进新 state（或写进 null 抛 TypeError）
+            const state = this.state;
+            const key = state.keyPromise ?? (state.keyPromise = this.loadKey());
+            state.key = await key;
             return { ok: true, value: undefined };
         }
         catch (e) {
@@ -103,6 +106,13 @@ export class PhysicalExecutionAdapterImpl {
                 // Python 端会拒绝并返回 unauthorized —— 这是诚实降级
             }
         }
+        // await 期间 reset() 可能已拆除 state —— 与 call() 同律诚实降级
+        if (!this.state) {
+            return {
+                ok: false,
+                error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+            };
+        }
         // 健康检查不强制 Cap Token（Python 端 allow_no_token_endpoints 含 /v1/health）
         const result = await microFetch(this.state.httpClientConfig, '/health', {
             method: 'GET',
@@ -126,6 +136,8 @@ export class PhysicalExecutionAdapterImpl {
             x: args.x, y: args.y,
             button: args.button ?? 'left',
             dry_run: args.dryRun ?? false,
+            // W4-5：undefined ⇒ JSON 序列化丢键 ⇒ 请求字节与现状等同（兼容铁律）
+            surface: args.surface,
         });
     }
     async typeText(args) {
@@ -133,6 +145,7 @@ export class PhysicalExecutionAdapterImpl {
             text: args.text,
             clear_first: args.clearFirst ?? false,
             dry_run: args.dryRun ?? false,
+            surface: args.surface, // W4-5
         });
     }
     async scrollPage(args) {
@@ -140,12 +153,14 @@ export class PhysicalExecutionAdapterImpl {
             direction: args.direction,
             amount: args.amount,
             dry_run: args.dryRun ?? false,
+            surface: args.surface, // W4-5
         });
     }
     async pressHotkey(args) {
         return this.call('/press_hotkey', {
             keys: args.keys,
             dry_run: args.dryRun ?? false,
+            surface: args.surface, // W4-5
         });
     }
     async dragMouse(args) {
@@ -153,6 +168,7 @@ export class PhysicalExecutionAdapterImpl {
             start: args.start,
             end: args.end,
             dry_run: args.dryRun ?? false,
+            surface: args.surface, // W4-5
         });
     }
     /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
@@ -161,6 +177,7 @@ export class PhysicalExecutionAdapterImpl {
             x: args.x, y: args.y,
             duration_ms: args.durationMs ?? 0,
             dry_run: args.dryRun ?? false,
+            surface: args.surface, // W4-5
         });
     }
     async takeScreenshot(args) {
@@ -179,7 +196,13 @@ export class PhysicalExecutionAdapterImpl {
             want_salience: args?.wantSalience ?? false,
             // Σ-5：undefined ⇒ JSON.stringify 丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
             display: args?.display,
+            // W4-5：同律（缺省键缺席 ⇒ 兼容铁律）
+            surface: args?.surface,
         });
+    }
+    /** W4-5 移动 Surface：adb 设备清单（真机缺席 ⇒ 空清单 + degraded + 真实原因） */
+    async getDevices() {
+        return this.callGet('/devices');
     }
     /** 感知辅助（D-1 工具层接线）：当前鼠标位置（全屏像素） */
     async getCursor() {
@@ -207,6 +230,13 @@ export class PhysicalExecutionAdapterImpl {
         }
         if (this.state.config.enableAuth !== false && !this.state.key) {
             await this.init();
+        }
+        // await 期间 reset() 可能已拆除 state —— 与 call() 同律诚实降级
+        if (!this.state) {
+            return {
+                ok: false,
+                error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+            };
         }
         const result = await microFetch(this.state.httpClientConfig, path, { method: 'GET' });
         if (!result.ok) {
@@ -273,7 +303,7 @@ export class PhysicalExecutionAdapterImpl {
             source: args?.source ?? 'auto',
             region: args?.region,
             funnel_ceiling: args?.funnelCeiling ?? 'L3',
-        });
+        }, args?.signal);
     }
     async switchWindow(args) {
         return this.call('/switch_window', { keyword: args.keyword });
@@ -314,7 +344,7 @@ export class PhysicalExecutionAdapterImpl {
         return key;
     }
     /** 通用 POST 调用 —— 处理 Cap Token / 错误转换 / Result 包装 */
-    async call(path, body) {
+    async call(path, body, signal) {
         if (!this.state) {
             return {
                 ok: false,
@@ -329,9 +359,17 @@ export class PhysicalExecutionAdapterImpl {
                 // 这样调用方能看到准确的 unauthorized 错误而非 internal_error
             }
         }
+        // await 期间 reset() 可能已拆除 state —— 运行层永不抛错，按未配置诚实降级
+        if (!this.state) {
+            return {
+                ok: false,
+                error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+            };
+        }
         const result = await microFetch(this.state.httpClientConfig, path, {
             method: 'POST',
             body,
+            ...(signal ? { signal } : {}),
         });
         if (!result.ok) {
             return { ok: false, error: result.error };

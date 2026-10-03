@@ -28,6 +28,17 @@ function nonEmptyStr(v) {
     return typeof v === 'string' && v.length > 0;
 }
 /**
+ * Laplace 平滑惊讶（bits）—— 惊讶计价的唯一实现，绝不复制。
+ * p = (count+α)/(total+α·(distinct+1))：未见过的目的地仍有残余概率 ——
+ * 模型绝不把「我没见过」伪装成「这不可能」。surprise() 方法（单转移报告）
+ * 与 surpriseSpectrum()（纪元 Κ 谱聚合）共用本函数：两处口径分毫不得漂移，
+ * 改这里即同时改两处 —— 这就是「复用现有内部惊讶计算」的落点。
+ */
+function smoothedSurpriseBits(total, distinct, count) {
+    const p = (count + SURPRISE_ALPHA) / (total + SURPRISE_ALPHA * (distinct + 1));
+    return -Math.log2(p);
+}
+/**
  * 转移动作键：动作在动力学里的身份。
  * 指针动作 ⇒ kind + 量化区域（'click_mouse@22' —— 点哪一片，不记精确像素：
  * 精确坐标是噪声，区域是信号）；无坐标动作 ⇒ kind 本身。
@@ -214,13 +225,11 @@ export class InMemoryWorldModel {
         if (!stats)
             return { ok: true, value: { bits: 0, novel: true, evidence: 0 } };
         const count = stats.next.get(actualTypeId) ?? 0;
-        // Laplace 平滑：未见过的目的地仍有残余概率（α/(total+α(|distinct|+1))）——
-        // 模型绝不把「我没见过」伪装成「这不可能」
-        const p = (count + SURPRISE_ALPHA) / (stats.total + SURPRISE_ALPHA * (stats.next.size + 1));
+        // Laplace 平滑（唯一实现见 smoothedSurpriseBits，与纪元 Κ 谱聚合同源）
         return {
             ok: true,
             value: {
-                bits: Math.round(-Math.log2(p) * 1000) / 1000,
+                bits: Math.round(smoothedSurpriseBits(stats.total, stats.next.size, count) * 1000) / 1000,
                 novel: count === 0,
                 evidence: stats.total,
             },
@@ -260,12 +269,16 @@ export class InMemoryWorldModel {
             return bad('snapshot', 'types and transitions must be arrays');
         }
         const typeIds = new Set();
+        let maxSeq = 0; // types 里 screen-N 序号的最大值（计数器同步用，见水合尾部）
         for (const t of s.types) {
             const ty = t;
             if (!ty || typeof ty.id !== 'string' || !ty.id || typeIds.has(ty.id)) {
                 return bad('snapshot.types', `type id must be unique non-empty string, got ${JSON.stringify(ty?.id)}`);
             }
             typeIds.add(ty.id);
+            const seq = /^screen-(\d+)$/.exec(ty.id)?.[1];
+            if (seq !== undefined)
+                maxSeq = Math.max(maxSeq, Number.parseInt(seq, 10));
             if (!Array.isArray(ty.tokens) || ty.tokens.length === 0 || !ty.tokens.every((x) => typeof x === 'string')) {
                 return bad('snapshot.types', `type "${ty.id}" tokens must be non-empty string array`);
             }
@@ -320,8 +333,55 @@ export class InMemoryWorldModel {
             const next = new Map(tr.next);
             this.transitions.set(`${tr.from}|${tr.action}`, { total: tr.total, success: tr.success, next });
         }
+        // 计数器同步到已水合 id 的最大序号（与 merge 的同步律同源）—— 否则快照
+        // 携带偏小 typeCounter 时，下次铸造会同号覆写既有类型（members/tokens 静默丢失）
         this.typeCounter = typeof s.typeCounter === 'number' && Number.isFinite(s.typeCounter)
-            ? Math.max(0, Math.floor(s.typeCounter)) : this.types.size;
+            ? Math.max(0, Math.floor(s.typeCounter), maxSeq) : Math.max(this.types.size, maxSeq);
         return { ok: true, value: undefined };
+    }
+}
+// ─── 纪元 Κ（惊异课程）：惊异谱 ───
+/**
+ * 世界模型的惊异谱：按屏幕类型聚合转移表惊讶，产出 { [screenType]: 平均 bits }。
+ * 聚合口径：每类型的全部出弧观察按次数加权平均 —— 类型 T 的谱值 =
+ * Σ(count × Laplace 平滑惊讶) / Σcount，逐转移惊讶经 smoothedSurpriseBits
+ * 计算（与 surprise() 方法同源同实现，绝不复制口径）。
+ * 只入册而无出弧证据的类型记 0（「见过这屏、没见过它去哪」= 对其动力学无
+ * 主张的诚实读数，不是零惊讶的伪装 —— 谱消费方自行决定探索权重）。
+ * 纯函数（零副作用 —— 经 exportSnapshot 只读快照聚合，不动模型半分）；
+ * 异常诚实铁律：model 缺席 / 非 InMemoryWorldModel / 空模型 / 聚合异常
+ * ⇒ 空对象（诚实无知，绝不铸造幽灵谱，绝不 throw）。
+ */
+export function surpriseSpectrum(model) {
+    try {
+        if (!(model instanceof InMemoryWorldModel))
+            return {};
+        const snap = model.exportSnapshot();
+        const sums = new Map();
+        for (const ty of snap.types)
+            sums.set(ty.id, { bits: 0, n: 0 });
+        for (const tr of snap.transitions) {
+            if (typeof tr.from !== 'string' || tr.from === '')
+                continue;
+            if (!Number.isFinite(tr.total) || tr.total < 1 || !Array.isArray(tr.next))
+                continue;
+            const acc = sums.get(tr.from) ?? { bits: 0, n: 0 };
+            const distinct = tr.next.length;
+            for (const [to, count] of tr.next) {
+                if (typeof to !== 'string' || !Number.isFinite(count) || count < 1)
+                    continue;
+                acc.bits += count * smoothedSurpriseBits(tr.total, distinct, count);
+                acc.n += count;
+            }
+            sums.set(tr.from, acc);
+        }
+        const out = {};
+        for (const [id, acc] of sums) {
+            out[id] = acc.n > 0 ? Math.round((acc.bits / acc.n) * 1000) / 1000 : 0;
+        }
+        return out;
+    }
+    catch {
+        return {}; // 谱聚合绝不 throw（运行层铁律）
     }
 }

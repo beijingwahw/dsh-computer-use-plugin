@@ -15,8 +15,14 @@
 //   5. 分词结果有界缓存（纪元 Δ）—— GoalSpec 关键词按对象 WeakMap 缓存、字符串
 //      分词走 1024 条上限的 Map：同输入同输出（行为透明），跨步复用的判据/标签/
 //      技能描述零重算；缓存数组只读共享，调用方不得原地修改。
+//   6. 并列破平（纪元 Η-4）—— 判据匹配得分并列带（差 < tieGap，与 uncertain 判据
+//      同带）内的候选用 Φ-9 反事实效用分（counterfactual.scoreOptions 真实 API：
+//      U = 0.5·progress + 0.3·info − 0.2·risk，重复动作折价含内）择优；效用并列取
+//      信息增益高者、再并列取带内输入次序（确定性稳定序兜底，同输入同输出）——
+//      效用全并列时保持旧确定性排序（得分→元素置信→原序）逐字节不变。
 import { getGlmClient, isGlmConfigured } from '../vlm/glmClient.js';
 import { kernelRegistry } from '../kernel/registry.js';
+import { scoreOptions, actionSignature } from './counterfactual.js';
 // ─── 常量 ───
 /** 元素匹配置信门槛：最佳候选得分低于此值 ⇒ uncertain（请云脑或如实标注） */
 const MATCH_CONFIDENT = 0.55;
@@ -245,6 +251,63 @@ function buildCandidates(elements, unmet) {
     return out;
 }
 /**
+ * 纪元 Η（Η-4 候选并列破平）：把并列带（与最佳得分差 < tieGap —— 与 uncertain 的
+ * 并列判据同带）内的候选交给 Φ-9 反事实沙盘择优 —— scoreOptions 真实 API：
+ *   U = 0.5·progressProbability + 0.3·informationGain − 0.2·risk
+ * （progress = 目标关键词与元素标签的重合率 / info = 陌生目标 +0.1、已试过 click
+ * 折价 0.1 / risk = benign 0.05、sensitive 0.5、destructive 1），胜者挪到带首，带内
+ * 其余保持原序 —— 全确定性稳定序（同输入同输出，同 seed 可复现）。
+ *
+ * 保序律（红律）：效用全并列时 scoreOptions 取带内输入次序在前者 —— 带内输入序
+ * 即旧确定性排序（得分→元素置信→原序），故并列破平对「效用同分」的既有路径
+ * 逐字节零变化（良性/常规置信候选的选优结果不因本函数在场而漂移）。
+ * 防御律：任何异常 ⇒ 原序直通（绝不抛）；带内不足 2 人 ⇒ 原样返回。
+ */
+function breakTieBand(candidates, spec, snapshot, history) {
+    try {
+        if (!Array.isArray(candidates) || candidates.length < 2)
+            return candidates;
+        const gap = kernelRegistry.getOrDefault('policy.tieGap', TIE_GAP);
+        const top = candidates[0].score;
+        let bandEnd = 1;
+        while (bandEnd < candidates.length && top - candidates[bandEnd].score < gap)
+            bandEnd += 1;
+        if (bandEnd <= 1)
+            return candidates;
+        const band = candidates.slice(0, bandEnd);
+        // 沙盘动作：与本中枢 ② 级真实产出同构（kind/target/utility=元素置信/风险词法分层）
+        // —— 保证沙盘效用分与真实执行动作的口径一致
+        const sandbox = band.map(c => ({
+            kind: 'click',
+            target: {
+                bbox: c.element.bbox,
+                center: c.element.center,
+                label: typeof c.element.label === 'string' ? c.element.label : '',
+            },
+            rationale: '并列破平沙盘动作（不执行）',
+            expectedEffect: '仅供 Φ-9 反事实效用评分',
+            utility: clamp01(c.element.confidence),
+            riskTier: classifyClickRisk(c.element.label),
+        }));
+        const plan = scoreOptions(sandbox, {
+            goalKeywords: extractGoalKeywords(spec),
+            snapshot: snapshot,
+            triedActionKeys: (Array.isArray(history) ? history : []).map(h => actionSignature(h?.action)),
+        });
+        if (!plan)
+            return candidates;
+        // 胜者回位：scoreOptions 的 chosen 是 sandbox 数组内的同一引用（indexOf 恒命中）
+        const winIdx = sandbox.indexOf(plan.chosen.action);
+        if (winIdx <= 0)
+            return candidates; // 胜者已是带首（含效用并列取输入序的保序情形）
+        const reordered = [band[winIdx], ...band.slice(0, winIdx), ...band.slice(winIdx + 1)];
+        return [...reordered, ...candidates.slice(bandEnd)];
+    }
+    catch {
+        return candidates; // 并列破平是裁决增强不是裁决前提 —— 异常时原序直通
+    }
+}
+/**
  * 僵局探测：取 history 尾部连续 no_effect 段，段内存在「同 kind 相邻成对」的
  * 最近一段 ⇒ 返回 { kind, count }（同类动作连续 ≥2 次无效果）。
  */
@@ -433,7 +496,8 @@ export class PolicyEngine {
                 };
             }
             // ② 判据匹配点击：未达成判据的关键词在可交互元素标签上的最佳覆盖
-            const candidates = buildCandidates(elements, unmet);
+            //    （纪元 Η-4：并列带内经 Φ-9 反事实效用分破平 —— 见 breakTieBand）
+            const candidates = breakTieBand(buildCandidates(elements, unmet), spec, snapshot, history);
             if (candidates.length > 0) {
                 const best = candidates[0];
                 const second = candidates[1];

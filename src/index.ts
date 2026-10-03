@@ -21,7 +21,8 @@ import { disposeOcr, setSemanticVlmOptions } from './textReader';
 import {
   configureVlm, isGlmConfigured,
   resetGlmClient, getGlmClient,
-  ConnectionStore, adoptLocalVision, startOnboarding,
+  ConnectionStore, adoptLocalVision, startOnboarding, vlmMeter,
+  resetVerifyGateBudget,
   type VisionConnection, type AdoptedLocal, type OnboardingHandle,
 } from './vlm/index';
 import {
@@ -32,6 +33,8 @@ import {
   KernelCalibrator,
   EvolutionConductor,
 } from './kernel/index';
+import { configureIoTimeout } from './ioMutex';
+import { notary, notaryAutoAnchorIfConfigured } from './notary/index';
 import { stopBackend } from './physicalBackend';
 import { setImageDeliveryStore } from './imageDelivery';
 import { swarm } from './swarm';
@@ -46,13 +49,20 @@ import { quantum, UiExtractorWhitebox } from './quantumSense';
 // 单文件工具（askScreen —— 测试装载器已验证干净）保持静态引入。
 import { createAskScreenTool } from './tools/askScreen';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards/index';
-import { resetPopupBelief, resetPopupSprt } from './popupDetector';
+import { resetPopupBelief, resetPopupSprt, setFreshnessPort, defaultFreshnessPort } from './popupDetector';
+// W3-0（W2-5/W2-1 接线）：恢复疗效账本单例（启动复载/卸载落盘）+ 离线批准
+// 队列单例（睡眠晨报的待批清单只读摘要面）。两者均为纯下游模块（node:crypto/
+// node:fs 级依赖），入口静态引入零回路。
+import { recoveryEfficacy } from './recoveryEfficacy';
+import { approvalQueue } from './approval';
 import { resetElementTracker } from './elementTracker';
 import { oscillationTracker } from './oscillationTracker';
 import { focusTracker } from './focusTracker';
 import { resetDiffPersistence } from './visualDiff';
 import { onToolPost } from './guards/hooks';
-import { runOrchestrator, ACTOR_SYSTEM_PROMPT, createActor } from './orchestrator';
+import { runOrchestrator, ACTOR_SYSTEM_PROMPT, createActor, resetChannelArbitration } from './orchestrator';
+import { selfModel, configureSelfModel, resetSelfModel, sceneBucketFromFingerprint } from './selfmodel/index';
+import { classifyResult } from './resultContract';
 // ChatFn 是纯类型 —— Node strip 型装载器下按值导入会链接炸（swarmDispatch
 // 同类地雷），拆为 import type（类型擦除后零运行时差）。
 import type { ChatFn as PlannerChatFn } from './orchestrator';
@@ -61,6 +71,23 @@ import {
   emitCognitionPlanReady, mintIntentPlanReady, COGNITION_PLAN_READY_EVENT,
 } from './cognitionEvents';
 import { wireDoctorVerdictChannel } from './doctorChannel';
+// W5-0（A/C/D 接线 · 第四批收官）：增量账本内核键铸造前的总闸读取面 + 可逆性
+// 注册表武装物料 + 技能联邦组合根接线 + 拍卖证据端口类型。ConvergenceEvidence
+// 是纯类型 —— Node strip 装载器下按值导入会链接炸（ChatFn/SubAgentSpec 同类
+// 地雷），拆 import type（擦除后零运行时差）。
+import { reversibilityRegistry } from './riskGate';
+import { wireSwarmSkillFederation } from './skillFederation';
+import type { ConvergenceEvidence } from './subAgent';
+// 纪元 Υ（认知睡眠周期）：会话终了的离线整合编排器（六幕剧 + 幂等水位线 +
+// 晨报落盘）。路径显式指到文件 —— 目录导入在 Node strip 装载器是
+// ERR_UNSUPPORTED_DIR_IMPORT（Λ-4 同律）；selfAudit 是纯函数面（其模块只有
+// type-only 依赖，运行时零耦合），auditTrajectory 值导入直接作 deps 注入。
+import { runSleepCycle } from './sleep/index';
+import { auditTrajectory } from './autonomy/selfAudit';
+// W4-0（D 接线）：睡眠第④幕校准旁挂的收敛面（W2-6 交付 API —— 28 臂确定性
+// Thompson 落值；seed = journal 水位线，同账本态跨夜重放一致）。纯下游模块
+//（kernel/registry 依赖已在加载图内），入口静态引入零回路。
+import { convergeMemoryOps } from './knowledge/memoryOps';
 
 export { Config } from './config';
 
@@ -137,6 +164,29 @@ const AUTONOMY_RUN_PROMPT = `
 `;
 
 export const name = 'dsh-computer-use-plugin';
+
+/** 纪元 Υ：睡眠保险丝（ms）—— 卸载路径上的认知睡眠超此限即视为完成
+ *（宁短勿挂：runSleepCycle 内部另有同值逐幕预算，超时只留半程晨报）。 */
+const SLEEP_FUSE_MS = 2000;
+
+// ─── W4-0（D 接线）：memoryOpsConverger 的种子源 —— journal 水位线 ───
+
+/**
+ * W4-0（D）：journal 状态指纹 `条数:链尖前16`（sleep.computeWatermark 同源式 ——
+ * 该函数是 sleep 模块私有面，此处按同一口径就地铸种子；条数与尾哈希双敏感，
+ * 任何 append 都前移指纹 ⇒ 同账本态同种子，跨夜重放一致）。journal 面故障 ⇒
+ * 'unavailable'（诚实降级：非确定性种子，报告 seed 字段如实申报）。
+ */
+function journalWatermarkSeed(): string {
+  try {
+    const entries = journal.list(false);
+    if (!Array.isArray(entries) || entries.length === 0) return '0:empty';
+    const tip = journal.tip;
+    return `${entries.length}:${typeof tip === 'string' && tip !== '' ? tip.slice(0, 16) : 'no-tip'}`;
+  } catch {
+    return 'unavailable';
+  }
+}
 
 // 必需依赖：工具注册服务。可选服务（systemPrompt / llm / agents）在使用点用 ctx.get() 查询
 export const inject = ['tools'];
@@ -429,6 +479,10 @@ export async function apply(ctx: Context, config: Config) {
         if (ev?.type !== 'user/message') return;
         const text = (ev.data?.content ?? []).map((p: any) => p?.text ?? '').join('');
         journal.markTaskStart(String(text).slice(0, 200) || 'user turn');
+        // W2-0（C 接线）：Zoom 复核预算（W1-8 P3）随任务边界清零 —— 用户回合即
+        // 任务切片（Y6 同律），上一回合的复核用量不雪崩进下一回合（旁路义务，
+        // 异常吞掉）。
+        try { resetVerifyGateBudget(); } catch { /* 预算复位是旁路义务 */ }
         // 纪元 Ξ（Ξ-A）：用户消息钩子内嵌编排器节流 tick —— conductor.enabled
         // false（缺省）⇒ maybeTick 恒空；节流窗内恒空；tick 有产出才落存档。
         // 异常全吞：进化是旁路义务，任何故障绝不炸用户消息钩子。
@@ -447,6 +501,40 @@ export async function apply(ctx: Context, config: Config) {
 
   // 1. 配置注入系统层与上下文层（一切魔法数字由 cordis.yml 决定）
   system.configure(config);
+  // 地基速修（P1-1）：IO 排队超时宿主接线 —— cordis.yml 的 ioTimeoutMs 灌入
+  // serialize 缺省（0 = 无限等旧行为；挂死调用不再永久堵塞全局队列）。
+  configureIoTimeout(config.ioTimeoutMs);
+  // 纪元 Γ（注视经济）：中央凹编码的宿主接线 —— config 三键铸入内核注册表，
+  // codec 消费面经 kernelRegistry.getOrDefault 读取（未注册 = 回声缺省的均质旧路径）。
+  // 入册后三键即可被内核进化（Ξ）在 [min,max] 区间内调参；重复 apply 幂等（值存续）。
+  kernelRegistry.register({ key: 'codec.foveated', organ: 'perception', defaultValue: config.foveatedEncoding ? 1 : 0, min: 0, max: 1, note: '纪元 Γ：中央凹加权编码开关（0/1 数值语义，>0.5 为真；config.foveatedEncoding 铸入）' });
+  kernelRegistry.register({ key: 'codec.foveaSize', organ: 'perception', defaultValue: config.foveaSize, min: 0.05, max: 1, note: '纪元 Γ：中央凹方窗边长占编码图比例（config.foveaSize 铸入）' });
+  kernelRegistry.register({ key: 'codec.foveaPeripheryScale', organ: 'perception', defaultValue: config.foveaPeripheryScale, min: 1, max: 8, note: '纪元 Γ：外围降采样因子（config.foveaPeripheryScale 铸入）' });
+  // 纪元 Π（行为公证账本）：宿主装配 —— TSA 端点与锚链 JSONL 路径灌入单例
+  //（endpoint 空 = 本地时间锚零网络；notarize 动作另有 ensureConfigured 兜底，
+  // 此处显式接线保证 config 优先于工具面首次调用）。
+  notary.configure({ endpoint: config.notaryEndpoint, tracePath: config.notaryTracePath });
+  // 纪元 Ι（自我模型）：宿主装配 —— 被动记账面启用（认识论闸门消费见 autonomy 栈；
+  // 生产喂食在下方 onToolPost 观察位）。
+  configureSelfModel({
+    enabled: config.enableSelfModel,
+    minEvidence: config.selfModelMinEvidence,
+    halfLifeH: config.selfModelHalfLifeH,
+  });
+  // 纪元 Γ2（注视经济·inset）：模式键入册（0=blur 缺省零变化；1=inset 兑现 token −75%，
+  // 外围保真有损——bench fovea.ab 在册）。入册后可被内核进化（Ξ）在 [0,1] 内调参。
+  kernelRegistry.register({ key: 'codec.foveaMode', organ: 'perception', defaultValue: 0, min: 0, max: 1, note: '纪元 Γ2：中央凹编码模式（0=blur 1=inset；inset 的注视经济对价是外围降采样保真损失）' });
+  // W2-0（C 接线）：Zoom 复核开关入册（W1-8 P3）—— config.vlmZoomVerify 铸入
+  // grounding.verifyZoom（0/1 数值语义，>0.5 为真）；消费面 = runtime 缺省接地与
+  // orchestration L3 适配器的 verifyClient 接线点（未注册 ⇒ 回声 1=开）。入册后
+  // 可被内核进化（Ξ）在 [0,1] 内调参；重复 apply 幂等。
+  kernelRegistry.register({ key: 'grounding.verifyZoom', organ: 'perception', defaultValue: config.vlmZoomVerify === false ? 0 : 1, min: 0, max: 1, note: 'W1-8：Zoom 复核 verifyClient 端口开关（0/1；config.vlmZoomVerify 铸入 —— 低置信/小目标/拥挤邻域三条件触发选择性复核）' });
+  // W5-0（A 接线 · W3-3/W4-1 增量账本）：总闸入册（0/1，perception 域，缺省 0
+  // = 关 —— 入册即立册可行区间，值全默认 ⇒ 零行为变化；消费面 = runtime 感知
+  // 的 ScreenStateLedger.ingest → deliverIncremental 消费链 + buildAutonomyStack
+  // 的增量观察槽补挂）。入册后可被内核进化（Ξ）在 [0,1] 内调参；重复 apply
+  // 幂等（w4macro M-8 测试内注册同键 —— 生产铸入与测试注册幂等共存）。
+  kernelRegistry.register({ key: 'visualDiff.incremental', organ: 'perception', defaultValue: 0, min: 0, max: 1, note: 'W3-3：增量编码模块开关（0/1；缺省关 —— 开 ⇒ 感知帧入账 + 关键帧/补丁/滚动条带投递 + incrementalObserver 观察面写入）' });
   // 纪元 Ω（云脑皮层）：单例铸造（config 优先于 env；全空不动单例走 env 路径）
   // + semanticConfirm 第三路径开关接线（本地双路径皆败后的 VLM 兜底读屏）。
   configureVlm(config);
@@ -521,6 +609,50 @@ export async function apply(ctx: Context, config: Config) {
   // 技能库：配置后从磁盘载入 —— 上一个会话学会的技能在本会话直接可用
   skillLibrary.configure(config.enableSkillLibrary, config.skillLibraryPath);
   skillLibrary.load();
+  // W5-0（B 接线 · W4-2 G3 策略联邦）：组合根一行接线 —— listSkillDigests /
+  // addDormantSkill 契约（W4-1 已落地）经适配端口铸进联邦接收端 + swarm packet
+  // v2 技能段。适配律：addDormantSkill 的联邦草案（指纹/槽统计）翻译为库的
+  // 登记方言（skillId=`fed-<指纹>` 溯源 origin:'federated'；槽统计 → 数值步
+  // 摘要 {槽: 中位数}——空槽统计诚实拒绝登记）；listSkillDigests 直通（形状
+  // 同构，useCount 契约可选）。接线失败/形状坏 ⇒ false 诚实降级（swarm 保持
+  // 无技能段行为，绝不炸装载）。
+  const fedWired = wireSwarmSkillFederation({
+    listSkillDigests: () => skillLibrary.listSkillDigests(),
+    addDormantSkill: (draft) => {
+      try {
+        const entries = Object.entries(draft?.slotStats ?? {}).filter(([, v]) =>
+          v && typeof v.median === 'number' && Number.isFinite(v.median));
+        if (entries.length === 0) return false; // 空槽统计：无可登记的数值面
+        return skillLibrary.addDormantSkill({
+          skillId: `fed-${draft.fingerprint}`,
+          sceneFingerprint: typeof draft.sceneFingerprint === 'string' ? draft.sceneFingerprint : '',
+          stepsDigest: entries.map(([k, v]) => ({ [k]: Math.round((v as { median: number }).median * 1000) / 1000 })),
+          reliability: draft.reliability,
+          origin: 'federated',
+        });
+      } catch {
+        return false; // 登记是增益不是依赖：防御式绝不抛
+      }
+    },
+  });
+  if (fedWired) {
+    console.log('[Vision Plugin] Skill federation wired (listSkillDigests/addDormantSkill contract).');
+  } else {
+    console.log('[Vision Plugin] Skill federation NOT wired (port shape rejected) — swarm packets carry no skills section.');
+  }
+  // W5-0（C 接线 · W4-3 S5 可逆性体系）：注册表武装 —— failureMemory 负证据
+  // 只读查询端口（match 计数折算 adverse，瞬态合并不入持久账）。纯读注入零
+  // 行为面（classify 消费侧在派发分道，enableReversibilityLanes 缺省关）；
+  // 查询故障 = 无负证据（riskGate 端口契约的诚实缺席）。
+  reversibilityRegistry.arm({
+    negativeEvidenceQuery: (semantics: string): number => {
+      try {
+        return failureMemory.match(semantics, undefined, 5).length;
+      } catch {
+        return 0;
+      }
+    },
+  });
   // 认知快照恢复（第七轮）：UI 记忆/技能/失败记忆/日志链/指标 —— 崩溃后原地满血。
   // 防御性恢复：逐子系统独立还原，单点损坏不拖垮整档。
   if (config.checkpointPath) {
@@ -530,6 +662,18 @@ export async function apply(ctx: Context, config: Config) {
     } else {
       console.log(`[Checkpoint] Fresh start (${cp.report[0]}).`);
     }
+  }
+
+  // W3-0（W2-5 接线）：恢复疗效账本 —— 复载 + 自动持久化武装（checkpoint 同律：
+  // 启动 restore（防御性逐格校验、垃圾格弃置不连坐整档）+ setPersistence（回合
+  // 闭合 fire-and-forget 原子落盘）。空路径 ⇒ 纯内存（restore no-op、不武装），
+  // 行为与接线前一致。绝不抛（restore/setPersistence 自带绝不抛契约）。
+  if (config.recoveryEfficacyPath) {
+    const r = recoveryEfficacy.restore(config.recoveryEfficacyPath);
+    console.log(r.ok
+      ? `[RecoveryEfficacy] Restored ${r.restored} cell(s)${r.dropped ? `, ${r.dropped} malformed dropped` : ''}.`
+      : `[RecoveryEfficacy] Fresh start (${r.error ?? 'no efficacy file'}).`);
+    recoveryEfficacy.setPersistence(config.recoveryEfficacyPath);
   }
 
   // 2. 注入 System Prompt（可选服务，优雅降级）
@@ -602,6 +746,10 @@ export async function apply(ctx: Context, config: Config) {
       const report = await runOrchestrator(
         args.userRequest, actorFn, chat,
         args.time_budget_sec ? args.time_budget_sec * 1000 : undefined,
+        // W4-0（G 接线 · W3-4 G2）：就绪层并行开关透传 —— orchestratorParallel
+        //（缺省 false）为 true 时 Kahn 就绪层 ≥2 无依赖子任务 + 团队余量双条件
+        // 齐备才实际并行（runOrchestrator 内部执法）；false ⇒ 串行脊梁逐字节旧路。
+        { parallel: config.orchestratorParallel === true },
       );
 
       // 自动归纳（第五轮）：任务无失败标记且确有可重放轨迹 ⇒ 固化为技能。
@@ -686,6 +834,14 @@ export async function apply(ctx: Context, config: Config) {
   registerAllGuards(ctx, config);
   console.log('[Vision Plugin] Security Guards activated.');
 
+  // W3-0（W2-2 S3 接线）：fail-closed 审计链 + 新鲜度探针武装 —— 默认端口
+  //（grounding 指纹源 = contextManager 最近截图 dhash —— 模型定位坐标所依据的
+  // 那一帧；当前帧源 = physicalBackend metaOnly 快图，一次低清服务端往返，零
+  // 叠加层零孵化）。探针是危险点击派发前的叠加防御（fail-open）：端口故障/
+  // 指纹缺席 ⇒ degraded 放行 + 注记，行为与未武装零回归；defaultFreshnessPort
+  // 惰性动态导入，模块加载图零变化。
+  setFreshnessPort(defaultFreshnessPort());
+
   // 5.2 D-4 判决回执通道（P0-4 发射端补全）：rehearsal-end → 自主诊断 → doctor/verdict。
   //     此前 doctor/verdict 三方消费侧（D-5 固化闸门 / D-6 判决索引 / D-7 验收结算门）
   //     全部接线而发射端缺席 —— 判决回执是死通道，D-5 固化只能永远冻结。
@@ -695,8 +851,62 @@ export async function apply(ctx: Context, config: Config) {
   //     无活跃代理时 chargeStep 直通返回（与 B/C 世代行为逐字节一致）。
   if (config.enableSubAgents) {
     coordinator.configure(config.maxSubAgents, config.agentRoundSteps);
+    // W5-0（D 接线 · W4-7 G5 步数拍卖）：按配置开启市场 —— maxSteps 变共享池
+    // 每 K 步重拍卖。证据端口从经验晶体聚合（swarm.counterfactual 按代理出生
+    // 场景指纹 focus.seedSceneHash 取同场景工具统计 → successes/attempts 收敛
+    // 证据；指纹缺席/晶体空/故障 ⇒ null 零证据 —— 先验回退舰队基率，诚实降级）。
+    // budget：stepAuctionBudget > 0 外注；0（缺省）= 名册推导（Σ maxSteps，
+    // 总预算与现状等价）。开关缺省关 ⇒ 关闭路径逐字节旧路（G5 兼容律）。
+    if (config.enableStepAuction) {
+      const auctionOn = coordinator.enableStepAuction({
+        ...(config.stepAuctionBudget > 0 && Number.isFinite(config.stepAuctionBudget)
+          ? { budget: Math.floor(config.stepAuctionBudget) }
+          : {}),
+        port: {
+          evidence: (agentId: string): ConvergenceEvidence | null => {
+            try {
+              const agent = coordinator.roster().find(a => a.spec.id === agentId);
+              const seed = agent?.focus?.seedSceneHash;
+              if (!seed) return null; // 出生锚缺席：零证据（不猜）
+              const stats = swarm.counterfactual(seed, 8);
+              if (!Array.isArray(stats) || stats.length === 0) return null;
+              let attempts = 0, successes = 0;
+              for (const s of stats) {
+                if (!s || !Number.isFinite(s.attempts)) continue;
+                attempts += Math.max(0, Math.floor(s.attempts));
+                successes += Math.max(0, Math.round(s.successRate * s.attempts));
+              }
+              return attempts > 0 ? { successes, attempts } : null;
+            } catch {
+              return null; // 晶体面故障 = 零证据（诚实降级，绝不炸市场）
+            }
+          },
+        },
+      });
+      console.log(auctionOn
+        ? '[Vision Plugin] Step auction market enabled (per-agent maxSteps now acts as the shared step-pool cap).'
+        : '[Vision Plugin] Step auction market failed to enable — falling back to per-agent budgets.');
+    }
     onToolPost(ctx, async (call, result, next) => {
       coordinator.chargeStep(call.name);
+      return next(result);
+    });
+  }
+
+  // 纪元 Ι（自我模型）：生产喂食观察位 —— 每次工具调用的成败（resultContract 唯一
+  // 读侧判定）记入（动作类×场景桶）衰减 Beta 后验；场景桶取活窗最新整屏 dhash 指纹
+  //（缺席 ⇒ 单轴诚实降级）。旁路义务：记账异常全吞，绝不影响工具管线。
+  if (config.enableSelfModel) {
+    onToolPost(ctx, async (call, result, next) => {
+      try {
+        const verdict = classifyResult(result);
+        const bucket = sceneBucketFromFingerprint(contextManager.lastImageRecord()?.hash);
+        selfModel.recordOutcome(
+          { actionKind: call.name, ...(bucket ? { sceneBucket: bucket } : {}) },
+          verdict.status === 'SUCCESS',
+          Date.now(),
+        );
+      } catch { /* 自我模型是旁路义务：喂食失败绝不炸工具管线 */ }
       return next(result);
     });
   }
@@ -715,6 +925,64 @@ export async function apply(ctx: Context, config: Config) {
   ctx.effect(() => {
     console.log('[Vision Plugin] Unloaded, cleaning up system resources...');
     return () => {
+      // 纪元 Υ（认知睡眠周期）：卸载链最前端的旁路仪式 —— enableSleepCycle
+      //（缺省 false）为真时触发六幕离线整合。挂点决策：宿主事件面没有干净的
+      // 「会话结束」方言（本文件 session/event 只见 user/message 先例），dispose
+      // 是唯一可信的会话终界，故挂 ctx.effect 清理函数最前端 —— 先行于
+      // saveCheckpoint / kernelStore.save / skillLibrary.save 与一切 reset：睡眠
+      // 蒸馏出的技能须被随后的落盘持久化、消化后的状态须进快照。六幕全部消费
+      // 同步快照（deps 皆同步面：journal/skillLibrary/auditTrajectory；consolidate
+      // 与 tick 亦同步），runSleepCycle 触发即完成主体消化 —— fire-and-forget
+      // 形式上不阻塞卸载，2s 保险丝（unref 计时器不阻进程退出）兜底「宁短勿挂」；
+      // 吞错铁律：睡眠的任何故障只留日志，绝不炸卸载主流程。
+      if (config.enableSleepCycle) {
+        try {
+          const slept = runSleepCycle(
+            {
+              journal,                       // 回放/审计幕：哈希链结算 + 决策点回看
+              skillLibrary,                  // 蒸馏幕：induceFromJournal（同步快照后归纳）
+              conductor: conductor ?? undefined, // 校准幕：maybeTick 节流口径（enabled=false ⇒ 恒空 —— 睡眠不偷开进化总开关）
+              // 免疫幕诚实缺席：knowledgeBase 唯一实例在 D-7 知识插件内部（独立
+              // apply 面，主插件无单例可注入）—— 晨报标 skipped，绝不伪造。
+              selfAudit: auditTrajectory,    // 审计幕：纯函数面直注
+              telemetry,                     // 纪元 Ζ 标定建议书：GPD A² 原子吃 tailReport 统计量（ξ+超额数）
+              meter: vlmMeter,               // 晨报附加：云脑用量台账快照
+              // W3-0（W2-1 H4 接线）：晨报待批清单源 —— approval 单例的离线
+              // 暂存队列只读摘要面（pendingSummary；结构子集直配 SleepDeps 的
+              // SleepApprovalQueueLike）。dep 在场 ⇒ 晨报第⑥幕附待批清单（含
+              // TTL 过期标注与证据引用），用户读晨报后经 adjudicate_approval_queue
+              // 批量裁决；队列自身另有独立持久化，不依赖晨报行存活。
+              approvalQueue,
+              // W4-0（D 接线 · W2-6/W3-2）：校准幕的收敛旁挂 —— 28 臂记忆操作
+              // 依确定性 Thompson 采样落值（n<门限按兵不动），种子 = journal
+              // 水位线（sleep 的集成契约：`convergeMemoryOps({ seed: <水位线> })`
+              // —— 同账本态跨夜重放一致）。dep 在场 ⇒ 晨报第④幕附 memoryOps
+              // 段；convergeMemoryOps 自带绝不抛契约，旁路故障不炸睡眠。
+              memoryOpsConverger: () => convergeMemoryOps({ seed: journalWatermarkSeed() }),
+              log: (m: string) => console.log(m),
+            },
+            { sleepTracePath: config.sleepTracePath, budgetMs: SLEEP_FUSE_MS },
+          );
+          const fuse = new Promise<null>(resolve => {
+            const t = setTimeout(() => resolve(null), SLEEP_FUSE_MS);
+            t.unref?.(); // 保险丝计时器不阻进程退出
+          });
+          void Promise.race([slept, fuse])
+            .then(r => {
+              if (!r) console.warn('[Sleep] 睡眠周期超保险丝 —— 视为完成（宁短勿挂；半程晨报见 sleepTracePath）。');
+            })
+            .catch(() => { /* 睡眠故障绝不炸卸载（runSleepCycle 永不 reject，双保险） */ });
+        } catch { /* 同步触发面的任何异常一并吞（不抛铁律） */ }
+      }
+      // 纪元 Π（行为公证账本）：卸载自动锚 —— notaryAutoAnchor（缺省 false）为真时
+      // 为 journal 铸一锚（链尖+MMR 根+时间戳），锚住本会话全部行为史。fire-and-forget
+      // 双层吞错（RFC3161 失败自动本地回退，绝不炸卸载）；锚捕的是 dispose 时刻的
+      // journal 状态（睡眠为异步旁路，其结算行由下一次会话的锚收编）。
+      notaryAutoAnchorIfConfigured({
+        notaryAutoAnchor: config.notaryAutoAnchor,
+        notaryEndpoint: config.notaryEndpoint,
+        notaryTracePath: config.notaryTracePath,
+      });
       // D-2 复原尽力而为（cleanup 不能 await）：restoreAll 异步启动；若与落盘竞速未及完成，
       // 残余义务随 checkpoint 交棒下次加载（restoreUndoLog 只认领未复原条目）——失败安全而非假装完成。
       // clearUndoLog 不得在此同步执行：restoreAll 的弹栈循环每次迭代都读 this.undoLog[i]，
@@ -746,20 +1014,41 @@ export async function apply(ctx: Context, config: Config) {
       telemetry.reset();         // 指标与生命周期同归
       contextManager.reset();      // 清空截图滑动窗口
       uiMemory.reset();            // 清空场景记忆（可选保留跨会话记忆：删除此行）
+      resetSelfModel();            // 纪元 Ι：自我模型清账留配置（W-1 单例隔离律同点位）
+      resetChannelArbitration();   // P2b-1：通道 EMA 卸载归零（W-1 隔离律；跨任务保持是学习语义，只在卸载清零）
       probeMemory.reset();          // Z-1d 同律：清空判决记忆
       journal.reset();             // 清空行动日志
       try { turnBoundaryDisposer?.(); } catch { /* already disposed */ }
       updatePopupState(false);     // 复位弹窗传感状态
       resetPopupBelief();          // F-3 复位贝叶斯弹窗信念（迟滞滤波器归零）
       resetPopupSprt();            // Δ 审计#6：SPRT 终判不可逆——会话边界必须归零，否则判决跨会话永存
+      setFreshnessPort(null);      // W3-0：新鲜度探针端口卸载（W-1 单例隔离律——探针缺省降级面恢复，下次 apply 重武装）
       oscillationTracker.reset();  // Δ 审计#6：环检测缓冲归零（同 W-1 单例隔离律）
       resetElementTracker();       // Δ 审计#6：跨帧元素 ID 跟踪归零
       focusTracker.clear();        // Δ 审计#6：焦点登记清空（30s 过期之外的显式归零）
+      try { resetVerifyGateBudget(); } catch { /* W2-0：Zoom 复核预算随会话归零（旁路义务） */ }
       resetDiffPersistence();      // G-1 复位差分持续性观测史（TDA 环归零）
       skillLibrary.save();         // 技能落盘后仅清内存 —— 技能的寿命长于会话
       skillLibrary.reset();
       failureMemory.reset();       // 失败记忆与技能库对称：已随 checkpoint 持久化
+      // W3-0（W2-5 接线）：疗效账本卸载兜底落盘（回合闭合的自动持久化之外的
+      // 最后一道 —— 原子写，失败只留日志）+ 归零（W-1 单例隔离律；reset 同时
+      // 清 persistPath，下次 apply 的 restore/setPersistence 重武装）。
+      if (config.recoveryEfficacyPath) {
+        try {
+          const saved = recoveryEfficacy.persist(config.recoveryEfficacyPath);
+          if (!saved.ok) console.warn(`[RecoveryEfficacy] Save failed on unload: ${saved.error}`);
+        } catch { /* 疗效存档是旁路义务 */ }
+      }
+      recoveryEfficacy.reset();
       coordinator.reset();         // D-1 团队解散（报告已随 checkpoint 持久化）
+      // W5-0（卸载摘线 · W-1 单例隔离律）：联邦接收端与可逆性注册表的武装物料
+      // 随生命周期归位 —— wireSwarmSkillFederation(null) 摘端口 + swarm 技能段
+      //（账本纯内存不落盘，federation 信任账同律）；reversibilityRegistry 摘
+      // failureMemory 查询端口（证据账由 approval 链路自清，此处只解武装引用）。
+      // 两者绝不抛（防御式契约），卸载主流程零风险。
+      try { wireSwarmSkillFederation(null); } catch { /* 摘线是旁路义务 */ }
+      try { reversibilityRegistry.arm({ negativeEvidenceQuery: null }); } catch { /* 摘线是旁路义务 */ }
       system.setWindowDelegate(null); // D-2 委托解除（下次加载按新探测重建）
       if (!shaperRestoring) shaper.clearUndoLog(); // D-2 弃责记账（restoreAll 在场时由其落定后自行清）
       quantum.reset();             // D-3 感知相位归零（快照已随 checkpoint 交棒）

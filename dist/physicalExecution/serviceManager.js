@@ -98,14 +98,18 @@ export function judgeHealthBody(body, expectedPid, expectedProof) {
  *  Σ 纪元：key 在场 ⇒ 每次探测附随机 nonce 质询，本地算期望回签交
  *  judgeHealthBody 验（密钥持有 = 自己人，pid 漂移也放行）；key 缺席 ⇒
  *  不发 nonce、纯 pid 判定（旧 Δ 语义，向后兼容老服务）。 */
-async function probeHealth(baseUrl, timeoutMs, child, key) {
+async function probeHealth(baseUrl, timeoutMs, child, key, spawnFailed) {
     const expectedPid = child?.pid ?? null;
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
     while (Date.now() < deadline) {
         // Δ 纪元：子进程已死 ⇒ 立即失败早退 —— 傻等满超时只会把崩溃伪装成超时
-        if (child && child.exitCode !== null) {
-            return { ok: false, detail: `python process exited during health probe (exit code ${child.exitCode})` };
+        // （信号致死时 exitCode 为 null 而 signalCode 非 null —— 两者都查，缺一漏判）
+        if (child && (child.exitCode !== null || child.signalCode !== null)) {
+            return { ok: false, detail: `python process exited during health probe (exit code ${child.exitCode}, signal ${child.signalCode})` };
+        }
+        if (spawnFailed?.()) {
+            return { ok: false, detail: `python process failed to spawn: ${spawnFailed()}` };
         }
         attempt++;
         try {
@@ -172,6 +176,8 @@ export class PhysicalServiceManager {
     _keyCleanup = null;
     _started = false;
     _disposed = false;
+    /** 在飞的 start 调用（并发 start 汇流到同一次 spawn + 探活；失败即归零可重试） */
+    _startPromise = null;
     constructor(opts = {}) {
         this.opts = opts;
     }
@@ -179,7 +185,7 @@ export class PhysicalServiceManager {
     get keyPath() { return this._keyPath; }
     get mmapDir() { return this._mmapDir; }
     get pid() { return this.proc?.pid ?? null; }
-    get isRunning() { return this.proc !== null && this.proc.exitCode === null; }
+    get isRunning() { return this.proc !== null && this.proc.exitCode === null && this.proc.signalCode === null; }
     get disposed() { return this._disposed; }
     /**
      * 启动 Python 微服务。
@@ -201,6 +207,12 @@ export class PhysicalServiceManager {
                 error: { kind: 'crashed', detail: 'service manager already disposed' },
             };
         }
+        // 启动竞态：并发 start 必须汇流到同一次 spawn + 探活。未汇流时后来者会在
+        // 首调用探活期间闯入：要么在探活窗（isRunning 已真但服务未就绪）提前返回
+        // 未经验证的 ok，要么走重生路径重复 spawn 并被首调用的失败清场误杀新进程
+        // （_killProcess 按当前 this.proc 行事）。失败后 _startPromise 归零，可重试。
+        if (this._startPromise)
+            return this._startPromise;
         if (this._started && this.isRunning) {
             return {
                 ok: true,
@@ -210,12 +222,23 @@ export class PhysicalServiceManager {
                 processPid: this.pid,
             };
         }
+        const run = this._spawnAndProbe();
+        this._startPromise = run;
+        try {
+            return await run;
+        }
+        finally {
+            if (this._startPromise === run)
+                this._startPromise = null;
+        }
+    }
+    async _spawnAndProbe() {
+        // 重生路径（进程崩溃后再 start）先清理上一轮的临时密钥/mmap 目录 —— 否则
+        // 旧目录被覆盖引用后永久泄漏在 tmp 里。首次 start（_started=false）天然
+        // 跳过；复用路径在 start() 的 isRunning 分支提前返回
+        const respawn = this._started;
         this._started = true;
-        // 1. 密钥文件（缺省 = 临时生成随机）。重生路径（进程崩溃后再 start）先清理
-        // 上一轮的临时密钥/mmap 目录 —— 否则旧目录被覆盖引用后永久泄漏在 tmp 里
-        // 重生路径（进程崩溃后再 start）：_started=true 且子进程已死 —— 首次
-        // start（_started=false）天然跳过；复用路径在上方 isRunning 分支提前返回
-        if (this._started && !this.isRunning) {
+        if (respawn) {
             this._cleanupLocal();
         }
         if (this.opts.keyPath) {
@@ -256,6 +279,13 @@ export class PhysicalServiceManager {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
         });
+        // spawn 失败（如解释器路径不存在）以异步 'error' 事件到达 —— 必须监听：
+        // 无监听的 'error' 会成为 uncaught exception 炸掉宿主进程，且
+        // ServiceStartResult 的 'spawn_failed' 形态将永不可达。
+        // 用 on 而非 once：kill() 对已死/未 spawn 成功的进程也会 emit 'error'
+        // （ESRCH 等）—— 一次性监听被 spawn 错误消费后，后续 emit 无人接 ⇒ uncaught
+        let spawnError = null;
+        proc.on('error', (err) => { spawnError = err.message; });
         this.proc = proc;
         this._baseUrl = `http://127.0.0.1:${port}/v1`;
         // 收集 stderr 用于诊断（内存受限：留最后 1KB）
@@ -278,19 +308,24 @@ export class PhysicalServiceManager {
             key = await ensureKey(this._keyPath);
         }
         catch { /* 密钥不可读：降级 pid-only 判定 */ }
-        const probe = await probeHealth(this._baseUrl, timeoutMs, proc, key);
+        const probe = await probeHealth(this._baseUrl, timeoutMs, proc, key, () => spawnError);
         if (!probe.ok) {
-            // 诊断信息：被占坑？已崩溃？
+            // 诊断信息：spawn 失败？被占坑？已崩溃？
             const squatted = probe.squatted;
-            const crashed = proc.exitCode !== null;
-            const errorKind = squatted ? 'port_squatted' : crashed ? 'crashed' : 'startup_timeout';
-            const detail = squatted
-                ? `tcp port ${port} is held by a foreign process (health reported pid ${squatted.reportedPid}, ` +
-                    `expected spawned child pid ${squatted.expectedPid}) — refusing to adopt a stranger; ` +
-                    `stop the squatter or choose another tcpPort. ${probe.detail ?? ''}`
-                : crashed
-                    ? `Python process exited with code ${proc.exitCode}. stderr tail: ${stderrTail}`
-                    : `${probe.detail}. stdout: ${stdoutTail}; stderr: ${stderrTail}`;
+            const crashed = proc.exitCode !== null || proc.signalCode !== null;
+            const errorKind = spawnError !== null ? 'spawn_failed'
+                : squatted ? 'port_squatted'
+                    : crashed ? 'crashed'
+                        : 'startup_timeout';
+            const detail = spawnError !== null
+                ? `Python process failed to spawn: ${spawnError} (check DSH_PYTHON / resolvePythonBin resolution). stderr tail: ${stderrTail}`
+                : squatted
+                    ? `tcp port ${port} is held by a foreign process (health reported pid ${squatted.reportedPid}, ` +
+                        `expected spawned child pid ${squatted.expectedPid}) — refusing to adopt a stranger; ` +
+                        `stop the squatter or choose another tcpPort. ${probe.detail ?? ''}`
+                    : crashed
+                        ? `Python process exited with code ${proc.exitCode}${proc.signalCode ? ` (signal ${proc.signalCode})` : ''}. stderr tail: ${stderrTail}`
+                        : `${probe.detail}. stdout: ${stdoutTail}; stderr: ${stderrTail}`;
             await this._killProcess();
             this._cleanupLocal();
             return {
@@ -321,21 +356,29 @@ export class PhysicalServiceManager {
     async _killProcess() {
         const p = this.proc;
         this.proc = null;
-        if (!p || p.exitCode !== null)
+        // 信号致死（exitCode=null / signalCode≠null）同样视为已退出 —— 否则对已死
+        // 进程注册的 'exit' 监听永不触发，dispose 白等满 3s SIGKILL 超时。
+        // pid===undefined ⇒ spawn 从未成功（'error' 已发、'exit' 永不发）—— 没有
+        // 可杀的进程，kill() 只会再 emit 一次 'error'，直接返回
+        if (!p || p.pid === undefined || p.exitCode !== null || p.signalCode !== null)
             return;
         await new Promise((resolve) => {
-            p.once('exit', () => resolve());
-            try {
-                p.kill('SIGTERM');
-            }
-            catch { /* noop */ }
-            setTimeout(() => {
+            const killer = setTimeout(() => {
                 try {
                     p.kill('SIGKILL');
                 }
                 catch { /* noop */ }
                 resolve();
-            }, 3000).unref();
+            }, 3000);
+            killer.unref();
+            p.once('exit', () => {
+                clearTimeout(killer); // 进程已退：不得再对可能被复用的 pid 补发 SIGKILL
+                resolve();
+            });
+            try {
+                p.kill('SIGTERM');
+            }
+            catch { /* noop */ }
         });
     }
     _cleanupLocal() {

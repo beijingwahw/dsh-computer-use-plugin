@@ -5,6 +5,9 @@
 // 持久化到磁盘后跨会话存活：Agent 第一次学会你的工作流，第二次直接复用。
 // 可靠度闭环：每次 run_skill 的成败回写 successCount/attemptCount，
 // 匹配排序时「历史验证过的技能」天然优先 —— 越用越准的肌肉记忆。
+// W3-2（创新提案 M2）：参数化通用技能 —— DTW 对齐 + 参数槽反统一把同骨架
+// 字面量技能蒸馏为带洞模板（纯符号、确定性、抗过拟合门），洞由当前世界
+// 读取绑定，绑定失败回退字面量技能 —— 见下方「W3-2」段与 distillTemplates。
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'fs';
 import path from 'path';
 import { journal } from './journal.js';
@@ -13,6 +16,7 @@ import { tokenize, overlapCoefficient } from './uiMemory.js';
 import { embed, cosine } from './semanticHash.js';
 import { sequitur, expandSymbols } from './sequitur.js';
 import { kernelRegistry } from './kernel/registry.js';
+import { sanitizeActionShape } from './approval.js';
 /** 可重放的工具白名单：click_element 依赖运行时元素缓存，不进技能 */
 const REPLAYABLE = new Set([
     'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
@@ -100,6 +104,221 @@ function quantizeArgs(v) {
 function hashArgsFuzzy(args) {
     return hashArgs(quantizeArgs(args));
 }
+// ─── Τ 纪元（干预即教育）：审批事件的蒸馏面（纯增量 —— 主路径零触碰） ───
+//
+// 审批事件是现成却全行业被扔掉的监督信号：验收式消费成功 = 用户亲自背书且
+// 世界验证成功的动作模式（特权正示范）；用户拒绝 = 这条路用户不让走（负示范）。
+// 蒸馏规则：
+//   正示范命中既有技能（签名/文本通道）⇒ 可靠度 +β 特权加成（封顶 0.95 ——
+//     「用户背书+世界验证」的双重证据等级高于自动归纳）；
+//   正示范无匹配 ⇒ 不伪造新技能（诚实 —— 单例不足以成技），仅计数；
+//   负示范命中 ⇒ 可靠度 −β 并打 denied 标记；形状入回避注记（LRU 32）——
+//     match 时命中回避清单的技能降序（用户不让走的路排后面）。
+/** 特权加成 β：双重证据（用户背书+世界验证）的信任增量 */
+const DEMO_BETA = 0.15;
+/** 示范加成后的可靠度封顶：β 只增信任到 0.95，绝不给「免验收」的满分 */
+const DEMO_RELIABILITY_CAP = 0.95;
+/** 回避注记容量（LRU） */
+const AVOID_CAPACITY = 32;
+/** 回避注记的形状键：带坐标用 tool@x,y（千分位量化），无坐标用 tool#长度桶 */
+const shapeKey = (s) => typeof s.x === 'number' && typeof s.y === 'number'
+    ? `${s.tool}@${s.x.toFixed(3)},${s.y.toFixed(3)}`
+    : `${s.tool}#${s.text_length_bucket ?? '*'}`;
+// ─── W3-2：抗过拟合门限（模块常量 —— 一切数值在此审计，绝无内联魔数） ───
+/** 模板最低母体数：单母体永不产模板（结构前提 —— 一例观测不成规律） */
+export const TEMPLATE_MIN_PARENTS = 2;
+/** 最低同源步数：短于 2 步的模板不构成「技能」（与 motif minLength 同律） */
+export const TEMPLATE_MIN_HOMOLOGS = 2;
+/** DTW 对齐归一代价上限（cost / max(lenA,lenB)）：骨架差太远的对不参加反统一 */
+export const TEMPLATE_MAX_ALIGN_COST_RATIO = 0.35;
+/** 洞位跨母体 Beta 后验门：mean = (s+1)/(s+f+2) ≥ 0.75 ⇔ s ≥ 3f+2
+ *  （f=0 时 s≥2 —— 与最低母体数自洽；一个反证母体即要求 5 个支撑母体） */
+export const TEMPLATE_HOLE_POSTERIOR_GATE = 0.75;
+/** 模板容量（可靠度×新近度驱逐，与技能容量驱逐同律） */
+export const TEMPLATE_CAPACITY = 16;
+/** 蒸馏预算护栏：参加配对的技能数上限（O(N²) 配对 × O(nm) DTW 的诚实上限） */
+export const TEMPLATE_MAX_SKILLS = 64;
+/** W3-2：工具骨架哈希（FNV-1a，hashArgs 同源密码学原语 —— 匹配粗筛键） */
+export function hashSkeleton(tools) {
+    let h = 0x811c9dc5;
+    const s = tools.join('\u0001');
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(36);
+}
+/** W3-2：单步对齐代价（编辑距离风格）：同工具 0 / 异工具 1（缺口代价同 1） */
+const alignStepCost = (toolA, toolB) => (toolA === toolB ? 0 : 1);
+/**
+ * W3-2：DTW 序列对齐（纯符号、确定性）。步标签 = 动作种类（tool 名），
+ * dp[i][j] = 对齐 a[0..i) 与 b[0..j) 的最小总代价；回溯取对齐路径，
+ * 平局裁决固定 diag > up > left（确定性铁律 —— 同输入逐位同路径）。
+ * 返回 pairs：已对齐位 [i, j]（j=-1 / i=-1 为缺口列），cost 为总代价。
+ * 导出纯函数：与 olcOverlap / betaReliability 同律（数学原子的测试面）。
+ */
+export function dtwAlignTools(a, b) {
+    const n = a.length;
+    const m = b.length;
+    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(Infinity));
+    dp[0][0] = 0;
+    for (let i = 0; i <= n; i++) {
+        for (let j = 0; j <= m; j++) {
+            if (i === 0 && j === 0)
+                continue;
+            let best = Infinity;
+            if (i > 0 && j > 0)
+                best = Math.min(best, dp[i - 1][j - 1] + alignStepCost(a[i - 1], b[j - 1]));
+            if (i > 0)
+                best = Math.min(best, dp[i - 1][j] + 1); // 缺口（b 侧插入）
+            if (j > 0)
+                best = Math.min(best, dp[i][j - 1] + 1); // 缺口（a 侧插入）
+            dp[i][j] = best;
+        }
+    }
+    const pairs = [];
+    let i = n;
+    let j = m;
+    while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && dp[i][j] === dp[i - 1][j - 1] + alignStepCost(a[i - 1], b[j - 1])) {
+            pairs.push([i - 1, j - 1]);
+            i--;
+            j--;
+        }
+        else if (i > 0 && dp[i][j] === dp[i - 1][j] + 1) {
+            pairs.push([i - 1, -1]);
+            i--;
+        }
+        else if (j > 0 && dp[i][j] === dp[i][j - 1] + 1) {
+            pairs.push([-1, j - 1]);
+            j--;
+        }
+        else {
+            break; // 防御带（dp 构造保证不可达）
+        }
+    }
+    pairs.reverse();
+    return { pairs, cost: dp[n][m] };
+}
+/** W3-2：值的洞类型标注（number 须有限 —— NaN/Infinity 归 json 由绑定闸拒绝） */
+export function holeTypeOf(v) {
+    if (typeof v === 'number')
+        return Number.isFinite(v) ? 'number' : 'json';
+    if (typeof v === 'string')
+        return 'string';
+    if (typeof v === 'boolean')
+        return 'boolean';
+    return 'json';
+}
+/** W3-2：来源提示的键形判据（确定性正则 —— 绝无模型猜测） */
+const HOLE_COORD_KEY = /(^|_)(x|y|dx|dy)(_|$|\d)/i; // x / y / from_x / to_y2 …
+const HOLE_CLIP_KEY = /(url|link|site|domain|address|href|path)/i; // 长串惯走粘贴
+const HOLE_TEXT_KEY = /(text|content|desc|query|search|keyword|message|prompt|title|label|value|input|answer|reply)/i;
+/**
+ * W3-2：洞的来源提示推断（纯函数，键形 + 类型 → 读取策略）：
+ * 数值且坐标形键 → coordinate；字符串且 URL 形键 → clipboard；
+ * 字符串且文本形键 → ocr（屏上读到的值）；其余 → user-input（问用户/任务上下文）。
+ * 提示是给绑定 reader 的路由建议，不是断言 —— 绑定失败回退字面量技能。
+ */
+export function inferHoleSource(key, type) {
+    if (type === 'number' && HOLE_COORD_KEY.test(key))
+        return 'coordinate';
+    if (type === 'string' && HOLE_CLIP_KEY.test(key))
+        return 'clipboard';
+    if (type === 'string' && HOLE_TEXT_KEY.test(key))
+        return 'ocr';
+    return 'user-input';
+}
+/** W3-2：绑定值的类型闸（洞类型 ↔ 运行时值的守卫 —— 类型不符即绑定失败） */
+export function valueMatchesHoleType(v, type) {
+    switch (type) {
+        case 'number': return typeof v === 'number' && Number.isFinite(v);
+        case 'string': return typeof v === 'string';
+        case 'boolean': return typeof v === 'boolean';
+        case 'json': return v !== null && typeof v === 'object';
+    }
+}
+/**
+ * W3-2：DTW 对齐 + 参数槽反统一（纯函数，手算可回验）。
+ * 步骤：① 工具骨架 DTW（归一代价过门）；② 同源步（同工具对齐位）逐槽比对 ——
+ * 同值 → 常量槽、同型异值 → 洞槽（类型 + 来源提示 + 双母体实值绑定）；
+ * 键集不一致或异型 ⇒ 该步结构分歧，弃置（保守：结构不稳的步不泛化）；
+ * ③ 全常量（零洞）⇒ 拒绝 —— 那是字面量重复，不是泛化；④ 弃置后步数
+ * < TEMPLATE_MIN_HOMOLOGS ⇒ 拒绝。洞槽的 posteriorMean 此处记 NaN 占位，
+ * 由调用方（distillTemplates 的跨母体证据扫）回填真值。
+ */
+export function antiUnifyPair(a, b) {
+    const { pairs, cost } = dtwAlignTools(a.steps.map(s => s.tool), b.steps.map(s => s.tool));
+    const maxLen = Math.max(1, Math.max(a.steps.length, b.steps.length));
+    const costRatio = cost / maxLen;
+    const homologPairs = pairs.filter(([i, j]) => i >= 0 && j >= 0 && a.steps[i].tool === b.steps[j].tool);
+    const alignment = { cost, costRatio: Math.round(costRatio * 1000) / 1000, homologs: homologPairs.length, droppedSteps: 0 };
+    if (costRatio > TEMPLATE_MAX_ALIGN_COST_RATIO) {
+        return { ok: false, reason: 'align-cost', detail: `costRatio=${alignment.costRatio}`, alignment };
+    }
+    if (homologPairs.length < TEMPLATE_MIN_HOMOLOGS) {
+        return { ok: false, reason: 'insufficient-homologs', detail: `homologs=${homologPairs.length}`, alignment };
+    }
+    const steps = [];
+    let holes = 0;
+    for (const [i, j] of homologPairs) {
+        const sa = a.steps[i];
+        const sb = b.steps[j];
+        const keysA = Object.keys(sa.args ?? {}).sort();
+        const keysB = Object.keys(sb.args ?? {}).sort();
+        if (JSON.stringify(keysA) !== JSON.stringify(keysB)) {
+            alignment.droppedSteps++; // 键集分歧：参数结构不稳，该步不泛化（保守）
+            continue;
+        }
+        const args = {};
+        let divergent = false;
+        for (const k of keysA) {
+            const va = sa.args[k];
+            const vb = sb.args[k];
+            if (canonicalStringify(va) === canonicalStringify(vb)) {
+                args[k] = { kind: 'const', value: va }; // 同值 → 常量
+                continue;
+            }
+            const ta = holeTypeOf(va);
+            const tb = holeTypeOf(vb);
+            if (ta !== tb || ta === 'json') {
+                divergent = true; // 异型（或双方皆非基元）⇒ 反统一非法 —— 弃置该步
+                break;
+            }
+            args[k] = {
+                kind: 'hole', type: ta, source: inferHoleSource(k, ta),
+                bindings: [{ skillId: a.id, value: va }, { skillId: b.id, value: vb }],
+                posteriorMean: Number.NaN, // 占位：跨母体证据扫回填（见 distillTemplates）
+                bindAttempts: 0, bindSuccesses: 0,
+            };
+            holes++;
+        }
+        if (divergent) {
+            alignment.droppedSteps++;
+            continue;
+        }
+        steps.push({ tool: sa.tool, args });
+    }
+    if (holes === 0) {
+        return { ok: false, reason: 'no-holes', detail: 'args 全同值 —— 字面量重复，非泛化', alignment };
+    }
+    if (steps.length < TEMPLATE_MIN_HOMOLOGS) {
+        return { ok: false, reason: 'too-few-steps', detail: `steps=${steps.length}`, alignment };
+    }
+    return { ok: true, steps, holes, alignment };
+}
+/** W4-1：args 的 FNV-1a 数值哈希（hashArgs 的数值形态 —— 摘要的铸造原子） */
+function hashArgsNumeric(args) {
+    let h = 0x811c9dc5;
+    const s = canonicalStringify(args);
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+}
+/** W4-1：休眠段容量（外来技能的隔离登记区上限 —— FIFO 驱逐） */
+export const DORMANT_CAPACITY = 32;
 class SkillLibrary {
     skills = [];
     nextId = 1;
@@ -107,6 +326,14 @@ class SkillLibrary {
     filePath = '';
     capacity = 50;
     nextSynthId = 1; // C-2：合成技能发号器（syn-N 命名，跨会话不冲突）
+    // ── Τ 纪元（干预即教育）：蒸馏簿记（内存态 —— 回避注记是会话级轻量清单） ──
+    avoidShapes = []; // 回避注记（LRU，容量 AVOID_CAPACITY）
+    demoUnmatched = 0; // 无匹配正示范的诚实计数（单例不成技）
+    // ── W3-2（M2 参数化通用技能）：模板存储段（新居民 —— 字面量技能主路径零触碰） ──
+    templates = [];
+    nextTemplateId = 1; // tpl-N 发号器（独立号段，跨会话不冲突）
+    // ── W4-1（G3 契约）：休眠技能段（联邦对接口 —— 隔离登记区，不入 match 主池） ──
+    dormant = [];
     configure(enabled, filePath, capacity = 50) {
         this.enabled = enabled;
         this.filePath = filePath;
@@ -125,6 +352,16 @@ class SkillLibrary {
                 const maxId = this.skills.reduce((m, s) => Math.max(m, Number(s.id) || 0), 0);
                 this.nextId = Math.max(data.nextId ?? 0, maxId + 1);
                 this.nextSynthId = data.nextSynthId ?? this.nextSynthId;
+                // W3-2：模板段载入（旧档无此键 ⇒ 空段 —— 磁盘 JSON 自动兼容）
+                if (Array.isArray(data.templates)) {
+                    this.templates = data.templates;
+                    const maxTid = this.templates.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
+                    this.nextTemplateId = Math.max(data.nextTemplateId ?? 1, maxTid + 1);
+                }
+                // W4-1：休眠段载入（联邦登记的持久形态；旧档无此键 ⇒ 空段）
+                if (Array.isArray(data.dormant)) {
+                    this.dormant = data.dormant.filter((d) => d && typeof d.skillId === 'string' && Array.isArray(d.stepsDigest));
+                }
             }
             console.log(`[Skill] Loaded ${this.skills.length} skill(s) from ${this.filePath}`);
         }
@@ -142,7 +379,13 @@ class SkillLibrary {
         const tmp = this.filePath + '.tmp';
         try {
             mkdirSync(path.dirname(this.filePath), { recursive: true });
-            writeFileSync(tmp, JSON.stringify({ skills: this.skills, nextId: this.nextId, nextSynthId: this.nextSynthId }, null, 2), 'utf8');
+            writeFileSync(tmp, JSON.stringify({
+                skills: this.skills, nextId: this.nextId, nextSynthId: this.nextSynthId,
+                // W3-2：模板段（追加键 —— 旧读方按 skills/nextId 消费不受影响）
+                templates: this.templates, nextTemplateId: this.nextTemplateId,
+                // W4-1：休眠段（追加键 —— 联邦登记的落盘形态）
+                dormant: this.dormant,
+            }, null, 2), 'utf8');
             renameSync(tmp, this.filePath); // 原子换名：要么完整旧档，要么完整新档，绝无半档
         }
         catch (e) {
@@ -153,9 +396,17 @@ class SkillLibrary {
             console.warn(`[Skill] Save failed: ${e.message}`);
         }
     }
-    /** 插件卸载：仅清内存，磁盘保留 —— 技能的寿命长于会话 */
+    /** 插件卸载：仅清内存，磁盘保留 —— 技能的寿命长于会话。
+     *  Τ 纪元：蒸馏簿记（回避注记+无匹配计数）随库归零 —— 隔离缝不漏全局态。 */
     reset() {
         this.skills = [];
+        this.avoidShapes = [];
+        this.demoUnmatched = 0;
+        // W3-2：模板簿记随库归零（磁盘保留 —— 模板的寿命长于会话，同技能律）
+        this.templates = [];
+        this.nextTemplateId = 1;
+        // W4-1：休眠段随库归零（磁盘保留 —— 联邦登记的寿命长于会话，同律）
+        this.dormant = [];
     }
     /**
      * 归纳技能。签名去重：完全相同的步骤序列不重复建卡，只 bump 可靠度 ——
@@ -278,7 +529,7 @@ class SkillLibrary {
         const reliabilityWeight = kernelRegistry.getOrDefault('skill.reliabilityWeight', 0.3);
         const ciDiscount = kernelRegistry.getOrDefault('skill.ciDiscount', 0.1);
         const recencyHalfLifeH = Math.max(1, kernelRegistry.getOrDefault('skill.recencyHalfLifeH', 72));
-        return this.skills
+        const scored = this.skills
             .map(s => {
             const overlap = overlapCoefficient(q, tokenize(s.description));
             // 懒嵌入：旧档技能无 embedding 时现场补算（restore 后首次匹配付一次微秒级成本）
@@ -292,7 +543,12 @@ class SkillLibrary {
             // 排在「0/0 的新直觉」之前，因为后者可能只是运气）。0.1 是算法形状字面量：
             // 折扣只做同均值平票的裁决者，绝不做主排序信号。（Ξ-D 起 0.1/0.3/72 读内核表。）
             const post = betaReliability(s.successCount, s.attemptCount);
-            const reliability = post.mean - ciDiscount * post.hw;
+            // Τ 纪元（干预即教育）：示范背书 —— demoBonus 缺省 0 ⇒ effMean === post.mean
+            // 逐字节不变；正加成封顶 0.95（β 只增信任，绝不给免验收的满分）；负加成
+            //（用户否决）如实下压。证据等级：用户背书+世界验证（双重）> 自动归纳（单重）。
+            const demoBonus = s.demoBonus ?? 0;
+            const effMean = demoBonus > 0 ? Math.min(DEMO_RELIABILITY_CAP, post.mean + demoBonus) : post.mean + demoBonus;
+            const reliability = effMean - ciDiscount * post.hw;
             let scene = 0;
             if (currentSceneHash && s.entrySceneHash && similarity(currentSceneHash, s.entrySceneHash) >= sceneGate) {
                 scene = sceneBonus;
@@ -311,13 +567,24 @@ class SkillLibrary {
                     Math.max(0, Math.round((post.mean - post.hw) * 1000) / 1000),
                     Math.min(1, Math.round((post.mean + post.hw) * 1000) / 1000),
                 ],
+                // Τ 透明面：示范加成与 denied 标记对模型可见（教育的账目公开）
+                demo_bonus: Math.round(demoBonus * 1000) / 1000,
+                demo_denied: (s.demoDenied ?? 0) > 0,
                 // G-5 Pareto 轴（内部暂存，判定后剥离）：三目标各自合法但互相冲突，
                 // 加权和排序是仲裁 —— 非支配标注让模型看见「为什么是它」的另一面
                 _axes: { text, rel: post.mean, rec: recency },
             };
         })
             .filter(s => s.score > scoreFloor)
-            .sort((a, b) => b.score - a.score)
+            .sort((a, b) => b.score - a.score);
+        // Τ 纪元（干预即教育）：回避降序 —— 命中回避清单的技能稳定降档到分区末尾
+        //（用户不让走的路排后面；稳定排序保各分区内既有的分数序）。空清单/无命中 ⇒
+        // 恒等传递（既有主路径逐字节不变 —— avoidedSkillIds 空清单时零成本短路）。
+        const avoided = this.avoidedSkillIds();
+        const ranked = avoided.size > 0
+            ? [...scored].sort((a, b) => (avoided.has(a.id) ? 1 : 0) - (avoided.has(b.id) ? 1 : 0))
+            : scored;
+        return ranked
             .slice(0, k)
             // G-5 非支配标注：A 支配 B ⇔ 三轴全 ≥ 且至少一轴 >。非支配者标
             // pareto_optimal —— 「没有任何别的候选在所有维度都不差于它且有一维更好」。
@@ -329,7 +596,7 @@ class SkillLibrary {
                     return false;
                 const axesB = other._axes;
                 // 轴名对齐 _axes 的 { text, rel, rec } —— 此前误写 axesA.recency
-                // （undefined），比较恒 false 导致 pareto_optimal 恒 true
+                //（undefined），比较恒 false 导致 pareto_optimal 恒 true
                 const ge = axesB.text >= axesA.text && axesB.rel >= axesA.rel && axesB.rec >= axesA.rec;
                 const gt = axesB.text > axesA.text || axesB.rel > axesA.rel || axesB.rec > axesA.rec;
                 return ge && gt;
@@ -476,23 +743,508 @@ class SkillLibrary {
         s.lastUsedAt = Date.now();
         this.save();
     }
+    // ── W3-2（M2 参数化通用技能）：反统一蒸馏 / 模板召回 / 运行时绑定 ──
+    /**
+     * W3-2：洞位证据扫（跨母体 Beta 门的证据源 —— 纯符号，确定性）。
+     * 证据池 = 全库能**完整实现**模板骨架的技能（DTW 对齐过门 + 每个模板步
+     *  都映射到同工具步；多余步是缺口、缺步即排除 —— 部分实现不构成反证源，
+     *  也不构成支撑源）。逐洞判定：键在且类型相符 ⇒ s（支撑证据）；键缺/异型
+     *  ⇒ f（反证 —— 同骨架的工作流在这个槽位上不守恒，洞就是过拟合）。
+     *  「每个洞位在各母体绑定成功才计证据」：只有全洞皆成的技能才入 supporters
+     *  —— 任何一洞失败即整技出局（单母体永不产模板的结构执法在 supporters
+     *  长度门）。返回值含逐洞后验均值 (s+1)/(s+f+2) 与支撑母体实值（审计面）。
+     */
+    sweepHoleEvidence(candSteps, pool) {
+        // 洞清单（步序 × 键字典序 —— 确定性枚举）
+        const holeList = [];
+        candSteps.forEach((st, si) => {
+            for (const k of Object.keys(st.args).sort()) {
+                const slot = st.args[k];
+                if (slot.kind === 'hole')
+                    holeList.push({ stepIndex: si, key: k, type: slot.type });
+            }
+        });
+        const stats = holeList.map(h => ({ stepIndex: h.stepIndex, key: h.key, s: 0, f: 0, posteriorMean: 0 }));
+        const supporterValues = new Map();
+        const supporters = [];
+        const candTools = candSteps.map(st => st.tool);
+        for (const sk of pool) {
+            const { pairs, cost } = dtwAlignTools(sk.steps.map(x => x.tool), candTools);
+            const ratio = cost / Math.max(1, Math.max(sk.steps.length, candTools.length));
+            if (ratio > TEMPLATE_MAX_ALIGN_COST_RATIO)
+                continue; // 骨架不同：既非证据亦非反证
+            // 模板步 → 技能步 的同源映射（缺口/异工具 ⇒ 缺映射）
+            const map = new Map();
+            for (const [j, i] of pairs) {
+                if (j >= 0 && i >= 0 && sk.steps[j].tool === candTools[i])
+                    map.set(i, j);
+            }
+            if (map.size < candSteps.length)
+                continue; // 未完整实现骨架 —— 不入证据池
+            let allBound = true;
+            holeList.forEach((h, hi) => {
+                const bound = map.get(h.stepIndex);
+                const v = bound !== undefined ? sk.steps[bound].args?.[h.key] : undefined;
+                if (bound === undefined || !(h.key in (sk.steps[bound].args ?? {})) || holeTypeOf(v) !== h.type) {
+                    stats[hi].f++; // 反证：同骨架在此槽位不守恒
+                    allBound = false;
+                }
+                else {
+                    stats[hi].s++; // 支撑：该母体在此洞位绑定成功
+                }
+            });
+            if (!allBound)
+                continue;
+            supporters.push(sk);
+            holeList.forEach((h, hi) => {
+                const bound = map.get(h.stepIndex);
+                const v = sk.steps[bound].args[h.key];
+                const mk = `${h.stepIndex}#${h.key}`;
+                const arr = supporterValues.get(mk) ?? [];
+                arr.push({ skillId: sk.id, value: v });
+                supporterValues.set(mk, arr);
+            });
+        }
+        for (const st of stats)
+            st.posteriorMean = (st.s + 1) / (st.s + st.f + 2);
+        return { supporters, holeStats: stats, supporterValues };
+    }
+    /**
+     * W3-2：反统一蒸馏入口（纯符号 —— 无 LLM、无网络、无模型调用）。
+     * 对库内字面量技能的两两组合（插入序、i<j —— 确定性）执行 DTW 对齐 +
+     * 参数槽反统一（antiUnifyPair），候选再过跨母体证据扫（sweepHoleEvidence）
+     * 与抗过拟合门：
+     *   · 支撑母体 ≥ TEMPLATE_MIN_PARENTS（单母体永不产模板）；
+     *   · 每个洞位 Beta 后验 mean ≥ TEMPLATE_HOLE_POSTERIOR_GATE；
+     *   · 骨架哈希去重（同骨架模板已存在 ⇒ 跳过，首酿优先）。
+     * 拒绝判词全量返回（可审计）；created 非空才落盘（原子写）。
+     * 消费面：sleep 第②幕蒸馏（SleepDeps.skillLibrary.distillTemplates 可选面）。
+     */
+    distillTemplates(maxSkills = TEMPLATE_MAX_SKILLS) {
+        const created = [];
+        const rejected = [];
+        if (!this.enabled)
+            return { created, rejected };
+        const pool = this.skills.filter(s => s.steps.length > 0).slice(0, maxSkills);
+        for (let i = 0; i < pool.length; i++) {
+            for (let j = i + 1; j < pool.length; j++) {
+                const A = pool[i];
+                const B = pool[j];
+                const uni = antiUnifyPair(A, B);
+                if (!uni.ok) {
+                    rejected.push({ a: A.id, b: B.id, reason: uni.reason, detail: uni.detail });
+                    continue;
+                }
+                const skeletonHash = hashSkeleton(uni.steps.map(st => st.tool));
+                if (this.templates.some(t => t.skeletonHash === skeletonHash)) {
+                    rejected.push({ a: A.id, b: B.id, reason: 'skeleton-exists', detail: '同骨架模板已在册（首酿优先）' });
+                    continue;
+                }
+                const ev = this.sweepHoleEvidence(uni.steps, pool);
+                if (ev.supporters.length < TEMPLATE_MIN_PARENTS) {
+                    rejected.push({ a: A.id, b: B.id, reason: 'insufficient-parents', detail: `supporters=${ev.supporters.length}` });
+                    continue;
+                }
+                const worst = Math.min(...ev.holeStats.map(h => h.posteriorMean));
+                if (worst < TEMPLATE_HOLE_POSTERIOR_GATE) {
+                    rejected.push({
+                        a: A.id, b: B.id, reason: 'hole-gate',
+                        detail: `worstPosterior=${Math.round(worst * 1000) / 1000} < ${TEMPLATE_HOLE_POSTERIOR_GATE}`,
+                    });
+                    continue;
+                }
+                // 回填逐洞后验 + 支撑母体实值（封顶 8 —— 审计面防膨胀；支撑母体集
+                // 天然含种对 A/B，故以证据扫的支撑值覆盖种对种子值，避免重复记账）
+                for (const h of ev.holeStats) {
+                    const slot = uni.steps[h.stepIndex].args[h.key];
+                    if (slot.kind !== 'hole')
+                        continue; // 防御带（holeList 只收洞槽）
+                    slot.posteriorMean = Math.round(h.posteriorMean * 1000) / 1000;
+                    const vals = ev.supporterValues.get(`${h.stepIndex}#${h.key}`) ?? [];
+                    slot.bindings = vals.length > 0 ? vals.slice(0, 8) : slot.bindings;
+                }
+                const tpl = {
+                    id: this.nextTemplateId++,
+                    name: `tpl-${this.nextTemplateId - 1}`,
+                    description: `参数化模板: ${A.description} ∥ ${B.description}`.slice(0, 200),
+                    entrySceneHash: A.entrySceneHash,
+                    skeletonHash,
+                    steps: uni.steps,
+                    parents: ev.supporters.map(s => s.id),
+                    generation: 1 + Math.max(0, ...ev.supporters.map(s => s.generation ?? 0)),
+                    holes: uni.holes,
+                    successCount: 0,
+                    attemptCount: 0,
+                    createdAt: Date.now(),
+                    lastUsedAt: Date.now(),
+                    alignment: uni.alignment,
+                };
+                this.templates.push(tpl);
+                created.push(tpl);
+            }
+        }
+        // 容量驱逐（可靠度 × 新近度 —— 技能驱逐同律；0/0 新模板按 Laplace 0.5 起步）
+        if (this.templates.length > TEMPLATE_CAPACITY) {
+            const now = Date.now();
+            const survival = (t) => (t.attemptCount > 0 ? t.successCount / t.attemptCount : 0.5) * Math.exp(-(now - t.lastUsedAt) / 7_200_000);
+            this.templates.sort((x, y) => survival(y) - survival(x));
+            this.templates = this.templates.slice(0, TEMPLATE_CAPACITY);
+        }
+        if (created.length > 0)
+            this.save(); // 原子落盘（tmp+rename —— 蒸馏中途崩溃保旧档）
+        return { created, rejected };
+    }
+    /**
+     * W3-2：模板召回（骨架哈希 + 场景指纹 —— match 的非文本通道同律）。
+     * skeleton 在场 ⇒ 精确骨架哈希过滤（matched_via='skeleton-hash'）；场景指纹
+     * 与 entrySceneHash 相似度过门 ⇒ 同屏加成（'scene-fingerprint'）；可靠度 =
+     * Beta 后验均值 − CI 折扣（与字面量技能 match 完全同一执法面）。对字面量
+     * 技能的 match() 零触碰 —— 两套召回并行，模型自选。
+     */
+    matchTemplates(opts = {}) {
+        if (!this.enabled)
+            return [];
+        const k = Math.max(1, opts.k ?? 3);
+        const sceneGate = kernelRegistry.getOrDefault('skill.sceneGate', 0.9);
+        const sceneBonus = kernelRegistry.getOrDefault('skill.sceneBonus', 0.3);
+        const reliabilityWeight = kernelRegistry.getOrDefault('skill.reliabilityWeight', 0.3);
+        const ciDiscount = kernelRegistry.getOrDefault('skill.ciDiscount', 0.1);
+        const recencyHalfLifeH = Math.max(1, kernelRegistry.getOrDefault('skill.recencyHalfLifeH', 72));
+        let via = 'reliability-only';
+        let pool = [...this.templates];
+        if (Array.isArray(opts.skeleton) && opts.skeleton.length > 0) {
+            const want = hashSkeleton(opts.skeleton);
+            pool = pool.filter(t => t.skeletonHash === want);
+            via = 'skeleton-hash';
+        }
+        const now = Date.now();
+        return pool
+            .map(t => {
+            const post = betaReliability(t.successCount, t.attemptCount);
+            let scene = 0;
+            let matchedVia = via;
+            if (opts.sceneHash && t.entrySceneHash && similarity(opts.sceneHash, t.entrySceneHash) >= sceneGate) {
+                scene = sceneBonus;
+                if (via === 'reliability-only')
+                    matchedVia = 'scene-fingerprint';
+            }
+            const ageH = (now - t.lastUsedAt) / 3_600_000;
+            const recency = 0.1 * Math.exp(-ageH / recencyHalfLifeH);
+            return {
+                ...t,
+                score: Math.round((reliabilityWeight * (post.mean - ciDiscount * post.hw) + scene + recency) * 1000) / 1000,
+                matched_via: matchedVia,
+            };
+        })
+            .sort((x, y) => y.score - x.score)
+            .slice(0, k);
+    }
+    /**
+     * W3-2：运行时绑定 —— 洞由当前世界读取（reader 注入面：OCR/元素跟踪/上下文
+     * 的宿主接线），常量槽逐字面回放。reader 抛错/缺席值 ⇒ hole-read-failed；
+     * 类型不符 ⇒ hole-type-mismatch —— 两种失败都判「模板不适用」，调用方回退
+     * 原字面量技能（零行为损失）。绑定账本逐洞回写（成败皆计 —— 审计面）并落盘。
+     */
+    bindTemplate(id, reader) {
+        if (!this.enabled)
+            return { ok: false, reason: 'library-disabled' };
+        const t = this.templates.find(x => x.id === id);
+        if (!t)
+            return { ok: false, reason: 'not-found' };
+        const steps = [];
+        for (let si = 0; si < t.steps.length; si++) {
+            const ts = t.steps[si];
+            const args = {};
+            for (const key of Object.keys(ts.args).sort()) {
+                const slot = ts.args[key];
+                if (slot.kind === 'const') {
+                    args[key] = slot.value;
+                    continue;
+                }
+                slot.bindAttempts++; // 绑定账本：尝试即计（失败也是洞可靠度的世界证据）
+                let raw;
+                try {
+                    raw = reader({ templateId: t.id, stepIndex: si, key, tool: ts.tool, type: slot.type, source: slot.source });
+                }
+                catch {
+                    this.save();
+                    return {
+                        ok: false, templateId: t.id, reason: 'hole-read-failed',
+                        failed: { stepIndex: si, key, source: slot.source },
+                    };
+                }
+                if (raw === undefined || raw === null || !valueMatchesHoleType(raw, slot.type)) {
+                    this.save();
+                    return {
+                        ok: false, templateId: t.id,
+                        reason: raw === undefined ? 'hole-read-failed' : 'hole-type-mismatch',
+                        failed: { stepIndex: si, key, source: slot.source },
+                    };
+                }
+                slot.bindSuccesses++;
+                args[key] = raw;
+            }
+            steps.push({ tool: ts.tool, args });
+        }
+        t.lastUsedAt = Date.now(); // 召回新鲜化（执行成败的回写归 recordTemplateOutcome）
+        this.save();
+        return { ok: true, templateId: t.id, steps };
+    }
+    /** W3-2：模板执行结果回写（recordOutcome 的模板同律 —— 越用越准） */
+    recordTemplateOutcome(id, success) {
+        const t = this.templates.find(x => x.id === id);
+        if (!t)
+            return;
+        t.attemptCount++;
+        if (success)
+            t.successCount++;
+        t.lastUsedAt = Date.now();
+        this.save();
+    }
+    /** W3-2：模板观测面 */
+    getTemplate(id) {
+        return this.templates.find(x => x.id === id);
+    }
+    /** W3-2：模板清单（新近优先 —— list() 同律） */
+    listTemplates() {
+        return [...this.templates].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+    }
+    // ── W4-1（G3 契约）：联邦摘要与休眠登记（签名逐字对齐契约，绝不抛） ──
+    /**
+     * W4-1（G3 契约）：本机技能摘要清单 —— 联邦交换的最小充分统计量。
+     * skillId = 技能名（skill-N / syn-N —— 跨档案稳定的人类可读标识）；
+     * sceneFingerprint = entrySceneHash（缺席诚实空串）；stepsDigest 每步
+     * { 工具名: argsFNV数值哈希 }；reliability = Beta 后验均值（round3）。
+     * 库禁用 ⇒ 空数组（诚实缺席）。纯读 —— 无副作用。
+     */
+    listSkillDigests() {
+        if (!this.enabled)
+            return [];
+        try {
+            return this.skills.map(s => ({
+                skillId: String(s.name ?? s.id),
+                sceneFingerprint: typeof s.entrySceneHash === 'string' ? s.entrySceneHash : '',
+                stepsDigest: (Array.isArray(s.steps) ? s.steps : []).map(st => ({
+                    [String(st?.tool ?? 'unknown')]: hashArgsNumeric((st?.args ?? {})),
+                })),
+                reliability: Math.round(betaReliability(s.successCount, s.attemptCount).mean * 1000) / 1000,
+            }));
+        }
+        catch {
+            return []; // 防御带：脏档案绝不让摘要面炸调用方
+        }
+    }
+    /**
+     * W4-1（G3 契约）：休眠技能登记（他方技能的隔离入境口）。
+     * 校验失败 / 库禁用 / 同 skillId 重复 ⇒ false（幂等拒绝，绝不抛）；
+     * 成功 ⇒ 入隔离登记区（FIFO 容量 DORMANT_CAPACITY），原子落盘。
+     * 休眠语义：不入 match 主池、不参与归纳 —— 外来技能未经本机验证，
+     * 唤醒（转正为可执行技能）是联邦消费方（W4-2）的职权，本库只管登记与溯源。
+     */
+    addDormantSkill(d) {
+        try {
+            if (!this.enabled)
+                return false;
+            if (!d || typeof d !== 'object')
+                return false;
+            if (typeof d.skillId !== 'string' || d.skillId.trim() === '')
+                return false;
+            if (typeof d.sceneFingerprint !== 'string')
+                return false;
+            if (typeof d.origin !== 'string' || d.origin.trim() === '')
+                return false;
+            if (typeof d.reliability !== 'number' || !Number.isFinite(d.reliability) || d.reliability < 0 || d.reliability > 1)
+                return false;
+            if (!Array.isArray(d.stepsDigest) || d.stepsDigest.length === 0)
+                return false;
+            for (const step of d.stepsDigest) {
+                if (!step || typeof step !== 'object' || Array.isArray(step))
+                    return false;
+                const keys = Object.keys(step);
+                if (keys.length === 0)
+                    return false;
+                for (const k of keys) {
+                    if (typeof step[k] !== 'number' || !Number.isFinite(step[k]))
+                        return false;
+                }
+            }
+            if (this.dormant.some(x => x.skillId === d.skillId))
+                return false; // 幂等：同 id 只登记一次
+            this.dormant.push({
+                skillId: d.skillId,
+                sceneFingerprint: d.sceneFingerprint,
+                stepsDigest: d.stepsDigest,
+                reliability: d.reliability,
+                origin: d.origin,
+                receivedAt: Date.now(),
+            });
+            if (this.dormant.length > DORMANT_CAPACITY)
+                this.dormant.shift(); // FIFO 驱逐最老
+            this.save();
+            return true;
+        }
+        catch {
+            return false; // 防御式绝不抛（登记是增益不是依赖）
+        }
+    }
+    /** W4-1：休眠段观测面（联邦消费方的唤醒候选清单 —— 拷贝，调用方改写不触库） */
+    listDormantSkills() {
+        return this.dormant.map(d => ({ ...d, stepsDigest: d.stepsDigest.map(s => ({ ...s })) }));
+    }
+    /**
+     * Τ 纪元（干预即教育）：示范蒸馏 —— 审批事件的技能库落点。
+     *   approval-consumed（验收式消费成功 = 用户背书+世界验证）：命中既有技能
+     *     （签名/文本通道）⇒ 可靠度 +β 特权加成（封顶 0.95）+ 来源注记（demoEndorsed）；
+     *     无匹配 ⇒ 不伪造新技能（诚实 —— 单例不足以成技），仅计数。
+     *   approval-denied（用户拒绝 = 负示范）：形状入回避注记（LRU 32）；命中既有技能
+     *     ⇒ 可靠度 −β 并打 denied 标记。
+     * 旁路义务：本方法自身不抛（蒸馏失败最多返回 no-shape/library-disabled 判词）；
+     * 既有归纳/匹配主路径零触碰 —— demoBonus 缺省、回避清单空的库行为逐字节不变。
+     */
+    learnFromDemonstration(ev) {
+        if (!this.enabled)
+            return { kind: ev.kind, outcome: 'library-disabled' };
+        // 二次脱敏（防御直调调用方）：铸造点已脱敏的形状再过一次幂等不变
+        const shape = ev.actionShape ? sanitizeActionShape(ev.actionShape) : undefined;
+        if (ev.kind === 'approval-consumed') {
+            const hit = shape ? this.findSkillByShape(shape) : undefined;
+            if (!hit) {
+                this.demoUnmatched += 1; // 仅计数：单例不足以成技
+                return { kind: ev.kind, outcome: shape ? 'counted-only' : 'no-shape' };
+            }
+            hit.demoBonus = Math.min(DEMO_RELIABILITY_CAP, (hit.demoBonus ?? 0) + DEMO_BETA);
+            hit.demoEndorsed = (hit.demoEndorsed ?? 0) + 1; // 来源注记在册
+            this.save();
+            return { kind: ev.kind, outcome: 'reinforced', skillId: hit.id };
+        }
+        // approval-denied：这条路用户不让走
+        if (shape)
+            this.rememberAvoidedShape(shape);
+        const hit = shape ? this.findSkillByShape(shape) : undefined;
+        if (!hit)
+            return { kind: ev.kind, outcome: shape ? 'avoidance-only' : 'no-shape' };
+        hit.demoBonus = (hit.demoBonus ?? 0) - DEMO_BETA;
+        hit.demoDenied = (hit.demoDenied ?? 0) + 1;
+        this.save();
+        return { kind: ev.kind, outcome: 'penalized', skillId: hit.id };
+    }
+    /** 回避注记观测面（脱敏形状的拷贝 —— 调用方改写不触库内清单） */
+    deniedShapes() {
+        return this.avoidShapes.map(s => ({ ...s }));
+    }
+    /** 蒸馏统计（观测面）：reinforced/penalized 从技能账本汇总，unmatched/avoided
+     *  为会话级内存计数（回避注记是轻量清单，不落盘） */
+    demonstrationStats() {
+        return {
+            reinforced: this.skills.reduce((n, s) => n + (s.demoEndorsed ?? 0), 0),
+            unmatched: this.demoUnmatched,
+            penalized: this.skills.reduce((n, s) => n + (s.demoDenied ?? 0), 0),
+            avoided: this.avoidShapes.length,
+        };
+    }
+    /** 形状→技能匹配：签名通道（步骤工具+坐标近邻）优先，文本通道（目标描述与技能
+     *  触发描述词面重合 ≥0.5，与 matched_via='exact-tokens' 同阈）次之。
+     *  确定性：签名按库序取首；文本取重合最高者（同分取后者 —— 罕见且无副作用）。 */
+    findSkillByShape(shape) {
+        for (const s of this.skills) {
+            if (s.steps.some(st => this.stepMatchesShape(st, shape)))
+                return s;
+        }
+        if (shape.target_description) {
+            const q = tokenize(shape.target_description);
+            let best;
+            let bestOv = 0.5; // 文本通道阈值（含）
+            for (const s of this.skills) {
+                const ov = overlapCoefficient(q, tokenize(s.description));
+                if (ov >= bestOv) {
+                    best = s;
+                    bestOv = ov;
+                }
+            }
+            if (best)
+                return best;
+        }
+        return undefined;
+    }
+    /** 步骤-形状签名匹配：同工具 + 坐标近邻（±0.025 —— G-3 量化网格半宽的抖动
+     *  容忍带）；形状无坐标（type_text 长度桶形态）⇒ 同工具即命中（文本类签名
+     *  退化为工具名 —— 隐私铁律削掉了可区分的其余维度）。 */
+    stepMatchesShape(step, shape) {
+        if (step.tool !== shape.tool)
+            return false;
+        if (typeof shape.x !== 'number' || typeof shape.y !== 'number')
+            return true;
+        const sx = step.args?.x;
+        const sy = step.args?.y;
+        if (typeof sx !== 'number' || typeof sy !== 'number')
+            return false;
+        return Math.abs(sx - shape.x) <= 0.025 && Math.abs(sy - shape.y) <= 0.025;
+    }
+    /** 回避注记入册（LRU：重复触达即新鲜化；容量 32，最老出局） */
+    rememberAvoidedShape(shape) {
+        const key = shapeKey(shape);
+        const idx = this.avoidShapes.findIndex(s => shapeKey(s) === key);
+        if (idx >= 0)
+            this.avoidShapes.splice(idx, 1);
+        this.avoidShapes.push({ ...shape });
+        if (this.avoidShapes.length > AVOID_CAPACITY)
+            this.avoidShapes.shift();
+    }
+    /** 命中回避清单的技能 id 集：签名通道（步骤工具+坐标）或文本通道（目标描述
+     *  重合 ≥0.5）任一命中即入。空清单 ⇒ 空集 —— match 主路径零成本短路。 */
+    avoidedSkillIds() {
+        const ids = new Set();
+        if (this.avoidShapes.length === 0)
+            return ids;
+        for (const s of this.skills) {
+            for (const shape of this.avoidShapes) {
+                if (s.steps.some(st => this.stepMatchesShape(st, shape))) {
+                    ids.add(s.id);
+                    break;
+                }
+                if (shape.target_description
+                    && overlapCoefficient(tokenize(shape.target_description), tokenize(s.description)) >= 0.5) {
+                    ids.add(s.id);
+                    break;
+                }
+            }
+        }
+        return ids;
+    }
     get(id) {
         return this.skills.find(x => x.id === id);
     }
     /** checkpoint 序列化：与磁盘 JSON 同构（skills + 发号器进度） */
     /** checkpoint 序列化 —— J 纪元修正：补齐 nextSynthId（磁盘 save 有、
-     *  快照没有 ⇒ 崩溃恢复后合成技能重复命名 syn-1，模型可见面撞名）。 */
+     *  快照没有 ⇒ 崩溃恢复后合成技能重复命名 syn-1，模型可见面撞名）。
+     *  W3-2：模板段同律入快照（templates + nextTemplateId —— 崩溃恢复后
+     *  tpl-N 不撞号、蒸馏成果不丢）。 */
     dump() {
-        return { skills: this.skills, nextId: this.nextId, nextSynthId: this.nextSynthId };
+        return {
+            skills: this.skills, nextId: this.nextId, nextSynthId: this.nextSynthId,
+            templates: this.templates, nextTemplateId: this.nextTemplateId,
+            // W4-1：休眠段入快照（联邦登记不随崩溃丢失）
+            dormant: this.dormant,
+        };
     }
     restore(data) {
-        if (!data?.skills)
+        if (!data?.skills && !Array.isArray(data?.templates) && !Array.isArray(data?.dormant))
             return;
-        this.skills = data.skills;
+        this.skills = data?.skills ?? this.skills;
         // 同 load 的撞号防线：ids 稀疏档案下 at(-1).id+1 不保证大于 max(id)+1
         const maxId = this.skills.reduce((m, s) => Math.max(m, Number(s.id) || 0), 0);
-        this.nextId = Math.max(data.nextId ?? 0, (this.skills.at(-1)?.id ?? 0) + 1, maxId + 1);
-        this.nextSynthId = data.nextSynthId ?? this.nextSynthId;
+        this.nextId = Math.max(data?.nextId ?? 0, (this.skills.at(-1)?.id ?? 0) + 1, maxId + 1);
+        this.nextSynthId = data?.nextSynthId ?? this.nextSynthId;
+        // W3-2：模板段恢复（缺席 ⇒ 保持现段 —— 旧快照兼容）
+        if (Array.isArray(data?.templates)) {
+            this.templates = data.templates;
+            const maxTid = this.templates.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
+            this.nextTemplateId = Math.max(data?.nextTemplateId ?? 1, maxTid + 1);
+        }
+        // W4-1：休眠段恢复（缺席 ⇒ 保持现段 —— 旧快照兼容）
+        if (Array.isArray(data?.dormant)) {
+            this.dormant = data.dormant;
+        }
     }
     list() {
         return [...this.skills].sort((a, b) => b.lastUsedAt - a.lastUsedAt);

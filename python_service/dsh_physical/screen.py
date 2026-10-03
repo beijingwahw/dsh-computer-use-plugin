@@ -27,7 +27,7 @@ import platform
 import sys
 import time
 from collections import deque
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -35,6 +35,10 @@ from PIL import Image, ImageDraw, ImageFont
 from .config import ScreenshotConfig
 from .errors import ErrorKind, PhysicalError
 from .shm import ShmHandle, make_handle
+
+# W4-5 移动 Surface：外部帧源（android 设备）—— server 期注入；返回
+# (帧, 降级说明|None)。
+SurfaceFrameSource = Callable[[str], tuple[Image.Image, str | None]]
 
 ImageFormat = Literal["png", "jpeg"]
 
@@ -421,9 +425,16 @@ class ScreenCapture:
 
     MAX_CACHED_FRAMES = 8
 
-    def __init__(self, config: ScreenshotConfig) -> None:
+    def __init__(
+        self,
+        config: ScreenshotConfig,
+        surface_source: "SurfaceFrameSource | None" = None,
+    ) -> None:
         self.cfg = config
         self._dry_run = False
+        # W4-5 移动 Surface：android 帧源（server 期注入 AndroidController.grab_frame）。
+        # 缺席时 android surface 请求 ⇒ 诚实失败（不静默降级主机屏 —— 那是坐标污染）。
+        self._surface_source = surface_source
         # 帧环缓存（干净帧半分辨率 RGB）：frame_id → ndarray。物理规则统计 /
         # popup 几何传感 / frame_diff 全部在此计算 —— Node 端零图像解码依赖。
         self._frames: deque[tuple[int, np.ndarray, tuple[int, int]]] = deque()
@@ -447,6 +458,7 @@ class ScreenCapture:
         meta_only: bool = False,
         want_salience: bool = False,
         display: int | None = None,
+        surface: str | None = None,
     ) -> tuple[ShmHandle | None, dict]:
         """截屏并写入共享内存通道。
 
@@ -472,6 +484,15 @@ class ScreenCapture:
         可预期）；``extras['display']`` = 实际使用的索引（仅 display 请求在场时
         附带，避免污染无参调用的响应字节）。
 
+        W4-5 移动 Surface（``surface``）：display 索引的字符串泛化 ——
+        ``"host:<i>"`` ≡ ``display=i``；``"android:<serial>"`` 路由到注入的
+        android 帧源（scrcpy 优先、adb screencap 降级，见 android.py）。
+        ``surface`` 与 ``display`` 并存时 surface 获胜（单一事实源）。
+        ``region`` / overlay 的归一化基准 = **设备屏幕矩形**（[0,1]² 契约不破，
+        与 Σ-5 的「基准 = 所选显示器矩形」同构）；帧进入同一管线 ⇒ 既有 dhash
+        变化门控 / 帧环 / 叠加层全部复用。``extras['surface']`` = 回显（仅
+        surface 请求在场时附带，兼容铁律）；帧源降级时 ``extras['note']`` 申报。
+
         返回 ``(handle, extras)``；extras = {dhash, phash, region_dhash,
         unchanged, frame_id, frame_count}。
         """
@@ -483,18 +504,37 @@ class ScreenCapture:
 
         loop = asyncio.get_running_loop()
 
+        # W4-5：surface id 解析（畸形 ⇒ INVALID_ARGS 诚实信封；safe_call 兜底）
+        android_serial: str | None = None
+        display_eff: int | None = display
+        if surface is not None:
+            from .android import parse_surface_id  # 延迟导入：android 侧不反向依赖本模块
+
+            kind, key = parse_surface_id(surface)
+            if kind == "host":
+                display_eff = int(key)
+            else:
+                android_serial = str(key)
+                display_eff = None
+
         # Σ-5：非 Windows 请求 display ⇒ 诚实降级主屏并 note 如实申报
         # （不静默假装多屏，也不拒服务 —— 跨平台行为可预期）。
-        display_used: int | None = display
+        display_used: int | None = display_eff
         degrade_note: str | None = None
-        if display is not None and platform.system() != "Windows":
+        if display_eff is not None and platform.system() != "Windows":
             degrade_note = (
-                f"display={display} ignored: cross-screen capture is Windows-only; "
+                f"display={display_eff} ignored: cross-screen capture is Windows-only; "
                 f"degraded to primary capture"
             )
             display_used = None
 
-        full = await loop.run_in_executor(None, self._capture_image, None, display_used)
+        surface_note: str | None = None
+        if android_serial is not None:
+            full, surface_note = await loop.run_in_executor(
+                None, self._grab_surface, android_serial,
+            )
+        else:
+            full = await loop.run_in_executor(None, self._capture_image, None, display_used)
 
         extras: dict = {
             "dhash": None, "phash": None, "region_dhash": None,
@@ -503,6 +543,10 @@ class ScreenCapture:
         }
         if degrade_note is not None:
             extras["note"] = degrade_note
+        if surface_note is not None:
+            extras["note"] = surface_note
+        if surface is not None:
+            extras["surface"] = surface
         if display is not None:
             extras["display"] = display_used
 
@@ -646,6 +690,21 @@ class ScreenCapture:
                 ErrorKind.SCREEN_CAPTURE_FAILED,
                 f"image encode failed: {e}",
             ) from e
+
+    def _grab_surface(self, serial: str) -> tuple[Image.Image, str | None]:
+        """W4-5：android 设备帧（线程池内执行）—— ``(帧, 降级说明)``。
+
+        帧源未接线（单元测试直构 ScreenCapture / 旧装配路径）⇒ 诚实失败：
+        绝不静默降级到主机屏 —— 那会让 [0,1]² 的基准矩形从设备屏漂移成
+        主机屏，坐标契约整体污染。
+        """
+        if self._surface_source is None:
+            raise PhysicalError(
+                ErrorKind.SCREEN_CAPTURE_FAILED,
+                f"android surface {serial!r} requested but no frame source wired "
+                "(AndroidController not injected)",
+            )
+        return self._surface_source(serial)
 
     def _capture_image(self, region: dict | None, display: int | None = None) -> Image.Image:
         """同步截屏（线程池内执行）：真实截屏 → 测试降级 → 裁剪。

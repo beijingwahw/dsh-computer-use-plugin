@@ -1,0 +1,462 @@
+// src/selfmodel/index.ts
+// 纪元 Ι（自我模型）：经验胜任度后验 —— agent 在（动作类 × 场景桶）格子上
+// 维护衰减 Beta 后验，认识论闸门从此拿到「实测校准置信」而非模型自报置信。
+//
+// 立意（世界级 novelty）：GUI agent 普遍「不知道自己不擅长什么」——纪元 Η 的
+// 认识论闸门消费的是动作自报置信（主观，policyEngine 的元素匹配分），Ι 给
+// agent 装上**经验胜任度后验**：每个格子按历史成败维护 Beta(s+1, f+1) 后验，
+// 旧战绩按半衰期指数衰减（上周的战果不该无限背书今天的我）。闸门改用后验
+// 均值后，agent 在自己历史上反复失败的格子前面**真正知道怕**。
+//
+// 诚实铁律（与 worldModel 同源）：冷启动/证据不足 ⇒ null —— 绝不返回 0.5
+// 假数据，绝不把「没做过」伪装成「做不成」，也绝不伪装成「做得成」。
+// 运行层铁律：本模块一切公开面永不抛异常（坏 cell/坏时间戳/坏快照全吸收）。
+//
+// 数学：
+//   · 衰减（懒结算）：格子内 (s, f) 计数在每次触达时按 factor = 2^(−age/halfLife)
+//     一次性折算（age = now − lastTs）——等价于每条历史战绩按其年龄独立衰减
+//     （同批战绩同 factor ⇒ 与逐条衰减严格等价，O(1) 而非 O(n)）。
+//   · 后验：s 成 f 败 ⇒ Beta(α=s+1, β=f+1)（Laplace/Jeffreys 型均匀先验 +1）；
+//     mean = (s+1)/(s+f+2)；95% 可信区间取正态近似 mean ± 1.96·sd，
+//     sd = sqrt(αβ/((α+β)²(α+β+1)))，夹 [0,1]。
+//   · 场景桶：64 位 dhash 指纹（WorldSnapshot.dhash / contextManager 记录的
+//     '0'/'1' 位串）量化成 16bit 桶 —— 8×8 网格按 2×2 分块共 4×4 块，每块
+//     均值阈值位图（块内 1 的个数 ≥2 记 1），参照 worldModel 类型学的
+//     TYPE_QUANTIZE 手法（精确坐标是噪声，区域是信号）。指纹字段缺席 ⇒
+//     只用 actionKind 单轴（诚实降级，绝不伪造场景）。
+//
+// 接线（纪元 Ι）：autoPilot 认识论闸门消费 adviseConfidence（缺席/null ⇒
+// 纪元 Η 自报链逐字节不变）；buildAutonomyStack 经 config.enableSelfModel
+// 铸本单例进栈；get_metrics 经 introspect 暴露自省面。configure/reset 由
+// 主控（src/index.ts，本纪元禁改）接线 —— 单例在此导出备铸。
+
+/** 格子：经验胜任度后验的索引单位（动作类 × 可选场景桶） */
+export interface SelfModelCell {
+  /** 动作类（工具名或 PolicyAction.kind 动作类） */
+  actionKind: string;
+  /** 场景桶（16bit 量化指纹的 4 位十六进制串，如 'f3a0'；缺席 = 单轴格子） */
+  sceneBucket?: string;
+}
+
+/** 胜任度读数：一格后验的全景（纯数据） */
+export interface CompetenceReport {
+  /** 有效证据量（衰减后的成败权重和，非整数是常态） */
+  n: number;
+  /** Beta 后验均值 (s+1)/(n+2) */
+  mean: number;
+  /** 95% 可信区间下界（正态近似，夹 [0,1]） */
+  ciLow: number;
+  /** 95% 可信区间上界（正态近似，夹 [0,1]） */
+  ciHigh: number;
+  /** 读数来源标记：经验后验（区别于模型自报） */
+  empirical: true;
+}
+
+/** 闸门置信建议：经验校准置信（认识论闸门的第四维入参换源） */
+export interface SelfModelAdvice {
+  /** 经验置信 = Beta 后验均值（消费方 adviseAction 自会再做对称校准） */
+  confidence: number;
+  /** 支撑证据量（衰减后有效值） */
+  n: number;
+  /** 溯源标记：自我模型（经验） */
+  source: 'self-model';
+}
+
+/** 自省面单行：一格的成绩单 */
+export interface CellReport {
+  cell: SelfModelCell;
+  /** 有效证据量（同 CompetenceReport.n） */
+  n: number;
+  /** Beta 后验均值 */
+  mean: number;
+}
+
+/** 纯数据快照（checkpoint 消费面）：格子账本 + 结算时刻 */
+export interface SelfModelSnapshot {
+  version: 1;
+  /** 快照结算时刻（懒衰减基准 —— 恢复后续接，不重复折算） */
+  settledAt: number;
+  /** 格子账本（键 = actionKind 或 actionKind|sceneBucket） */
+  cells: Array<{ key: string; s: number; f: number; lastTs: number }>;
+}
+
+/** 缺省参数（config 三键同值）：诚实冷启动 8 条证据起步、记忆半衰一周 */
+const DEFAULT_MIN_EVIDENCE = 8;
+const DEFAULT_HALF_LIFE_H = 168;
+/** competence 读数的证据下限：有效证据 <1 视为冷启动（诚实无知 ⇒ null） */
+const EVIDENCE_FLOOR = 1;
+/** Beta 可信区间正态近似 z 值（95% 双侧） */
+const Z95 = 1.96;
+/** 衰减权重的数值下界：低于此按 0 计（防永久残尾） */
+const WEIGHT_EPSILON = 1e-9;
+
+/**
+ * 场景桶量化（纯函数）：64 位 '0'/'1' dhash 位串 → 16bit 桶（4 位十六进制串）。
+ *
+ * 8×8 网格按 2×2 分块共 4×4 块，块 (R,C) 覆盖行 {2R,2R+1} × 列 {2C,2C+1}；
+ * 块内 1 的个数 ≥2（均值阈值 0.5）记 1，位序 R·4+C —— 与 worldModel
+ * transitionActionKey 的 TYPE_QUANTIZE=4 同一门方言（「大致在哪片」，不记精确位）。
+ * 输入宽容性：已是 4 位十六进制桶串 ⇒ 原样归一化直通（幂等）；其它一切
+ * （缺字段/摘要文本/8 位前缀锚点等）⇒ null —— 诚实降级到 actionKind 单轴。
+ * 永不抛异常。
+ */
+export function sceneBucketFromFingerprint(fingerprint: unknown): string | null {
+  try {
+    if (typeof fingerprint !== 'string') return null;
+    const fp = fingerprint.trim();
+    // 已量化桶串直通（幂等：桶化桶还是桶）
+    if (/^[0-9a-f]{4}$/i.test(fp)) return fp.toLowerCase();
+    // 64 位 dhash 位串（row-major 8×8）→ 4×4 块均值阈值位图
+    if (fp.length === 64 && /^[01]+$/.test(fp)) {
+      let value = 0;
+      for (let r = 0; r < 4; r++) {
+        for (let c = 0; c < 4; c++) {
+          // 块内 4 位：行 2r/2r+1 × 列 2c/2c+1（位索引 = row·8 + col）
+          let ones = 0;
+          for (const row of [2 * r, 2 * r + 1]) {
+            for (const col of [2 * c, 2 * c + 1]) {
+              if (fp[row * 8 + col] === '1') ones++;
+            }
+          }
+          if (ones >= 2) value |= 1 << (r * 4 + c);
+        }
+      }
+      return value.toString(16).padStart(4, '0');
+    }
+    return null;
+  } catch {
+    return null; // 量化绝不抛（运行层铁律）
+  }
+}
+
+/** 格子键（纯函数）：actionKind 单轴或 actionKind|sceneBucket 双轴；永不抛 */
+function cellKey(cell: SelfModelCell): string | null {
+  try {
+    const kind = cell && typeof cell.actionKind === 'string' ? cell.actionKind.trim() : '';
+    if (kind === '') return null;
+    const bucket =
+      cell.sceneBucket !== undefined && typeof cell.sceneBucket === 'string' && cell.sceneBucket.trim() !== ''
+        ? cell.sceneBucket.trim().toLowerCase()
+        : null;
+    return bucket === null ? kind : `${kind}|${bucket}`;
+  } catch {
+    return null;
+  }
+}
+
+/** 安全时钟读数：注入钟缺席/抛错 ⇒ Date.now；永不抛 */
+function safeNow(injected: (() => number) | undefined): number {
+  try {
+    if (typeof injected === 'function') {
+      const t = injected();
+      if (typeof t === 'number' && Number.isFinite(t)) return t;
+    }
+  } catch { /* 坏钟 ⇒ 系统钟兜底 */ }
+  return Date.now();
+}
+
+/**
+ * 内存自我模型（衰减 Beta 胜任度后验账本）。
+ * 零持久化（dump/restore 纯数据面，供 checkpoint 未来消费）；GC 即归零。
+ * 一切公开面永不抛异常；enabled=false ⇒ 记录面静默 no-op、读取面诚实 null。
+ */
+export class SelfModel {
+  /** 格子账本：key → 衰减成败计数 + 懒结算基准 */
+  private cells = new Map<string, { s: number; f: number; lastTs: number }>();
+  private enabled = true;
+  private minEvidence = DEFAULT_MIN_EVIDENCE;
+  private halfLifeH = DEFAULT_HALF_LIFE_H;
+  private now: (() => number) | undefined;
+
+  /**
+   * 配置注入（部分覆盖语义：只改给出的键，其余保持 —— 重复调用幂等无害）。
+   * 非法值逐键回退缺省（enabled 非布尔忽略；minEvidence 非有限数或 <1 ⇒ 8；
+   * halfLifeH 非有限数或 ≤0 ⇒ 168）。永不抛异常。
+   */
+  configure(opts: {
+    /** 总开关：false ⇒ 记录 no-op、读取恒 null（诚实熄灯） */
+    enabled?: boolean;
+    /** adviseConfidence 参与闸门的最小有效证据量 */
+    minEvidence?: number;
+    /** 记忆半衰期（小时）：旧战绩指数衰减 */
+    halfLifeH?: number;
+    /** 注入时钟（测试确定性生命线；缺省 Date.now） */
+    now?: () => number;
+  }): void {
+    try {
+      if (!opts || typeof opts !== 'object') return;
+      if (typeof opts.enabled === 'boolean') this.enabled = opts.enabled;
+      if (typeof opts.minEvidence === 'number' && Number.isFinite(opts.minEvidence) && opts.minEvidence >= 1) {
+        this.minEvidence = opts.minEvidence;
+      }
+      if (typeof opts.halfLifeH === 'number' && Number.isFinite(opts.halfLifeH) && opts.halfLifeH > 0) {
+        this.halfLifeH = opts.halfLifeH;
+      }
+      if (typeof opts.now === 'function') this.now = opts.now;
+    } catch { /* 配置绝不抛（运行层铁律） */ }
+  }
+
+  /** 全量归零（会话边界/测试隔离；配置保留 —— 只清账本） */
+  reset(): void {
+    this.cells.clear();
+  }
+
+  /** 半衰期（毫秒）：小时 × 3.6e6；已由 configure 保证有限正数 */
+  private halfLifeMs(): number {
+    return this.halfLifeH * 3_600_000;
+  }
+
+  /**
+   * 懒衰减结算（内部件）：把格子的 (s, f) 折算到时刻 t。
+   * factor = 2^(−(t−lastTs)/halfLifeMs)；时间倒流（t < lastTs）按 factor=1 容忍。
+   * 结算后 lastTs = max(lastTs, t)。永不抛。
+   */
+  private settle(stat: { s: number; f: number; lastTs: number }, t: number): void {
+    const age = t - stat.lastTs;
+    if (age > 0) {
+      const factor = Math.pow(2, -age / this.halfLifeMs());
+      if (Number.isFinite(factor) && factor >= 0) {
+        stat.s = stat.s < WEIGHT_EPSILON ? 0 : stat.s * factor;
+        stat.f = stat.f < WEIGHT_EPSILON ? 0 : stat.f * factor;
+      }
+    }
+    if (t > stat.lastTs) stat.lastTs = t;
+  }
+
+  /**
+   * 记录面：一格战绩入账（ok=true 成 / false 败）。
+   * ts 非有限数 ⇒ 注入钟（缺省系统钟）兜底；坏 cell（null/非对象/空 actionKind）
+   * ⇒ 静默吸收；sceneBucket 非法 ⇒ 诚实降级为 actionKind 单轴格。永不抛。
+   */
+  recordOutcome(cell: SelfModelCell, ok: boolean, ts?: number): void {
+    try {
+      if (!this.enabled) return;
+      if (ok !== true && ok !== false) return; // 结局必须是真布尔 —— 垃圾结局不入账
+      const key = cellKey(cell);
+      if (key === null) return; // 坏 cell 吸收（诚实：无法归位的战绩不入账）
+      const t =
+        typeof ts === 'number' && Number.isFinite(ts)
+          ? ts
+          : safeNow(this.now);
+      let stat = this.cells.get(key);
+      if (!stat) {
+        stat = { s: 0, f: 0, lastTs: t };
+        this.cells.set(key, stat);
+      }
+      this.settle(stat, t);
+      if (ok) stat.s += 1;
+      else stat.f += 1;
+    } catch { /* 记录绝不抛（运行层铁律） */ }
+  }
+
+  /**
+   * 读取面：一格胜任度后验（Beta(α=s+1, β=f+1) 的均值与 95% 可信区间）。
+   * 冷启动（格子无账/有效证据 <1/模型禁用）⇒ null —— 诚实无知，绝不返回
+   * 0.5 假数据。读取即懒结算（衰减在触达时折算）。永不抛。
+   */
+  competence(cell: SelfModelCell): CompetenceReport | null {
+    try {
+      if (!this.enabled) return null;
+      const key = cellKey(cell);
+      if (key === null) return null;
+      const stat = this.cells.get(key);
+      if (!stat) return null;
+      this.settle(stat, safeNow(this.now));
+      const s = Math.max(0, stat.s);
+      const f = Math.max(0, stat.f);
+      const n = s + f;
+      if (!Number.isFinite(n) || n < EVIDENCE_FLOOR) return null; // 冷启动诚实
+      const alpha = s + 1;
+      const beta = f + 1;
+      const total = alpha + beta;
+      const mean = alpha / total;
+      const sd = Math.sqrt((alpha * beta) / (total * total * (total + 1)));
+      const lo = Math.min(1, Math.max(0, mean - Z95 * sd));
+      const hi = Math.min(1, Math.max(0, mean + Z95 * sd));
+      return { n, mean, ciLow: lo, ciHigh: hi, empirical: true };
+    } catch {
+      return null; // 读取绝不抛（运行层铁律）
+    }
+  }
+
+  /**
+   * 闸门建议面：给认识论闸门的经验校准置信。
+   * action 取字符串（工具名/动作类）或带 kind 的动作对象；sceneFingerprint 取
+   * 原始指纹（64 位 dhash 位串或已是桶串）—— 桶量化在本面内完成，调用方零方言。
+   * 有效证据 n < minEvidence（含冷启动 null/模型禁用）⇒ null —— 不掺入闸门
+   * （诚实冷启动：宁可走纪元 Η 自报链，不伪造经验）。永不抛。
+   */
+  adviseConfidence(action: unknown, sceneFingerprint?: unknown): SelfModelAdvice | null {
+    try {
+      if (!this.enabled) return null;
+      const kind =
+        typeof action === 'string'
+          ? action.trim()
+          : action && typeof action === 'object' && typeof (action as { kind?: unknown }).kind === 'string'
+            ? (action as { kind: string }).kind.trim()
+            : '';
+      if (kind === '') return null;
+      const bucket = sceneBucketFromFingerprint(sceneFingerprint);
+      const report = this.competence(bucket === null ? { actionKind: kind } : { actionKind: kind, sceneBucket: bucket });
+      if (report === null || report.n < this.minEvidence) return null;
+      if (!Number.isFinite(report.mean) || report.mean < 0 || report.mean > 1) return null;
+      return { confidence: report.mean, n: report.n, source: 'self-model' };
+    } catch {
+      return null; // 建议绝不抛（运行层铁律）
+    }
+  }
+
+  /** 全部格子（内部枚举前的懒结算快照；结算异常的格子跳过） */
+  private settledEntries(): Array<{ key: string; cell: SelfModelCell; report: CompetenceReport }> {
+    const t = safeNow(this.now);
+    const out: Array<{ key: string; cell: SelfModelCell; report: CompetenceReport }> = [];
+    for (const [key, stat] of this.cells) {
+      try {
+        this.settle(stat, t);
+      } catch { /* 单格结算故障不拖垮自省面 */ }
+      const s = Math.max(0, stat.s);
+      const f = Math.max(0, stat.f);
+      const n = s + f;
+      if (!Number.isFinite(n) || n < EVIDENCE_FLOOR) continue;
+      const alpha = s + 1;
+      const beta = f + 1;
+      out.push({
+        key,
+        cell: key.includes('|')
+          ? { actionKind: key.slice(0, key.indexOf('|')), sceneBucket: key.slice(key.indexOf('|') + 1) }
+          : { actionKind: key },
+        report: { n, mean: alpha / (alpha + beta), ciLow: 0, ciHigh: 1, empirical: true },
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 自省面：最擅长的 k 个格子（Beta 均值降序；并列按证据量多者优先、再按键
+   * 字典序 —— 全序确定，绝不掷硬币）。证据不足（n<1）的格子不入榜。永不抛。
+   */
+  topCells(k: number): CellReport[] {
+    return this.rankedCells(k, false);
+  }
+
+  /**
+   * 自省面：最不擅长的 k 个格子（Beta 均值升序；并列同上确定序）。
+   * 「知道自己不擅长什么」正是本纪元的立意 —— 榜单供 get_metrics 自省。永不抛。
+   */
+  bottomCells(k: number): CellReport[] {
+    return this.rankedCells(k, true);
+  }
+
+  /** 排序实现件（topCells/bottomCells 共用；坏 k ⇒ 空榜） */
+  private rankedCells(k: number, ascending: boolean): CellReport[] {
+    try {
+      if (typeof k !== 'number' || !Number.isFinite(k) || k <= 0) return [];
+      const rows = this.settledEntries()
+        .map(e => ({ cell: e.cell, n: e.report.n, mean: e.report.mean }))
+        .sort((a, b) => {
+          const byMean = ascending ? a.mean - b.mean : b.mean - a.mean;
+          if (Math.abs(byMean) > 1e-12) return byMean;
+          if (a.n !== b.n) return b.n - a.n; // 并列：证据多者胜（更可信的读数优先）
+          return a.cell.actionKind < b.cell.actionKind ? -1 : a.cell.actionKind > b.cell.actionKind ? 1 : 0;
+        });
+      return rows.slice(0, Math.floor(k));
+    } catch {
+      return []; // 自省绝不抛（运行层铁律）
+    }
+  }
+
+  /** 库存快照：总格子数（含未结算全部）+ 总有效证据量（结算后求和） */
+  stats(): { cells: number; evidence: number } {
+    try {
+      const entries = this.settledEntries();
+      let evidence = 0;
+      for (const e of entries) evidence += e.report.n;
+      return { cells: this.cells.size, evidence: Number.isFinite(evidence) ? evidence : 0 };
+    } catch {
+      return { cells: this.cells.size, evidence: 0 };
+    }
+  }
+
+  /**
+   * 可观测内省面（get_metrics 消费）：禁用 ⇒ null（字段整体缺席）；
+   * 在场 ⇒ 总格子数 + 总证据量 + top/bottom 各 k 条。永不抛。
+   */
+  introspect(k = 3): { cells: number; evidence: number; top: CellReport[]; bottom: CellReport[] } | null {
+    try {
+      if (!this.enabled) return null;
+      const stats = this.stats();
+      return {
+        cells: stats.cells,
+        evidence: Math.round(stats.evidence * 1e6) / 1e6, // 展示精度（防浮点尾长）
+        top: this.topCells(k),
+        bottom: this.bottomCells(k),
+      };
+    } catch {
+      return null; // 内省绝不抛（运行层铁律）
+    }
+  }
+
+  /**
+   * 纯数据快照（checkpoint 消费面）：结算时刻 + 格子账本。
+   * 键序按 Map 插入序稳定（确定性序列化）。永不抛。
+   */
+  dump(): SelfModelSnapshot {
+    const t = safeNow(this.now);
+    const cells: SelfModelSnapshot['cells'] = [];
+    for (const [key, stat] of this.cells) {
+      try {
+        this.settle(stat, t);
+      } catch { /* 单格结算故障不拖垮快照 */ }
+      cells.push({ key, s: Math.max(0, stat.s), f: Math.max(0, stat.f), lastTs: stat.lastTs });
+    }
+    return { version: 1, settledAt: t, cells };
+  }
+
+  /**
+   * 快照水合（checkpoint 恢复面）：防御式整体替换 —— 任一行非法即跳过该行
+   * （半水合诚实：好行入账、坏行弃置，绝不因一行脏数据丢整本账）。永不抛。
+   */
+  restore(snapshot: unknown): void {
+    try {
+      if (!snapshot || typeof snapshot !== 'object') return;
+      const snap = snapshot as { cells?: unknown };
+      if (!Array.isArray(snap.cells)) return;
+      const next = new Map<string, { s: number; f: number; lastTs: number }>();
+      for (const row of snap.cells) {
+        const r = row as { key?: unknown; s?: unknown; f?: unknown; lastTs?: unknown } | null;
+        if (!r || typeof r.key !== 'string' || r.key.trim() === '' || r.key.includes('\n')) continue;
+        if (typeof r.s !== 'number' || !Number.isFinite(r.s) || r.s < 0) continue;
+        if (typeof r.f !== 'number' || !Number.isFinite(r.f) || r.f < 0) continue;
+        if (typeof r.lastTs !== 'number' || !Number.isFinite(r.lastTs)) continue;
+        if (r.s + r.f <= 0) continue; // 空格子不入账
+        next.set(r.key, { s: r.s, f: r.f, lastTs: r.lastTs });
+      }
+      this.cells = next;
+    } catch { /* 水合绝不抛（运行层铁律） */ }
+  }
+}
+
+/**
+ * 自我模型单例（纪元 Ι 生产接线）：buildAutonomyStack 经
+ * config.enableSelfModel 铸进自主闭环栈；get_metrics 经 introspect 自省。
+ */
+export const selfModel = new SelfModel();
+
+/**
+ * 配置面（主控接线口）：src/index.ts 禁改（纪元 Ι），主控在 apply 时把 config
+ * 三键（enableSelfModel/selfModelMinEvidence/selfModelHalfLifeH）经此灌入单例；
+ * 未灌入时缺省（true/8/168）即生产语义。部分覆盖语义，永不抛。
+ */
+export function configureSelfModel(opts: {
+  enabled?: boolean;
+  minEvidence?: number;
+  halfLifeH?: number;
+  now?: () => number;
+}): void {
+  selfModel.configure(opts);
+}
+
+/** 会话边界归零面（主控接线口）：清账本、留配置（与插件卸载清理序列同律） */
+export function resetSelfModel(): void {
+  selfModel.reset();
+}

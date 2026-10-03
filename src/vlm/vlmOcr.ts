@@ -1,24 +1,27 @@
 // src/vlm/vlmOcr.ts
 // 纪元 Ω（Ω-5 · GLM-5.3-Flash 云脑皮层）：云端 VLM 文字感知（read_text / find_text 的云脑路径）。
 // textReader.ts（本地 OCR：服务端 RapidOCR 优先 → legacy tesseract 降级）的云侧姊妹：
-// encodeForVlm 编码（region 像素裁剪/压缩）→ buildOcrPrompt 铁律提示词（findQuery 聚焦）
-// → GlmClient.chatJson 结构化对话 → 逐词校验（trim / 夹取 / 4 元数组转对象 / 几何中心 / 阅读序）。
+// encodeForVlmMeta 编码（region 像素裁剪/压缩，源图宽高随行）→ buildOcrPrompt 铁律提示词
+// （findQuery 聚焦）→ GlmClient.chatJson 结构化对话 → 逐词校验（trim / 夹取 / 4 元数组转
+// 对象 / 几何中心 / 阅读序）→ 纪元 Γ 坐标反算（词坐标：编码图系 → 源图系，裁剪窗先缩放
+// 后平移）→ coordinateSpace 诚实标注。
 // 铁律：具名导出、零新增依赖、绝不抛异常 —— 一切失败以 { ok:false, degraded:true } 表达，
 // 调用方降级回本地 OCR 路径（云脑缺席不致命，宁可空不可错）。
 import {
   getGlmClient, isGlmConfigured,
   type GlmClient, type GlmImageInput,
 } from './glmClient';
-import { encodeForVlm, type Bbox } from './codec';
+import { encodeForVlmMeta, mapEncodedToOriginal, mapInsetToOriginal, type Bbox } from './codec';
+import { clampBbox } from './grounding';
 import { buildOcrPrompt } from './som';
 
-/** 云脑识别词 —— 本地 OcrWord 的像素方言（bbox/center 为模型所见图像的像素坐标，非归一化） */
+/** 云脑识别词 —— 本地 OcrWord 的像素方言（bbox/center 像素坐标；空间见 VlmOcrResult.coordinateSpace） */
 export interface VlmWord {
   /** 屏幕原文（去首尾空白；保持原语言不翻译不改写 —— som 提示词约定） */
   text: string;
   /** 置信度 —— 模型 0..1 输出经夹取（越界夹边界、缺失/NaN 压 0，永不 NaN） */
   confidence: number;
-  /** 像素边框（输入图像空间 = region 裁剪/编码后的图；som 铁律：图外坐标非法） */
+  /** 像素边框（纪元 Γ 起恒为源图坐标系 —— region 裁剪与编码缩放已反算；反算基准缺席时为编码图系） */
   bbox: Bbox;
   /** 几何中心（bbox 对角线中点，点击定位目标） */
   center: { x: number; y: number };
@@ -36,6 +39,12 @@ export interface VlmOcrResult {
   error?: string;
   /** 整次调用墙钟延迟（毫秒） */
   latencyMs: number;
+  /**
+   * 纪元 Γ（Γ-1）：词坐标空间标注 —— 'original'（源图系：region 偏移与编码
+   * 缩放均已反算）| 'encoded'（编码图系：反算基准缺席时的诚实降级）。
+   * 成功路径必有；失败路径省略（words 恒空）。
+   */
+  coordinateSpace?: 'original' | 'encoded';
 }
 
 /** find_text 命中项 —— 带中心像素坐标供点击定位 */
@@ -52,6 +61,8 @@ export interface VlmFindResult {
   /** true = 云脑缺席/失败（与 VlmOcrResult.degraded 同语义） */
   degraded: boolean;
   error?: string;
+  /** 纪元 Γ：命中中心坐标空间（同 VlmOcrResult.coordinateSpace） */
+  coordinateSpace?: 'original' | 'encoded';
 }
 
 /** 大小写/空白不敏感归一 —— 与 textReader.ts 的 normalize 同律（toLowerCase + 空白折叠） */
@@ -122,8 +133,9 @@ interface VlmOcrOptions {
 }
 
 /**
- * 共用主流程：配置探测 → encodeForVlm（region 裁剪）→ buildOcrPrompt → chatJson
- * → 逐词校验。任何一步失败降级返回（{ ok:false, degraded:true }），绝不抛。
+ * 共用主流程：配置探测 → encodeForVlmMeta（region 裁剪/压缩 + 源图宽高随行）
+ * → buildOcrPrompt → chatJson → 逐词校验 → 纪元 Γ 坐标反算（编码系 → 源图系）。
+ * 任何一步失败降级返回（{ ok:false, degraded:true }），绝不抛。
  * 未配置且未注入 client 时零网络（不建 client、不编码、不发请求）。
  */
 async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrResult> {
@@ -144,12 +156,14 @@ async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrRes
       return degrade('vlm ocr unavailable: empty image buffer');
     }
 
-    // 2) 编码（region 像素裁剪/压缩在此发生；词坐标 = 编码后图像的像素空间）
-    const enc = await encodeForVlm(buffer, { region: opts.region });
+    // 2) 编码（region 像素裁剪/压缩在此发生；纪元 Γ 元信息通道 —— 模型在
+    //    编码图上作答，sourceWidth/Height + cropRect 是反算回源图系的基准）
+    const enc = await encodeForVlmMeta(buffer, { region: opts.region });
     if (!enc.ok || !enc.value) {
       return degrade(`vlm ocr encode failed: ${enc.error ?? 'unknown codec error'}`);
     }
-    const image: GlmImageInput = { base64: enc.value.base64, mime: enc.value.mime };
+    const encoded = enc.value;
+    const image: GlmImageInput = { base64: encoded.base64, mime: encoded.mime };
 
     // 3) 铁律提示词（findQuery 有值时聚焦查询词）→ 结构化对话（chatJson 内部强制 jsonMode）
     const prompt = buildOcrPrompt({ lang: opts.lang, findQuery: opts.findQuery });
@@ -163,10 +177,49 @@ async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrRes
       : Array.isArray((payload as { words?: unknown } | null)?.words)
         ? (payload as { words: unknown[] }).words
         : [];
-    const words = sanitizeWords(rawWords);
+    let words = sanitizeWords(rawWords);
+
+    // 5) 纪元 Γ（Γ-1）坐标反算：词 bbox 编码图系 → 源图系。两段复合：
+    //    编码图 →（等比缩放）→ 裁剪窗/原图 →（+cropRect.left/top 平移）→ 源图，
+    //    clampBbox 以源图为画布收口整化（floor/ceil/1px/夹回 —— 与 grounding
+    //    同一几何方言）。反算基准缺席（理论不可达：codec 恒供源图宽高）⇒
+    //    诚实保持编码图系并在 coordinateSpace 标 'encoded'。
+    const srcW = encoded.sourceWidth;
+    const srcH = encoded.sourceHeight;
+    const crop = encoded.cropRect ?? null;
+    const canMap = Number.isFinite(srcW) && srcW >= 1 && Number.isFinite(srcH) && srcH >= 1
+      && encoded.width >= 1 && encoded.height >= 1;
+    if (canMap) {
+      // 纪元 Γ2：inset 编码走分段反算（凹窗内原生 1:1、窗外缩图实际比值；cropRect
+      // 平移与 clamp 已在 mapInsetToOriginal 内复合 —— 与下方等比路径同一输出契约）。
+      // 其余（均质/blur）走 Γ 等比两段复合，既有路径零变化。
+      if (encoded.foveaMode === 'inset') {
+        words = words.map(w => {
+          const p0 = mapInsetToOriginal(w.bbox.x0, w.bbox.y0, encoded);
+          const p1 = mapInsetToOriginal(w.bbox.x1, w.bbox.y1, encoded);
+          const bbox = clampBbox({ x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y }, srcW, srcH);
+          return { ...w, bbox, center: { x: (bbox.x0 + bbox.x1) / 2, y: (bbox.y0 + bbox.y1) / 2 } };
+        });
+      } else {
+        const midW = crop ? crop.width : encoded.width;
+        const midH = crop ? crop.height : encoded.height;
+        const offX = crop ? crop.left : 0;
+        const offY = crop ? crop.top : 0;
+        words = words.map(w => {
+          const p0 = mapEncodedToOriginal(w.bbox.x0, w.bbox.y0, encoded.width, encoded.height, midW, midH);
+          const p1 = mapEncodedToOriginal(w.bbox.x1, w.bbox.y1, encoded.width, encoded.height, midW, midH);
+          const bbox = clampBbox(
+            { x0: p0.x + offX, y0: p0.y + offY, x1: p1.x + offX, y1: p1.y + offY },
+            srcW, srcH,
+          );
+          return { ...w, bbox, center: { x: (bbox.x0 + bbox.x1) / 2, y: (bbox.y0 + bbox.y1) / 2 } };
+        });
+      }
+    }
     return {
       ok: true, text: words.map(w => w.text).join(' '), words,
       degraded: false, latencyMs: Date.now() - startedAt,
+      coordinateSpace: canMap ? 'original' : 'encoded',
     };
   } catch (e) {
     // 理论不可达（各步自兜底）—— 最后防线：异常转降级返回，绝不越狱上抛
@@ -176,8 +229,10 @@ async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrRes
 }
 
 /**
- * 云端 VLM 区域读字：buffer + 可选 region 像素裁剪 → 词级像素坐标结果。
- * 未配置且未注入 client 时零网络降级（degraded:true，调用方走本地 OCR）。
+ * 云端 VLM 区域读字：buffer + 可选 region 像素裁剪 → 词级像素坐标结果
+ * （纪元 Γ 起 bbox/center 恒为**源图坐标系** —— region 偏移与编码缩放已在
+ * 管线内反算；coordinateSpace 诚实标注）。未配置且未注入 client 时零网络
+ * 降级（degraded:true，调用方走本地 OCR）。
  */
 export async function readTextViaVlm(
   buffer: Buffer,
@@ -207,5 +262,7 @@ export async function findTextViaVlm(
   const matches: VlmTextMatch[] = ocr.words
     .filter(w => normalize(w.text).includes(needle))
     .map(w => ({ text: w.text, center: w.center, confidence: w.confidence }));
-  return { ok: true, matches, degraded: false };
+  // 命中中心与 ocr.words 同空间 —— 纪元 Γ 标注随行透传（'original' 时调用方
+  // 可直接以源图宽高换算归一化点击坐标）
+  return { ok: true, matches, degraded: false, coordinateSpace: ocr.coordinateSpace };
 }

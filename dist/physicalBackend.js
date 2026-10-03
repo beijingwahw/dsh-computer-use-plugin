@@ -39,7 +39,10 @@ async function probeAlive(port) {
         const resp = await fetch(`http://127.0.0.1:${port}/v1/health`, {
             signal: AbortSignal.timeout(800),
         });
-        return resp.ok;
+        const alive = resp.ok;
+        // 取消响应体：未消费的 body 会占住连接池里挂起的 socket
+        resp.body?.cancel().catch(() => { });
+        return alive;
     }
     catch {
         return false;
@@ -62,15 +65,37 @@ async function startOnPort(port) {
         timeoutMs: 15_000,
         keyPath: res.keyPath,
     });
-    unwrap(await adapter.init(), 'adapter.init');
-    const health = unwrap(await adapter.health(), 'adapter.health');
-    state.manager = manager;
-    state.adapter = adapter;
-    state.health = health;
-    if (health.screen && 'width' in health.screen) {
-        state.screen = { width: health.screen.width, height: health.screen.height };
+    try {
+        unwrap(await adapter.init(), 'adapter.init');
+        const health = unwrap(await adapter.health(), 'adapter.health');
+        state.manager = manager;
+        state.adapter = adapter;
+        state.health = health;
+        if (health.screen && 'width' in health.screen) {
+            state.screen = { width: health.screen.width, height: health.screen.height };
+        }
+    }
+    catch (e) {
+        // init/health 失败：服务进程已 spawn，必须随失败一并处置 ——
+        // 否则逐端口重试每失败一个端口就泄漏一个存活进程
+        try {
+            await manager.dispose();
+        }
+        catch { /* dispose 失败不掩盖原始错误 */ }
+        throw e;
     }
     return adapter;
+}
+/** 语义化版本比较（数字段逐段）：字符串序会把 '0.10.0' 判小于 '0.4.0'，必须按段数值比 */
+function versionLt(a, b) {
+    const pa = a.split('.').map(s => parseInt(s, 10) || 0);
+    const pb = b.split('.').map(s => parseInt(s, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (d !== 0)
+            return d < 0;
+    }
+    return false;
 }
 /** 收养已存活服务：稳定密钥路径 ⇒ 同一 HMAC ⇒ 令牌互通 */
 async function adoptExisting(port) {
@@ -86,7 +111,7 @@ async function adoptExisting(port) {
     // 版本闸门：旧版本服务（旧键表/旧端点面）不收养 —— 宁可换端口 spawn 新码。
     // 0.4.0：Z-1 世界行动端点（/move_mouse、/cursor_kind）入伍
     const MIN_SVC_VERSION = '0.4.0';
-    if ((health.value.version ?? '0.0.0') < MIN_SVC_VERSION)
+    if (versionLt(health.value.version ?? '0.0.0', MIN_SVC_VERSION))
         return false;
     // 鉴权握手验证（收养的前提是同一密钥）：cursor 是最便宜的已鉴权端点
     const cursor = await adapter.getCursor();
@@ -105,7 +130,7 @@ export function ensureBackend() {
         return Promise.resolve(state.adapter);
     if (state.starting)
         return state.starting;
-    state.starting = (async () => {
+    const starting = (async () => {
         let lastErr = null;
         for (let i = 0; i < PORT_SPAN; i++) {
             const port = BASE_PORT + i;
@@ -127,8 +152,11 @@ export function ensureBackend() {
         state.starting = null;
         throw lastErr ?? new Error('[physicalBackend] no free port in range');
     })();
-    state.starting.catch(() => { state.starting = null; });
-    return state.starting;
+    state.starting = starting;
+    // 拒绝清理只认自身承诺：迟到的 catch 不得清掉后来者新铸的 starting（并发双 spawn 竞态）
+    starting.catch(() => { if (state.starting === starting)
+        state.starting = null; });
+    return starting;
 }
 async function adapter() {
     return ensureBackend();
@@ -162,6 +190,8 @@ export async function captureProcessed(opts = {}) {
         wantSalience: opts.wantSalience,
         // Σ-5：undefined ⇒ JSON 序列化丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
         display: opts.display,
+        // W4-5：同律（缺省键缺席 ⇒ 请求字节与现状等同）
+        surface: opts.surface,
     }), 'take_screenshot');
     const unchanged = !!meta.unchanged;
     if (unchanged || opts.metaOnly) {
@@ -173,6 +203,7 @@ export async function captureProcessed(opts = {}) {
             transport: meta.transport,
             salience: meta.salience ?? null,
             display: meta.display ?? null,
+            surface: meta.surface ?? null,
         };
     }
     // 读取图像字节：readShm 统一处理 base64（内联）与 mmap-file（零拷贝文件）
@@ -194,6 +225,7 @@ export async function captureProcessed(opts = {}) {
         transport: meta.transport,
         salience: meta.salience ?? null,
         display: meta.display ?? null,
+        surface: meta.surface ?? null,
     };
 }
 // ─── 纯净截屏（无叠加层）：语义核对 OCR / 记忆预验等 ───
@@ -204,26 +236,28 @@ export async function captureCleanPng(region) {
     return r.buffer;
 }
 // ─── 键鼠动作 ───
-export async function clickMouse(x, y, button = 'left', dryRun = false) {
+export async function clickMouse(x, y, button = 'left', dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.clickMouse({ x, y, button, dryRun }), 'click_mouse');
+    // W4-5：surface 经 impl 扩展参数面透传（Σ-5 的 display 同型 —— contracts
+    // 接口签名未含，桥接断言到 impl；undefined ⇒ JSON 丢键 ⇒ 请求字节等同现状）
+    unwrap(await a.clickMouse({ x, y, button, dryRun, surface }), 'click_mouse');
 }
-export async function typeText(text, clearFirst = false, dryRun = false) {
+export async function typeText(text, clearFirst = false, dryRun = false, surface) {
     const a = await adapter();
-    const r = unwrap(await a.typeText({ text, clearFirst, dryRun }), 'type_text');
+    const r = unwrap(await a.typeText({ text, clearFirst, dryRun, surface }), 'type_text');
     return r.typed_chars;
 }
-export async function scrollPage(direction, amount, dryRun = false) {
+export async function scrollPage(direction, amount, dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.scrollPage({ direction, amount, dryRun }), 'scroll_page');
+    unwrap(await a.scrollPage({ direction, amount, dryRun, surface }), 'scroll_page');
 }
-export async function pressHotkey(keys, dryRun = false) {
+export async function pressHotkey(keys, dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.pressHotkey({ keys, dryRun }), 'press_hotkey');
+    unwrap(await a.pressHotkey({ keys, dryRun, surface }), 'press_hotkey');
 }
-export async function dragMouse(start, end, dryRun = false) {
+export async function dragMouse(start, end, dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.dragMouse({ start, end, dryRun }), 'drag_mouse');
+    unwrap(await a.dragMouse({ start, end, dryRun, surface }), 'drag_mouse');
 }
 /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
 export async function moveMouse(x, y, durationMs = 0, dryRun = false) {
@@ -256,6 +290,46 @@ export async function getDisplays() {
     const r = unwrap(await a.getDisplays(), 'displays');
     state.displays = r.displays;
     return state.displays;
+}
+/** surface id → 结构化（畸形 id throw —— 调用方契约错误的快速失败）。 */
+export function parseSurfaceId(spec) {
+    const m = /^(host|android):(.+)$/.exec(spec.trim());
+    if (!m) {
+        throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)} (expected 'host:<index>' or 'android:<serial>')`);
+    }
+    if (m[1] === 'host') {
+        if (!/^\d+$/.test(m[2])) {
+            throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)}: host index must be a non-negative integer`);
+        }
+        return { kind: 'host', index: parseInt(m[2], 10) };
+    }
+    if (!m[2]) {
+        throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)}: android serial must be non-empty`);
+    }
+    return { kind: 'android', serial: m[2] };
+}
+/** 显示器索引 → 'host:<i>'（Σ-5 display 的泛化形态）。 */
+export function hostSurface(index) {
+    return `host:${index}`;
+}
+/** adb serial → 'android:<serial>'。 */
+export function androidSurface(serial) {
+    return `android:${serial}`;
+}
+/** adb 设备清单（真机/adb 缺席 ⇒ 空清单 + degraded + 真实原因 —— 诚实降级）。 */
+export async function listMobileDevices() {
+    const a = await adapter();
+    return unwrap(await a.getDevices(), 'devices');
+}
+/** 全量 surface 清单（主机显示器 + 移动设备统一入列 —— 多屏感知的移动扩展）。 */
+export async function listSurfaces() {
+    const [displays, inventory] = await Promise.all([getDisplays(), listMobileDevices()]);
+    return {
+        host: displays.map((_, i) => hostSurface(i)),
+        android: inventory.devices.map(d => d.surface_id),
+        degraded: inventory.degraded,
+        ...(inventory.reason ? { reason: inventory.reason } : {}),
+    };
 }
 export async function getScreenSize() {
     if (state.screen)

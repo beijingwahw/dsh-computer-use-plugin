@@ -70,7 +70,13 @@ export function parseToken(key, token) {
     if (!token || !token.includes('.')) {
         return { ok: false, reason: 'malformed token: missing . separator' };
     }
-    const [payloadB64, sigB64] = token.split('.');
+    // 恰好两段：多出的 '.' 段不静默丢弃 —— Python 端 split('.', 1) 会把多段签名
+    // 判为签名失配而拒绝，Node 端忽略尾段会把 "payload.sig.junk" 形态错放行。
+    const parts = token.split('.');
+    if (parts.length !== 2) {
+        return { ok: false, reason: 'malformed token: expected exactly one . separator' };
+    }
+    const [payloadB64, sigB64] = parts;
     if (!payloadB64 || !sigB64) {
         return { ok: false, reason: 'malformed token: empty segments' };
     }

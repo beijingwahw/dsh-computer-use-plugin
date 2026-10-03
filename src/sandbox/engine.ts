@@ -12,6 +12,7 @@
 //   第一条（加载层）configure 校验失败 throw —— 拒绝带病上线，与宿主同生命周期哲学；
 //   第二条（运行层）一切运行时方法永不抛错，Result/verdict 降级 —— 数据流不可击穿。
 import { mkdirSync, writeFileSync } from 'fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { DoctorVerdictPayload } from '../doctorEvents';
@@ -20,14 +21,14 @@ import {
   emitHostReplayEnd, emitMemoryConsolidated, emitRehearsalBegin, emitRehearsalEnd,
 } from './events';
 import { MuscleMemoryStore } from './memory';
-import { VirtualScreen } from './virtualScreen';
-import { sandboxLog } from './log';
+import { VirtualScreen, asVirtualWidget } from './virtualScreen';
+import { sandboxLog, REHEARSAL_FP_FORMAT } from './log';
 import {
   createDefaultIdGenerator, muscleReliability, resolveConsolidation,
   type ActionChain, type HostReplayOutcome, type IdGenerator,
   type RehearsalOutcome, type RehearsalStepResult, type RehearsalVerdict,
   type Result, type SandboxAction, type SandboxConfig, type SandboxEngine,
-  type SandboxSnapshot, type VerificationLayer,
+  type SandboxSnapshot, type VerificationLayer, type VirtualWidget,
 } from './types';
 
 /** Laplace 中性先验 = (0+1)/(0+2) —— 数学中性值，非部署调优魔法数字 */
@@ -166,8 +167,19 @@ export class SandboxEngineImpl implements SandboxEngine {
     const snapResult = await this.createSnapshot();
     const snapshotId = opts?.snapshotId ?? (snapResult.ok ? snapResult.value.id : 'snap-none');
 
+    // Χ 纪元（重放证词）：取证场景 = asVirtualWidget 铸造后的规范形 —— 与
+    // VirtualScreen 内部世界逐位同源（原始场景里的畸形控件/超长名在链上记录的
+    // 就是世界真正收下的形状；重演侧同一构造函数再铸，世界形状必然一致）。
+    const forensicScene: VirtualWidget[] = chain.virtualScene
+      ? chain.virtualScene.map(asVirtualWidget).filter((w): w is VirtualWidget => w !== null)
+      : [];
+
     await sandboxLog.append('rehearsal-begin', {
       chainId: chain.id, snapshotId, actions: chain.actions.length,
+      // ── Χ（纯增量可选字段）：格式标记 + 入口场景（重演的世界源；
+      //    全畸形场景 ⇒ 世界为空 ⇒ 不记场景 —— 无世界即无可重放，诚实）──
+      fpFormat: REHEARSAL_FP_FORMAT,
+      ...(forensicScene.length > 0 ? { scene: forensicScene } : {}),
     });
     if (this.ctx) emitRehearsalBegin(this.ctx, { chainId: chain.id, snapshotId, startedAt });
 
@@ -215,12 +227,19 @@ export class SandboxEngineImpl implements SandboxEngine {
               ? 'expect declared but no virtual scene — verification unavailable (honest null)'
               : 'no virtual scene — verification unavailable (honest null)',
         });
-        await sandboxLog.append('rehearsal-step', {
+        // Χ（纯增量可选字段）：完整动作 + 该步后屏状态指纹 —— 重放章的链上权威
+        // 记录。指纹域零时钟零熵（latency/ts 不进指纹）—— 同动作链必同指纹序列。
+        const screenFp = screenStateFingerprint(screen);
+        const stepData: Record<string, any> = {
           chainId: chain.id, index: i, kind: action.kind, latencyMs,
           effectDetected: evidence ? evidence.effectDetected : null,
           expectationMet: evidence ? evidence.expectationMet : null,
           virtualFocus: book.focus ? `${book.focus.x},${book.focus.y}` : null,
-        });
+          fpFormat: REHEARSAL_FP_FORMAT,
+          action,
+        };
+        if (screenFp !== null) stepData.screenFingerprint = screenFp;
+        await sandboxLog.append('rehearsal-step', stepData);
       }
     } catch (e: any) {
       // 异常诚实：内部异常 ⇒ degraded（不吞不抛）
@@ -433,7 +452,11 @@ export class SandboxEngineImpl implements SandboxEngine {
       if (oldest === undefined) break;
       this.replayTokens.delete(oldest);
     }
-    const token = 'SBX-' + Math.random().toString(36).slice(2, 10).toUpperCase();
+    // P1-2（地基速修）：重放令牌换 CSPRNG —— 对齐宿主 approval.newToken 的铸法与
+    // 它对可预测伪随机数的批评（"可预测且 8 字符 base36 空间在高频下可碰撞"）。
+    // 令牌门禁的是宿主物理重放（THE HOST IS SACRED 的第二道门），预测性随机数
+    // 等于把门禁钥匙铸成了明文；8 字节熵（16 位 hex）与 APR- 同一强度口径。
+    const token = 'SBX-' + randomBytes(8).toString('hex').toUpperCase();
     this.replayTokens.set(token, {
       token, entryId, expiresAt: now + REPLAY_TOKEN_TTL_MS,
     });
@@ -534,4 +557,108 @@ export class SandboxEngineImpl implements SandboxEngine {
     this.hostFingerprint = null;
     sandboxLog.reset();
   }
+}
+
+// ── Χ 纪元（沙箱重放证词）：确定性重放面 —— 纯增量模块级导出，主路径零触碰 ──
+// Π 公证了「行为史未被篡改」；Χ 公证「行为史可复现」：对确定性沙箱段（排练链），
+// 同动作链重入虚拟屏，屏状态指纹序列与链上权威记录逐位一致 ⇒ 复现性成立。
+// 这是 agent 行为的重放性证明；真机段保持诚实 n/a（世界不可复现 —— notary 侧裁决）。
+
+/** 屏指纹探针网格密度（每轴 8 格）。指纹 = 公开观测面的确定性采样摘要：
+ *  widgetAt（命中测试 —— 控件树拓扑/几何/弹窗消亡）× sceneOcr（重叠网格，
+ *  半径 1/8 ⇒ 区域并集覆盖全屏，任意正宽度控件的缓冲文本必被读到）。
+ *  virtualScreen 的内部态（焦点指针/滚动偏移）私有 —— 探测面即契约观测面：
+ *  指纹是世界的校验和而非全态快照，但它是世界的**确定**函数 —— 记录路径与
+ *  重放路径共用本函数，逐位可比性由此成立。 */
+const FP_GRID = 8;
+const FP_HEADER = 'dsh-chi-screenstate-v1';
+
+/** 虚拟屏状态指纹：sha256(探针序列的稳定序列化)。永不抛；无世界（排练无场景）
+ *  ⇒ null（诚实缺席 —— 与「世界为空」的合法态区分：空世界也摘要）。 */
+function screenStateFingerprint(screen: VirtualScreen | null): string | null {
+  if (!screen) return null;
+  const probes: string[] = [];
+  for (let gy = 0; gy < FP_GRID; gy++) {
+    for (let gx = 0; gx < FP_GRID; gx++) {
+      const x = (gx + 0.5) / FP_GRID;
+      const y = (gy + 0.5) / FP_GRID;
+      const hit = screen.widgetAt(x, y);
+      probes.push(JSON.stringify([
+        hit ? hit.role : null,
+        hit ? hit.name : null,
+        hit ? [hit.rect.x, hit.rect.y, hit.rect.width, hit.rect.height] : null,
+        screen.sceneOcr(x, y, 1 / FP_GRID),
+      ]));
+    }
+  }
+  return createHash('sha256').update(FP_HEADER + '\n' + probes.join('\n'), 'utf8').digest('hex');
+}
+
+/** 确定性重放注入面（全注入 —— 确定性测试） */
+export interface DeterministicReplayOptions {
+  /** 重演的虚拟场景（rehearsal-begin 链上记录的取证场景；经 VirtualScreen 同一
+   *  构造路径防御性铸造 —— asVirtualWidget 规范形上再铸是幂等的，世界形状一致） */
+  scene?: unknown;
+  /** 注入时钟（缺省 Date.now；只盖重演簿记时间戳 —— 不进指纹域） */
+  now?: () => number;
+  /** 注入随机源（缺省缺席）。诚实声明：虚拟屏世界零熵 —— 本重放零消费（确定性
+   *  是本纪元的立命之本，任何熵消费都是重放性的破坏）；注入面在场供接口完备。 */
+  rng?: () => number;
+}
+
+/** 确定性重放结果：指纹序列 + 重演裁决 */
+export interface DeterministicReplayResult {
+  /** 每步后的屏状态指纹（与 rehearse 落链的 screenFingerprint 出自同一函数 —— 逐位可比） */
+  fingerprints: string[];
+  /** 重演裁决（与 rehearse 同律：反证 ⇒ failed；零生效层 ⇒ degraded；否则 passed） */
+  verdict: 'passed' | 'failed' | 'degraded';
+  /** 生效验证层（典范序铸造 —— 与 RehearsalOutcome.verificationLayers 同方言） */
+  layers: VerificationLayer[];
+  /** 重演簿记时间戳（注入时钟源；不在指纹域内） */
+  replayedAt: number;
+  note: string;
+}
+
+/**
+ * 确定性重放（Χ 纪元执法原语）：重入虚拟屏执行动作链，逐步产出屏状态指纹序列。
+ * 纯函数语义：不落账本、不写报告、不发事件、永不抛 —— 与 rehearse 主路径完全
+ * 隔离（rehearse 照旧记账，replay 只重演）。无场景 ⇒ 零证词诚实降级（degraded +
+ * 空 fingerprint 序列），绝不伪造空世界的指纹。
+ */
+export function deterministicReplay(
+  actions: ReadonlyArray<SandboxAction>,
+  opts: DeterministicReplayOptions = {},
+): DeterministicReplayResult {
+  const now = opts.now ?? Date.now;
+  void opts.rng; // 世界零熵：注入面在场但零消费（见接口注释）
+  const screen = new VirtualScreen(opts.scene);
+  if (screen.isEmpty) {
+    return {
+      fingerprints: [], verdict: 'degraded', layers: [], replayedAt: now(),
+      note: 'no virtual scene — replay has no world to re-enter (honest absence, not a failure)',
+    };
+  }
+  const layers = new Set<VerificationLayer>();
+  let counterEvidence = false;
+  const fingerprints: string[] = [];
+  for (const action of actions) {
+    if (!action || typeof action.kind !== 'string') {
+      // 畸形动作（伪造账本可注入任意 JSON —— 类型层拦不住运行时谎言）：无状态
+      // 转移可应用 ⇒ 世界不变，照常摘要 —— 诚实缺席而非抛错（运行层铁律）
+      fingerprints.push(screenStateFingerprint(screen)!);
+      continue;
+    }
+    const evidence = screen.applyAction(action);
+    for (const l of evidence.layers) layers.add(l);
+    if (evidence.effectDetected === false || evidence.expectationMet === false) counterEvidence = true;
+    fingerprints.push(screenStateFingerprint(screen)!); // 世界非空 ⇒ 摘要恒非 null
+  }
+  return {
+    fingerprints,
+    verdict: counterEvidence ? 'failed' : layers.size === 0 ? 'degraded' : 'passed',
+    layers: LAYER_ORDER.filter(l => layers.has(l)),
+    replayedAt: now(),
+    note: `re-entered the virtual screen over ${actions.length} action(s) — `
+      + `${fingerprints.length} post-step screen fingerprint(s) minted (zero entropy consumed)`,
+  };
 }

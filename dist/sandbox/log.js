@@ -10,6 +10,23 @@ import { createHash } from 'crypto';
 import path from 'path';
 import { mmrRoot, mmrInclusionProof } from '../proof.js';
 const GENESIS = 'GENESIS';
+// ── Χ 纪元（沙箱重放证词）：链上记录面补齐屏指纹（纯增量，旧行结构零破坏）──
+// Π 公证了「行为史未被篡改」；Χ 进一步公证「行为史可复现」—— 对确定性沙箱段
+// （排练链），重放是可执法的。前提是链上在册：完整动作 + 每步后的虚拟屏状态
+// 指纹。既有 rehearsal-step 只记 kind/证据布尔 —— 本纪元以**可选字段**补记：
+// 旧格式行无指纹 ⇒ 消费方（notary 重放章）诚实 n/a(legacy)，绝不炸既有读者。
+/** Χ 指纹格式标记：Χ 后代码写入的 rehearsal-begin/step 携带（旧账本无此字段）。
+ *  消费方据此区分「旧格式不可重放」与「新格式但无场景」—— 两者证词语义不同。 */
+export const REHEARSAL_FP_FORMAT = 1;
+/** 记录防御性深拷贝（JSON 安全数据 —— 往返即拷贝；异值原样奉还） */
+function forensicClone(v) {
+    try {
+        return JSON.parse(JSON.stringify(v));
+    }
+    catch {
+        return v;
+    }
+}
 /** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提；对齐 journal.canonical） */
 function canonical(obj) {
     if (obj === null || typeof obj !== 'object')
@@ -37,6 +54,10 @@ export class SandboxLog {
     capacity = 2000;
     chainTip = GENESIS;
     chainBase = GENESIS;
+    /** 落盘写串行队列：append 可并发重入（fire-and-forget 调用方在场），链推进是
+     *  同步节（内存序 = 调用序），但并发 appendFile 交错会让 JSONL 行序与链序
+     *  脱钩（取证重放断链）—— 单写队列保行序与链序一致 */
+    writeQueue = Promise.resolve();
     configure(filePath, capacity) {
         this.filePath = filePath;
         this.capacity = capacity;
@@ -60,13 +81,19 @@ export class SandboxLog {
             this.chainBase = evicted.hash ?? GENESIS; // 链基前滚（对齐 journal B-1 语义）
         }
         if (this.filePath) {
-            try {
-                await mkdir(path.dirname(this.filePath), { recursive: true });
-                await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
-            }
-            catch (e) {
-                console.warn(`[SandboxLog] write failed: ${e.message}`);
-            }
+            const filePath = this.filePath; // configure 可能在队列排空前换址 —— 逐条快照
+            const line = JSON.stringify(entry) + '\n';
+            const write = this.writeQueue.then(async () => {
+                try {
+                    await mkdir(path.dirname(filePath), { recursive: true });
+                    await appendFile(filePath, line, 'utf8');
+                }
+                catch (e) {
+                    console.warn(`[SandboxLog] write failed: ${e.message}`);
+                }
+            });
+            this.writeQueue = write;
+            await write;
         }
     }
     /** 链完整性校验：从链基重放存活窗口，返回第一个断点（verify 语义对齐 journal） */
@@ -83,6 +110,47 @@ export class SandboxLog {
     }
     list() {
         return this.entries;
+    }
+    /** Χ 纪元取证面：提取可重放排练段（动作序列 + 屏指纹序列）—— 重放章的权威
+     *  记录源。只收完整段（begin 在场 + 场景在场 + 步带指纹）；无场景段（排练
+     *  未声明 virtualScene）、容量驱逐后的残段、旧格式段均不入列 —— 分类语义
+     *  （legacy / 无段 / 无场景）由消费方经 fpFormat 自裁。永不抛：崩溃 = 无段
+     *  可证（诚实缺席，绝不炸调用方）。 */
+    exportRehearsalSegments() {
+        try {
+            const out = [];
+            let current = null;
+            for (const e of this.entries) {
+                if (e.kind === 'rehearsal-begin') {
+                    current = {
+                        chainId: String(e.data?.chainId ?? ''),
+                        scene: forensicClone(e.data?.scene),
+                        steps: [],
+                    };
+                    out.push(current);
+                }
+                else if (e.kind === 'rehearsal-step') {
+                    // 同链归属防御：步的 chainId 必须与开段一致（交错写入不误归属）
+                    if (current && e.data?.chainId === current.chainId
+                        && e.data?.action && typeof e.data?.screenFingerprint === 'string') {
+                        current.steps.push({
+                            index: typeof e.data?.index === 'number' ? e.data.index : current.steps.length,
+                            action: forensicClone(e.data.action),
+                            fingerprint: e.data.screenFingerprint,
+                        });
+                    }
+                }
+                else if (e.kind === 'rehearsal-end') {
+                    if (!current || e.data?.chainId === current.chainId)
+                        current = null;
+                }
+            }
+            return out.filter(s => Array.isArray(s.scene) && s.scene.length > 0
+                && s.steps.length > 0);
+        }
+        catch {
+            return []; // 取证面崩溃 = 无段可证 —— 诚实缺席优于半段毒证
+        }
     }
     // ── Q 纪元（Q-1 证明层）：MMR 包含证明面（叶值 = 链哈希；纯计算零存储）──
     /** 排练链 MMR 根（O(n) 计算 —— D-6 verify_pipeline_log 之外的取证升级面） */

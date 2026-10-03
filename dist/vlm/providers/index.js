@@ -21,3 +21,6 @@ export { ProviderPool, createProviderPool, getPreset as getPoolPreset, resolvePr
 // 纪元 Σ（Σ-1 全军升维）：云脑合议庭 —— ensemble 全族导出名（Ensemble* 前缀）
 // 与既有导出零重名，star 转发零歧义。
 export * from './ensemble.js';
+// W2-8（C2 成本级联路由）：tier cascade —— Cascade*/triage*/CASCADE_* 全族
+// 导出名与既有导出零重名，star 转发零歧义。
+export * from './cascade.js';

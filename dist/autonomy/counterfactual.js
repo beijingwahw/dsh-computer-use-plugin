@@ -7,6 +7,21 @@ const RISK_SCORES = { benign: 0.05, sensitive: 0.5, destructive: 1 };
 const RISK_UNKNOWN = 0.5;
 /** 并列判定阈值：总效用差小于此值视为并列，取信息增益高者 */
 const TIE_EPSILON = 0.01;
+/**
+ * W3-6（H3 换支重放）：改选偏置的择优效用加成。值即边界论证：三围 ∈ [0,1]、
+ * 权重逐项夹 [0,1] ⇒ 诚实效用 U = w_p·p + w_i·i − w_r·r ∈ [−1, 2]，任意两候选
+ * 的最大效用差严格小于 3；加成 3.5 > 3 ⇒ 只要被偏置候选在场，择优必被其决定
+ * （偏好决定性 —— 「改选候选 k」的语义就是 k 被重放决策采纳）。偏置只进择优
+ * 用力，绝不进 rawU：效用账面（rankTopK 的 utility、岔路账、落选理由数值）
+ * 永远是未偏置的诚实预测。
+ */
+const STEER_BIAS_UTILITY = 3.5;
+/**
+ * W3-6（H3）：Top-K 排序的缺省深度 —— 岔路卡的三候选（Top-3）。
+ * 值即边界：三支岔路覆盖「原路 + 两条最有竞争力的替代路」，再深则边际信息
+ * 递减而卡面噪声明升（steer 一键三选的交互上限）。
+ */
+export const DEFAULT_TOP_K = 3;
 /** actionSignature 截断上限（字符数） */
 const SIGNATURE_MAX = 60;
 /** 中日韩统一表意字符（含扩展 A / 兼容区）—— 2-gram 切分对象（自带副本，不 import policyEngine） */
@@ -259,7 +274,57 @@ function resolveWeights(w) {
     }
     return { progress, info, risk };
 }
-// ─── 导出纯函数 ───
+/**
+ * 评分内核（W3-6 从 scoreOptions 提取的共享底座，语义零变更）：
+ * 三围计分律与原实现逐条相同（重复折价 / tried click 信息 0.1 / 风险映射），
+ * 唯一增量是改选偏置 —— preferredActionKeys 命中者择优效用加 STEER_BIAS_UTILITY。
+ */
+function scoreAll(actions, c) {
+    const snapshot = c.snapshot && typeof c.snapshot === 'object' ? c.snapshot : EMPTY_SNAPSHOT;
+    const goalKeywords = Array.isArray(c.goalKeywords)
+        ? c.goalKeywords.filter(k => typeof k === 'string')
+        : [];
+    const tried = new Set(Array.isArray(c.triedActionKeys) ? c.triedActionKeys.filter(k => typeof k === 'string') : []);
+    // W3-6：改选偏置集合（空串剔除 —— 空签名会误伤无标签动作）
+    const preferred = new Set(Array.isArray(c.preferredActionKeys)
+        ? c.preferredActionKeys.filter(k => typeof k === 'string' && k !== '')
+        : []);
+    const w = resolveWeights(c.weights);
+    return actions.map((action, index) => {
+        const isTried = tried.has(actionSignature(action));
+        const progress = clamp01(progressPrior(action, goalKeywords) * (isTried ? 0.6 : 1));
+        const informationGain = action.kind === 'click' && isTried ? 0.1 : clamp01(expectedInformationGain(action, snapshot));
+        const risk = riskOf(action.riskTier);
+        const option = {
+            action,
+            predictedEffects: deriveEffects(action, snapshot),
+            progressProbability: progress,
+            informationGain,
+            risk,
+        };
+        const rawU = w.progress * progress + w.info * informationGain - w.risk * risk;
+        const steered = preferred.size > 0 && preferred.has(actionSignature(action));
+        return { option, index, rawU, steered, utility: rawU + (steered ? STEER_BIAS_UTILITY : 0) };
+    });
+}
+/**
+ * 择优律本体（W3-6 提取，与既有 scoreOptions 内联实现逐字节同律）：
+ * 先取择优效用最大者；与最大者差 < TIE_EPSILON 视为并列，并列取信息增益高者；
+ * 信息增益亦并列取输入次序在前者 —— 全确定性、可回放。
+ */
+function pickWinner(entries) {
+    let bestU = Number.NEGATIVE_INFINITY;
+    for (const s of entries)
+        if (s.utility > bestU)
+            bestU = s.utility;
+    const contenders = entries.filter(s => bestU - s.utility < TIE_EPSILON);
+    let winIdx = 0;
+    for (let i = 1; i < contenders.length; i += 1) {
+        if (contenders[i].option.informationGain > contenders[winIdx].option.informationGain)
+            winIdx = i;
+    }
+    return contenders[winIdx];
+}
 /**
  * 动作签名（纯函数、绝不抛异常）：`${kind}:${normalize(target.label)}` 截 60 字符。
  * 归一律 = 小写化 + 连续空白折叠单空格 + 去首尾；无 target 的动作 label 记空串
@@ -336,6 +401,10 @@ export function expectedInformationGain(action, snapshot) {
  *   （w_p/w_i/w_r 缺省 0.5/0.3/0.2，ctx.weights 逐项覆盖，非有限数按缺省记）；
  *   先取 U 最大者；与最大者差 <0.01 视为并列，并列取 informationGain 高者；
  *   信息增益亦并列取输入次序在前者 —— 全确定性、可回放。
+ *   W3-6（H3）注入缝：ctx.preferredActionKeys 命中的候选在择优中获得
+ *   STEER_BIAS_UTILITY 决定性加成（换支重放的「改选候选 k」偏置）—— 偏置只
+ *   改选择，rawU 与落选理由的数值仍是诚实预测；缝缺席时本函数行为与既有
+ *   语义逐字节一致。
  *
  * 防御律：options 非数组或滤除脏条目（null/非对象）后为空 ⇒ 返回 null（空输入不
  * 伪造计划）；ctx / ctx.snapshot / goalKeywords 脏值按空上下文（空快照 + 零关键
@@ -346,45 +415,48 @@ export function scoreOptions(options, ctx) {
     const actions = raw.filter(a => a !== null && a !== undefined && typeof a === 'object');
     if (actions.length === 0)
         return null;
-    const c = (ctx ?? {});
-    const snapshot = c.snapshot && typeof c.snapshot === 'object' ? c.snapshot : EMPTY_SNAPSHOT;
-    const goalKeywords = Array.isArray(c.goalKeywords)
-        ? c.goalKeywords.filter(k => typeof k === 'string')
-        : [];
-    const tried = new Set(Array.isArray(c.triedActionKeys) ? c.triedActionKeys.filter(k => typeof k === 'string') : []);
-    const w = resolveWeights(c.weights);
-    const scored = actions.map(action => {
-        const isTried = tried.has(actionSignature(action));
-        const progress = clamp01(progressPrior(action, goalKeywords) * (isTried ? 0.6 : 1));
-        const informationGain = action.kind === 'click' && isTried ? 0.1 : clamp01(expectedInformationGain(action, snapshot));
-        const risk = riskOf(action.riskTier);
-        const option = {
-            action,
-            predictedEffects: deriveEffects(action, snapshot),
-            progressProbability: progress,
-            informationGain,
-            risk,
-        };
-        return { option, utility: w.progress * progress + w.info * informationGain - w.risk * risk };
-    });
-    let bestU = Number.NEGATIVE_INFINITY;
-    for (const s of scored)
-        if (s.utility > bestU)
-            bestU = s.utility;
-    const contenders = scored.filter(s => bestU - s.utility < TIE_EPSILON);
-    let winIdx = 0;
-    for (let i = 1; i < contenders.length; i += 1) {
-        if (contenders[i].option.informationGain > contenders[winIdx].option.informationGain)
-            winIdx = i;
-    }
-    const winner = contenders[winIdx];
+    const scored = scoreAll(actions, (ctx ?? {}));
+    const winner = pickWinner(scored);
     const rejected = scored
         .filter(s => s !== winner)
         .map(s => ({
         option: s.option,
-        why: winner.utility - s.utility < TIE_EPSILON
-            ? `总效用 ${round2(s.utility)} 与胜者 ${round2(winner.utility)} 并列（差 <0.01），信息增益 ${round2(s.option.informationGain)} 较低而落选`
-            : `总效用 ${round2(s.utility)} 低于胜者 ${round2(winner.utility)}（进展 ${round2(s.option.progressProbability)}/信息 ${round2(s.option.informationGain)}/风险 ${round2(s.option.risk)}）`,
+        why: winner.steered
+            // W3-6：胜者由改选偏置提升 ⇒ 落选理由如实申报偏置在场，数值用诚实 rawU
+            ? `用户改选偏置将「${actionSignature(winner.option.action)}」定为胜者（其原始总效用 ${round2(winner.rawU)}，本候选 ${round2(s.rawU)}；偏置只改选择，不改预测）`
+            : winner.utility - s.utility < TIE_EPSILON
+                ? `总效用 ${round2(s.utility)} 与胜者 ${round2(winner.utility)} 并列（差 <0.01），信息增益 ${round2(s.option.informationGain)} 较低而落选`
+                : `总效用 ${round2(s.utility)} 低于胜者 ${round2(winner.utility)}（进展 ${round2(s.option.progressProbability)}/信息 ${round2(s.option.informationGain)}/风险 ${round2(s.option.risk)}）`,
     }));
     return { chosen: winner.option, rejected };
+}
+/**
+ * W3-6（H3）：Top-K 候选排序（纯函数、绝不抛异常；空候选集 ⇒ null 不伪造）。
+ *
+ * 排序律与择优律同源（同一 scoreAll 内核 + pickWinner 逐名抽取）：每轮在剩余
+ * 候选中按「择优效用最大 → ε 并列取信息增益高 → 最早输入序」抽出一名，抽满
+ * k 名或候选耗尽为止 ⇒ rank 1 与 scoreOptions(同输入).chosen 严格一致（择优
+ * 单点 = 排序序列的头部，效用账与决策账互证）。
+ *
+ * 效用纪律：utility 字段恒为 rawU（诚实预测，未含 STEER_BIAS）；改选偏置只
+ * 影响**名次**（被偏置者升到 rank 1），不污染账面 —— 岔路卡展示给用户的是
+ * 未偏置的预测值，重放后的复盘与原决策可直接对照。
+ *
+ * 防御律：options 非数组 / 滤脏后为空 ⇒ null；k 非法（非有限数）⇒ 缺省
+ * DEFAULT_TOP_K，<1 夹 1；ctx 脏值按空上下文处理（与 scoreOptions 同律）。
+ */
+export function rankTopK(options, ctx, k) {
+    const raw = Array.isArray(options) ? options : [];
+    const actions = raw.filter(a => a !== null && a !== undefined && typeof a === 'object');
+    if (actions.length === 0)
+        return null;
+    const depth = typeof k === 'number' && Number.isFinite(k) ? Math.max(1, Math.floor(k)) : DEFAULT_TOP_K;
+    const remaining = scoreAll(actions, (ctx ?? {}));
+    const ranked = [];
+    while (ranked.length < depth && remaining.length > 0) {
+        const winner = pickWinner(remaining);
+        ranked.push({ rank: ranked.length + 1, option: winner.option, utility: winner.rawU, steered: winner.steered });
+        remaining.splice(remaining.indexOf(winner), 1);
+    }
+    return ranked;
 }

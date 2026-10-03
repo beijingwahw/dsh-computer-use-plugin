@@ -56,6 +56,12 @@ export interface ProcessedCapture {
    * 在场时由服务端回填。
    */
   display?: number | null;
+  /**
+   * W4-5 移动 Surface：实际捕获的 surface id（'host:<i>' / 'android:<serial>'）。
+   * null = 未请求 surface（主机主屏现状）。仅 opts.surface 在场时由服务端回填
+   * （兼容铁律：缺省调用不引入新键）。
+   */
+  surface?: string | null;
 }
 
 export interface OverlayBox {
@@ -96,6 +102,13 @@ export interface CaptureOptions {
    * 非 Windows 服务端诚实降级主屏并附 note。
    */
   display?: number;
+  /**
+   * W4-5 移动 Surface：display 的字符串泛化 —— 'host:<i>' ≡ display=i；
+   * 'android:<serial>' 路由到 scrcpy/adb 帧源（帧进同一管线 ⇒ dhash 变化
+   * 门控 / 帧环 / 叠加层全部复用）。region / crosshair / boxes 的归一化基准
+   * = 所选 surface 的矩形（[0,1]² 契约不破）。与 display 并存时 surface 获胜。
+   */
+  surface?: string;
 }
 
 interface BackendState {
@@ -266,7 +279,9 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
     wantSalience: opts.wantSalience,
     // Σ-5：undefined ⇒ JSON 序列化丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
     display: opts.display,
-  }), 'take_screenshot') as ScreenshotResult & { display?: number | null };
+    // W4-5：同律（缺省键缺席 ⇒ 请求字节与现状等同）
+    surface: opts.surface,
+  }), 'take_screenshot') as ScreenshotResult & { display?: number | null; surface?: string | null };
 
   const unchanged = !!meta.unchanged;
   if (unchanged || opts.metaOnly) {
@@ -278,6 +293,7 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
       transport: meta.transport,
       salience: meta.salience ?? null,
       display: meta.display ?? null,
+      surface: meta.surface ?? null,
     };
   }
 
@@ -301,6 +317,7 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
     transport: meta.transport,
     salience: meta.salience ?? null,
     display: meta.display ?? null,
+    surface: meta.surface ?? null,
   };
 }
 
@@ -314,30 +331,32 @@ export async function captureCleanPng(region?: { x: number; y: number; width: nu
 
 // ─── 键鼠动作 ───
 
-export async function clickMouse(x: number, y: number, button: 'left' | 'right' | 'middle' = 'left', dryRun = false): Promise<void> {
+export async function clickMouse(x: number, y: number, button: 'left' | 'right' | 'middle' = 'left', dryRun = false, surface?: string): Promise<void> {
   const a = await adapter();
-  unwrap(await a.clickMouse({ x, y, button, dryRun }), 'click_mouse');
+  // W4-5：surface 经 impl 扩展参数面透传（Σ-5 的 display 同型 —— contracts
+  // 接口签名未含，桥接断言到 impl；undefined ⇒ JSON 丢键 ⇒ 请求字节等同现状）
+  unwrap(await (a as PhysicalExecutionAdapterImpl).clickMouse({ x, y, button, dryRun, surface }), 'click_mouse');
 }
 
-export async function typeText(text: string, clearFirst = false, dryRun = false): Promise<number> {
+export async function typeText(text: string, clearFirst = false, dryRun = false, surface?: string): Promise<number> {
   const a = await adapter();
-  const r = unwrap(await a.typeText({ text, clearFirst, dryRun }), 'type_text');
+  const r = unwrap(await (a as PhysicalExecutionAdapterImpl).typeText({ text, clearFirst, dryRun, surface }), 'type_text');
   return r.typed_chars;
 }
 
-export async function scrollPage(direction: 'up' | 'down' | 'left' | 'right', amount: number, dryRun = false): Promise<void> {
+export async function scrollPage(direction: 'up' | 'down' | 'left' | 'right', amount: number, dryRun = false, surface?: string): Promise<void> {
   const a = await adapter();
-  unwrap(await a.scrollPage({ direction, amount, dryRun }), 'scroll_page');
+  unwrap(await (a as PhysicalExecutionAdapterImpl).scrollPage({ direction, amount, dryRun, surface }), 'scroll_page');
 }
 
-export async function pressHotkey(keys: string[], dryRun = false): Promise<void> {
+export async function pressHotkey(keys: string[], dryRun = false, surface?: string): Promise<void> {
   const a = await adapter();
-  unwrap(await a.pressHotkey({ keys, dryRun }), 'press_hotkey');
+  unwrap(await (a as PhysicalExecutionAdapterImpl).pressHotkey({ keys, dryRun, surface }), 'press_hotkey');
 }
 
-export async function dragMouse(start: { x: number; y: number }, end: { x: number; y: number }, dryRun = false): Promise<void> {
+export async function dragMouse(start: { x: number; y: number }, end: { x: number; y: number }, dryRun = false, surface?: string): Promise<void> {
   const a = await adapter();
-  unwrap(await a.dragMouse({ start, end, dryRun }), 'drag_mouse');
+  unwrap(await (a as PhysicalExecutionAdapterImpl).dragMouse({ start, end, dryRun, surface }), 'drag_mouse');
 }
 
 /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
@@ -376,6 +395,78 @@ export async function getDisplays(): Promise<Array<{ name: string; x: number; y:
   const r = unwrap(await a.getDisplays(), 'displays');
   state.displays = r.displays;
   return state.displays;
+}
+
+// ─── W4-5 移动 Surface：surface id 方言 + 设备清单 + surfaces 能力申报 ───
+//
+// 方言（与 Python 端 dsh_physical/android.py 的 parse_surface_id 严格镜像）：
+//   'host:<i>'      主机显示器（/v1/displays 清单序，0 起 —— Σ-5 display 索引
+//                   泛化为字符串 id）
+//   'android:<s>'   adb 设备 serial（scrcpy/ADB 设备入列虚拟显示器）
+
+export type SurfaceSpec = { kind: 'host'; index: number } | { kind: 'android'; serial: string };
+
+/** surface id → 结构化（畸形 id throw —— 调用方契约错误的快速失败）。 */
+export function parseSurfaceId(spec: string): SurfaceSpec {
+  const m = /^(host|android):(.+)$/.exec(spec.trim());
+  if (!m) {
+    throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)} (expected 'host:<index>' or 'android:<serial>')`);
+  }
+  if (m[1] === 'host') {
+    if (!/^\d+$/.test(m[2])) {
+      throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)}: host index must be a non-negative integer`);
+    }
+    return { kind: 'host', index: parseInt(m[2], 10) };
+  }
+  if (!m[2]) {
+    throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)}: android serial must be non-empty`);
+  }
+  return { kind: 'android', serial: m[2] };
+}
+
+/** 显示器索引 → 'host:<i>'（Σ-5 display 的泛化形态）。 */
+export function hostSurface(index: number): string {
+  return `host:${index}`;
+}
+
+/** adb serial → 'android:<serial>'。 */
+export function androidSurface(serial: string): string {
+  return `android:${serial}`;
+}
+
+/** /v1/devices 响应体（镜像 Python 端 AndroidController.list_devices ——
+ *  impl 侧 getDevices 的返回型；契约层 contracts.ts 未含此 DTO，本地结构化）。 */
+export interface MobileDeviceInventory {
+  devices: Array<{
+    serial: string;
+    state: string;
+    surface_id: string;
+    resolution: { width: number; height: number } | null;
+  }>;
+  degraded: boolean;
+  reason?: string;
+}
+
+/** adb 设备清单（真机/adb 缺席 ⇒ 空清单 + degraded + 真实原因 —— 诚实降级）。 */
+export async function listMobileDevices(): Promise<MobileDeviceInventory> {
+  const a = await adapter();
+  return unwrap(await (a as PhysicalExecutionAdapterImpl).getDevices(), 'devices');
+}
+
+/** 全量 surface 清单（主机显示器 + 移动设备统一入列 —— 多屏感知的移动扩展）。 */
+export async function listSurfaces(): Promise<{
+  host: string[];
+  android: string[];
+  degraded: boolean;
+  reason?: string;
+}> {
+  const [displays, inventory] = await Promise.all([getDisplays(), listMobileDevices()]);
+  return {
+    host: displays.map((_, i) => hostSurface(i)),
+    android: inventory.devices.map(d => d.surface_id),
+    degraded: inventory.degraded,
+    ...(inventory.reason ? { reason: inventory.reason } : {}),
+  };
 }
 
 export async function getScreenSize(): Promise<{ width: number; height: number }> {

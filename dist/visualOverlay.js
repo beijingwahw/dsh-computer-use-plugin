@@ -51,6 +51,10 @@ export async function addVisualOverlay(imageBuffer, options = {}) {
             continue;
         if (w <= 0 || h <= 0)
             continue;
+        // 与画幅零交集的元素经下方夹取会退化成边缘 1×1 假锚点 + 编号标签
+        // （自信地错位的 grounding 信号 —— 与准星同病）：诚实缺席，不画
+        if (x >= width || y >= height || x + w <= 0 || y + h <= 0)
+            continue;
         const ex = Math.max(0, Math.min(width - 1, x));
         const ey = Math.max(0, Math.min(height - 1, y));
         const ew = Math.max(1, Math.min(width - ex, w));

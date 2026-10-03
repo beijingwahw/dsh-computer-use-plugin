@@ -4,6 +4,8 @@
 // 三通道按判别力降序：UIA 点查询（结构层官方登记，零物理副作用）→
 // 悬停光标本体感觉（hand/ibeam）→ 悬停重绘。大多数点在第一通道即被
 // 判决，鼠标根本不动；只有 UIA 拿不到证据时才做悬停实验（结束后复位）。
+// 纪元 Ν（探索经济学）：通道序可按学习到的 bitsPerMs 后验自适应（关闭 =
+// 固定降序）；判决附带经济学透明注记（通道序/各通道 bitsPerMs/是否提前停）。
 // 使用时机：拿不准某处文字/区域是不是可点击入口时 —— 尤其在聊天/文档
 // 界面里，正文提到目标关键词与真入口像素等价。
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -42,6 +44,18 @@ export function createProbeInteractivityTool(config: Config) {
           text: 'This is selectable TEXT (I-beam cursor) — static content such as a chat message or document body, NOT a clickable entry. Do not click it when looking for a button. (Exception: if you intended to focus a text input, clicking is fine — verify focus afterwards.)',
           inconclusive: 'Channels were inconclusive (native controls often keep the arrow cursor and some have no hover effect). Fall back to visual affordance: zoom_inspect for button chrome (border/background) before clicking.',
         };
+        // 纪元 Ν（探索经济学）透明律：经济模式开启时，判决附带通道经济学注记
+        // —— 花钱的序（channel_order）、各通道的 bitsPerMs 后验（bits_per_ms）、
+        // 是否熵减足额提前停（stopped_early）、已花成本（spent_ms）。
+        // 既有字段一字不动；经济关闭/记忆召回的判决无此注记（Z 纪元原形状）。
+        const economicsNote = r.economics ? {
+          economics: {
+            channel_order: r.economics.channel_order,
+            bits_per_ms: r.economics.bits_per_ms,
+            stopped_early: r.economics.stopped_early,
+            spent_ms: r.economics.spent_ms,
+          },
+        } : {};
         return JSON.stringify({
           status: 'SUCCESS',
           state_anchor: {
@@ -50,6 +64,7 @@ export function createProbeInteractivityTool(config: Config) {
             confidence: r.confidence,
             evidence: r.evidence,
             ...(r.note ? { note: r.note } : {}),
+            ...economicsNote,
           },
           next_step: explain[r.verdict],
         }, null, 2);

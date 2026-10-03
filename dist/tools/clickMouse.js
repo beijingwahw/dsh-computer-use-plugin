@@ -5,8 +5,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import { captureBefore, settleAndVerify } from '../actionVerifier.js';
 import { focusTracker } from '../focusTracker.js';
-import { semanticConfirm } from '../textReader.js';
-import { matchesRiskPatterns } from '../riskGate.js';
+import { semanticConfirm, readTextAny } from '../textReader.js';
+import { matchesRiskPatterns, reversibilityRegistry, dispatchLaneFor } from '../riskGate.js';
 import { approval } from '../approval.js';
 import { uiMemory } from '../uiMemory.js';
 import { regionDhash, similarity } from '../perceptualHash.js';
@@ -15,7 +15,255 @@ import { quantum } from '../quantumSense.js';
 import { probePoints, gateTextClick } from '../interactivityProbe.js';
 import { extractUrls } from '../urlSense.js';
 import { toolErr } from '../toolResult.js';
+import { journal } from '../journal.js';
+import * as physicalBackend from '../physicalBackend.js';
+import { encodeForVlm } from '../vlm/codec.js';
+import { askRefutation, refuteCourtInSession } from '../vlm/refute.js';
+import { probeGroundingFreshness } from '../popupDetector.js';
 import { assertActionAllowed } from './actionGate.js';
+import { reversalEscrow } from '../reversalEscrow.js';
+/** W2-2：派发前消费批注 patch（clickMouse/clickElement/dragMouse 共用原语）。 */
+export function consumeApprovalAmendment(token, plan) {
+    if (!token)
+        return {};
+    try {
+        const patched = approval.applyAmendment(token, plan);
+        const corrected = {};
+        const ignored = [];
+        let px;
+        let py;
+        let pd;
+        if (typeof patched.x === 'number' && Number.isFinite(patched.x)) {
+            if (patched.x < 0 || patched.x > 1)
+                ignored.push(`x=${patched.x}`);
+            else if (patched.x !== plan.x) {
+                px = patched.x;
+                corrected.x = patched.x;
+            }
+        }
+        if (typeof patched.y === 'number' && Number.isFinite(patched.y)) {
+            if (patched.y < 0 || patched.y > 1)
+                ignored.push(`y=${patched.y}`);
+            else if (patched.y !== plan.y) {
+                py = patched.y;
+                corrected.y = patched.y;
+            }
+        }
+        if (typeof patched.target_description === 'string' && patched.target_description
+            && patched.target_description !== plan.target_description) {
+            pd = patched.target_description;
+            corrected.target_description = pd;
+        }
+        if (px === undefined && py === undefined && pd === undefined)
+            return {};
+        const am = approval.amendmentOf(token);
+        return {
+            x: px, y: py, target_description: pd,
+            stamp: {
+                applied: true,
+                note: am?.note ?? '',
+                corrected,
+                ...(ignored.length > 0 ? { ignored_out_of_range: ignored } : {}),
+            },
+        };
+    }
+    catch {
+        return {}; // 旁路宪法：批注读取失败 = 无批注（不炸派发主流程）
+    }
+}
+// ─── 纪元 Ρ（双钥公证锁）：公证取证面 ───
+//
+// 审计背景：危险判定此前只信模型自述 —— 被提示注入的模型谎报目标即可绕过
+// dangerPatterns 词表。本取证面在物理派发前对点击落点独立取证：
+//   · OCR 实读（ocrLabel）：点击坐标邻域的一次轻量区域读屏（textReader 现成
+//     路径：服务端 L2 优先，enableOcr 开启时 legacy tesseract 兜底）；
+//   · 白盒控件名（structuralName）：UIA 点查询（physicalBackend.hitTest，
+//     与 Z-1 探针同一判决源）—— 仅当 D-5 服务已在场时取（零孵化零新增调用）。
+// 取证纪律（诚实降级律）：
+//   · 通道不可用 ⇒ null —— 锁只在「通道在场且见危险/不符」时收紧，绝不因
+//     公证取证失败而阻塞正常点击；
+//   · 通道可用性的判定纯配置/纯在场（零物理调用）：OCR 通道随 enableOcr
+//     （OCR 是部署显式开启的感知能力，公证不反向扩大能力面）；白盒通道随
+//     enableInteractivityProbe（UIA 点查询属探针子系统，总闸关即视为白盒
+//     通道不可用）且要求服务已存活（healthSnapshot 在场 —— 绝不为取证孵化）。
+// 本对象是可注入缝（模块级可变属性）：测试注入假 OCR provider 断言闸门执法，
+// 生产路径不经任何替换。
+export const notaryEvidence = {
+    /** 通道可用性（纯配置/在场判定 —— 零物理调用、零孵化、零网络） */
+    channelsAvailable(config) {
+        return {
+            ocr: notaryOcrAvailable(config),
+            structural: notaryStructuralAvailable(config),
+        };
+    },
+    /** OCR 实读：点击点邻域区域读屏（失败/缺席 ⇒ null 诚实降级，绝不抛） */
+    async readOcrLabel(config, nx, ny) {
+        if (!notaryOcrAvailable(config))
+            return null;
+        try {
+            // 邻域窗口：与效果验证的区域半径同源（regionVerifyRadius，缺省 0.15），
+            // 夹取 [0.05, 0.25] —— 太小漏标签上下文，太大把整屏正文都读进来
+            const r = Math.min(0.25, Math.max(0.05, config.regionVerifyRadius > 0 ? config.regionVerifyRadius : 0.15));
+            const left = Math.max(0, nx - r);
+            const top = Math.max(0, ny - r);
+            const width = Math.min(1 - left, r * 2);
+            const height = Math.min(1 - top, r * 2);
+            if (width < 0.005 || height < 0.005)
+                return null;
+            const result = await readTextAny({ x: left, y: top, width, height }, config.ocrLang);
+            const text = (result.text ?? '').replace(/\s+/g, ' ').trim();
+            // 截断到公证预算：区域可能读回整段正文，词表扫描不需要长文
+            return text ? text.slice(0, 200) : null;
+        }
+        catch {
+            return null; // 双路径皆败：通道缺席，不阻塞正常点击
+        }
+    },
+    /** 白盒控件名：UIA 点查询（服务在场才取 —— 零孵化；失败 ⇒ null） */
+    async readStructuralName(config, nx, ny) {
+        if (!notaryStructuralAvailable(config))
+            return null;
+        try {
+            const hit = await physicalBackend.hitTest(nx, ny);
+            if (!hit?.available)
+                return null;
+            const name = (hit.name ?? '').trim();
+            return name ? name.slice(0, 120) : null;
+        }
+        catch {
+            return null; // 端点缺席/COM 失败：通道缺席，不阻塞正常点击
+        }
+    },
+};
+function notaryOcrAvailable(config) {
+    // OCR 是部署显式开启的感知能力（enableOcr 同时装载 read_text/find_text 与
+    // 语义核对）；公证锁不反向扩大感知面 —— enableOcr=false 即视为 OCR 公证
+    // 通道不可用（诚实 null），不为取证新增任何网络/孵化调用
+    return config.enableOcr === true && !config.dryRun;
+}
+function notaryStructuralAvailable(config) {
+    // UIA 点查询属交互性探针子系统（Z-1 通道 1）：探针总闸关闭即白盒通道不可用；
+    // 且仅当 D-5 服务已在场（healthSnapshot 非空）才取 —— 取证绝不触发服务孵化
+    return config.enableInteractivityProbe === true
+        && !config.dryRun
+        && physicalBackend.healthSnapshot() !== null;
+}
+/** Ρ 纪元：公证锚点（输出透明化用 —— verdict + 各通道在场情况/降级注记；
+ *  clickElement 共用，导出为工具层公证方言的单一定义点） */
+export function notaryAnchorOf(verdict, evidence, note) {
+    if (verdict === undefined)
+        return undefined; // 总开关关：锚点不入场（完全旧路径）
+    return {
+        verdict,
+        ocr_label: evidence?.ocrLabel ? evidence.ocrLabel.slice(0, 80) : '(absent)',
+        structural_name: evidence?.structuralName ?? '(absent)',
+        note: note || undefined,
+    };
+}
+/** W5-0（C）：分道闸（异步原语 —— escrow 道需 await mintPlan）。绝不抛。 */
+export async function gateByReversibility(config, intent) {
+    try {
+        if (config?.enableReversibilityLanes !== true)
+            return { applied: false, reason: 'disabled' };
+        const verdict = reversibilityRegistry.classify({
+            tool: intent.tool,
+            description: intent.description,
+        });
+        if (verdict.semantics === 'unknown') {
+            return { applied: false, reason: 'unknown-semantics' };
+        }
+        const lane = dispatchLaneFor(verdict.level);
+        if (lane.humanExecution) {
+            return {
+                applied: true, verdict, lane, blocked: JSON.stringify({
+                    status: 'ACTION_REQUIRED',
+                    state_anchor: {
+                        reason: 'reversibility-human-lane',
+                        reversibility: {
+                            level: verdict.level,
+                            semantics: verdict.semantics,
+                            source: verdict.source,
+                            lane: lane.lane,
+                            note: lane.note,
+                        },
+                    },
+                    next_step: 'IRREVERSIBLE by classification: an action whose effect cannot be undone must be performed ' +
+                        'by the HUMAN personally. Relay to the user what needs to be done and where; do NOT retry automated ' +
+                        'dispatch for this intent while reversibility lanes are enabled.',
+                }, null, 2),
+            };
+        }
+        if (lane.requiresEscrowPlan && intent.enforceEscrow) {
+            const minted = await reversalEscrow.mintPlan({
+                semantics: verdict.semantics,
+                ...(intent.description !== undefined ? { description: intent.description } : {}),
+                ...(intent.approvalToken !== undefined ? { approvalToken: intent.approvalToken } : {}),
+                tool: intent.tool,
+            });
+            if (!minted.ok) {
+                return {
+                    applied: true, verdict, lane,
+                    blocked: JSON.stringify({
+                        status: 'ACTION_REQUIRED',
+                        state_anchor: {
+                            reason: 'reversibility-escrow-unavailable',
+                            reversibility: {
+                                level: verdict.level,
+                                semantics: verdict.semantics,
+                                lane: lane.lane,
+                                mint_failure: minted.reason,
+                            },
+                            note: minted.detail ?? 'no hosted compensation plan could be minted — fail-closed',
+                        },
+                        next_step: 'COMPENSABLE action without a mintageable reversal plan: dispatch refused (fail-closed). ' +
+                            'The HUMAN must perform this action personally, or the deployment must extend the compensation ' +
+                            'strategy table for this semantics.',
+                    }, null, 2),
+                };
+            }
+            return { applied: true, verdict, lane, escrowPlanId: minted.plan.planId, blocked: null };
+        }
+        return { applied: true, verdict, lane, blocked: null };
+    }
+    catch {
+        return { applied: false, reason: 'disabled' }; // 防御式：分道故障 = 未分道
+    }
+}
+/** W5-0（C）：分道注记（state_anchor.reversibility_lane 的铸造面；applied:false ⇒ undefined） */
+export function laneAnchorOf(gate) {
+    if (!gate.applied)
+        return undefined;
+    return {
+        level: gate.verdict.level,
+        semantics: gate.verdict.semantics,
+        lane: gate.lane.lane,
+        ...(gate.escrowPlanId !== undefined ? { escrow_plan: gate.escrowPlanId } : {}),
+    };
+}
+// ─── 纪元 Β（反驳法院）：对抗核验取证面 ───
+//
+// 截图 + 压缩编码为异构第二脑的呈堂证据：encodeForVlm 优先（长边压缩 + JPEG，
+// 与 ask_screen 同一编码纪律）；编码失败（sharp 缺席/残图）回退原图直送。
+// 取证失败一律 null（诚实缺席）—— 法院不审无据之案，但绝不因取证失败阻塞
+// 点击主流程（askRefutation 收到空证据 ⇒ 缺席审判 uncertain ⇒ 不拦）。
+async function captureRefuteEvidence() {
+    try {
+        const buf = await system.captureScreen();
+        if (!Buffer.isBuffer(buf) || buf.length === 0)
+            return null;
+        try {
+            const enc = await encodeForVlm(buf);
+            if (enc.ok && enc.value && enc.value.base64) {
+                return { base64: enc.value.base64, mime: enc.value.mime };
+            }
+        }
+        catch { /* 编码失败回退原图直送 */ }
+        return { base64: buf.toString('base64'), mime: 'image/png' };
+    }
+    catch {
+        return null; // 截屏通道缺席 —— 缺席审判，不阻塞
+    }
+}
 export function createClickMouseTool(config) {
     return defineTool({
         name: 'click_mouse',
@@ -23,7 +271,10 @@ export function createClickMouseTool(config) {
             'Effect verification is built-in: the result tells you whether the screen actually changed. ' +
             'target_description is REQUIRED (protocol level): every click must name its target — ' +
             'it feeds UI memory and the risk/approval gate; a click that cannot describe its ' +
-            'target is a click that cannot be verified.',
+            'target is a click that cannot be verified. ' +
+            'The click point is independently notarized (OCR screen-read + whitebox control name): ' +
+            'describe the target USING THE TEXT ACTUALLY SHOWN ON IT — a description that contradicts ' +
+            'the screen is rejected (notary-mismatch).',
         parameters: {
             x: { type: 'number', required: true, description: 'X coordinate (0.0-1.0)' },
             y: { type: 'number', required: true, description: 'Y coordinate (0.0-1.0)' },
@@ -79,11 +330,20 @@ export function createClickMouseTool(config) {
             render: (_args, value) => [{ type: 'text', text: value }],
         },
         async execute(args) {
-            const { x, y, button = 'left', confidence, target_description, expected_change, expected_text, from_memory_id, approval_token, expected_effect, reasoning, allow_text_click } = args;
+            const { x: rawX, y: rawY, button = 'left', confidence, expected_change, expected_text, from_memory_id, approval_token, expected_effect, reasoning, allow_text_click } = args;
+            const rawTarget = typeof args.target_description === 'string' ? args.target_description : undefined;
             // 双保险校验（Guard 已在前线，工具自查兜底）
-            if (x < 0 || x > 1 || y < 0 || y > 1) {
-                return toolErr('Click validation failed.', `Invalid normalized coordinates (${x}, ${y}). X and Y must be between 0.0 and 1.0.`, 'Re-estimate the target center from the latest screenshot; zoom_inspect can refine the estimate.');
+            if (rawX < 0 || rawX > 1 || rawY < 0 || rawY > 1) {
+                return toolErr('Click validation failed.', `Invalid normalized coordinates (${rawX}, ${rawY}). X and Y must be between 0.0 and 1.0.`, 'Re-estimate the target center from the latest screenshot; zoom_inspect can refine the estimate.');
             }
+            // ── W1-2 批注消费接线：派发前读 amendment patch 修正计划 ──
+            // 位置刻意在 assertActionAllowed **之前**（「beginAttempt 前」的最强形式）：
+            // 用户批注修正后的 target_description 参与危险判定 —— 修正出危险语义的
+            // 计划同样要过审批闸门，批注不得成为绕闸通道。无令牌/无批注 ⇒ 零行为。
+            const amendment = consumeApprovalAmendment(approval_token, { tool: 'click_mouse', x: rawX, y: rawY, target_description: rawTarget });
+            const x = amendment.x ?? rawX;
+            const y = amendment.y ?? rawY;
+            const target_description = amendment.target_description ?? rawTarget;
             // ── 不可逆操作闸门（第六轮 + B-3 两阶段 + J 纪元授予门 + N 纪元硬前置）──
             // 危险目标必须持**已授予**的有效令牌（grant_approval 落点 approval.grant ——
             // "从未 grant" 与 "grant=true" 不再等价）。
@@ -98,7 +358,6 @@ export function createClickMouseTool(config) {
             // 阶段一 validate：只查不烧 —— 点击若抛异常，令牌仍可用于重试；
             // 阶段二 consume 在动作成功返回前调用（见下方 finally 前的成功路径）。
             const gate = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config);
-            const dangerous = gate.dangerous;
             if (!gate.allowed) {
                 if (gate.reason === 'undescribed-click') {
                     return JSON.stringify({
@@ -124,7 +383,148 @@ export function createClickMouseTool(config) {
                         'Never proceed without consent.',
                 }, null, 2);
             }
+            // ── 纪元 Ρ（双钥公证锁·第二遍）：放行路径上的多通道公证 ──
+            // 第一遍（上方）保持 Ρ 之前的全部阻断语义 —— 危险/未授予/未描述的点击
+            // 在取证之前就被拒（阻断路径零新增物理/网络副作用，逐字节旧方言）。
+            // 只有本来就会派发的点击才付出取证成本：落点邻域 OCR 实读 + 白盒控件名，
+            // 携证据重审 —— 任一通道见危险 ⇒ 审批域执法；OCR 实读与模型自述不符 ⇒
+            // notary-mismatch（注入谎报目标的根除点）。取证失败一律 null（诚实降级），
+            // 绝不因公证取证失败而阻塞正常点击：锁只在「通道在场且见危险/不符」时收紧。
+            let gate2 = gate;
+            let notarization;
+            if (config.enableNotarizationLock && !config.dryRun) {
+                const avail = notaryEvidence.channelsAvailable(config);
+                if (avail.ocr || avail.structural) {
+                    let evidence;
+                    try {
+                        evidence = {
+                            ocrLabel: avail.ocr ? await notaryEvidence.readOcrLabel(config, x, y) : null,
+                            structuralName: avail.structural ? await notaryEvidence.readStructuralName(config, x, y) : null,
+                        };
+                        gate2 = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config, evidence);
+                    }
+                    catch {
+                        // 宪法：运行层永不抛 —— 取证自身失败 = 通道缺席，维持第一遍判决
+                        evidence = undefined;
+                        gate2 = gate;
+                    }
+                    notarization = notaryAnchorOf(gate2.notarization, evidence, gate2.notaryNote);
+                    if (!gate2.allowed) {
+                        // 审计留痕：公证拦截入防篡改链（GUARD_BLOCKED 方言，circuitBreaker 同律）
+                        void journal.appendMarker({
+                            kind: 'GUARD_BLOCKED',
+                            guard: 'notary-lock',
+                            reason: gate2.reason === 'notary-mismatch'
+                                ? 'notary-mismatch'
+                                : `danger:${gate2.dangerSignalChannel ?? 'unknown'}`,
+                        }).catch(() => { });
+                        if (gate2.reason === 'notary-mismatch') {
+                            const ocrSnippet = (evidence?.ocrLabel ?? '').slice(0, 60);
+                            return JSON.stringify({
+                                status: 'ACTION_REQUIRED',
+                                state_anchor: {
+                                    target: target_description ?? expected_text ?? '(undescribed target)',
+                                    reason: 'notary-mismatch',
+                                    notarization,
+                                    note: 'The text actually READ FROM THE SCREEN at this point does not match your description ' +
+                                        '(semantic handshake failed) — the target may have moved, or the description is wrong.',
+                                },
+                                next_step: `NOTARY MISMATCH: this point actually reads "${ocrSnippet}". RE-DESCRIBE the target ` +
+                                    'using the text ACTUALLY SHOWN ON SCREEN (put it in target_description) and retry the click. ' +
+                                    "If the screen has changed, call 'take_screenshot' first and re-locate the target. " +
+                                    'Do not reuse the mismatched description.',
+                            }, null, 2);
+                        }
+                        return JSON.stringify({
+                            status: 'ACTION_REQUIRED',
+                            state_anchor: {
+                                target: target_description ?? expected_text ?? '(undescribed target)',
+                                danger_signal: gate2.dangerSignalChannel,
+                                reason: gate2.reason,
+                                notarization,
+                                note: approval_token
+                                    ? 'The token exists but the user has not granted it yet (or it expired).'
+                                    : 'This target looks irreversible (send/delete/pay/submit...) — the danger was NOTARIZED FROM ' +
+                                        'THE SCREEN (OCR-read label / whitebox control name), not taken from your description.',
+                            },
+                            next_step: 'PAUSE: this action needs explicit user approval. Call request_approval with a clear ' +
+                                'description (quote the text actually shown on the target), tell the user what you are about to ' +
+                                'do, wait for their consent, call grant_approval(token, true), then re-invoke click_mouse with ' +
+                                'the returned approval_token. Never proceed without consent.',
+                        }, null, 2);
+                    }
+                }
+                else {
+                    notarization = notaryAnchorOf('degraded', undefined, 'notary-channels-unavailable');
+                }
+            }
+            const dangerous = gate2.dangerous;
             const gateCoverage = config.enableApprovalGate ? 'described' : 'gate-disabled';
+            // ── W5-0（C 接线 · W4-3 S5）：可逆性分道 —— 物理派发前的三路执法 ──
+            // 位置在全部既有闸门（危险词/公证/批注）之后、beginAttempt 之前：
+            // compensable 的逆转预案必须先于派发预留铸造（dispatchLaneFor 的字面序）。
+            // 开关关（缺省）⇒ applied:false 零行为；未知语义交回危险词闸门（保守律 ②）。
+            const laneGate = await gateByReversibility(config, {
+                tool: 'click_mouse',
+                description: target_description ?? expected_text,
+                ...(approval_token !== undefined ? { approvalToken: approval_token } : {}),
+                enforceEscrow: !!(dangerous && approval_token),
+            });
+            if (laneGate.applied && laneGate.blocked !== null) {
+                return laneGate.blocked;
+            }
+            // ── 纪元 Β（反驳法院）：不可逆动作派发前的跨模型对抗核验 ──
+            // 窄门执法三前置（缺一不开庭，非危险动作零法院调用 —— 性能铁律：法院只审
+            // 不可逆）：危险词命中（能走到这里的危险点击必已持有效令牌，即将物理派发）
+            // + enableRefuteCourt 开 + 会话内有异构第二脑（refuteCourtInSession 纯配置
+            // /在场判定，零网络零拨号）。判决执法（沿 notary-lock 方言）：
+            //   refuted   ⇒ 拦截（toolErr + guard:'refute-court' + next_step 人工复核
+            //               指引 + journal GUARD_BLOCKED 留痕）；拦截发生在 beginAttempt
+            //               之前 —— 令牌不烧、尝试不占，人工复核后可原令牌重试；
+            //   upheld    ⇒ 放行 + 锚点注记 refute:'upheld'（认真反驳后维持的可信度
+            //               加成，透明化）；
+            //   uncertain ⇒ 缺席审判零行为 —— 不拦、不注记，输出与法院关闭时逐字节
+            //               同路。法院是旁路增益不是依赖：故障（无第二脑/调用失败/
+            //               超时 8s 单次不重试）绝不下沉为点击主流程的阻塞。askRefutation
+            //               自身永不抛，本块对主流程的唯一可见副作用是上述两分支。
+            let refuteStamp;
+            if (dangerous && config.enableRefuteCourt === true && !config.dryRun && refuteCourtInSession()) {
+                const evidence = await captureRefuteEvidence();
+                // 目标区域聚焦注记：与 notary 邻域窗口同源（regionVerifyRadius 夹取）
+                const rr = Math.min(0.25, Math.max(0.05, config.regionVerifyRadius > 0 ? config.regionVerifyRadius : 0.15));
+                const rLeft = Math.max(0, x - rr);
+                const rTop = Math.max(0, y - rr);
+                const verdict = await askRefutation({
+                    imageBase64: evidence ? evidence.base64 : '',
+                    mime: evidence?.mime,
+                    description: target_description ?? expected_text ?? 'the point being clicked',
+                    region: {
+                        x: rLeft,
+                        y: rTop,
+                        width: Math.min(1 - rLeft, rr * 2),
+                        height: Math.min(1 - rTop, rr * 2),
+                    },
+                });
+                if (verdict.verdict === 'refuted') {
+                    // 审计留痕：反驳拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
+                    void journal.appendMarker({
+                        kind: 'GUARD_BLOCKED',
+                        guard: 'refute-court',
+                        reason: `second-brain-refuted:${verdict.secondOpinionId ?? 'unknown'}`,
+                    }).catch(() => { });
+                    return toolErr(`Irreversible click on "${target_description ?? 'undescribed target'}" blocked by the refutation court.`, `An independent second brain (${verdict.secondOpinionId ?? 'heterogeneous second opinion'}) examined the ` +
+                        'screen and found CONTRADICTING evidence (guard: refute-court): ' +
+                        `${verdict.reason ?? 'no reason given'} (confidence ${verdict.confidence.toFixed(2)}).`, 'PAUSE: do NOT retry this click as-is. The target description did not survive adversarial review — ' +
+                        'ask the USER to manually verify this target on screen (take_screenshot / zoom_inspect around the point) ' +
+                        'and confirm what it actually is before any retry; if the user confirms the target, re-invoke with a ' +
+                        'corrected target_description (the approval token is still valid — the court blocked before dispatch).');
+                }
+                if (verdict.verdict === 'upheld')
+                    refuteStamp = 'upheld';
+                // uncertain ⇒ 缺席审判零行为（不拦、不注记 —— 见上方法条）
+            }
+            // W2-2（S3）：派发前接地新鲜度探针的判决（成功路径透明化用）
+            let freshnessStamp;
             // Δ 纪元（审计#2）：本回合是否已持有 beginAttempt 的派发预留（catch 路径
             // 需据此结算 —— 见下方异常分支）
             let attemptReserved = false;
@@ -213,6 +613,39 @@ export function createClickMouseTool(config) {
                 const before = verify
                     ? await captureBefore({ x, y }, config.regionVerifyRadius, !!expectation)
                     : null;
+                // ── W2-2（S3）：派发前接地新鲜度探针（approval.beginAttempt 之前）──
+                // 危险类点击（dangerous 经闸门判定 —— riskGate 词表的只读调用产物）的
+                // 坐标来自接地时刻的截图；审批人机往返分钟级，屏幕可能已相变。派发前
+                // 抓一帧低清快图（经注入端口）与接地指纹比对：漂移 ⇒ 阻断本次派发
+                // （结构化「需重新截图定位」，供上层重感知；令牌未烧 —— 阻断在预留/派发
+                // 之前）。端口缺席/失败 ⇒ degraded 放行（fail-open 论证见 popupDetector
+                // 探针法条：叠加防御故障不下沉为危险动作面的可用性故障，降级随锚点观测）。
+                if (dangerous && approval_token && !config.dryRun) {
+                    const fresh = await probeGroundingFreshness();
+                    freshnessStamp = fresh;
+                    if (fresh.verdict === 'drifted') {
+                        // 审计留痕：新鲜度拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
+                        void journal.appendMarker({
+                            kind: 'GUARD_BLOCKED',
+                            guard: 'freshness-probe',
+                            reason: `grounding-drift: similarity ${fresh.similarity_pct}% < threshold ${fresh.threshold_pct}%`,
+                        }).catch(() => { });
+                        return JSON.stringify({
+                            status: 'ACTION_REQUIRED',
+                            state_anchor: {
+                                target: target_description ?? expected_text ?? '(undescribed target)',
+                                freshness_probe: fresh,
+                                reason: 'grounding-stale',
+                                note: 'The screen has changed materially since the screenshot these coordinates were ' +
+                                    'grounded against — the click would land in a DIFFERENT world state.',
+                            },
+                            next_step: 'STALE GROUNDING — do NOT retry these coordinates. Call take_screenshot to ' +
+                                're-capture the screen, RE-LOCATE the target from the fresh screenshot, then retry with ' +
+                                'the new coordinates. The approval token is still valid (blocked before dispatch — no ' +
+                                'attempt was spent).',
+                        }, null, 2);
+                    }
+                }
                 // ── Δ 纪元（审计#2·双花窗口封堵）：派发预留 ──
                 // validate（只查不烧）与验收式消费（consume/attemptFailed，见下方）之间
                 // 隔着多个 await —— 并发两次同令牌调用都能过 validate、都派发物理点击。
@@ -385,6 +818,20 @@ export function createClickMouseTool(config) {
                         sensitive_focus: sensitive || undefined, // 风险闸门：焦点已标记为凭据区
                         // J 纪元：审批网覆盖情况透明化（described / blind-spot / gate-disabled）
                         approval_gate: gateCoverage,
+                        // Ρ 纪元：双钥公证参与情况透明化（engaged/degraded + 各通道在场情况；
+                        // 总开关关 ⇒ 键不入场 —— 完全旧路径）
+                        notarization: notarization || undefined,
+                        // Β 纪元：反驳法院参与情况透明化 —— 'upheld' = 异构第二脑认真反驳后
+                        // 维持「目标=描述」；uncertain/缺席 ⇒ 键不入场（缺席审判零行为，
+                        // 输出与法院关闭时同路）
+                        refute: refuteStamp || undefined,
+                        // W2-2（S3）：接地新鲜度探针判决（dangerous 路径在场；degraded 是
+                        // fail-open 的诚实观测面 —— 叠加防御缺席要让模型/遥测看得见）
+                        freshness: freshnessStamp || undefined,
+                        // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
+                        reversibility_lane: laneAnchorOf(laneGate),
+                        // W2-2（W1-2）：批注修正透明化 —— 用户批注把计划修正成了什么
+                        amendment: amendment.stamp || undefined,
                         // V 纪元：验收裁决 —— verified（通过，令牌已焚毁）/ retry-allowed
                         // （未生效，令牌保留，重试免确认）/ budget-exhausted（预算耗尽，需重新审批）
                         acceptance: acceptance || undefined,

@@ -1,0 +1,139 @@
+// src/tools/federationTools.ts
+// 纪元 Μ（万脑联邦进化）：federation_sync 工具 —— 内核证据账本的差分隐私联邦面。
+// 三个动作：
+//   · digest —— 本地摘要预览（mintEvidenceDigest 直接铸给模型看；恒零网络、
+//     确定性种子 ⇒ 同账本同摘要，审计可复现）；
+//   · sync   —— 全流程（federationSync：铸摘要 → endpoint 非空则 fire-and-forget
+//     POST → 响应含合并摘要则按份额上限掺入账本；endpoint 空 = 零网络，仅返回
+//     本地摘要 —— **缺省即离线**，网络是显式 opt-in 的增益旁路）；
+//   · status —— 信任账（federationTrustReport）+ 上次同步结果（lastFederationSync）
+//     + 联邦配置镜像（endpoint/ε/份额上限）。
+// 铁律：绝不抛（一切失败走 toolErr / 诚实注记）；输出一律走 toolResult 工厂；
+// 远端证据只喂 EvidenceLedger —— 参数值变化仍由本地 calibrator 全链执法
+//（见 src/federation/index.ts 的安全设计注记）。
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import { toolOk, toolErr } from '../toolResult.js';
+import { evidenceLedger } from '../kernel/registry.js';
+import { mintEvidenceDigest, federationSync, federationTrustReport, lastFederationSync, } from '../federation/index.js';
+/** 合法动作表（缺席/空白 ⇒ 'digest' —— 最保守的只读预览） */
+const VALID_ACTIONS = ['digest', 'sync', 'status'];
+export function createFederationSyncTool(config) {
+    return defineTool({
+        name: 'federation_sync',
+        description: 'Differentially-private federation of kernel evidence (epoch Mu): mints a clipped-histogram digest ' +
+            '(K=8 margin bins x success/fail counts, per-cell Laplace noise with epsilon=federationEpsilon) from the ' +
+            'local evidence ledger, optionally POSTs it to a federation aggregation endpoint, and blends a returned ' +
+            'merged digest back into the LOCAL LEDGER ONLY (capped by federationMaxRemoteShare and a per-source trust ' +
+            'weight; kernel parameter VALUES still change only through the local calibrator evidence gate + regression ' +
+            'guard). ZERO NETWORK BY DEFAULT: with federationEndpoint empty (the default) nothing is ever sent — ' +
+            "digest/merge/apply all work fully offline for multi-process hand-off. Actions: 'digest' (default; local " +
+            "deterministic preview, never touches the network), 'sync' (full flow; POST is single-shot, 5s timeout, " +
+            "fire-and-forget, errors sanitized), 'status' (trust ledger + last sync result + config mirror).",
+        parameters: {
+            action: {
+                type: 'string',
+                description: "Which action to run: 'digest' (local digest preview, zero network), 'sync' (mint + optional POST + " +
+                    "blend returned merged digest), or 'status' (trust ledger + last sync). Default 'digest'.",
+            },
+        },
+        output: {
+            schema: { type: 'string' },
+            render: (_args, value) => [{ type: 'text', text: value }],
+        },
+        async execute(args) {
+            try {
+                // 动作解析：缺席/空白 ⇒ 'digest'；大小写不敏感；非法值 ⇒ 结构化 toolErr（绝不抛）
+                const raw = args?.action;
+                let action;
+                if (raw === undefined || raw === null) {
+                    action = 'digest';
+                }
+                else if (typeof raw === 'string') {
+                    const t = raw.trim().toLowerCase();
+                    action = t === '' ? 'digest' : VALID_ACTIONS.includes(t) ? t : null;
+                }
+                else {
+                    action = null;
+                }
+                if (action === null) {
+                    return toolErr('federation_sync validation failed.', `Invalid action value: ${JSON.stringify(raw)}. Valid actions: digest | sync | status.`, "Omit action (or pass 'digest') for the local zero-network preview, 'sync' for the full flow, " +
+                        'or status for the trust ledger and last sync result.');
+                }
+                // 配置镜像（status / 锚点共用 —— 手算可复现的三键回显）
+                const configMirror = {
+                    endpoint: config.federationEndpoint,
+                    epsilon: config.federationEpsilon,
+                    max_remote_share: config.federationMaxRemoteShare,
+                };
+                if (action === 'digest') {
+                    // 本地摘要预览：确定性种子（缺省 0）⇒ 同账本同摘要 —— 审计可复现；恒零网络
+                    const digest = mintEvidenceDigest(evidenceLedger, { epsilon: config.federationEpsilon });
+                    if (digest === null) {
+                        return toolErr('federation_sync digest failed.', '本地摘要铸造失败（账本视图非法 —— 理论不可达）。', 'The evidence ledger view was rejected; nothing was uploaded or blended. Retry once; ' +
+                            "if it persists, inspect the ledger via metrics_dashboard section 'kernel'.");
+                    }
+                    return toolOk(`federation_sync digest: minted a v${digest.v} digest over ${digest.keys.length} key(s) ` +
+                        `(epsilon=${digest.epsilon}, per-cell Laplace noise, post-processed to non-negative integers).`, {
+                        action,
+                        network: 'off',
+                        config: configMirror,
+                        digest,
+                    }, 'This is a LOCAL preview with a deterministic seed — nothing left this machine (zero network by ' +
+                        "default). To actually federate, call action 'sync' (requires federationEndpoint to be configured; " +
+                        "otherwise it honestly stays offline). Use action 'status' to inspect trust and past syncs.");
+                }
+                if (action === 'status') {
+                    const trust = federationTrustReport();
+                    const last = lastFederationSync();
+                    return toolOk(`federation_sync status: ${trust.length} trust account(s), last sync ` +
+                        `${last === null ? '(never)' : `${last.network} @${last.at} applied=${last.applied}`}.`, {
+                        action,
+                        config: configMirror,
+                        trust,
+                        last_sync: last,
+                    }, 'Trust decays as 1/(1+regressed) per source; blending quotas are multiplied by it. ' +
+                        "Call action 'digest' for a local preview or 'sync' to run the full flow " +
+                        '(zero network while federationEndpoint is empty).');
+                }
+                // action === 'sync'：全流程。await settled（≤5s 超时上界）把掺入结果带回给模型 ——
+                // 工具调用不是热路径，5 秒有界等待换全流程可观测是值得的；热路径纪律由
+                // federationSync 内部的 fire-and-forget 结构保证（settled 永不 reject）。
+                const res = federationSync({
+                    endpoint: config.federationEndpoint,
+                    epsilon: config.federationEpsilon,
+                    maxRemoteShare: config.federationMaxRemoteShare,
+                });
+                await res.settled;
+                if (!res.ok || res.digest === null) {
+                    return toolErr('federation_sync sync failed.', '本地摘要铸造失败（账本视图非法 —— 理论不可达），零网络零应用。', 'Nothing was uploaded or blended. Retry once; the local ledger and kernel registry are unaffected.');
+                }
+                return toolOk(`federation_sync sync: minted digest over ${res.digest.keys.length} key(s); network=${res.network}` +
+                    (res.network === 'off'
+                        ? ' (endpoint empty — zero network, digest returned for hand-off).'
+                        : res.applied !== null
+                            ? `; blended ${res.applied.applied} remote evidence row(s) into the local ledger (cap x trust enforced).`
+                            : '; no usable merged digest in the response (upload-only).'), {
+                    action,
+                    network: res.network,
+                    endpoint: res.endpoint,
+                    config: configMirror,
+                    digest: res.digest,
+                    applied: res.applied,
+                    error: res.error,
+                }, res.network === 'off'
+                    ? 'Endpoint is empty: zero network by default. Hand the digest to mergeDigests/applyFederatedEvidence ' +
+                        'in another process, or configure federationEndpoint and re-run to federate for real.'
+                    : res.applied !== null
+                        ? 'Remote evidence now sits in the LOCAL LEDGER only; kernel values still move solely through the ' +
+                            "local calibrator (evidence gate + regression guard). Check action 'status' for trust effects."
+                        : 'Upload succeeded but the response carried no merged digest; nothing was blended. ' +
+                            "Retry 'sync' later or inspect the aggregation endpoint.");
+            }
+            catch (error) {
+                // 绝不抛纪律的兜底臂（理论不可达 —— 全程只读/防御式/工厂输出）
+                return toolErr('federation_sync failed.', error?.message ?? 'unknown error', 'The federation bypass crashed unexpectedly — the local ledger and kernel registry are unaffected ' +
+                    "(federation never writes kernel values). Retry once; if it persists, use action 'status' to inspect state.");
+            }
+        },
+    });
+}

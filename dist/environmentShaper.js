@@ -462,7 +462,7 @@ class Shaper {
             return { ok: true, token, matchedTitle: recipe.matchedTitle };
         }
         catch (e) {
-            return { ok: false, reason: e.message };
+            return { ok: false, reason: e?.message ?? String(e) }; // 非 Error 抛出也必有原因
         }
     }
     async applyPreset(preset, titleHint) {
@@ -497,8 +497,9 @@ class Shaper {
                 results.push({ token: rec.token, ok: true });
             }
             catch (e) {
-                rec.undoFailureReason = e.message;
-                results.push({ token: rec.token, ok: false, reason: e.message });
+                const reason = e?.message ?? String(e);
+                rec.undoFailureReason = reason;
+                results.push({ token: rec.token, ok: false, reason });
                 // 部分复原优于中止：失败记录后继续弹栈
             }
         }
@@ -512,10 +513,50 @@ class Shaper {
             return;
         // 防御性恢复：结构非法条目跳过；只认领未复原条目的复原义务
         this.undoLog = records.filter(r => r && typeof r.token === 'string' && r.recipe && typeof r.recipe.kind === 'string');
-        this.tokenSeq = this.undoLog.length; // 后续发号不撞已存在令牌
+        // 后续发号不撞已存在令牌：按令牌最大数字后缀计（length 在条目被过滤/
+        // 令牌不连续时会复用旧号 —— undo-N 撞号会毒化审计对账）
+        let maxSeq = 0;
+        for (const r of this.undoLog) {
+            const m = /^undo-(\d+)$/.exec(r.token);
+            if (m)
+                maxSeq = Math.max(maxSeq, Number.parseInt(m[1], 10));
+        }
+        this.tokenSeq = maxSeq;
     }
     undoDepth() {
         return this.undoLog.filter(r => !r.undone).length;
+    }
+    /** W4-3（R3）：定向复原（见接口注释 —— token 命中单条 / 缺席回退全量） */
+    async undoOne(token) {
+        this.ensure();
+        if (typeof token === 'string' && token !== '') {
+            const rec = this.undoLog.find(r => r.token === token);
+            if (rec && !rec.undone) {
+                try {
+                    await serialize(() => this.adapter.undo(rec.recipe));
+                    rec.undone = true;
+                    rec.undoneAt = Date.now();
+                    return { token: rec.token, ok: true };
+                }
+                catch (e) {
+                    rec.undoFailureReason = e?.message ?? String(e); // 失败也如实入栈（restoreAll 同律）
+                    return { token: rec.token, ok: false, reason: e?.message ?? String(e) };
+                }
+            }
+            if (rec?.undone)
+                return { token: rec.token, ok: true }; // 幂等：已复原的义务不再执行
+            // 未命中 ⇒ 回退全量复原（保守方向，见接口注释）
+        }
+        const results = await this.restoreAll();
+        const failed = results.filter(r => !r.ok);
+        if (failed.length > 0) {
+            return {
+                ok: false,
+                reason: `full-restore fallback failed for ${failed.length}/${results.length} record(s): ` +
+                    failed.map(f => `${f.token}: ${f.reason ?? 'unknown'}`).join('; '),
+            };
+        }
+        return { ok: true };
     }
     clearUndoLog() {
         this.undoLog = [];
@@ -524,3 +565,67 @@ class Shaper {
 }
 // 单例是正确的：一台躯体只有一个工作台；物理唯一性由 serialize 保证
 export const shaper = new Shaper();
+/**
+ * W3-1：shaper 撤销栈补偿执行器。
+ * 支持 method 'shaper-undo'（LIFO 全量复原 —— 单条 token 的定向复原不在
+ * shaper 公开面，全量复原是保守正确的方向：多复原一条窗口几何无害，少复原
+ * 一条则补偿不完整）；其余 method ⇒ ok:false + 说明（补偿步骤路由错配的
+ * 醒目拒绝，绝不假装执行）。绝不抛（shaper.restoreAll 自带部分复原续行）。
+ */
+export function createShaperCompensationExecutor() {
+    return {
+        async execute(step, _plan) {
+            if (step.method !== 'shaper-undo') {
+                return {
+                    ok: false,
+                    detail: `shaper executor only handles method "shaper-undo" (got "${step.method}") — route this step to a GUI executor port`,
+                };
+            }
+            try {
+                const results = await shaper.restoreAll();
+                const failed = results.filter(r => !r.ok);
+                if (failed.length > 0) {
+                    return {
+                        ok: false,
+                        detail: `shaper undo failed for ${failed.length}/${results.length} record(s): ${failed.map(f => `${f.token}: ${f.reason ?? 'unknown'}`).join('; ')}`,
+                    };
+                }
+                return { ok: true };
+            }
+            catch (e) {
+                return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+            }
+        },
+    };
+}
+/**
+ * W4-3（R3）：shaper 定向复原的独立函数面（rollbackPlanner 执行端口 /
+ * 宿主的落点）。token 缺席 ⇒ 全量 LIFO 复原（保守方向）。绝不抛。
+ */
+export async function undoShaperRecord(token) {
+    try {
+        const r = await shaper.undoOne(typeof token === 'string' && token !== '' ? token : undefined);
+        return r.ok ? { ok: true } : { ok: false, detail: r.reason ?? 'unknown shaper undo failure' };
+    }
+    catch (e) {
+        return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    }
+}
+/**
+ * W4-3（R3）：shaper 撤销栈的回滚执行端口构造器 —— 只处理 shaper-undo 模态
+ * （定向 undoToken / 缺省全量），其余模态醒目拒绝（路由错配不冒充执行）。
+ */
+export function createShaperRollbackExecutor() {
+    return {
+        execute: async (step) => {
+            if (step.modality !== 'shaper-undo') {
+                return {
+                    ok: false,
+                    detail: `shaper rollback executor only handles modality "shaper-undo" (got "${step.modality}") — ` +
+                        'route keyboard/click/scroll modalities to a GUI executor port',
+                };
+            }
+            return undoShaperRecord(step.payload.undoToken);
+        },
+    };
+}

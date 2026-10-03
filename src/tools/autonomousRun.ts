@@ -25,11 +25,21 @@ import type { Config } from '../config';
 import { toolOk, toolErr, toolActionRequired } from '../toolResult';
 import {
   buildAutonomyStack, createExecute, runAutonomousLoop, auditTrajectory, EvolutionEngine,
-  GoalStateMachine, PilotStore,
+  GoalStateMachine, PilotStore, activeSteerSession,
   type GoalSpec, type PolicyAction, type RuntimeDeps, type ExecOutcome, type StepRecord,
+  type AutonomyDeps,
 } from '../autonomy/index';
+// W5-5（缝3）：换支重放偏置的步进面类型（在役 steer 会话 → runAutonomousLoop 的
+// 注入面；steerTools → branchCards 均下游，与本文件零回路）。
+import type { SteerBiasStepper } from './steerTools';
 import { waitForStableHash, reportEffect } from '../actionVerifier';
 import { evidenceLedger, kernelRegistry, type KernelOutcome } from '../kernel/registry';
+import { resetVerifyGateBudget } from '../vlm/grounding';
+// W3-4（takeGranted 续跑接线）：只读消费 approvalQueue（takeGranted/pendingSummary）
+// 与 journal 步账；对账纯函数从 orchestrator 复用（单一事实源，不复制逻辑）。
+import { approvalQueue, type QueuedApprovalEntry } from '../approval';
+import { journal } from '../journal';
+import { reconcileResumeWindow, type ResumeReconciliation } from '../orchestrator';
 
 /** 目标与判据的字符预算（Token 纪律：goal 是状态锚点，不是需求文档） */
 const GOAL_MAX_CHARS = 500;
@@ -61,6 +71,30 @@ export type AutonomousRunDeps = RuntimeDeps & {
    * （指纹退化等），调用方诚实跳过对账（宁缺毋错）。缺省真实现见 makeSettleOracle。
    */
   settleOracle?: (beforeHash: string) => Promise<{ detected: boolean; distance: number } | null>;
+  /**
+   * W3-4（takeGranted 续跑）：已批队列条目的执行通道。在场时 runPilotLoop 重入
+   * 先调 approvalQueue.takeGranted() 消费至多一条已批条目，连同对账结果交给本
+   * 通道执行（返回一句审计注记）。缺席 ⇒ 只读 pendingSummary 审计提示 ——
+   * **不破坏性消费**：跑环自身的动作由 policy 引擎决策，无法担保已批动作的
+   * 精确形状被派发；takeGranted 是落盘先行 + 铸令牌的消费面，消费而不执行
+   * 等于白烧用户的同意（宁可条目留队等 orchestrator 的续跑消费，不可烧令）。
+   * 生产接线（集成线）：组合根注入「证据链坐标 → 以 executionToken 派发点击」
+   * 的适配器（V 纪元验收式 consume 在工具层照常执法）。防御式：通道异常 ⇒
+   * 审计注记，绝不炸环。
+   */
+  resumeGranted?: (granted: {
+    entry: QueuedApprovalEntry;
+    executionToken: string;
+    reconciliation: ResumeReconciliation;
+  }) => Promise<string>;
+  /**
+   * W5-5（缝2）：岔路账端口的显式注入位（测试缝/生产注入面）。buildAutonomyStack
+   * 对 deps.branchLedger 的既有契约是「调用方显式注入优先，只填缺席位」，但该字段
+   * 此前在 runPilotLoop 血脉上断头（stack 不透传）—— 本脊梁现将其随栈透传给
+   * runAutonomousLoop，契约闭合。缺席 ⇒ buildAutonomyStack 的单例适配照旧
+   * （缺省路径零变化 —— 零回归红律）。
+   */
+  branchLedger?: AutonomyDeps['branchLedger'];
 };
 
 // ─── 纪元 Ξ（Ξ-B）：生产自监督对账的常量与纯工具 ───
@@ -168,11 +202,103 @@ export interface PilotLoopOptions {
 export async function runPilotLoop(opts: PilotLoopOptions): Promise<string> {
   const { toolName, config, deps, spec, goalMachine, store, token } = opts;
 
+  // W3-0（W2-0 集成接线 · B 面补全）：每次跑环 = 独立任务边界 —— Zoom 复核
+  // 预算清零。W1-8 已知取舍的补全：此前预算只挂用户回合边界与卸载清零，单一
+  // 回合内多次 autonomous_run 会共享同一份 8 次复核预算（先到的 run 吃光额度，
+  // 后到的 run 复核闸全数 budget-exhausted）。挂点在本脊梁（runPilotLoop）⇒
+  // autonomy_resume 同律受益（续跑亦视为新任务）。旁路义务：异常吞。
+  try { resetVerifyGateBudget(); } catch { /* 预算复位是旁路义务 */ }
+
   // 组装闭环栈：perceive/policy/constitution 由 buildAutonomyStack 铸造
   //（deps.lastSnapshotRef 就地补挂 —— 同一 deps 对象随后铸 execute，感知/执行共享 before 帧）
   const stack = buildAutonomyStack(config, deps);
   const rawExecute = createExecute({ ...deps, spec });
   const executionNotes: string[] = [];
+
+  // ── W3-4（takeGranted 续跑接线）：重入消费 —— W2-1 H4 遗留的执行侧闭环 ──
+  //
+  // 双通道法则（防御式绝不抛，全部旁路义务）：
+  //   · 执行通道在场（deps.resumeGranted）⇒ takeGranted 消费一条已批条目：
+  //     先以 entry.stepCursor 对账 journal 步账（orchestrator 的同一纯函数 ——
+  //     reconcileResumeWindow：无 cursor/无账/cursor 越界 ⇒ 保守全量重规划，
+  //     其余 ⇒ 只重演 cursor 之后的步骤），对账结果随条目交执行通道；
+  //   · 执行通道缺席 ⇒ 只读 pendingSummary 审计提示（grantedAwaitingResume
+  //     计数 > 0 才注记）—— 不消费：跑环无法担保已批动作形状被精确派发，
+  //     消费而不执行 = 白烧用户同意（保守方向：条目留队等 orchestrator 消费）。
+  try {
+    if (typeof deps.resumeGranted === 'function') {
+      const granted = approvalQueue.takeGranted();
+      if (granted) {
+        let ledger = 0;
+        try { ledger = journal.list(false).length; } catch { ledger = 0; }
+        const rec = reconcileResumeWindow(granted.entry?.stepCursor, ledger);
+        let note = '';
+        try {
+          note = await deps.resumeGranted({
+            entry: granted.entry,
+            executionToken: granted.executionToken,
+            reconciliation: rec,
+          });
+        } catch (e: unknown) {
+          note = `resume executor fault: ${e instanceof Error ? e.message : String(e)}`;
+        }
+        const mode = rec.mode === 'replay-window'
+          ? `replay-window(cursor=${rec.cursor}, window=${rec.windowSize})`
+          : `full-replan(${rec.reason})`;
+        executionNotes.push(
+          `[Resume] 已批队列条目 ${granted.entry?.id ?? 'unknown'} 续跑消费（对账：${mode}；令牌已铸造）：` +
+          `${typeof note === 'string' ? note.slice(0, 300) : ''}`.slice(0, 500),
+        );
+      }
+    } else {
+      const summary = approvalQueue.pendingSummary();
+      if (summary.grantedAwaitingResume > 0) {
+        executionNotes.push(
+          `[Resume] ${summary.grantedAwaitingResume} 条已批队列条目待续跑 —— 经 start_complex_task（orchestrator 续跑消费）执行，` +
+          `或为 autonomous_run 注入 AutonomousRunDeps.resumeGranted 执行通道。`.slice(0, 500),
+        );
+      }
+    }
+  } catch {
+    /* 续跑是旁路：任何故障零注记零影响（绝不炸环） */
+  }
+
+  // ── W5-5（缝1）：steer B 应答回灌 —— 在役 steer 会话的修订判据重放进本轮目标机 ──
+  //
+  // 闭环语义：上一环 steer-drift 升级出题、用户应答 B（amendCriterion 已写回旧
+  // 目标机）后，模型按 steer_answer 返回的重启指引（restart 字段：修订后锚点
+  // 摘要 + resume 语义）重入本脊梁 —— 此处把会话账里未消费的修订判据（经会话
+  // 状态传递，见 SteerAmendmentHandoff）replay 进**本轮**目标机。同 goal 匹配
+  // 防御：跨目标的陈旧修订绝不回灌。旁路义务：无在役会话 / 会话无账 / 一切
+  // 故障 ⇒ 零回灌零注记（与接线前逐字节一致 —— 三缝 opt-in 红律）。
+  try {
+    const w5Session = activeSteerSession();
+    if (w5Session !== null && typeof w5Session.drainAmendments === 'function') {
+      const handoffs = w5Session.drainAmendments() ?? [];
+      let w5Applied = 0;
+      for (const h of handoffs) {
+        const am = h !== null && typeof h === 'object' ? h.amendment : undefined;
+        if (am === null || am === undefined || typeof am !== 'object') continue;
+        if (typeof am.criterion_index !== 'number' || typeof am.to !== 'string') continue;
+        if (typeof h.goalText !== 'string' || h.goalText !== spec.goal) {
+          continue; // 跨 goal 防御：陈旧修订只属于出题时的那个目标
+        }
+        try {
+          if (goalMachine.amendCriterion(am.criterion_index, am.to) === true) w5Applied++;
+        } catch {
+          /* amendCriterion 防御式绝不抛 —— 双保险 */
+        }
+      }
+      if (handoffs.length > 0) {
+        executionNotes.push(
+          (`[Steer] B 应答回灌：修订判据 ${w5Applied}/${handoffs.length} 条已重放进本轮目标机` +
+            '（修正即新主张，状态重置未核；同 goal 匹配后回灌）').slice(0, 500),
+        );
+      }
+    }
+  } catch {
+    /* 回灌是旁路：任何故障零影响（绝不炸环） */
+  }
 
   // ── 纪元 Ξ（Ξ-B）：生产自监督对账 —— 快路径判决 vs 慢而准 settle-verify 真值 ──
   //
@@ -336,7 +462,62 @@ export async function runPilotLoop(opts: PilotLoopOptions): Promise<string> {
     }
   };
 
-  const result = await runAutonomousLoop({ ...stack, execute, goal: goalMachine, onStep });
+  // ── W5-5（缝3）：steer(k) 换支偏置消费 —— 在役会话的换支重放移交闭环脊梁 ──
+  //
+  // 用户经 steer_answer 应答支号（"2"/"B2"）后，会话武装了换支重放
+  // （applyBranchChoice 的 bias 载荷 + BranchReplayController 预算执法面）；
+  // 此处一次性取走（takeBranchBias），注入 runAutonomousLoop 的 steerBias 端口 ——
+  // ③¼ 岔路账评分上下文经 withSteerBias 铸入 preferredActionKeys（改选偏置只改
+  // 选择不改预测），每步决策既定即扣重放预算，超支诚实终止（偏置摘除原路继续）。
+  // 旁路义务：无在役会话 / 无在役重放 / 一切故障 ⇒ 零注入零注记（逐字节旧路径）。
+  let w5Replay: SteerBiasStepper | null = null;
+  try {
+    const w5Session = activeSteerSession();
+    if (w5Session !== null && typeof w5Session.takeBranchBias === 'function') {
+      const stepper = w5Session.takeBranchBias();
+      if (stepper !== null && typeof stepper.step === 'function') w5Replay = stepper;
+    }
+  } catch {
+    /* 换支是增益不是依赖 —— 故障零影响（绝不炸环） */
+  }
+
+  const result = await runAutonomousLoop({
+    ...stack,
+    execute,
+    goal: goalMachine,
+    onStep,
+    // W5-5（缝2）：岔路账端口的显式注入透传（buildAutonomyStack 的「显式注入
+    // 优先」契约闭合 —— 缺席时 stack 内的单例适配照旧，缺省路径零变化）。
+    ...(deps.branchLedger ? { branchLedger: deps.branchLedger } : {}),
+    // W5-5（缝2）：岔路账支点锚 journal 面 —— 铸卡锚来自真实步账（journal 条数 +
+    // 链尖），applyBranchChoice 的 verifyAnchor 由此可对卡锚强校验（锚真实可校验）。
+    // journal 故障 ⇒ null（锚缺席诚实降级 —— autoPilot 侧消费点防御收敛）。
+    branchAnchor: (): { journalLength: number; chainTip: string } | null => {
+      try {
+        return { journalLength: journal.list(false).length, chainTip: journal.tip };
+      } catch {
+        return null;
+      }
+    },
+    // W5-5（缝3）：换支重放偏置步进面（在役重放在场才落键 —— 缺席 ⇒ 逐字节旧路径）
+    ...(w5Replay !== null ? { steerBias: w5Replay } : {}),
+  });
+
+  // W5-5（缝3）收尾记账：achieved ⇒ 重放收尾 complete；预算读数进执行注记
+  //（exhausted 是终局事实 —— 超支后 complete 不改判，如实申报）。
+  if (w5Replay !== null) {
+    try {
+      const achieved = result.phase === 'achieved';
+      if (achieved) w5Replay.complete();
+      const st = w5Replay.state();
+      executionNotes.push(
+        (`[Steer] 换支重放：${st.status}（预算 ${st.stepsUsed}/${st.budgetSteps} 步已用` +
+          `${achieved ? '，已随达成收尾' : ''}）`).slice(0, 500),
+      );
+    } catch {
+      /* 记账是旁路：故障绝不炸环 */
+    }
+  }
 
   // Σ-3 终局定档：phase/summary/status + 终局判据账全量（回放的权威源）
   store.finish(

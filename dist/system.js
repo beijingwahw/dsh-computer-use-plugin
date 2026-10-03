@@ -1,3 +1,4 @@
+import { Config as ConfigSchema } from './config.js';
 import { serialize } from './ioMutex.js';
 import * as backend from './physicalBackend.js';
 export { serialize };
@@ -81,7 +82,9 @@ async function _getKey(keyName) {
     const name = keyName.toLowerCase();
     try {
         const nj = await _getNutJS();
-        return nj.Key[name] ?? fallbackMap[name] ?? keyName;
+        // fallbackMap 的值是 nut-js 枚举成员名（PascalCase）—— 必须经 nj.Key 再索引
+        // 取枚举值；直接回传字符串名，pressKey 收到的是非法键（legacy 热键全灭的隐形根因）
+        return nj.Key[name] ?? nj.Key[fallbackMap[name]] ?? keyName;
     }
     catch {
         return fallbackMap[name] ?? keyName;
@@ -90,6 +93,73 @@ async function _getKey(keyName) {
 // ─── 模块级状态（保持原有可变模式 —— 插件单例）───
 let dryRun = false;
 let windowDelegate = null;
+// ─── P1-3（地基速修）：系统级热键黑名单 ───
+// Alt+F4 关窗、Meta/Win 唤起系统壳层、Ctrl+Alt+Delete —— 这些和弦不是「在应用内
+// 操作」，而是把动作射向 OS 壳层/会话管理器：逃逸出纯视觉闭环的验证范围
+//（点了之后桌面发生了什么，模型看不见也验证不了），且多数不可逆。执法点放在
+// system.pressHotkey（全部热键调用方的唯一漏斗：工具层/shaper/autonomy/replay），
+// 拒绝 = 直接 throw（与「白名单外的键名被拒绝」同方言，由各调用方 catch 降级）。
+/** config.hotkeyBlacklist 缺省镜像：schema 不可载时的降级值（单一事实源仍是 config.ts） */
+const FALLBACK_HOTKEY_BLACKLIST = 'alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete';
+/** 缺省黑名单：单一事实源是 config schema 声明的 hotkeyBlacklist 缺省 */
+let hotkeyBlacklistCsv = (() => {
+    try {
+        const v = ConfigSchema({}).hotkeyBlacklist;
+        return typeof v === 'string' ? v : FALLBACK_HOTKEY_BLACKLIST;
+    }
+    catch {
+        return FALLBACK_HOTKEY_BLACKLIST; // schema 调用失败：降级镜像值，绝不阻断装载
+    }
+})();
+/** P1-3 拒绝标记（工具层据此区分黑名单拦截与白名单拒绝/底层故障） */
+export const HOTKEY_BLACKLIST_MARKER = '[SYSTEM_HOTKEY_BLOCKED]';
+/** 键名等价归一表：win/meta/cmd/cmdsuper/super 同指 OS 壳层修饰键；长名折叠为白名单短名 */
+const HOTKEY_ALIASES = {
+    win: 'meta', meta: 'meta', cmd: 'meta', command: 'meta', super: 'meta', cmdsuper: 'meta',
+    escape: 'esc', control: 'ctrl', del: 'delete', return: 'enter',
+};
+/** 单键归一：小写 + 去空白 + 别名折叠（'Win'/'CMD'/'Escape' → 'meta'/'meta'/'esc'） */
+function normalizeHotkeyKey(k) {
+    const n = String(k ?? '').trim().toLowerCase();
+    return HOTKEY_ALIASES[n] ?? n;
+}
+/**
+ * 黑名单命中裁决（纯函数，测试直测）：命中返回触发的黑名单条目原文，未命中返回 null。
+ * 两条判定律（与 config.hotkeyBlacklist 描述一致）：
+ *   1) 和弦整体归一（小写+别名折叠+排序无关）后与含 '+' 的条目全等 —— 如 'alt+f4'；
+ *   2) 和弦包含任一单键条目 —— 如 'meta'/'win'（任何含 OS 壳层修饰键的组合都拒）。
+ * 空黑名单（空串/全空白条目）= 全放行（部署明示不设防）。
+ */
+export function hotkeyBlacklistHit(keys, blacklistCsv) {
+    const csv = String(blacklistCsv ?? '').trim();
+    if (!csv)
+        return null; // 空黑名单 = 全放行
+    const normKeys = (Array.isArray(keys) ? keys : []).map(normalizeHotkeyKey).filter(Boolean);
+    const chordSig = [...normKeys].sort().join('+');
+    const keySet = new Set(normKeys);
+    for (const raw of csv.split(',')) {
+        const entry = raw.trim().toLowerCase();
+        if (!entry)
+            continue;
+        if (entry.includes('+')) {
+            // 整体和弦条目：同律归一后全等比较（'cmd+q' 与 ['meta','Q'] 命中）
+            const sig = entry.split('+').map(normalizeHotkeyKey).filter(Boolean).sort().join('+');
+            if (sig && sig === chordSig)
+                return raw.trim();
+        }
+        else {
+            // 单键条目：和弦含此键即拒（'meta' ⇒ ['ctrl','shift','meta'] 也拒）
+            const single = normalizeHotkeyKey(entry);
+            if (single && keySet.has(single))
+                return raw.trim();
+        }
+    }
+    return null;
+}
+/** 程序化判别：这次 pressHotkey 失败是不是黑名单拦截（工具层据此给出针对性 next_step） */
+export function isHotkeyBlacklistError(e) {
+    return e instanceof Error && e.message.includes(HOTKEY_BLACKLIST_MARKER);
+}
 function guardDryRun(action, detail) {
     if (!dryRun)
         return false;
@@ -100,6 +170,9 @@ export const system = {
     /** 应用插件配置；D-5 路径下仅 dryRun 生效（服务端无鼠标速度概念） */
     async configure(config) {
         dryRun = config.dryRun;
+        // P1-3：热键黑名单随配置接线（cordis.yml 的 hotkeyBlacklist 直达执法点）
+        if (typeof config.hotkeyBlacklist === 'string')
+            hotkeyBlacklistCsv = config.hotkeyBlacklist;
         if (forceLegacy()) {
             try {
                 const nj = await _getNutJS();
@@ -181,7 +254,9 @@ export const system = {
         const size = await backend.getScreenSize();
         const nx = Math.min(1, Math.max(0, x / size.width));
         const ny = Math.min(1, Math.max(0, y / size.height));
-        await backend.clickMouse(nx, ny, button, dryRun);
+        // D-1 物理躯体公理：动作派发入互斥队列（legacy 路径与 typeText/drag 同律；
+        // pressHotkey 例外 —— shaper 的 set_zoom 在 serialize 内复用本管线，嵌套即死锁）
+        await serialize(() => backend.clickMouse(nx, ny, button, dryRun));
     },
     /**
      * 移动鼠标（无点击）—— Z-1 交互性探针的悬停动作。
@@ -198,7 +273,7 @@ export const system = {
         const size = await backend.getScreenSize();
         const nx = Math.min(1, Math.max(0, x / size.width));
         const ny = Math.min(1, Math.max(0, y / size.height));
-        await backend.moveMouse(nx, ny, durationMs, dryRun);
+        await serialize(() => backend.moveMouse(nx, ny, durationMs, dryRun));
     },
     async typeText(text, clearFirst = false) {
         if (guardDryRun('typeText', { text: text.substring(0, 30), clearFirst }))
@@ -263,11 +338,20 @@ export const system = {
             });
             return;
         }
-        await backend.scrollPage(direction, amount, dryRun);
+        await serialize(() => backend.scrollPage(direction, amount, dryRun));
     },
     async pressHotkey(keys) {
+        // P1-3：dryRun 照旧只记录（不执行 = 无拦截必要；提示词调试要能看到完整热键轨迹）
         if (guardDryRun('pressHotkey', { keys }))
             return;
+        // P1-3：系统级热键黑名单执法 —— 归一和弦命中条目 / 含黑名单单键 ⇒ 拒绝。
+        // 在 legacy 与 D-5 两条路径之前拦截（逃逸动作哪条躯体都不许碰）
+        const hit = hotkeyBlacklistHit(keys, hotkeyBlacklistCsv);
+        if (hit !== null) {
+            throw new Error(`${HOTKEY_BLACKLIST_MARKER} 系统级热键被黑名单拦截: chord "${keys.join('+')}" ` +
+                `hits blacklist entry "${hit}" — system-level hotkeys (window close / OS shell) are ` +
+                `rejected outright; use regular channels (click UI controls / switch_window / open_url)`);
+        }
         if (forceLegacy()) {
             const [nj, ...mapped] = await Promise.all([
                 _getNutJS(),
@@ -333,21 +417,30 @@ export const system = {
         if (guardDryRun('openUrl', { url }))
             return { method: 'dry-run' };
         const { spawn } = await import('child_process');
+        // fire-and-forget 的另一半：spawn 失败（ENOENT/EACCES，如缺失 xdg-open）经
+        // 异步 'error' 事件到达 —— 无监听即 uncaught exception 炸宿主进程。启动成败
+        // 本就由世界回击验证（见 JSDoc），此处只封崩溃面
         if (process.platform === 'win32') {
             // windowsVerbatimArguments：URL 由本层手工加引号 —— Node 默认的 argv
             // 引用只在含空格时触发，`&`（查询参数常态）裸露会被 cmd 当命令分隔符
             const quoted = `"${url.replace(/"/g, '')}"`;
-            spawn('cmd.exe', ['/c', 'start', '""', quoted], {
+            const child = spawn('cmd.exe', ['/c', 'start', '""', quoted], {
                 detached: true, stdio: 'ignore',
                 windowsVerbatimArguments: true,
-            }).unref();
+            });
+            child.on('error', () => { });
+            child.unref();
             return { method: 'shell:start' };
         }
         if (process.platform === 'darwin') {
-            spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+            const child = spawn('open', [url], { detached: true, stdio: 'ignore' });
+            child.on('error', () => { });
+            child.unref();
             return { method: 'open' };
         }
-        spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+        const child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+        child.on('error', () => { });
+        child.unref();
         return { method: 'xdg-open' };
     },
 };
@@ -357,7 +450,8 @@ async function _getButton(button) {
     };
     try {
         const nj = await _getNutJS();
-        return nj.Button[button] ?? fallbackMap[button];
+        // 同 _getKey：fallbackMap 的值须再经 nj.Button 索引取枚举值，不能回传字符串名
+        return nj.Button[button] ?? nj.Button[fallbackMap[button]] ?? fallbackMap[button];
     }
     catch {
         return fallbackMap[button] ?? button;

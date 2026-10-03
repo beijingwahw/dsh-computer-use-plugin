@@ -12,11 +12,20 @@
 // 本文件对 Config 只做 import type 引用 —— 类型擦除后无运行时回路。
 // sharp 纪律：codec 经 _legacyDeps 懒加载 sharp，本桶静态引入不触发原生二进制加载。
 import type { Config } from '../config';
-import { resetGlmClient, getGlmClient } from './glmClient';
+import { resetGlmClient, getGlmClient, attachFailoverPool, attachCascadeFace } from './glmClient';
 import { vlmMeter } from './metering';
 import type { VlmCallRecord } from './metering';
 import { createProviderPool } from './providers/failover';
 import type { ProviderPool } from './providers/failover';
+// W3-0（W2-8 C2 接线）：成本级联执行体 —— cascade 全族已经 './providers/index'
+// （第 44 行 export * from './cascade'）再分发，本文件只额外按值引入铸造所需的
+// 执行体与谓词类型（与 createProviderPool 自 './providers/failover' 直引同律）。
+import { VlmCascade } from './providers/cascade';
+import type { CascadeValidator } from './providers/cascade';
+import type { ProviderTier } from './providers/types';
+// 纪元 Β（反驳法院）：第二意见面的装配物料 + 法院本体再分发
+import { createEnsembleCourt } from './providers/ensemble';
+import { attachRefuteFace, type RefuteBrain } from './refute';
 // 纪元 Λ（开箱即亮）：连接存档 / 本地自动接管 / 向导服务 三模块再分发
 export * from './connection';
 export * from './autoAdopt';
@@ -32,6 +41,7 @@ export * from './diffExplainer';
 export * from './diagnosis';
 export * from './arbitration';
 export * from './metering';
+export * from './refute';
 export * from './providers/index';
 
 // ─── 宿主接线入口 ───
@@ -80,14 +90,64 @@ const vlmMeterTap = (rec: VlmCallRecord): void => {
 /**
  * 取模块级 ProviderPool（只读快照）—— 未铸池时 null。
  *
- * 双轨取舍（JSDoc 契约）：本池与 GlmClient 单例**双轨并存、互不感知** ——
- * 单例（getGlmClient）保 Ω 纪元 glm 路径逐字节不变（兼容层 3 号命门优先），
- * 池不介入其 chat/chatJson；池供 vlm_platforms 工具与健康报告消费，供宿主/
- * 未来消费面按池序故障切换（createProviderPool 铸造，熔断跳行见 failover.ts）。
+ * 双轨取舍（JSDoc 契约 → P2a-1 升格为「贯通双轨」）：本池与 GlmClient 单例曾
+ * 是双轨并存、互不感知 —— 单例（getGlmClient）保 Ω 纪元 glm 路径逐字节不变，
+ * 池只服务 vlm_platforms 工具与健康报告等显式消费面，主力路径（ask_screen /
+ * grounding / vlmOcr 走的 getGlmClient chat/chatJson）失败后不切备脑 —— 这正是
+ * 全库遍历报告点名的缺陷（用户配了 vlmFallbackProviders 以为有容错，实际主力
+ * 路径没有）。P2a-1 贯通：configureVlm 铸池时把池注入单例的失败咨询面
+ * （attachFailoverPool），单例 chat/chatJson 自身重试全败后按池序取首个健康脑
+ * 救回（providerId 标注来源 + note:'failover'）；不配 fallbacks（池 null）⇒
+ * 单例行为与 Ω 纪元逐字段一致。池另供 vlm_platforms 工具与健康报告消费
+ * （createProviderPool 铸造，熔断跳行见 failover.ts）。
  */
 export function getProviderPool(): ProviderPool | null {
   return poolSingleton;
 }
+
+// ─── W3-0（W2-8 C2 成本级联路由）：级联铸造与咨询面接线 ───
+
+/** 模块级级联执行体单例 —— tiers 显式标注了 cheap 档且池在场时铸造；null = 未铸 */
+let cascadeSingleton: VlmCascade | null = null;
+
+/** 取模块级 VlmCascade（只读快照 —— 可观测性/测试面）；未铸时 null */
+export function getVlmCascade(): VlmCascade | null {
+  return cascadeSingleton;
+}
+
+/**
+ * W3-0：CSV tier 标注表解析（"id=tier" 逗号分隔；tier ∈ cheap|primary，键为池内
+ * provider id）。脏段（无 = / 空 id / 非法 tier）安静跳过 —— 配置错误不毒化铸池
+ *（与 fallbacks CSV 的宽容解析同律，绝不抛）。
+ */
+function parseProviderTiers(raw: string): Record<string, ProviderTier> {
+  const out: Record<string, ProviderTier> = {};
+  for (const part of raw.split(',')) {
+    const seg = part.trim();
+    const eq = seg.indexOf('=');
+    if (eq <= 0) continue;
+    const id = seg.slice(0, eq).trim().toLowerCase();
+    const tier = seg.slice(eq + 1).trim().toLowerCase();
+    if (id === '' || (tier !== 'cheap' && tier !== 'primary')) continue;
+    out[id] = tier;
+  }
+  return out;
+}
+
+/**
+ * W3-0：便宜臂法定校验谓词（缺省内建）—— 结构性 JSON 判定（解析值为非 null
+ * 对象/数组）。glmClient 咨询桥不携带逐调用谓词物料（bbox/OCR 期望等调用点
+ * 语境在桥的另一端不可得），故铸池面只内建这一条确定性谓词：它保证「采信的
+ * 便宜答案必须是结构完整的 JSON 值」，而逐调用语义校验（withinBbox/
+ * ocrText/schema 族）保留给携带得动语境的直接消费面。校验不过 ⇒ 安全升级
+ * 主力重做（失败安全方向恒为多花一次主力调用，而非错答上屏）。
+ */
+const cascadeStructuralValidator: CascadeValidator = {
+  name: 'json-structural',
+  check(value: unknown): boolean {
+    return value !== null && (Array.isArray(value) || typeof value === 'object');
+  },
+};
 
 /**
  * 宿主血脉接线：以插件配置铸造云脑单例 + 备选池（config 优先于 env）。
@@ -104,7 +164,15 @@ export function getProviderPool(): ProviderPool | null {
  *
  * 池铸造法：vlmFallbackProviders 非空 ⇒ 按 CSV 铸 ProviderPool（主力 =
  *   vlmProvider 或缺省 'glm'，备选各自 env 解析；解析不出 key 且非本机免钥
- *   的备选不进池）；空 ⇒ 池置 null。
+ *   的备选不进池）；空 ⇒ 池置 null。P2a-1（单例-池贯通）：池的在场性同步注入
+ *   单例咨询面 —— 铸池 ⇒ attachFailoverPool(pool)，空 ⇒ attachFailoverPool(null)
+ *   （摘除）。
+ *
+ * 反驳面装配（纪元 Β）：备选链非空（≥2 颗脑）⇒ 另铸一座 EnsembleCourt（主力
+ *   + 备选全部入席），庭员名册（listRoster）连同主脑身份注入 vlm/refute 的
+ *   attachRefuteFace —— 危险点击派发前 askRefutation 按身份剔除同源庭员后请
+ *   首颗异构脑反驳「目标=描述」；空链 ⇒ attachRefuteFace(null)（单脑部署：
+ *   法院诚实缺席，零调用零行为）。
  *
  * 计量接线（纪元 Δ-6）：铸造的单例与池缺省挂 `rec => vlmMeter.record(rec)`
  *（GlmMeterRecord 与 VlmCallRecord 字段同名同型，零适配直落台账）；直接
@@ -119,6 +187,7 @@ export function configureVlm(
         Config,
         | 'vlmApiKey' | 'vlmBaseUrl' | 'vlmModel'
         | 'vlmProvider' | 'vlmFallbackProviders'
+        | 'vlmProviderTiers' | 'vlmCascadeDangerMax'
       >>
     | null
     | undefined,
@@ -129,6 +198,8 @@ export function configureVlm(
     const model = cfgStr(config?.vlmModel);
     const provider = cfgStr(config?.vlmProvider).toLowerCase();
     const fallbacks = cfgStr(config?.vlmFallbackProviders);
+    // W3-0（W2-8 C2 接线）：tier 标注表（缺省空 = 池内全 primary ⇒ 级联恒弃权）
+    const tiers = parseProviderTiers(cfgStr(config?.vlmProviderTiers));
 
     // 单例：显式平台（纪元 Ψ）⇒ 平台铸造；否则 Ω 纪元 glm 三字段法原样。
     // 两条铸造路都挂 vlmMeter 缺省接线（Δ-6）—— 心跳落进模块级计量台账。
@@ -166,10 +237,87 @@ export function configureVlm(
         ...(url ? { baseUrl: url } : {}),
         ...(mdl ? { model: mdl } : {}),
         fallbacks: chain,
+        // W3-0（W2-8 C2 接线）：tier 标注入池 —— options.tiers[id] 显式覆盖 >
+        // provider 自报 > 'primary'（failover.ts 三级解析）。空表缺席注入 ⇒
+        // 铸池路径与既往逐字节一致。
+        ...(Object.keys(tiers).length > 0 ? { tiers } : {}),
         meter: vlmMeterTap,
       });
     } else {
       poolSingleton = null;
+    }
+    // P2a-1（单例-池贯通）：池的在场性同步注入单例失败咨询面 —— 铸池 ⇒ 接线，
+    // 空池 ⇒ 摘除。此后 getGlmClient 的 chat/chatJson 自身重试全败后按池序取
+    // 首个健康脑救回；不配 fallbacks ⇒ null 注入 ⇒ 单例行为与既往逐字段一致。
+    attachFailoverPool(poolSingleton);
+
+    // ── 纪元 Β（反驳法院）：第二意见面装配（照 P2a attachFailoverPool 的注入模式）──
+    // 备选链在场（≥2 颗脑配置）才有异构可言：铸一座合议庭（主力 + 备选全部入席，
+    // 铸造面零网络 —— 只是适配器落座），把庭员名册连同主脑身份注入反驳面 ——
+    // askRefutation 按身份（providerId/baseUrl）剔除与主脑同源的庭员后请首颗
+    // 异构脑作证。单脑部署（无 fallbacks）⇒ attachRefuteFace(null) —— 法院
+    // 诚实缺席（零调用零行为，绝不静默把主脑自己请上证人席反驳自己）。
+    try {
+      if (fallbacks !== '') {
+        const chain = fallbacks.split(',').map(s => s.trim()).filter(s => s !== '');
+        const primary = provider !== '' ? provider : 'glm';
+        const url = eraDefaultStr(baseUrl, GLM_ERA_BASE_URL, primary);
+        const court = createEnsembleCourt({
+          provider: primary,
+          ...(apiKey ? { apiKey } : {}),
+          ...(url ? { baseUrl: url } : {}),
+          extraProviders: chain,
+        });
+        attachRefuteFace({
+          primaryId: primary,
+          ...(url ? { primaryBaseUrl: url } : {}),
+          // 庭员名册 → 第二意见脑（VisionProvider 天然结构满足 RefuteBrain 契约；
+          // baseUrl 适配器不外露 ⇒ 缺席，同源比对退回 providerId 单因子，诚实不虚构）
+          brains: court.listRoster().map(p => ({
+            id: p.id,
+            configured: p.configured === true,
+            chatJson: (req: Parameters<RefuteBrain['chatJson']>[0]) => p.chatJson(req),
+          })),
+        });
+      } else {
+        attachRefuteFace(null);
+      }
+    } catch {
+      attachRefuteFace(null); // 装配失败 = 法院缺席：零调用零行为（绝不抛）
+    }
+
+    // ── W3-0（W2-8 C2 成本级联路由）：级联执行体铸造 + 咨询面接线 ──
+    // 激活双钥：① vlmProviderTiers 显式标注了 cheap 档（无 cheap 档 ⇒ 级联律
+    // 恒弃权，接线无意义）；② 池在场（fallbacks 非空时铸造）。双钥齐 ⇒ 铸
+    // VlmCascade 并 attachCascadeFace —— glmClient.chatJson 的最前置咨询闸自此
+    // 有真实消费面；任一缺席 ⇒ attachCascadeFace(null)（摘除，幂等），单例
+    // chatJson 行为与未接线逐字节一致（缺省零行为变化律）。
+    // 因子源诚实声明：glmClient 桥不携带逐调用分诊因子（置信/风险/场景新旧度
+    // 在桥的另一端不可得），铸池面只能供保守静态因子（中危/新场景/中性置信 ⇒
+    // danger = 0.4×0.5+0.4×0.5+0.2×1 = 0.6）—— 配缺省阈值 0.35 ⇒ 高危直行
+    // 主力（弃权），把「无证据不便宜」的失败安全缺省落在接线层；vlmCascadeDangerMax
+    // 配置 ≥0.6 才真正点亮便宜臂（两钥激活，绝不静默便宜）。
+    try {
+      if (poolSingleton !== null && Object.values(tiers).includes('cheap')) {
+        const dm = Number(config?.vlmCascadeDangerMax);
+        cascadeSingleton = new VlmCascade(poolSingleton, {
+          ...(Number.isFinite(dm) ? { dangerMax: Math.min(1, Math.max(0, dm)) } : {}),
+          factors: () => ({ risk: 'medium' as const, sceneFamiliar: false, confidence: 0.5 }),
+          validators: [cascadeStructuralValidator],
+        });
+        attachCascadeFace({
+          consultJson: req => {
+            const c = cascadeSingleton;
+            return c === null ? Promise.resolve(null) : c.runJson(req);
+          },
+        });
+      } else {
+        cascadeSingleton = null;
+        attachCascadeFace(null);
+      }
+    } catch {
+      cascadeSingleton = null;
+      attachCascadeFace(null); // 铸造失败 = 级联缺席：零调用零行为（绝不抛）
     }
   } catch { /* 铸造失败 = 云脑缺席：env/降级路径不变（绝不抛） */ }
 }

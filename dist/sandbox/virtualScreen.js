@@ -217,7 +217,6 @@ export class VirtualScreen {
             const delta = dir === 'previous' ? -1 : 1; // 缺省/未知方向 = next（与工具面方言同律）
             const next = tabs[(idx + delta + tabs.length) % tabs.length];
             this.activeTab = next;
-            this.activeTab = next;
             this.focus = next;
             return { effectDetected: true, expectationMet: null,
                 note: `tab ${from.name} → ${next.name} (${dir ?? 'next'}, stack ${tabs.length})`,

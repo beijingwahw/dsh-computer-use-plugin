@@ -4,6 +4,15 @@
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。
 import { planTasks, topoSortSubTasks, type SubTask, type ChatFn } from './planner';
 import { kernelRegistry } from './kernel/registry';
+// W3-4（G2 就绪层并行 + takeGranted 续跑接线）：全部只读消费 —— planner 冻结不改，
+// subAgent 只增量（preseed/retire），approval 只消费 takeGranted，journal 只读步账。
+import { journal, ACTION_TOOLS } from './journal';
+import { approvalQueue } from './approval';
+import { contextManager } from './contextManager';
+import { coordinator, type SubAgentSpec, type SubAgentState, type SubAgentReport, type ClaimResult } from './subAgent';
+// W5-3（L3 跨机编排）：barrier 步注入缝 —— crossMachine 方言只读消费
+//（crossMachine.ts 冻结不改；缺省缺席 = 现状逐字节一致）。
+import { parseBarrierStep, type CrossBarrierOutcome } from './crossMachine';
 
 export type { ChatFn } from './planner';
 
@@ -79,9 +88,21 @@ export function actorChannelWeights(): { agents: number; skill: number } {
   return { ...channelEma };
 }
 
-/** W 纪元（W-1 隔离缝）：通道仲裁归零（Laplace 0.5/0.5）—— 测试隔离与卸载共用 */
+// ── P2b-1（缺陷修复，出处=全库遍历报告）：通道 EMA 的隔离边界立法 ──
+// 缺陷：模块级 channelEma（S-3/V 纪元的 agents/skill 通道仲裁学习）此前无人
+// 在插件卸载时归零 —— 宿主重载插件后 EMA 仍在，跨宿主实例泄漏，违背项目
+// 自己的「W-1 单例隔离律」（一切有状态单例必有归零缝，卸载即回初值）。
+// 边界立法（两半，缺一不可）：
+//   · **跨任务保持**：runOrchestrator 之间绝不重置 —— EMA 的学习价值正在
+//     任务间（上一个任务里 agents 通道连败的教训，要护着下一个任务的仲裁）；
+//     只有插件卸载才清零。把 reset 埋进 runOrchestrator/任何任务入口都是
+//     误杀学习记忆（本函数因此不挂在任何执行路径上）。
+//   · **卸载归零**：插件卸载（dispose）时由 src/index.ts 的 ctx.effect 清理
+//     函数调用（W-1 隔离律，与 resetApproval/uiMemory.reset 同律同点位）——
+//     重载后的新实例从 Laplace 0.5/0.5 平权态重新学习，不继承幽灵权重。
+// 测试隔离共用本缝（epochW/epochXi 先例）。
 export function resetChannelArbitration(): void {
-  channelEma.agents = 0.5;
+  channelEma.agents = 0.5; // Laplace 先验：无证据 ⇒ 平权
   channelEma.skill = 0.5;
 }
 
@@ -148,11 +169,374 @@ export function createActor(deps: ActorDeps = {}) {
   };
 }
 
+// ─── W3-4（G2 就绪层并行 + takeGranted 续跑）：类型、纯函数与流水线执行器 ───
+//
+// 本段立法（全部增量，缺省路径逐字节兼容）：
+//   · 就绪层并行是**显式 opt-in**（opts.parallel === true 才启用）。论证：现状
+//     orchestrator 的队列循环是纯串行契约（测试与宿主按串行轨迹断言/审计），
+//     并行重排是行为变更 —— 缺省关 + 显式开是最保守的兼容姿态；「计划显式
+//     声明并行批」以 Kahn 就绪层 ≥2 个无依赖子任务为结构判据（planner 冻结，
+//     deps 图本身就是并行性声明），但**仍需** opts.parallel 显式开门 + 团队
+//     余量（无在役外来会话）双条件齐备。
+//   · 读写分离物理保证（三重防线）：
+//       ① 编排层结构串行 —— 每个写的 Promise 落定（await）后才派发下一个写，
+//          写在编排器层面永不并发；
+//       ② 通道层互斥 —— 一切写调用必经注入的 serializeWrite 通道（缺省直通，
+//          因为生产 actor 的物理 IO 已在工具层经 ioMutex.serialize 串行化 ——
+//          P1-1 立法「嵌套 serialize 即死锁」（system.ts pressHotkey 例外同源），
+//          再包一层全局锁会自杀；测试注入计数互斥证零并发写）；
+//       ③ 观察只读 —— seed 预注的观察面（observeSeed）只读共享世界，绝不触碰
+//          物理 IO；预注落在 subAgent 的纯簿记（preseed）。
+//   · 流水线深度有界（1..2）：depth=2 时「写在飞窗口内协调器只读观察并预注
+//     下一 pending 代理」（观察重叠在单躯体上兑现）；depth=1 退化为无预注纯串行。
+//   · 预算耗尽 ⇒ [TIMEOUT] 中止（与串行脊梁同款语义/文案）；波次异常（病态
+//     循环熔断）⇒ 余部落回串行脊梁（战测路径接管）。
+//   · takeGranted 续跑：重入时消费一条已批队列条目，以 entry.stepCursor 对账
+//     journal 步账只重演其后步骤；对账防御式（无 cursor / 无账 / cursor 越界
+//     ⇒ 保守全量重规划 = 现状整计划重跑）。
+
+/** W3-4：就绪层并行消费的 subAgent 团队面（缺省 = coordinator 单例）。
+ *  结构化窄接口 —— orchestrator 只依赖协议所需的最小面，测试注入假团队。 */
+export interface PipelineTeam {
+  spawn(specs: SubAgentSpec[]): SubAgentState[];
+  claim(agentId: string, subject: string, ttlSteps?: number): ClaimResult;
+  post(agentId: string, subject: string, finding: string, ttlSteps?: number): boolean;
+  report(taskId: string, findings: string, confidence: number, status?: SubAgentReport['status']): unknown;
+  abort(taskId: string, reason: string): void;
+  isActive(): boolean;
+  /** W3-4 增量：seed 预注（只读观察的落点） */
+  preseed(agentId: string, sceneHash: string | null): boolean;
+  /** W3-4 增量：退场回收（释放 spawn 容量） */
+  retire(...agentIds: string[]): number;
+}
+
+/** W3-4：takeGranted 续跑的消费契约（approvalQueue.takeGranted 返回值的结构化窄面） */
+export interface GrantedResume {
+  entry: { id?: string; description?: string; stepCursor?: number };
+  executionToken: string;
+}
+
+/** W3-4：runOrchestrator 的增量注入面（第 5 参，全部可选 —— 缺省零行为差） */
+export interface RunOrchestratorOptions {
+  /** G2 就绪层并行开关：显式 opt-in（缺省 false = 现状串行，逐字节兼容） */
+  parallel?: boolean;
+  /** 流水线深度（钳 [1,2]；缺省 2；1 = 退化无预注） */
+  pipelineDepth?: number;
+  /** 写互斥通道：一切 actorFn 派发必经此通道（缺省直通 —— 物理互斥由工具层
+   *  ioMutex 兜底；编排层结构串行保证写永不并发；嵌套 serialize 即死锁） */
+  serializeWrite?: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** 只读观察面：动作后新屏的指纹（缺省 contextManager 共享窗的最新图指纹；
+   *  观察步只读共享世界，绝不触碰物理 IO） */
+  observeSeed?: () => string | null;
+  /** subAgent 团队（缺省 coordinator 单例；注入假团队供离线确定性测试） */
+  team?: PipelineTeam;
+  /** takeGranted 消费面（缺省真 approvalQueue；防御式：任何异常 ⇒ null） */
+  takeGranted?: () => GrantedResume | null;
+  /** 步账计量面（缺省 journal.list(false).length —— 与 W2-1 H4-7 的入队计量同源） */
+  ledgerCount?: () => number;
+  /** 步账切片：from 起的可重放动作步骤（缺省 journal.list(false).slice(from)
+   *  过滤 ACTION_TOOLS —— 观察类条目不可重放） */
+  ledgerSlice?: (from: number) => Array<{ tool: string; args?: Record<string, unknown> }>;
+  /** 步骤重放通道（缺席 ⇒ 重演窗口无法物理重放 ⇒ 保守全量重规划） */
+  replayStep?: (tool: string, args: Record<string, unknown>) => Promise<string | undefined>;
+  /**
+   * W5-3（L3 跨机编排）：跨机 barrier 注入缝 —— 复合任务（E2E 测试类
+   * 「拨打-接听」）的子任务可声明 rendezvous 步（action 文本内嵌
+   * `barrier:<name>#<n>` 方言，或 barrierOf 注入整体覆写）。步骤到达
+   * barrier 点即 arrive 等待（全到达才放行；超时诚实失败 ⇒ [FAILED] 行
+   * 走 Σ-4 同律自愈/fail-fast 脊梁）。缺省缺席 = 现状逐字节一致（纯增量）。
+   * barrier 等待绝不进写互斥通道：等远端同侪不是本地物理写 —— 持着躯体锁
+   * 等跨机同步是分布式死锁（ioMutex 的分布式类比不反噬本地互斥）。
+   */
+  crossMachine?: CrossMachineSeam;
+}
+
+/** W5-3：跨机协同注入面（arriveAndWait = crossMachine.ts 客户端的窄面） */
+export interface CrossMachineSeam {
+  /** barrier 抵达等待（http 客户端或内存传输桩；诚实 ok:false，绝不抛） */
+  arriveAndWait: (name: string, n: number) => Promise<CrossBarrierOutcome>;
+  /** 步骤 → barrier 声明解析（缺省 = parseBarrierStep 文本方言） */
+  barrierOf?: (task: SubTask) => { name: string; n: number } | null;
+}
+
+/** W3-4：续跑对账结果（纯函数产出，确定性事实源） */
+export type ResumeReconciliation =
+  | { mode: 'replay-window'; cursor: number; windowSize: number }
+  | { mode: 'full-replan'; reason: 'no-cursor' | 'empty-ledger' | 'cursor-ahead' };
+
+/**
+ * W3-4：takeGranted 续跑对账（纯函数、防御式绝不抛）。
+ * stepCursor = 入队时的 journal 步账（总条数计量，与 W2-1 H4-7 同源）；当前账面
+ * 与之对账决定重演窗口：
+ *   · cursor 非有限/负 ⇒ no-cursor（无步账 —— 不猜）；
+ *   · 账面为空/非有限 ⇒ empty-ledger（无 journal ⇒ 保守全量重规划）；
+ *   · cursor > 账面 ⇒ cursor-ahead（账已轮转/换会话，证据丢失 —— 保守）；
+ *   · 其余 ⇒ replay-window：windowSize = 账面 − cursor（恰为 0 = 干净续跑点）。
+ */
+export function reconcileResumeWindow(cursor: unknown, ledgerCount: number): ResumeReconciliation {
+  if (typeof cursor !== 'number' || !Number.isFinite(cursor) || cursor < 0) {
+    return { mode: 'full-replan', reason: 'no-cursor' };
+  }
+  if (typeof ledgerCount !== 'number' || !Number.isFinite(ledgerCount) || ledgerCount <= 0) {
+    return { mode: 'full-replan', reason: 'empty-ledger' };
+  }
+  const c = Math.floor(cursor);
+  if (c > ledgerCount) {
+    return { mode: 'full-replan', reason: 'cursor-ahead' };
+  }
+  return { mode: 'replay-window', cursor: c, windowSize: ledgerCount - c };
+}
+
+/**
+ * W3-4 G2：Kahn 就绪层切分（纯函数、确定性）。
+ * 消费 topoSortSubTasks 的无环前缀（planner 冻结 —— 分层在编排器侧自行完成）：
+ * layer(t) = 1 + max(layer(dep))，未知 dep 边天然剔除（topo 已清洗）；同层内保持
+ * 拓扑序（稳定输出 —— 测试可断言）。层内任务两两无依赖 ⇒ 可并行批。
+ */
+export function layerSubTasks(order: SubTask[]): SubTask[][] {
+  const layerOf = new Map<number, number>();
+  const layers: SubTask[][] = [];
+  for (const t of order) {
+    if (!t || typeof t.id !== 'number') continue; // 防御：垃圾条目弃置
+    let d = 0;
+    for (const dep of Array.isArray(t.deps) ? t.deps : []) {
+      const li = layerOf.get(dep);
+      if (li !== undefined && li + 1 > d) d = li + 1;
+    }
+    layerOf.set(t.id, d);
+    while (layers.length <= d) layers.push([]);
+    layers[d]!.push(t);
+  }
+  return layers.filter(l => Array.isArray(l) && l.length > 0);
+}
+
+/** W3-4 G2：波次代理代号（任务 id → 团队名册 id；确定性可重放） */
+function waveAgentId(taskId: number): string {
+  return `w3-${taskId}`;
+}
+
+/** W3-4 G2：流水线波次执行器的全部输入（runOrchestrator 组装，依赖全注入） */
+interface WaveRunInput {
+  layers: SubTask[][];
+  actorFn: ActorFn;
+  write: <T>(fn: () => Promise<T>) => Promise<T>;
+  observeSeed: () => string | null;
+  team: PipelineTeam;
+  depth: number;
+  startAt: number;
+  timeBudgetMs?: number;
+  /** W5-3：barrier 步等待面（缺省缺席 ⇒ 波内零跨机行为；等待在写通道之外） */
+  barrier?: (task: SubTask) => Promise<{ line: string; ok: boolean } | null>;
+}
+
+/** W3-4 G2：波次执行产出（lines 逐字保持串行报告契约 `Task #id (action): result`） */
+interface WaveRunOutcome {
+  lines: string[];
+  completed: Set<number>;
+  failure: { task: SubTask; result: string } | null;
+  /** 非空 ⇒ 预算耗尽（串行同款 [TIMEOUT] 文案，调用方直接收场） */
+  timeoutLine: string | null;
+}
+
+/** W3-4 G2：波次内一波的执行产物 */
+interface WaveExecution {
+  executed: Array<{ task: SubTask; result: string; agentId: string | null }>;
+  deferred: SubTask[];
+}
+
+/** W3-4 G2：就绪层流水线执行器 —— 读写分离软件流水线（深度 ≤2）。
+ *
+ * 节拍（对 active 队列逐代理）：
+ *   ① 确注拍（depth≥2）：上一写落地后的新屏（seedBuffer，只读观察产物）预注给
+ *      当前代理 —— 这就是「把动作后的新屏预注为下一 pending 代理的 seed 锚点」；
+ *   ② 写拍：actorFn 派发必经 serializeWrite 通道；派发后**不立即 await** ——
+ *      进入观察重叠窗口；
+ *   ③ 重叠拍（depth≥2）：写在飞窗口内协调器只读观察共享屏，把在飞观察值预注给
+ *      下一 pending 代理（单躯体上兑现观察重叠：读与写在时间上交叠，物理上
+ *      读绝不触碰 IO）；随后才 await 写落地；
+ *   ④ 收账拍：结果按串行契约行入账；写后新屏只读观察 → seedBuffer（下一轮①的
+ *      权威值，覆盖③的投机值）；report 退场 + post 黑板共享发现。
+ * 失败 ⇒ 停止后续派发（写已结构串行 ⇒ 无在飞写需要回收）；预算 ⇒ [TIMEOUT] 收场。
+ */
+async function runReadyLayerWaves(input: WaveRunInput): Promise<WaveRunOutcome> {
+  const { layers, actorFn, write, observeSeed, team, startAt } = input;
+  const depth = Math.min(2, Math.max(1, Math.floor(input.depth) || 2));
+  const timeBudgetMs = typeof input.timeBudgetMs === 'number' && Number.isFinite(input.timeBudgetMs)
+    ? input.timeBudgetMs : undefined;
+  const lines: string[] = [];
+  const completed = new Set<number>();
+  let failure: { task: SubTask; result: string } | null = null;
+  let timeoutLine: string | null = null;
+  const total = layers.reduce((n, l) => n + l.length, 0);
+  let executedCount = 0;
+
+  const budgetGone = (): boolean =>
+    timeBudgetMs !== undefined && timeBudgetMs > 0 && Date.now() - startAt > timeBudgetMs;
+
+  /** 单任务执行（写必经互斥通道 —— 单员层直行与波次代理执行同律） */
+  const runOne = async (task: SubTask): Promise<string> => {
+    console.log(`[Orchestrator] Executing Task #${task.id}: ${task.action}`); // 与串行脊梁同款观测面
+    // W5-3：barrier 步 —— 抵达即 arrive 等待（在写互斥通道**外**：等远端
+    // 同侪不是物理写，持躯体锁等跨机同步 = 分布式死锁）；失败行自带
+    // [FAILED] 方言，走既有失败脊梁（Σ-4 自愈/中止）。成功 ⇒ [Barrier] 审计行。
+    if (input.barrier) {
+      const b = await input.barrier(task);
+      if (b) {
+        if (!b.ok) return b.line;
+        lines.push(b.line);
+      }
+    }
+    // 写：必经互斥通道（编排层结构串行 + 通道层互斥双保险）
+    return write(() => actorFn(task.action));
+  };
+
+  /** 波次收尾：本波全部 spawn 代理（active + 让位未激活者）abort 退场 + retire 回收容量 */
+  const settleWave = (agentIds: string[]): void => {
+    for (const id of agentIds) {
+      try { team.abort(id, 'W3-4 wave settled (budget/failure)'); } catch { /* 防御式 */ }
+    }
+    if (agentIds.length > 0) {
+      try { team.retire(...agentIds); } catch { /* 防御式 */ }
+    }
+  };
+
+  // 全程 spawn 名册：finally 兜底回收（labeled break / 熔断路径也不漏代理占坑）
+  const spawnedAll: string[] = [];
+  const cleanupAll = (): void => settleWave([...spawnedAll]);
+
+  try {
+  waveLoop:
+  for (let li = 0; li < layers.length; li++) {
+    const layer = layers[li]!;
+    if (budgetGone()) {
+      const elapsed = Math.round((Date.now() - startAt) / 1000);
+      timeoutLine = `[TIMEOUT] Time budget of ${timeBudgetMs !== undefined ? Math.round(timeBudgetMs / 1000) : 0}s exhausted after ${elapsed}s. ` +
+        `${total - executedCount} task(s) skipped.`;
+      console.warn('[Orchestrator] Time budget exhausted. Aborting with partial results.');
+      break waveLoop;
+    }
+    // 单员层：零团队开销直行（仍走写通道；行序与串行逐字节同构）
+    if (layer.length === 1) {
+      const t = layer[0]!;
+      const result = await runOne(t);
+      executedCount++;
+      completed.add(t.id);
+      lines.push(`Task #${t.id} (${t.action}): ${result}`);
+      if (result.includes('[FAILED]') || result.includes('[TIMEOUT]')) {
+        failure = { task: t, result };
+        break waveLoop;
+      }
+      continue;
+    }
+    // 多员层：团队波次（容量守限 3 —— 超额/撞租约让位者分波重试）
+    let pendingTasks = [...layer];
+    let guard = 0;
+    const GUARD_MAX = layers.length + 4; // 防御：病态让位循环熔断（余部落回串行脊梁）
+    while (pendingTasks.length > 0 && !failure && timeoutLine === null) {
+      if (budgetGone()) {
+        const elapsed = Math.round((Date.now() - startAt) / 1000);
+        timeoutLine = `[TIMEOUT] Time budget of ${timeBudgetMs !== undefined ? Math.round(timeBudgetMs / 1000) : 0}s exhausted after ${elapsed}s. ` +
+          `${total - executedCount} task(s) skipped.`;
+        console.warn('[Orchestrator] Time budget exhausted. Aborting with partial results.');
+        break waveLoop;
+      }
+      if (++guard > GUARD_MAX) break; // 熔断：余部由串行脊梁接管（runOrchestrator 重建队列）
+      // ① spawn（守限3：超额静默拒绝 ⇒ 让位到下一波）
+      const specs: SubAgentSpec[] = pendingTasks.map(t => ({
+        id: waveAgentId(t.id),
+        role: 'W3-4 ready-layer executor',
+        objective: `执行子任务：${t.action}（就绪层并行波次；四步 ReAct，只汇报 [SUCCESS]/[FAILED]）`,
+        maxSteps: 10,
+      }));
+      let accepted: SubAgentState[] = [];
+      try { accepted = team.spawn(specs) ?? []; } catch { accepted = []; }
+      const spawnedIds = accepted.map(a => a?.spec?.id).filter((id): id is string => typeof id === 'string');
+      spawnedAll.push(...spawnedIds);
+      const active: Array<{ task: SubTask; agentId: string }> = [];
+      const deferred: SubTask[] = [];
+      // ② 黑板 claim 防重复（W2-4 租约协议只读消费）：撞他人未过期租约 ⇒ 让位换目标
+      for (const t of pendingTasks) {
+        const st = accepted.find(a => a?.spec?.id === waveAgentId(t.id));
+        if (!st) { deferred.push(t); continue; } // spawn 拒收（容量满/同名重生）
+        let claim: ClaimResult;
+        try { claim = team.claim(st.spec.id, t.action); }
+        catch { deferred.push(t); continue; }
+        if (claim && claim.ok === true) active.push({ task: t, agentId: st.spec.id });
+        else deferred.push(t); // lease-conflict / inactive ⇒ 让位（持有者在做语义同构的事）
+      }
+      pendingTasks = [];
+      // ③ 读写分离软件流水线（深度 ≤2；写结构串行，观察只读重叠）
+      let seedBuffer: string | null = null; // 上一写落地后的新屏（权威 seed）
+      for (let ai = 0; ai < active.length; ai++) {
+        const cur = active[ai]!;
+        if (budgetGone()) {
+          const elapsed = Math.round((Date.now() - startAt) / 1000);
+          timeoutLine = `[TIMEOUT] Time budget of ${timeBudgetMs !== undefined ? Math.round(timeBudgetMs / 1000) : 0}s exhausted after ${elapsed}s. ` +
+            `${total - executedCount} task(s) skipped.`;
+          console.warn('[Orchestrator] Time budget exhausted. Aborting with partial results.');
+          break waveLoop;
+        }
+        // 确注拍：动作后的新屏（上一写的只读观察产物）预注给当前代理
+        if (depth >= 2 && seedBuffer !== null) {
+          try { team.preseed(cur.agentId, seedBuffer); } catch { /* 防御式 */ }
+        }
+        // 写拍：派发必经互斥通道；派发后先不 await —— 进入观察重叠窗口
+        const writeP = runOne(cur.task);
+        // 重叠拍：写在飞窗口内只读观察共享屏，预注给下一 pending 代理
+        if (depth >= 2 && ai + 1 < active.length) {
+          const overlap = safeObserve(observeSeed);
+          if (overlap !== null) {
+            try { team.preseed(active[ai + 1]!.agentId, overlap); } catch { /* 防御式 */ }
+          }
+        }
+        const result = await writeP;
+        executedCount++;
+        completed.add(cur.task.id);
+        lines.push(`Task #${cur.task.id} (${cur.task.action}): ${result}`);
+        // 收账拍：写后新屏只读观察 → 权威 seedBuffer（深度 1 无下一消费者 ⇒ 零读开销）；
+        // report 退场；post 共享发现
+        if (depth >= 2) seedBuffer = safeObserve(observeSeed);
+        const ok = !(result.includes('[FAILED]') || result.includes('[TIMEOUT]'));
+        try {
+          team.report(cur.agentId, result.slice(0, 2000), ok ? 0.9 : 0.1, ok ? 'completed' : 'failed');
+        } catch { /* 防御式 */ }
+        if (ok && result.length > 0) {
+          try { team.post(cur.agentId, cur.task.action, `done: ${result}`.slice(0, 120)); } catch { /* 防御式 */ }
+        }
+        if (!ok) {
+          failure = { task: cur.task, result };
+          break; // 停止后续派发（写结构串行 ⇒ 无在飞写）
+        }
+      }
+      // ④ 波次收尾：本波全部 spawn 代理退场回收（让位/拒收者与冲突释放后的重试集合 = deferred）
+      settleWave(spawnedIds);
+      pendingTasks = deferred; // 容量释放后下一波重试（claim 租约已随 report 释放）
+    }
+    if (failure || timeoutLine !== null) break waveLoop;
+  }
+  } finally {
+    cleanupAll(); // 兜底：任何退出路径（labeled break / 熔断 / 异常）代理不占坑
+  }
+
+  return { lines, completed, failure, timeoutLine };
+}
+
+/** W3-4：只读观察的安全包装（观察面异常 ⇒ null —— 观察是旁路，绝不炸流水线） */
+function safeObserve(observe: () => string | null): string | null {
+  try {
+    const v = observe();
+    return typeof v === 'string' && v.trim() !== '' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function runOrchestrator(
   userPrompt: string,
   actorFn: ActorFn,
   chat?: ChatFn,
   timeBudgetMs?: number,
+  opts?: RunOrchestratorOptions,
 ): Promise<string> {
   const startAt = Date.now();
 
@@ -191,6 +575,182 @@ export async function runOrchestrator(
   const queue: SubTask[] = [...orderedSubTasks];
   let idCounter = Math.max(0, ...orderedSubTasks.map(t => t.id));
 
+  // Σ-4 自愈的共用闭包（W3-4 抽取：串行脊梁与并行预取路径同一血脉，语义一字不变；
+  // keepUpto = 队列保留前缀长 —— 串行传 qi+1（失败任务占位），并行传 0（余部整体替换））
+  const replanAfterFailure = async (task: SubTask, result: string, keepUpto: number): Promise<boolean> => {
+    if (chat && !replannedOnce) {
+      replannedOnce = true; // 闭包守卫先记账：自愈机会只有一次（含失败的自愈尝试）
+      const replanPrompt = userPrompt
+        + '\n以下子任务已失败，请重新规划剩余步骤避开失败路径：\n'
+        + task.action
+        + '\n失败结果：' + result.slice(0, 500);
+      const replanned = await planTasks(replanPrompt, chat);
+      const reTopo = replanned.length > 0 ? topoSortSubTasks(replanned) : null;
+      if (reTopo && !reTopo.cycle) {
+        const remaining = reTopo.order.map(t => ({ ...t, id: ++idCounter }));
+        queue.length = keepUpto; // 替换剩余未执行队列 —— 新计划从头执行
+        queue.push(...remaining);
+        results[results.length - 1] = results[results.length - 1]
+          .replace('[FAILED]', '[RECOVERED]')
+          .replace('[TIMEOUT]', '[RECOVERED]');
+        results.push(`[Replan] 子任务失败，已重规划（剩余 ${remaining.length} 步）`);
+        console.warn(`[Orchestrator] Task #${task.id} failed. Replanned once (${remaining.length} step(s) ahead).`);
+        return true;
+      }
+      // 重规划失败（空计划 / 拓扑有环）⇒ 落回原 fail-fast（诚实）
+      console.warn(`[Orchestrator] Replan unavailable (empty or cyclic plan). Aborting plan.`);
+    }
+    console.warn(`[Orchestrator] Task #${task.id} failed. Aborting plan.`);
+    return false;
+  };
+
+  // ── W3-4：takeGranted 续跑接线（重入消费 —— W2-1 H4 遗留的执行侧闭环）──
+  // 法则：runOrchestrator 每次重入先消费至多一条已批队列条目（防御式：消费面
+  // 异常 ⇒ null 静默降级为无续跑）；以 entry.stepCursor 对账 journal 步账 ——
+  // 重演窗口内只重演 cursor 之后的可重放动作步骤（已暂存的可逆部分不重复执行）；
+  // 对账不可能（无 cursor / 无账 / cursor 越界）⇒ 保守全量重规划（= 现状整计划
+  // 从头执行 —— 恰是串行现状语义，只是多一行 [Resume] 审计）。已授予的不可逆
+  // 动作以续跑子任务形式先行执行（描述携带执行令牌 —— 物理消费在工具层，
+  // V 纪元验收式 consume 照常执法；W1-2 amendment 经 applyAmendment 同点消费）。
+  const granted = (() => {
+    try {
+      const take = opts?.takeGranted ?? approvalQueue.takeGranted.bind(approvalQueue);
+      const g = take();
+      return g && typeof g === 'object' && g.entry && typeof g.entry === 'object' ? g : null;
+    } catch {
+      return null; // 消费面异常 = 无续跑（绝不炸主流程）
+    }
+  })();
+  if (granted) {
+    const entry = granted.entry;
+    const ledgerCount = (() => {
+      try {
+        const c = opts?.ledgerCount ? opts.ledgerCount() : journal.list(false).length;
+        return typeof c === 'number' && Number.isFinite(c) ? c : 0;
+      } catch {
+        return 0;
+      }
+    })();
+    const rec = reconcileResumeWindow(entry.stepCursor, ledgerCount);
+    const entryId = typeof entry.id === 'string' && entry.id !== '' ? entry.id : 'unknown';
+    const grantedDesc = typeof entry.description === 'string' ? entry.description.slice(0, 200) : '';
+    results.push(`[Resume] 已批队列条目 ${entryId} 续跑接入（对账：${rec.mode}` +
+      (rec.mode === 'replay-window'
+        ? `，cursor=${rec.cursor}，账面=${ledgerCount}，重演窗口 ${rec.windowSize} 步）`
+        : `，成因 ${rec.reason}，账面=${ledgerCount} —— 保守全量重规划）`));
+    // ① 已授予的不可逆动作先行（写在最前 —— 它本来就是被打断的原位步骤）；
+    //    令牌随描述下发：actor 凭令牌携行执行（审批协议的既有流转面）。
+    const resumeAction = `执行已批准动作：${grantedDesc}` +
+      `（审批执行令牌 ${granted.executionToken} 已授予，验收通过即焚毁）`;
+    const resumeTask: SubTask = { id: ++idCounter, action: resumeAction, deps: [] };
+    const resumeResult = await (async (): Promise<string> => {
+      try {
+        return await actorFn(resumeAction);
+      } catch (e: unknown) {
+        return `[FAILED] resumed action fault: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    })();
+    results.push(`Task #${resumeTask.id} (执行已批准动作：${grantedDesc}): ${resumeResult}`);
+    if (resumeResult.includes('[FAILED]') || resumeResult.includes('[TIMEOUT]')) {
+      // 续跑动作失败 ⇒ 与串行同律的自愈/中止脊梁接管（queue 尚为全量计划）
+      if (!(await replanAfterFailure(resumeTask, resumeResult, 0))) {
+        return results.join('\n');
+      }
+    }
+    // ② 重演窗口：只重演 cursor 之后的可重放动作步骤（防御式 —— 重放通道缺席
+    //    或窗口为空 ⇒ 零重放，保守交给下方全量计划 = 保守全量重规划的执行面）
+    if (rec.mode === 'replay-window' && rec.windowSize > 0 && typeof opts?.replayStep === 'function') {
+      let windowEntries: Array<{ tool: string; args?: Record<string, unknown> }> = [];
+      try {
+        windowEntries = opts.ledgerSlice
+          ? opts.ledgerSlice(rec.cursor)
+          : journal.list(false).slice(rec.cursor).filter(e => ACTION_TOOLS.includes(e.tool));
+      } catch {
+        windowEntries = [];
+      }
+      for (const e of windowEntries) {
+        if (!e || typeof e.tool !== 'string') continue;
+        try {
+          const r = await opts.replayStep(e.tool, e.args ?? {});
+          results.push(`[Resume] replay ${e.tool}: ${typeof r === 'string' ? r.slice(0, 120) : 'done'}`);
+        } catch (err: unknown) {
+          results.push(`[Resume] replay ${e.tool} failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200));
+        }
+      }
+    }
+  }
+
+  // ── W3-4 G2：就绪层并行预取（显式 opt-in —— 缺省 false 时本块整体跳过，
+  //    串行脊梁逐字节走旧路）──
+  const layers = layerSubTasks(orderedSubTasks);
+  const team: PipelineTeam = opts?.team ?? coordinator;
+
+  // ── W5-3（L3 跨机编排）：crossMachine 注入缝的本地接线（缺省缺席 = 零行为差）──
+  // barrierFor：步骤 → barrier 声明（注入覆写优先，缺省 = 文本方言解析）；
+  // awaitCrossBarrier：抵达即 arrive 等待 —— 成功 ⇒ [Barrier] 审计行（放行
+  // 事实：seq/名册/耗时），失败 ⇒ [FAILED] 行（reason + 已见名册，诚实不臆造）。
+  // 全程防御式（注入面异常 ⇒ null = 无 barrier 步，绝不炸编排主链）。
+  const cross = opts?.crossMachine;
+  const awaitCrossBarrier = async (task: SubTask): Promise<{ line: string; ok: boolean } | null> => {
+    if (!cross || typeof cross.arriveAndWait !== 'function') return null;
+    let b: { name: string; n: number } | null = null;
+    try {
+      // 缺省声明解析 = 文本方言（action 内嵌 barrier:<name>#<n>）；注入覆写同签名
+      const resolve = cross.barrierOf ?? ((t: SubTask) => parseBarrierStep(typeof t?.action === 'string' ? t.action : ''));
+      b = resolve(task);
+    } catch {
+      return null; // 声明面异常 = 无 barrier 步（防御式）
+    }
+    if (!b || typeof b.name !== 'string' || b.name === '' || typeof b.n !== 'number') return null;
+    let r: CrossBarrierOutcome;
+    try {
+      r = await cross.arriveAndWait(b.name, b.n);
+    } catch (e: unknown) {
+      return { ok: false, line: `[FAILED] cross-barrier ${b.name}#${b.n} fault: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) };
+    }
+    if (r.ok) {
+      return {
+        ok: true,
+        line: `[Barrier] ${b.name}#${b.n} passed (seq ${r.seq}, peers ${(Array.isArray(r.peers) ? r.peers : []).join(',')}, ${r.waitedMs}ms)`,
+      };
+    }
+    const seen = Array.isArray(r.arrived) && r.arrived.length > 0 ? `, peers seen: ${r.arrived.join(',')}` : '';
+    const exp = typeof r.expected === 'number' ? ` (expected ${r.expected})` : '';
+    return { ok: false, line: `[FAILED] cross-barrier ${b.name}#${b.n} ${r.reason}${exp} after ${r.waitedMs}ms${seen}` };
+  };
+  const useParallel = opts?.parallel === true
+    && orderedSubTasks.length > 1
+    && layers.some(l => l.length > 1)
+    && (() => { try { return team.isActive() !== true; } catch { return false; } })(); // 团队余量：在役外来会话 ⇒ 退化为串行
+  if (useParallel) {
+    const write = opts?.serializeWrite ?? (<T>(fn: () => Promise<T>): Promise<T> => fn());
+    const observeSeed = opts?.observeSeed ?? ((): string | null => {
+      try { return contextManager.lastImageRecord()?.hash ?? null; }
+      catch { return null; }
+    });
+    const depth = typeof opts?.pipelineDepth === 'number' && Number.isFinite(opts.pipelineDepth)
+      ? opts.pipelineDepth : 2;
+    const pre = await runReadyLayerWaves({
+      layers, actorFn, write, observeSeed, team,
+      depth, startAt, timeBudgetMs,
+      ...(cross ? { barrier: awaitCrossBarrier } : {}), // W5-3：并行波内 barrier 步（写通道之外等待）
+    });
+    results.push(...pre.lines);
+    // 队列重铸 = 未执行余部（波次异常熔断/失败截断的兜底都从这里落回串行脊梁）
+    queue.length = 0;
+    queue.push(...orderedSubTasks.filter(t => !pre.completed.has(t.id)));
+    if (pre.timeoutLine !== null) {
+      results.push(pre.timeoutLine);
+      return results.join('\n');
+    }
+    if (pre.failure) {
+      // 波次失败 ⇒ Σ-4 同律自愈；自愈后余部由串行脊梁接管（并行快路径退役 —— 诚实降级）
+      if (!(await replanAfterFailure(pre.failure.task, pre.failure.result, 0))) {
+        return results.join('\n');
+      }
+    }
+  }
+
   // 2. 循环执行子任务
   for (let qi = 0; qi < queue.length; qi++) {
     const task = queue[qi];
@@ -207,6 +767,22 @@ export async function runOrchestrator(
 
     console.log(`[Orchestrator] Executing Task #${task.id}: ${task.action}`);
 
+    // W5-3（L3 跨机编排）：barrier 步 —— 到达 rendezvous 点即 arrive 等待
+    //（写通道之外的跨机同步）；放行 ⇒ [Barrier] 审计行先行，失败 ⇒ [FAILED]
+    // 行走 Σ-4 同律自愈/fail-fast（不执行该步骤的物理部分 —— 前提未成立）。
+    if (cross) {
+      const bLine = await awaitCrossBarrier(task);
+      if (bLine) {
+        results.push(bLine.line);
+        if (!bLine.ok) {
+          if (await replanAfterFailure(task, bLine.line, qi + 1)) {
+            continue;
+          }
+          break;
+        }
+      }
+    }
+
     // 3. 将子任务交给 Actor 执行（依赖注入：编排器不关心 Actor 如何实现）
     const result = await actorFn(task.action);
     results.push(`Task #${task.id} (${task.action}): ${result}`);
@@ -214,29 +790,9 @@ export async function runOrchestrator(
     // 4. fail-fast 容错：后续步骤建立在失败步骤的前提上，中止是最理性的选择
     //    （Σ-4：中止前先给一次带失败上下文的重规划机会 —— 见上方法则）
     if (result.includes('[FAILED]') || result.includes('[TIMEOUT]')) {
-      if (chat && !replannedOnce) {
-        replannedOnce = true; // 闭包守卫先记账：自愈机会只有一次（含失败的自愈尝试）
-        const replanPrompt = userPrompt
-          + '\n以下子任务已失败，请重新规划剩余步骤避开失败路径：\n'
-          + task.action
-          + '\n失败结果：' + result.slice(0, 500);
-        const replanned = await planTasks(replanPrompt, chat);
-        const reTopo = replanned.length > 0 ? topoSortSubTasks(replanned) : null;
-        if (reTopo && !reTopo.cycle) {
-          const remaining = reTopo.order.map(t => ({ ...t, id: ++idCounter }));
-          queue.length = qi + 1; // 替换剩余未执行队列 —— 新计划从头执行
-          queue.push(...remaining);
-          results[results.length - 1] = results[results.length - 1]
-            .replace('[FAILED]', '[RECOVERED]')
-            .replace('[TIMEOUT]', '[RECOVERED]');
-          results.push(`[Replan] 子任务失败，已重规划（剩余 ${remaining.length} 步）`);
-          console.warn(`[Orchestrator] Task #${task.id} failed. Replanned once (${remaining.length} step(s) ahead).`);
-          continue;
-        }
-        // 重规划失败（空计划 / 拓扑有环）⇒ 落回原 fail-fast（诚实）
-        console.warn(`[Orchestrator] Replan unavailable (empty or cyclic plan). Aborting plan.`);
+      if (await replanAfterFailure(task, result, qi + 1)) {
+        continue;
       }
-      console.warn(`[Orchestrator] Task #${task.id} failed. Aborting plan.`);
       break;
     }
   }

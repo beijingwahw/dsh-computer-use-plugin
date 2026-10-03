@@ -503,6 +503,14 @@ export interface EnvironmentShaper {
   undoDepth(): number;
   /** 仅清空撤销日志（丢弃复原义务，不执行任何物理复原）—— 测试隔离/显式弃责用 */
   clearUndoLog(): void;
+  /**
+   * W4-3（R3）：定向复原 —— 按撤销令牌复原单条 UndoRecord（rollbackPlanner
+   * 的 shaper-undo 模态落点）。token 在场且命中未复原条目 ⇒ 只复原该条
+   * （精确归位）；token 已复原 ⇒ 幂等 ok；token 缺席/未命中 ⇒ 回退全量
+   * restoreAll（保守方向：多复原一条无害，少复原一条则补偿不完整 —— 与
+   * W3-1 桥同律）。绝不抛。
+   */
+  undoOne(token?: string): Promise<ShaperResult>;
   /** 平台名（capabilities 视图的伴生元数据） */
   platform(): string;
 }
@@ -661,6 +669,37 @@ class Shaper implements EnvironmentShaper {
     return this.undoLog.filter(r => !r.undone).length;
   }
 
+  /** W4-3（R3）：定向复原（见接口注释 —— token 命中单条 / 缺席回退全量） */
+  async undoOne(token?: string): Promise<ShaperResult> {
+    this.ensure();
+    if (typeof token === 'string' && token !== '') {
+      const rec = this.undoLog.find(r => r.token === token);
+      if (rec && !rec.undone) {
+        try {
+          await serialize(() => this.adapter.undo(rec.recipe));
+          rec.undone = true;
+          rec.undoneAt = Date.now();
+          return { token: rec.token, ok: true };
+        } catch (e: any) {
+          rec.undoFailureReason = e?.message ?? String(e); // 失败也如实入栈（restoreAll 同律）
+          return { token: rec.token, ok: false, reason: e?.message ?? String(e) };
+        }
+      }
+      if (rec?.undone) return { token: rec.token, ok: true }; // 幂等：已复原的义务不再执行
+      // 未命中 ⇒ 回退全量复原（保守方向，见接口注释）
+    }
+    const results = await this.restoreAll();
+    const failed = results.filter(r => !r.ok);
+    if (failed.length > 0) {
+      return {
+        ok: false,
+        reason: `full-restore fallback failed for ${failed.length}/${results.length} record(s): ` +
+          failed.map(f => `${f.token}: ${f.reason ?? 'unknown'}`).join('; '),
+      };
+    }
+    return { ok: true };
+  }
+
   clearUndoLog(): void {
     this.undoLog = [];
     this.tokenSeq = 0;
@@ -669,3 +708,86 @@ class Shaper implements EnvironmentShaper {
 
 // 单例是正确的：一台躯体只有一个工作台；物理唯一性由 serialize 保证
 export const shaper = new Shaper();
+
+// ─── W3-1（S1 逆转托管）：shaper 撤销栈 → 补偿执行端口的桥 ───
+//
+// 逆转托管（reversalEscrow）的补偿路径里，环境重塑类动作的补偿有现成机制：
+// shaper 的 UndoRecord/undoLog（D-2：改变世界的权力与复原世界的义务严格对称）。
+// 本桥把 restoreAll 的 LIFO 复原栈包装成 CompensationExecutorPort —— 策略表
+// 里 method:'shaper-undo' 的补偿步骤经此落到物理世界。类型面依赖
+// （import type —— 零运行时耦合，reversalEscrow ↔ shaper 无环）。
+import type { CompensationExecutorPort, CompensationStep, ReversalPlan } from './reversalEscrow';
+
+/**
+ * W3-1：shaper 撤销栈补偿执行器。
+ * 支持 method 'shaper-undo'（LIFO 全量复原 —— 单条 token 的定向复原不在
+ * shaper 公开面，全量复原是保守正确的方向：多复原一条窗口几何无害，少复原
+ * 一条则补偿不完整）；其余 method ⇒ ok:false + 说明（补偿步骤路由错配的
+ * 醒目拒绝，绝不假装执行）。绝不抛（shaper.restoreAll 自带部分复原续行）。
+ */
+export function createShaperCompensationExecutor(): CompensationExecutorPort {
+  return {
+    async execute(step: CompensationStep, _plan: ReversalPlan): Promise<{ ok: boolean; detail?: string }> {
+      if (step.method !== 'shaper-undo') {
+        return {
+          ok: false,
+          detail: `shaper executor only handles method "shaper-undo" (got "${step.method}") — route this step to a GUI executor port`,
+        };
+      }
+      try {
+        const results = await shaper.restoreAll();
+        const failed = results.filter(r => !r.ok);
+        if (failed.length > 0) {
+          return {
+            ok: false,
+            detail: `shaper undo failed for ${failed.length}/${results.length} record(s): ${failed.map(f => `${f.token}: ${f.reason ?? 'unknown'}`).join('; ')}`,
+          };
+        }
+        return { ok: true };
+      } catch (e: unknown) {
+        return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  };
+}
+
+// ─── W4-3（R3 有界回滚）：shaper 撤销栈 → rollbackPlanner 执行端口的桥 ───
+//
+// rollbackPlanner 的逆映射表里 shaper 操作 → UndoRecipe 走 undoLog（定向
+// undoOne / 缺省全量 restoreAll）。本桥把 RollbackStep 的 shaper-undo 模态
+// 包装成 rollbackPlanner 的执行端口可用的落点函数；其余模态（键序/再点/
+// 反向滚动）⇒ ok:false + 说明（路由错配的醒目拒绝，绝不假装执行）。
+// 类型面依赖（import type —— 零运行时耦合）。绝不抛。
+import type { RollbackStep, RollbackPorts } from './rollbackPlanner';
+
+/**
+ * W4-3（R3）：shaper 定向复原的独立函数面（rollbackPlanner 执行端口 /
+ * 宿主的落点）。token 缺席 ⇒ 全量 LIFO 复原（保守方向）。绝不抛。
+ */
+export async function undoShaperRecord(token?: string): Promise<{ ok: boolean; detail?: string }> {
+  try {
+    const r = await shaper.undoOne(typeof token === 'string' && token !== '' ? token : undefined);
+    return r.ok ? { ok: true } : { ok: false, detail: r.reason ?? 'unknown shaper undo failure' };
+  } catch (e: unknown) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * W4-3（R3）：shaper 撤销栈的回滚执行端口构造器 —— 只处理 shaper-undo 模态
+ * （定向 undoToken / 缺省全量），其余模态醒目拒绝（路由错配不冒充执行）。
+ */
+export function createShaperRollbackExecutor(): Pick<RollbackPorts, 'execute'> {
+  return {
+    execute: async (step: RollbackStep): Promise<{ ok: boolean; detail?: string }> => {
+      if (step.modality !== 'shaper-undo') {
+        return {
+          ok: false,
+          detail: `shaper rollback executor only handles modality "shaper-undo" (got "${step.modality}") — ` +
+            'route keyboard/click/scroll modalities to a GUI executor port',
+        };
+      }
+      return undoShaperRecord(step.payload.undoToken);
+    },
+  };
+}

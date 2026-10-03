@@ -8,6 +8,7 @@ import { similarity } from './perceptualHash';
 import { tokenize, overlapCoefficient } from './uiMemory';
 import { ncdSimilarity } from './ncd';
 import { kernelRegistry } from './kernel/registry';
+import { parseRootCause, type RootCauseId } from './diagnosis'; // W1-6：R1 根因归因链的病因命名空间
 
 export interface FailureRecord {
   id: number;
@@ -15,7 +16,19 @@ export interface FailureRecord {
   approach: string;           // 尝试了什么路径（工具+参数摘要）
   symptom: string;            // 失败症状（无变化/找不到/被拦截…）
   sceneHash?: string;         // 失败时的整屏指纹
+  /**
+   * W1-6（R1 鉴别试验）：结构化病因 —— 鉴别探针序列的结论
+   * （over-strict-verification / blind-spot-text / stall / unknown）。
+   * 缺席 = 未归因或旧记录（检索侧统一视为 unknown —— 向后兼容：旧
+   * checkpoint 反序列化的记录无此字段，经 effectiveRootCause 归一）。
+   */
+  rootCause?: RootCauseId;
   at: number;
+}
+
+/** W1-6：记录的有效病因（无字段/垃圾值 ⇒ unknown —— 与 parseRootCause 同律） */
+function effectiveRootCause(r: FailureRecord): RootCauseId {
+  return r.rootCause === undefined ? 'unknown' : parseRootCause(r.rootCause);
 }
 
 class FailureMemory {
@@ -23,13 +36,23 @@ class FailureMemory {
   private nextId = 1;
   private capacity = 30;
 
-  record(query: string, approach: string, symptom: string, sceneHash?: string): FailureRecord {
+  record(query: string, approach: string, symptom: string, sceneHash?: string, rootCause?: RootCauseId): FailureRecord {
     // 近重复去重：同查询+同路径 5 分钟内不重复记录
     const dup = this.records.find(r =>
       r.query === query && r.approach === approach && Date.now() - r.at < 300_000);
-    if (dup) { dup.at = Date.now(); return dup; }
+    if (dup) {
+      dup.at = Date.now();
+      // W1-6：重复失败路径刷新病因 —— 鉴别探针的结论比「未归因」新（如旧记录
+      // 无 rootCause 而本次归因出 stall）。垃圾值经 parseRootCause 收口。
+      if (rootCause !== undefined) dup.rootCause = parseRootCause(rootCause);
+      return dup;
+    }
 
-    const rec: FailureRecord = { id: this.nextId++, query, approach, symptom, sceneHash, at: Date.now() };
+    const rec: FailureRecord = {
+      id: this.nextId++, query, approach, symptom, sceneHash, at: Date.now(),
+      // W1-6：病因防御入库（非法值 ⇒ unknown，不冒充知识）
+      ...(rootCause !== undefined ? { rootCause: parseRootCause(rootCause) } : {}),
+    };
     this.records.push(rec);
     if (this.records.length > this.capacity) this.records.shift(); // FIFO：旧失败让位新失败
     return rec;
@@ -38,9 +61,20 @@ class FailureMemory {
   /** 匹配：文本重合（query+approach+symptom 全文）+ 同场景加成 + H-2 压缩相似。
    *  H-2 修正注记：symptom 纳入 token hay（症状文本本就可检索 —— 原只搜 query/
    *  approach 是检索面残缺）；NCD 仍只对 symptom 比（可换述的部分，避免 approach
-   *  的 ASCII 坐标稀释）。返回「在这个场景/任务下别这么试」的清单 */
-  match(query: string, currentSceneHash?: string, k = 3): Array<FailureRecord & { score: number }> {
+   *  的 ASCII 坐标稀释）。返回「在这个场景/任务下别这么试」的清单
+   *  W1-6（R1）：opts.rootCause 在场 ⇒ 先按病因过滤候选池再走三通道 —— 病因
+   *  通道与文本通道并存（结构化 narrowing，不替换排序律）；缺省不过滤，零回归。 */
+  match(
+    query: string,
+    currentSceneHash?: string,
+    k = 3,
+    opts?: { rootCause?: RootCauseId },
+  ): Array<FailureRecord & { score: number }> {
     const qTokens = tokenize(query);
+    // W1-6：病因过滤（与文本通道并存 —— 池 narrowed，RRF/legacy 排序律不变）
+    const pool = opts?.rootCause
+      ? this.records.filter(r => effectiveRootCause(r) === opts.rootCause)
+      : this.records;
     // R 纪元（R-6 召回层）：RRF 倒数排名融合 —— 三通道（词面重合 / NCD 压缩 /
     // 场景指纹）各排各的名次，融合分 = Σ 1/(60+rankᵢ)（TREC 2003 Cormack 形，
     // k=60 惯例）。为什么不用加权和：三通道分数量纲悬殊（重合系数 [0,1]、
@@ -53,7 +87,7 @@ class FailureMemory {
     const score2Floor = kernelRegistry.getOrDefault('failure.score2Floor', 0.2);
     const RRF_K = Math.round(kernelRegistry.getOrDefault('failure.rrfK', 60));
     const sceneBonus = kernelRegistry.getOrDefault('failure.sceneBonus', 0.4);
-    const scored = this.records.map(r => {
+    const scored = pool.map(r => {
       const hay = `${r.query} ${r.approach} ${r.symptom}`;
       const text = overlapCoefficient(qTokens, tokenize(hay));
       // H-2 NCD 通道：leet/typo 变体与原文共享长子串（'verificat·on'）而 token
@@ -100,6 +134,21 @@ class FailureMemory {
     return this.records.length;
   }
 
+  /**
+   * W1-6（R1 鉴别试验）：按病因检索 —— 「已知 stall 类死路有哪些」「这个场景下
+   * 的盲点文本点击败过几次」。与文本通道（match）并存而非替代：match 回答
+   * 「这个任务下别这么试」，本方法回答「这类病因下都有哪些前科」。
+   * 旧记录（无 rootCause 字段）统一归入 unknown 桶 —— 向后兼容的检索面。
+   * 排序按时间降序（无文本查询 ⇒ 无相关性维度，新近性是唯一诚实序）。
+   */
+  matchByRootCause(rootCause: RootCauseId, k = 5): FailureRecord[] {
+    const wanted = parseRootCause(rootCause); // 防御：非法入参 ⇒ unknown 桶
+    return this.records
+      .filter(r => effectiveRootCause(r) === wanted)
+      .sort((a, b) => b.at - a.at)
+      .slice(0, Math.max(1, k));
+  }
+
   /** checkpoint 序列化：失败记忆与技能库对称持久化 */
   dump(): { records: FailureRecord[]; nextId: number } {
     return { records: this.records, nextId: this.nextId };
@@ -107,7 +156,13 @@ class FailureMemory {
 
   restore(data: { records?: FailureRecord[]; nextId?: number } | undefined): void {
     if (!data?.records) return;
-    this.records = data.records;
+    // W1-6：病因字段防御收口 —— 旧 checkpoint 无此字段（保持 undefined = unknown
+    // 语义）；被篡改/损坏的垃圾值归一为 unknown（parseRootCause 律）。
+    this.records = data.records.map(r =>
+      (r.rootCause === undefined || parseRootCause(r.rootCause) === r.rootCause)
+        ? r
+        : { ...r, rootCause: 'unknown' as RootCauseId },
+    );
     this.nextId = data.nextId ?? (this.records.at(-1)?.id ?? 0) + 1;
   }
 

@@ -49,9 +49,16 @@ export function createReplayActionsTool(config) {
             const all = journal.list();
             // J 纪元修正：to_step 补下界钳制 —— 旧实现只有上界 min(len-1)，
             // to_step=-5 时 slice(0, -4) 静默选中「除最后 4 条外的全部」并重放，
-            // 与钳制 from 的初衷自相矛盾。
-            const from = Math.max(0, args.from_step ?? 0);
-            const to = Math.max(from, Math.min(all.length - 1, args.to_step ?? all.length - 1));
+            // 与钳制 from 的初衷自相矛盾。NaN 防御：Math.max(0, NaN)=NaN，slice 视
+            // NaN 为 0 —— 非有限数一律按缺省记，绝不让坏下标静默扩大重放范围。
+            const fromStep = typeof args.from_step === 'number' && Number.isFinite(args.from_step)
+                ? args.from_step
+                : 0;
+            const toStep = typeof args.to_step === 'number' && Number.isFinite(args.to_step)
+                ? args.to_step
+                : all.length - 1;
+            const from = Math.max(0, fromStep);
+            const to = Math.max(from, Math.min(all.length - 1, toStep));
             const steps = all.slice(from, to + 1);
             if (steps.length === 0) {
                 return toolOk(`No replayable actions in range [${from}, ${to}].`, { range: { from, to }, journal_length: all.length }, 'Adjust from_step/to_step, or perform the actions manually — the journal may be empty or the range is out of bounds.');
@@ -82,6 +89,15 @@ export function createReplayActionsTool(config) {
                     log.push(`  [GATE] step ${i} 重放被安全闸门拦截 — replay halted (dangerous/gated step was NOT executed)`);
                     break;
                 }
+                // 派发失败即停：FAILED 步 = 物理动作根本没执行（system 层异常）—— 比
+                // 死步（执行了但无效）更强的事实，后续步骤的前提同样已崩塌，继续只会
+                // 制造连锁错误（与 Y-6 死步即停 / Δ 纪元闸门即停同律）
+                if (line.startsWith('FAILED:')) {
+                    halted = { index: i, tool: entry.tool };
+                    haltGate = 'step-failure';
+                    log.push(`  [GATE] step ${i} dispatch FAILED — replay halted (the step did NOT execute)`);
+                    break;
+                }
                 if (before?.dhash) {
                     const after = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
                     if (isDeadStep(before.dhash, after.dhash ?? null)) {
@@ -102,15 +118,21 @@ export function createReplayActionsTool(config) {
                         diverged_tool: halted.tool,
                         gate: haltGate === 'safety-gate'
                             ? 'pre-dispatch safety gate (approval/risk) — 重放被安全闸门拦截'
-                            : 'per-step scene hash (dHash dead-step detection)',
+                            : haltGate === 'step-failure'
+                                ? 'step dispatch failure (system-layer exception) — 该步未执行即失败'
+                                : 'per-step scene hash (dHash dead-step detection)',
                     },
                     execution_log: log.join('\n'),
                     next_step: haltGate === 'safety-gate'
                         ? 'REPLAY HALTED: a step was BLOCKED by the safety gate (irreversible target without a valid approval ' +
                             'token, or gated input) and was NOT executed. Re-run that step live via click_mouse/type_text with ' +
                             'proper user consent (request_approval → grant_approval), then continue the remaining steps manually.'
-                        : 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
-                            'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
+                        : haltGate === 'step-failure'
+                            ? 'REPLAY HALTED: a step FAILED to dispatch (system-layer exception — the action did NOT execute; ' +
+                                'see execution_log for the error). take_screenshot to inspect the current state, re-run the failed ' +
+                                'step live, then continue the remaining steps.'
+                            : 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
+                                'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
                 }, null, 2);
             }
             return toolOk(`Replayed ${steps.length} action(s).`, { replayed_steps: steps.length, detail: log }, "Call 'take_screenshot' to verify the final state matches the expected outcome.");

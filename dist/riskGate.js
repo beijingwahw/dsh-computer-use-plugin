@@ -129,7 +129,10 @@ function normalizedPatterns(csv, fallback) {
         .split(',')
         .map(s => s.trim().toLowerCase())
         .filter(Boolean)
-        .map(normalizeForRisk); // 与 haystack 同律（含不动点迭代 —— 两侧停在同一形态）
+        .map(normalizeForRisk) // 与 haystack 同律（含不动点迭代 —— 两侧停在同一形态）
+        // 归一化后为空的模式（纯标点/符号词，如 "***"）必须剔除：'' 是一切串的
+        // 子串，留下它会令 matches* 对任意文本恒真 —— 风险门整体失效（全拦 = 失能）
+        .filter(p => p.length > 0);
     if (patternCache.size >= PATTERN_CACHE_LIMIT) {
         const oldest = patternCache.keys().next().value;
         if (oldest !== undefined)
@@ -164,3 +167,311 @@ export function matchesDangerPatterns(text, csv) {
             return true;
     return false;
 }
+/** 分级判定的等级序（校准升级的步进面：reversible < compensable < irreversible） */
+const LEVEL_ORDER = {
+    reversible: 0, compensable: 1, irreversible: 2,
+};
+/** 按级分道（纯函数）：三级 → 派发要求。 */
+export function dispatchLaneFor(level) {
+    switch (level) {
+        case 'reversible':
+            return {
+                lane: 'fast', requiresApprovalToken: false, requiresEscrowPlan: false, humanExecution: false,
+                note: 'reversible: fast lane — a non-destructive inverse exists (scroll back / re-click / switch back); ' +
+                    'no reversibility-imposed requirements (danger-word gate still applies independently)',
+            };
+        case 'compensable':
+            return {
+                lane: 'escrow', requiresApprovalToken: false, requiresEscrowPlan: true, humanExecution: false,
+                note: 'compensable: W3-1 escrow lane — mint a reversal plan (reversalEscrow.mintPlan) BEFORE beginAttempt; ' +
+                    'compensation path is hosted and verified (danger-word gate may still require approval independently)',
+            };
+        case 'irreversible':
+            return {
+                lane: 'human', requiresApprovalToken: true, requiresEscrowPlan: false, humanExecution: true,
+                note: 'irreversible: forced approval + HUMAN execution — the escrow strategy table is manual-only ' +
+                    '(fail-closed: a delivered message cannot be unsent); automation must hand control back to the user',
+            };
+    }
+}
+/**
+ * 内置语义 → 级别表。键与 reversalEscrow 的补偿策略表对齐（compensable 键 =
+ * 策略表 kind:'compensate' 的语义；irreversible 键 = manual-only 的语义 ——
+ * 两表各自独立维护，键对齐是纪律不是依赖：riskGate 不得 import reversalEscrow
+ * （会与 approval → riskGate 成环），对齐靠测试与注释执法）。
+ */
+const BUILTIN_LEVELS = new Map([
+    // 可逆：逆动作存在且非破坏
+    ['viewport-scroll', 'reversible'], // scroll_page → 反向滚动
+    ['tab-switch', 'reversible'], // switch_tab / switch_window → 切回
+    ['popup-dismiss', 'reversible'], // dismiss_popup → 关掉的浮层不改变持久世界
+    ['toggle', 'reversible'], // 开关/复选 → 再点一次（精确逆）
+    // 可补偿：W3-1 托管策略表有补偿路径
+    ['form-submit', 'compensable'], // Ctrl+Z / 草稿箱回收
+    ['file-delete', 'compensable'], // 回收站还原 / Ctrl+Z
+    ['file-write', 'compensable'], // 应用内 undo 栈
+    ['text-input', 'compensable'], // 输入 → 全选退格（破坏性补偿 —— 过审批闸）
+    ['navigation', 'compensable'], // open_url → 后退导航
+    // 不可逆：策略表明示 manual-only
+    ['send-message', 'irreversible'], // 已发出的消息无法收回
+    ['payment', 'irreversible'], // 退款是新交易不是撤销
+    ['permanent-delete', 'irreversible'], // 不进回收站的删除 —— 语义上已放弃可逆性
+]);
+/**
+ * 描述关键词 → 语义键（与危险词表同律归一化、但**独立成表** —— 不改既有
+ * 危险词语义，分级是叠加维度）。匹配序 = 表序：不可逆族最前（保守优先 ——
+ * "delete then send" 的复合描述归入 send-message），可补偿族次之，可逆族最后。
+ */
+const LEVEL_KEYWORDS = [
+    // 不可逆族（对齐 DEFAULT_DANGER_PATTERNS 的发送/支付/格式化词组）
+    { key: normalizeForRisk('send'), semantics: 'send-message' },
+    { key: '发送', semantics: 'send-message' },
+    { key: normalizeForRisk('pay'), semantics: 'payment' },
+    { key: '支付', semantics: 'payment' }, { key: '付款', semantics: 'payment' },
+    { key: 'buy', semantics: 'payment' }, { key: '购买', semantics: 'payment' },
+    { key: 'checkout', semantics: 'payment' }, { key: '结算', semantics: 'payment' },
+    { key: 'withdraw', semantics: 'payment' }, { key: '提现', semantics: 'payment' },
+    { key: 'transfer', semantics: 'payment' }, { key: '转账', semantics: 'payment' },
+    { key: 'format', semantics: 'permanent-delete' }, { key: '格式化', semantics: 'permanent-delete' },
+    { key: 'erase', semantics: 'permanent-delete' }, { key: '抹掉', semantics: 'permanent-delete' },
+    // 可补偿族
+    { key: 'delete', semantics: 'file-delete' }, { key: '删除', semantics: 'file-delete' },
+    { key: 'remove', semantics: 'file-delete' }, { key: '移除', semantics: 'file-delete' },
+    { key: 'submit', semantics: 'form-submit' }, { key: '提交', semantics: 'form-submit' },
+    { key: '下单', semantics: 'form-submit' }, { key: '订单', semantics: 'form-submit' },
+    { key: 'type', semantics: 'text-input' }, { key: '输入', semantics: 'text-input' },
+    { key: '填写', semantics: 'text-input' },
+    { key: 'open', semantics: 'navigation' }, { key: 'navigate', semantics: 'navigation' },
+    { key: '跳转', semantics: 'navigation' },
+    // 可逆族（描述面少用 —— 工具回退表承担主力）
+    { key: 'scroll', semantics: 'viewport-scroll' }, { key: '滚动', semantics: 'viewport-scroll' },
+    { key: 'tab', semantics: 'tab-switch' },
+];
+/** 已知工具 → 语义键回退表（描述无命中时的次级判定面）。
+ *  刻意不收录 click_mouse/click_element/drag_mouse/press_hotkey —— 这些工具
+ *  的可逆性由**目标语义**决定而非工具本身（点开关可逆、点发送不可逆），目标
+ *  未知 ⇒ 保守律默认最高级。 */
+const TOOL_SEMANTICS = new Map([
+    ['scroll_page', 'viewport-scroll'],
+    ['switch_tab', 'tab-switch'],
+    ['switch_window', 'tab-switch'],
+    ['dismiss_popup', 'popup-dismiss'],
+    ['type_text', 'text-input'],
+    ['open_url', 'navigation'],
+]);
+// ─── 证据门常量（Beta 风格 —— 值即边界） ───
+/** 升一级的最低 adverse 事件数（防单事件翻级的执法点） */
+const RAISE_MIN_ADVERSE = 2;
+/** 升一级的后验均值门（Beta(1+adverse, 1+supportive) 均值） */
+const RAISE_POSTERIOR = 0.5;
+/** 升两级的最低 adverse 事件数 */
+const RAISE2_MIN_ADVERSE = 4;
+/** 升两级的后验均值门 */
+const RAISE2_POSTERIOR = 0.75;
+/** 证据键封顶（无界键表 = 无界记忆 —— 满后逐出最旧） */
+const EVIDENCE_KEYS_MAX = 128;
+/** 单次负证据查询的折算上限（查询返回巨数不得一次买断两级） */
+const NEGATIVE_EVIDENCE_CAP = 10;
+// ─── 注册表模块态（全部经 arm 注入；缺省 = 内置表 + 无扩展 + 无查询） ───
+let extensionLevels = new Map();
+let evidenceStore = new Map();
+let negativeEvidenceQuery = null;
+function cleanStr(v, max) {
+    return typeof v === 'string' && v.trim() !== '' ? v.slice(0, max) : undefined;
+}
+function isLevel(v) {
+    return v === 'reversible' || v === 'compensable' || v === 'irreversible';
+}
+function clampCount(v, max) {
+    const n = typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : 0;
+    return Math.max(0, Math.min(max, n));
+}
+/** 证据账读取（无则零账 —— 诚实起点） */
+function evidenceOf(semantics) {
+    return evidenceStore.get(semantics) ?? { adverse: 0, supportive: 0 };
+}
+/** 证据账写入（封顶逐出最旧 —— Map 保序，首键即牺牲者） */
+function putEvidence(semantics, ev) {
+    if (evidenceStore.size >= EVIDENCE_KEYS_MAX && !evidenceStore.has(semantics)) {
+        const oldest = evidenceStore.keys().next().value;
+        if (oldest !== undefined)
+            evidenceStore.delete(oldest);
+    }
+    evidenceStore.set(semantics, ev);
+}
+/** Beta 后验均值：Beta(1+adverse, 1+supportive) 的 mean = (β)/(α+β) */
+function posteriorMean(ev) {
+    return (ev.adverse + 1) / (ev.adverse + ev.supportive + 2);
+}
+/** 证据门（纯函数）：base 级 + 证据账 → 校准级与升档数 */
+function gateLevel(base, ev) {
+    const p = posteriorMean(ev);
+    let notches = 0;
+    if (ev.adverse >= RAISE_MIN_ADVERSE && p >= RAISE_POSTERIOR)
+        notches = 1;
+    if (ev.adverse >= RAISE2_MIN_ADVERSE && p >= RAISE2_POSTERIOR)
+        notches = 2;
+    const levelNum = Math.min(LEVEL_ORDER.irreversible, LEVEL_ORDER[base] + notches);
+    const level = ['reversible', 'compensable', 'irreversible'][levelNum];
+    return { level, raisedNotches: levelNum - LEVEL_ORDER[base] };
+}
+/** 描述 → 语义键（关键词表序匹配 —— 不可逆族优先的保守序） */
+function semanticsFromDescription(description) {
+    if (!description)
+        return null;
+    const hay = normalizeForRisk(description);
+    if (hay === '')
+        return null;
+    for (const { key, semantics } of LEVEL_KEYWORDS) {
+        if (key !== '' && hay.includes(key))
+            return semantics;
+    }
+    return null;
+}
+/** 分级判定的核心实现（注册表方法与示范入账共用的内部面） */
+function classifyIntent(intent) {
+    try {
+        const explicit = cleanStr(intent?.semantics, 64);
+        const tool = cleanStr(intent?.tool, 64);
+        const description = cleanStr(intent?.description, 200);
+        let semantics = null;
+        let known = false;
+        if (explicit !== undefined && (BUILTIN_LEVELS.has(explicit) || extensionLevels.has(explicit))) {
+            semantics = explicit;
+            known = true;
+        }
+        if (!known) {
+            const byDesc = description !== undefined ? semanticsFromDescription(description) : null;
+            if (byDesc !== null) {
+                semantics = byDesc;
+                known = true;
+            }
+        }
+        if (!known && tool !== undefined && TOOL_SEMANTICS.has(tool)) {
+            semantics = TOOL_SEMANTICS.get(tool);
+            known = true;
+        }
+        if (!known) {
+            // 保守律：未知动作默认最高级（分级知识的缺口按最坏情况收费）
+            return { level: 'irreversible', semantics: 'unknown', source: 'unknown-default' };
+        }
+        const ext = extensionLevels.get(semantics);
+        const base = ext ?? BUILTIN_LEVELS.get(semantics) ?? 'irreversible';
+        const baseSource = ext !== undefined ? 'extension' : 'builtin';
+        // 瞬态负证据合并（只读查询 —— 不入持久账，防 classify 自我膨胀）
+        let ev = evidenceOf(semantics);
+        if (semantics !== 'unknown' && negativeEvidenceQuery !== null) {
+            try {
+                ev = { ...ev, adverse: ev.adverse + clampCount(negativeEvidenceQuery(semantics), NEGATIVE_EVIDENCE_CAP) };
+            }
+            catch { /* 查询端口故障 = 无负证据（诚实缺席，不炸分级） */ }
+        }
+        const gated = gateLevel(base, ev);
+        if (gated.raisedNotches > 0) {
+            return {
+                level: gated.level, semantics: semantics, source: 'calibrated',
+                evidence: {
+                    adverse: ev.adverse, supportive: ev.supportive,
+                    posterior: Math.round(posteriorMean(ev) * 1000) / 1000,
+                    raisedNotches: gated.raisedNotches,
+                },
+            };
+        }
+        return { level: gated.level, semantics: semantics, source: baseSource };
+    }
+    catch {
+        return { level: 'irreversible', semantics: 'unknown', source: 'unknown-default' }; // 防御式兜底
+    }
+}
+/**
+ * W4-3（S5）：可逆性分级注册表（模块单例 —— 插件卸载随闭包消亡）。
+ * 一切公开面绝不抛：脏输入 / 查询端口故障 ⇒ 收敛为保守返回值（未知默认
+ * 最高级是缺省的方向，不是异常的出口）。
+ */
+export const reversibilityRegistry = {
+    /** 分级判定（纯读 + 瞬态负证据合并；绝不抛）。
+     *  判定序：显式语义键（表内）→ 描述关键词 → 工具回退表 → 未知默认最高。
+     *  显式语义键不在表内 ⇒ 同样默认最高（未注册的语义 = 注册表的知识缺口）。 */
+    classify(intent) {
+        return classifyIntent(intent);
+    },
+    /** Τ示范事件入账（approval.emitDemonstration 的旁路落点；绝不抛）：
+     *  approval-denied ⇒ adverse++（用户视此为不可逆的证据）；
+     *  approval-consumed ⇒ supportive++（特权正示范 —— 后验分母）。
+     *  语义键解析：显式 semantics ?? 由 tool/description 现场分类（与 classify
+     *  同一判定面 —— 事件落在哪个键上，分级就在哪个键上长证据）。 */
+    observeDemonstration(ev) {
+        try {
+            if (ev?.kind !== 'approval-denied' && ev?.kind !== 'approval-consumed')
+                return;
+            let key = cleanStr(ev?.semantics, 64) ?? null;
+            if (key === null || (!BUILTIN_LEVELS.has(key) && !extensionLevels.has(key))) {
+                const v = classifyIntent({ tool: ev?.tool, description: ev?.description, semantics: ev?.semantics });
+                key = v.semantics === 'unknown' ? null : v.semantics;
+            }
+            if (key === null)
+                return; // 键不可解析 ⇒ 证据不落账（不把噪声记成知识）
+            const cur = evidenceOf(key);
+            putEvidence(key, ev?.kind === 'approval-denied'
+                ? { ...cur, adverse: cur.adverse + 1 }
+                : { ...cur, supportive: cur.supportive + 1 });
+        }
+        catch { /* 旁路义务：教育失败绝不炸调用方 */ }
+    },
+    /** 持久负证据注入（failureMemory 之外的显式入账面；一次封顶 8 —— 单次
+     *  调用不得买断两级）。绝不抛。 */
+    applyNegativeEvidence(semantics, count) {
+        try {
+            const key = cleanStr(semantics, 64);
+            if (key === undefined)
+                return;
+            const cur = evidenceOf(key);
+            putEvidence(key, { ...cur, adverse: cur.adverse + clampCount(count, 8) });
+        }
+        catch { /* 防御式兜底 */ }
+    },
+    /** 部署显式定级（人的决策 —— 在线校准只升不降，降级走此面或 arm 扩展） */
+    setLevel(semantics, level) {
+        try {
+            const key = cleanStr(semantics, 64);
+            if (key === undefined || !isLevel(level))
+                return false;
+            extensionLevels.set(key, level);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    },
+    /** 武装（幂等）：注入扩展级别表 / failureMemory 负证据只读查询。绝不抛。 */
+    arm(opts = {}) {
+        try {
+            if (Array.isArray(opts.extensionLevels)) {
+                const m = new Map();
+                for (const e of opts.extensionLevels) {
+                    const key = cleanStr(e?.semantics, 64);
+                    if (key !== undefined && isLevel(e?.level))
+                        m.set(key, e.level);
+                }
+                extensionLevels = m;
+            }
+            if ('negativeEvidenceQuery' in opts) {
+                negativeEvidenceQuery = typeof opts.negativeEvidenceQuery === 'function' ? opts.negativeEvidenceQuery : null;
+            }
+        }
+        catch { /* 武装失败 = 保持现状（诚实降级） */ }
+    },
+    /** 透明化（测试/遥测面）：证据账快照（深拷贝 —— 新的在后） */
+    dumpEvidence() {
+        return [...evidenceStore.entries()].map(([semantics, ev]) => ({
+            semantics, adverse: ev.adverse, supportive: ev.supportive,
+            posterior: Math.round(posteriorMean(ev) * 1000) / 1000,
+        }));
+    },
+    /** 隔离缝（测试 beforeEach / 插件卸载）：扩展表/证据账/查询端口归零回缺省 */
+    reset() {
+        extensionLevels = new Map();
+        evidenceStore = new Map();
+        negativeEvidenceQuery = null;
+    },
+};

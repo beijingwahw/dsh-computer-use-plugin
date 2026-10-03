@@ -16,6 +16,14 @@
 /** 供应商线协议族 —— 决定请求体/鉴权/响应字段的方言 */
 export type ProviderProtocol = 'openai' | 'anthropic' | 'gemini';
 
+/**
+ * W2-8（C2 成本级联路由）：供应方成本档标注 —— 'cheap' = 池内最便宜档
+ * （级联便宜臂候选脑），'primary' = 主力档（缺省）。三用途正交律：本字段只被
+ * 级联路由（providers/cascade）消费，failover（池序切换）与 ensemble（合议庭）
+ * 语义完全不受影响；未标注/脏值一律视为 'primary'（零行为变化律）。
+ */
+export type ProviderTier = 'primary' | 'cheap';
+
 /** 视觉输入：裸 base64（不带 data: 前缀）+ 可选 mime（默认 image/jpeg） */
 export interface VisionImage {
   /** 图像裸 base64（无 data: 前缀、无换行） */
@@ -95,6 +103,12 @@ export interface VisionProvider {
   readonly model: string;
   /** 是否已配置（缺 apiKey 等 ⇒ false，chat 走 degraded 降级臂） */
   readonly configured: boolean;
+  /**
+   * W2-8（C2 成本级联路由）：成本档自报（模型自报成本的标注面）——
+   * 'cheap' = 便宜档候选；缺省/脏值 = 'primary'。可选字段：既有适配器
+   * 零改动即满足（undefined ⇒ 主力档，零行为变化律）。仅级联路由消费。
+   */
+  readonly tier?: ProviderTier;
   /** 视觉对话 —— 永不抛错（失败以 ok:false 表达） */
   chat(req: VisionChatRequest): Promise<VisionChatResult>;
   /**

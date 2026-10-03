@@ -24,6 +24,14 @@ export interface VlmCallRecord {
 /** 延迟分位窗口：只看最近 1000 个样本（最近邻秩法精确分位，无桶近似） */
 const LATENCY_WINDOW = 1000;
 
+/**
+ * 原始台账环形上限（P2a-2）：封顶 5000 条 —— 超限覆盖最老样本并计 dropped。
+ * 全库遍历报告点名：p50/p95 只看最近 1000 窗，但原始 ledger 数组只增不减，
+ * 长会话内存无界。上限取分位窗的 5 倍：exportJsonl 审计面保留足够近史，
+ * 内存恒有界；被覆盖的总量由 dropped 计数器诚实标注（不假装全量在场）。
+ */
+const LEDGER_CAP = 5000;
+
 /** 最近邻秩分位：sorted 升序，index = min(n−1, floor(q·n))；空样本诚实回 0 */
 function rankPercentile(sorted: readonly number[], q: number): number {
   if (sorted.length === 0) return 0;
@@ -32,12 +40,22 @@ function rankPercentile(sorted: readonly number[], q: number): number {
 }
 
 /**
- * VLM 调用计量器：append-only 台账 + 窗口化分位快照。
- * 写入 O(1)、读取时排序（读写频率不对称 —— 与 telemetry 的延迟环同一取舍，
- * 但此处保留全量台账供 exportJsonl 审计，分位数只取最近 1000 个样本）。
+ * VLM 调用计量器：环形有界台账（P2a-2：封顶 LEDGER_CAP=5000 条，溢出覆盖最老
+ * 样本并计 dropped）+ 窗口化分位快照。写入 O(1)（溢出时一次 shift，5000 元素内
+ * 开销可忽略）、读取时排序（读写频率不对称 —— 与 telemetry 的延迟环同一取舍）；
+ * 分位数只取最近 1000 个样本，exportJsonl 审计最近 5000 条 —— 「样本被覆盖」
+ * 由 dropped getter 诚实暴露（真总量 = summary().calls + dropped）。
  */
 export class VlmMeter {
   private records: VlmCallRecord[] = [];
+  /** P2a-2：被环形覆盖挤出的样本总数（诚实「样本被覆盖」账） */
+  private droppedCount = 0;
+
+  /** P2a-2：被覆盖样本数 —— summary() 的返回形状被既有测试 deepStrictEqual 锁死
+   *  （不可加字段），故独立 getter 暴露；reset 归零 */
+  get dropped(): number {
+    return this.droppedCount;
+  }
 
   /** 记入一次调用：非对象输入直接丢弃（诚实降级，绝不抛异常）；字段做有限性消毒 */
   record(rec: VlmCallRecord): void {
@@ -53,6 +71,11 @@ export class VlmMeter {
     if (Number.isFinite(rec.promptTokens)) copy.promptTokens = rec.promptTokens;
     if (Number.isFinite(rec.completionTokens)) copy.completionTokens = rec.completionTokens;
     if (typeof rec.error === 'string') copy.error = rec.error;
+    // P2a-2：环形封顶 —— 台账满时挤掉最老样本（dropped 诚实计数），长会话内存有界
+    if (this.records.length >= LEDGER_CAP) {
+      this.records.shift();
+      this.droppedCount++;
+    }
     this.records.push(copy);
   }
 
@@ -87,14 +110,17 @@ export class VlmMeter {
     };
   }
 
-  /** JSONL 审计导出：每行一个 JSON（空台账返回空串）；消费方可直接落盘/回放 */
+  /** JSONL 审计导出：每行一个 JSON（空台账返回空串）；消费方可直接落盘/回放。
+   *  P2a-2：导出的是环形保留窗（最近 LEDGER_CAP 条）—— 被覆盖的早期样本不在场，
+   *  总量见 dropped */
   exportJsonl(): string {
     return this.records.map(r => JSON.stringify(r)).join('\n');
   }
 
-  /** 清空台账（计量归零 —— 会话切换 / 测试隔离用） */
+  /** 清空台账（计量归零 —— 会话切换 / 测试隔离用；P2a-2：dropped 同步归零） */
   reset(): void {
     this.records = [];
+    this.droppedCount = 0;
   }
 }
 
@@ -240,4 +266,130 @@ export function jitterBackoff(attempt: number, baseMs = 500, capMs = 8000): numb
   const c = Number.isFinite(capMs) && capMs > 0 ? capMs : 8000;
   const upper = Math.min(c, b * 2 ** a);
   return Math.random() * upper;
+}
+
+// ─── W2-8（C2 成本级联路由）：按 tier 分列的级联台账 + 节省率 ───
+
+/**
+ * W2-8：级联节省率结构化快照 —— 全部字段可离线精确断言（统计诚实律：
+ * 负节省如实上报，不做钳零美化；级联比全主力更贵时 savedUnits/savingsRate
+ * 为负值，供宿主据实回撤策略）。
+ */
+export interface CascadeStats {
+  /** 级联队列（便宜臂实际承接的调用）= cheapHit + escalated */
+  eligible: number;
+  /** 便宜档答案通过确定性校验被采信的次数（省钱事件） */
+  cheapHit: number;
+  /** 便宜臂失败（调用败/JSON 坏/校验不过）升级主力重做的次数 */
+  escalated: number;
+  /** 便宜命中率 = cheapHit / eligible（eligible 0 时诚实记 0） */
+  hitRate: number;
+  /** 按 tier 分列：便宜档实际拨号次数与花费（相对价格单位） */
+  cheapTier: { calls: number; units: number };
+  /** 按 tier 分列：主力档在级联队列内的实际次数与花费（升级重做） */
+  primaryTier: { calls: number; units: number };
+  /** 级联队列实际总花费 = cheapTier.units + primaryTier.units */
+  spentUnits: number;
+  /** 反事实基线 = eligible × primaryPrice（不用级联时的全主力花费） */
+  baselineUnits: number;
+  /** 净节省 = baseline − spent（可为负 —— 统计诚实，不钳零） */
+  savedUnits: number;
+  /** 节省率 = saved / baseline（= 命中率 × 价差比；baseline 0 时记 0） */
+  savingsRate: number;
+  /** 分诊判高危直行主力的次数（级联队列之外，仅观测） */
+  primaryDirect: number;
+}
+
+/**
+ * W2-8（C2 成本级联路由）：级联台账 —— 按 tier 分列记账 + 节省率快照。
+ *
+ * 数学（与 CascadeStats 字段一一对应，可离线复算）：
+ *   - 队列 = cheapHit + escalated；基线 = 队列 × primaryPrice（反事实：不用
+ *     级联每次都走主力）；
+ *   - 实际花费 = 便宜实拨次数计 cheapPrice（便宜脑被熔断/未配置跳过而未拨号
+ *     ⇒ 计 0 —— 只记真实发生的钱）+ 升级重做计 primaryPrice；
+ *   - 节省率 = (baseline − spent) / baseline = 命中率 × (primaryPrice −
+ *     cheapPrice) / primaryPrice（便宜命中率 × 价差比，规格 C2-4 的定义式）。
+ *
+ * 记账事件由 VlmCascade（providers/cascade）在决策点如实上报；本类零网络零
+ * 时钟、绝不抛异常（脏入参安静消毒：非有限价格单位记 0）。
+ */
+export class CascadeMeter {
+  private readonly primaryPrice: number;
+  private cheapHitCount = 0;
+  private escalatedCount = 0;
+  private cheapCalls = 0;
+  private cheapUnitsTotal = 0;
+  private primaryCalls = 0;
+  private primaryUnitsTotal = 0;
+  private primaryDirectCount = 0;
+
+  /** @param opts.primaryPrice 主力档相对价格（反事实基线单价）；脏值回退 1 */
+  constructor(opts?: { primaryPrice?: number }) {
+    const p = Number(opts?.primaryPrice);
+    this.primaryPrice = Number.isFinite(p) && p > 0 ? p : 1;
+  }
+
+  /** 非负有限数消毒：脏值（NaN/负/∞）记 0（不抛铁律 + 只记真实的钱） */
+  private static cleanUnits(v: unknown): number {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  /** 便宜答案过校验被采信：cheapUnits = 便宜档本次实际花费；cheapCalled = 是否真拨号 */
+  recordCheapHit(cheapUnits: number, cheapCalled: boolean): void {
+    this.cheapHitCount++;
+    if (cheapCalled === true) {
+      this.cheapCalls++;
+      this.cheapUnitsTotal += CascadeMeter.cleanUnits(cheapUnits);
+    }
+  }
+
+  /** 升级主力重做：cheapUnits/cheapCalled 同上（未拨号计 0）；主力档按 primaryPrice 记账 */
+  recordEscalation(cheapUnits: number, cheapCalled: boolean): void {
+    this.escalatedCount++;
+    if (cheapCalled === true) {
+      this.cheapCalls++;
+      this.cheapUnitsTotal += CascadeMeter.cleanUnits(cheapUnits);
+    }
+    this.primaryCalls++;
+    this.primaryUnitsTotal += this.primaryPrice;
+  }
+
+  /** 分诊判高危直行主力（级联队列之外，仅观测计数） */
+  recordPrimaryDirect(): void {
+    this.primaryDirectCount++;
+  }
+
+  /** 结构化快照 —— 全字段纯函数推导，可离线精确断言 */
+  stats(): CascadeStats {
+    const eligible = this.cheapHitCount + this.escalatedCount;
+    const spentUnits = this.cheapUnitsTotal + this.primaryUnitsTotal;
+    const baselineUnits = eligible * this.primaryPrice;
+    const savedUnits = baselineUnits - spentUnits; // 统计诚实：可为负，不钳零
+    return {
+      eligible,
+      cheapHit: this.cheapHitCount,
+      escalated: this.escalatedCount,
+      hitRate: eligible > 0 ? this.cheapHitCount / eligible : 0,
+      cheapTier: { calls: this.cheapCalls, units: this.cheapUnitsTotal },
+      primaryTier: { calls: this.primaryCalls, units: this.primaryUnitsTotal },
+      spentUnits,
+      baselineUnits,
+      savedUnits,
+      savingsRate: baselineUnits > 0 ? savedUnits / baselineUnits : 0,
+      primaryDirect: this.primaryDirectCount,
+    };
+  }
+
+  /** 清空台账（测试隔离用） */
+  reset(): void {
+    this.cheapHitCount = 0;
+    this.escalatedCount = 0;
+    this.cheapCalls = 0;
+    this.cheapUnitsTotal = 0;
+    this.primaryCalls = 0;
+    this.primaryUnitsTotal = 0;
+    this.primaryDirectCount = 0;
+  }
 }

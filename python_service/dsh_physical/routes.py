@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import platform
 import sys
 import time
 from typing import Any, Literal
@@ -16,12 +17,16 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from . import shm as shm_module
+from .android import AndroidController, parse_surface_id
+from .audio import audio_events_payload
 from .auth import ALL_CAPS
 from .config import AppConfig
 from .errors import ErrorKind, PhysicalError, safe_call, success
+from .hid import HidController
 from .input import InputController
 from .screen import ScreenCapture, list_displays
 from .ui_tree import UIFunnel
+from .uvc import UvcController
 from .window import WindowManager
 
 router = APIRouter(prefix="/v1")
@@ -35,29 +40,37 @@ class ClickRequest(BaseModel):
     y: float = Field(ge=0.0, le=1.0)
     button: Literal["left", "right", "middle"] = "left"
     dry_run: bool = False
+    # W4-5 移动 Surface：'host:<i>' = 第 i 主机显示器（Σ-5 display 的泛化）、
+    # 'android:<serial>' = adb 设备。None = 主机现状（兼容铁律）。
+    # 畸形 id 由 parse_surface_id 判 INVALID_ARGS（单一事实源，模型不重复校验）。
+    surface: str | None = Field(default=None, max_length=256)
 
 
 class TypeRequest(BaseModel):
     text: str = Field(min_length=0, max_length=10_000)
     clear_first: bool = False
     dry_run: bool = False
+    surface: str | None = Field(default=None, max_length=256)  # W4-5
 
 
 class ScrollRequest(BaseModel):
     direction: Literal["up", "down", "left", "right"]
     amount: int = Field(ge=1, le=1000)
     dry_run: bool = False
+    surface: str | None = Field(default=None, max_length=256)  # W4-5
 
 
 class HotkeyRequest(BaseModel):
     keys: list[str] = Field(min_length=1, max_length=5)
     dry_run: bool = False
+    surface: str | None = Field(default=None, max_length=256)  # W4-5
 
 
 class DragRequest(BaseModel):
     start: dict[str, float]
     end: dict[str, float]
     dry_run: bool = False
+    surface: str | None = Field(default=None, max_length=256)  # W4-5
 
 
 class MoveRequest(BaseModel):
@@ -67,6 +80,7 @@ class MoveRequest(BaseModel):
     y: float = Field(ge=0.0, le=1.0)
     duration_ms: float = Field(default=0.0, ge=0.0, le=2000.0)
     dry_run: bool = False
+    surface: str | None = Field(default=None, max_length=256)  # W4-5（android 无悬停概念 → 诚实拒绝）
 
 
 class HitTestRequest(BaseModel):
@@ -103,6 +117,10 @@ class ScreenshotRequest(BaseModel):
     # （兼容铁律）。选定后 region/overlay 归一化基准 = 所选显示器矩形；
     # 非 Windows 平台请求 ⇒ 服务端诚实降级主屏并在响应附 note。
     display: int | None = None
+    # W4-5 移动 Surface：display 的字符串泛化 —— 'host:<i>' ≡ display=i、
+    # 'android:<serial>' 路由到 scrcpy/adb 帧源。与 display 并存时 surface 获胜；
+    # region/overlay 归一化基准 = 所选 surface 的矩形（契约不破）。
+    surface: str | None = Field(default=None, max_length=256)
 
 
 class FrameStatsRequest(BaseModel):
@@ -132,6 +150,65 @@ class SwitchWindowRequest(BaseModel):
     keyword: str = Field(min_length=1, max_length=200)
 
 
+# ─── W5-1（W4-6 落盘）：L2 零 API 设备面（UVC 采集卡 / HID 棒）请求模型 ───
+# 字段方言对齐 ScreenshotRequest / ClickRequest 等既有模板（归一化 [0,1]
+# 契约、dry_run 调用级覆盖、gate 变化门控）—— 硬件缺席 ⇒ 控制器层诚实
+# unsupported 信封，模型层不重复校验。
+
+
+class UvcCaptureRequest(BaseModel):
+    """UVC 采集卡取帧请求（W5-1：对齐 ScreenshotRequest 的可用字段子集）。"""
+    format: Literal["png", "jpeg"] = "png"
+    quality: int | None = Field(default=None, ge=0, le=100)
+    region: RegionSpec | None = None
+    gate: dict | None = None             # {dhash_ref, distance}（screen.py 同语义）
+    want_hashes: bool = False
+    max_width: int | None = Field(default=None, ge=64, le=8192)
+
+
+class HidClickRequest(BaseModel):
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    button: Literal["left", "right", "middle"] = "left"
+    dry_run: bool = False
+
+
+class HidMoveRequest(BaseModel):
+    """HID 绝对移动请求（W5-1）。
+
+    无 ``duration_ms``：HID 绝对鼠标是单帧瞬移（无平滑移动概念）——
+    参数缺席即诚实（伪装支持 = 谎报）。
+    """
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    dry_run: bool = False
+
+
+class HidDragRequest(BaseModel):
+    start: dict[str, float]
+    end: dict[str, float]
+    dry_run: bool = False
+
+
+class HidScrollRequest(BaseModel):
+    direction: Literal["up", "down", "left", "right"]
+    amount: int = Field(ge=1, le=1000)
+    dry_run: bool = False
+
+
+class HidHotkeyRequest(BaseModel):
+    keys: list[str] = Field(min_length=1, max_length=5)
+    dry_run: bool = False
+
+
+class HidTypeRequest(BaseModel):
+    text: str = Field(min_length=0, max_length=10_000)
+    clear_first: bool = False
+    dry_run: bool = False
+    # auto: 纯 ASCII 短文本逐键；长文/非 ASCII 改走 Ctrl+V 粘贴（调用方备剪贴板）
+    mode: Literal["auto", "keys", "paste"] = "auto"
+
+
 # ─── 控制器容器（启动期注入）───
 
 _controllers: dict[str, Any] = {}
@@ -143,8 +220,17 @@ def set_controllers(
     funnel_ctrl: UIFunnel,
     window_ctrl: WindowManager,
     config: AppConfig,
+    android_ctrl: AndroidController | None = None,
+    uvc: UvcController | None = None,
+    hid: HidController | None = None,
 ) -> None:
-    """启动期由 server 注入控制器实例。"""
+    """启动期由 server 注入控制器实例。
+
+    W4-5：``android_ctrl`` 注入移动 Surface 控制器（缺席 = 移动面不可用，
+    相关端点诚实降级/拒绝 —— 兼容旧装配路径）。
+    W5-1（W4-6 落盘）：``uvc``/``hid`` 注入 L2 零 API 设备面控制器
+    （UVC 采集卡 / HID 棒；缺席 = 相关端点诚实拒绝，不影响既有端点）。
+    """
     _controllers.clear()
     _controllers.update({
         "input": input_ctrl,
@@ -153,6 +239,12 @@ def set_controllers(
         "window": window_ctrl,
         "config": config,
     })
+    if android_ctrl is not None:
+        _controllers["android"] = android_ctrl
+    if uvc is not None:
+        _controllers["uvc"] = uvc
+    if hid is not None:
+        _controllers["hid"] = hid
 
 
 def _get(name: str) -> Any:
@@ -162,6 +254,158 @@ def _get(name: str) -> Any:
             f"controller {name!r} not initialized",
         )
     return _controllers[name]
+
+
+# ─── W4-5 移动 Surface：surface id 路由（host 显示器 / android 设备）───
+
+
+def _android_ctrl() -> AndroidController:
+    """android 控制器（缺席 = 移动面未装配 ⇒ 诚实拒绝，不静默走主机）。"""
+    ctrl = _controllers.get("android")
+    if ctrl is None:
+        raise PhysicalError(
+            ErrorKind.INVALID_ARGS,
+            "android surface requested but android controller not initialized "
+            "(mobile surface unavailable in this deployment)",
+        )
+    return ctrl
+
+
+def _run_android(fn: Any, /, *args: Any) -> Any:
+    """android 同步控制器方法 → executor（子进程阻塞不进事件循环）。"""
+    return asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+
+# ─── W5-1（W4-6 落盘）：L2 零 API 设备面控制器取用（缺席 = 诚实拒绝）───
+
+
+def _uvc_ctrl() -> UvcController:
+    """uvc 控制器（缺席 = 采集面未装配 ⇒ 诚实失败，不静默降级主机截屏）。"""
+    ctrl = _controllers.get("uvc")
+    if ctrl is None:
+        raise PhysicalError(
+            ErrorKind.SCREEN_CAPTURE_FAILED,
+            "uvc capture requested but uvc controller not initialized "
+            "(capture-card surface unavailable in this deployment)",
+        )
+    return ctrl
+
+
+def _hid_ctrl() -> HidController:
+    """hid 控制器（缺席 = HID 面未装配 ⇒ 诚实拒绝，不静默改走主机 pyautogui）。"""
+    ctrl = _controllers.get("hid")
+    if ctrl is None:
+        raise PhysicalError(
+            ErrorKind.INVALID_ARGS,
+            "hid endpoint called but hid controller not initialized "
+            "(hid stick unavailable in this deployment)",
+        )
+    return ctrl
+
+
+# ─── W5-1（W4-8 落盘）：声学通道缓存态（health 读，/v1/audio_events 写）───
+# health 高频探活不得触发 WASAPI 建链 —— 只读此缓存；探测事实由端点首调落账。
+_audio_state: dict = {"probed": False, "available": None, "backend": None}
+
+
+async def _host_remap(display_idx: int | None, x: float, y: float) -> tuple[float, float, str | None]:
+    """``host:<i>`` 选定后，归一化坐标换算到 InputController 的主屏基准。
+
+    InputController 以主屏尺寸归一化（pyautogui 坐标 = 全屏虚拟坐标系，
+    主屏原点即虚拟原点）⇒ 目标显示器矩形上的 (x,y) 先映射虚拟像素、再除以
+    主屏宽高。非 Windows / 越界索引 ⇒ 与 Σ-5 同律：诚实降级主屏 + note
+    （Windows 越界 ⇒ INVALID_ARGS —— 枚举是事实源）。
+    """
+    if display_idx is None:
+        return x, y, None
+    if platform.system() != "Windows":
+        return x, y, (
+            f"surface host:{display_idx} ignored: cross-screen input is Windows-only; "
+            "degraded to primary"
+        )
+    screen_ctrl: ScreenCapture = _get("screen")
+    displays = await list_displays(screen_ctrl)
+    if display_idx < 0 or display_idx >= len(displays):
+        raise PhysicalError(
+            ErrorKind.INVALID_ARGS,
+            f"invalid surface host:{display_idx}: {len(displays)} display(s) enumerated "
+            f"(valid indices: 0..{len(displays) - 1})",
+        )
+    d = displays[display_idx]
+    primary = next((p for p in displays if p.get("primary")), displays[0])
+    nx = (d["x"] + x * d["width"]) / max(1, primary["width"])
+    ny = (d["y"] + y * d["height"]) / max(1, primary["height"])
+    return nx, ny, None
+
+
+def _with_surface(result: dict, surface: str | None, note: str | None) -> dict:
+    """动作回执附加 surface 回显与降级 note（仅 surface 请求在场时 —— 兼容铁律）。"""
+    if surface is None:
+        return result
+    out = {**result, "surface": surface}
+    if note:
+        out["note"] = note
+    return out
+
+
+async def _surfaces_report() -> dict:
+    """W4-5：surface 清单（health 的能力申报 —— 永不抛，异常诚实第一条）。
+
+    host：显示器枚举（与 /displays、display 索引同一事实源）；android：控制器
+    的清单**缓存**（未探测过 = 尚无事实，如实申报 unknown —— health 高频探活
+    不能每次都跑 adb 子进程；现场探测走 /v1/devices）。
+    """
+    report: dict = {"host": [], "android": [], "android_probed": False}
+    try:
+        screen_ctrl: ScreenCapture = _get("screen")
+        displays = await list_displays(screen_ctrl)
+        report["host"] = [f"host:{i}" for i in range(len(displays))]
+    except Exception:  # noqa: BLE001 —— health 绝不抛
+        report["host"] = []
+    android = _controllers.get("android")
+    if android is not None:
+        try:
+            cached = await asyncio.get_running_loop().run_in_executor(
+                None, android.cached_inventory,
+            )
+            if cached is not None:
+                report["android"] = [d["surface_id"] for d in cached.get("devices", [])]
+                report["android_probed"] = True
+                if cached.get("degraded"):
+                    report["android_degraded_reason"] = cached.get("reason")
+        except Exception:  # noqa: BLE001
+            pass
+    return report
+
+
+def _hardware_faces() -> dict:
+    """W5-1：uvc/hid/audio 硬件面能力申报（health 永不抛、不阻塞铁律）。
+
+    只读缓存态：uvc/hid 的 ``device_info()`` 为纯读取（backend 未解析 =
+    如实报 unresolved，不触发设备打开）；audio 读 ``_audio_state`` 缓存
+    （未探测过 = 如实报未探测，不在探活路径上建 WASAPI 链）。
+    """
+    faces: dict = {}
+    uvc = _controllers.get("uvc")
+    if uvc is None:
+        faces["uvc"] = {"initialized": False,
+                        "reason": "uvc controller not assembled (capture-card surface unavailable)"}
+    else:
+        try:
+            faces["uvc"] = {"initialized": True, **uvc.device_info()}
+        except Exception as e:  # noqa: BLE001 —— health 绝不抛
+            faces["uvc"] = {"initialized": True, "error": f"{type(e).__name__}: {e}"}
+    hid = _controllers.get("hid")
+    if hid is None:
+        faces["hid"] = {"initialized": False,
+                        "reason": "hid controller not assembled (hid stick unavailable)"}
+    else:
+        try:
+            faces["hid"] = {"initialized": True, **hid.device_info()}
+        except Exception as e:  # noqa: BLE001 —— health 绝不抛
+            faces["hid"] = {"initialized": True, "error": f"{type(e).__name__}: {e}"}
+    faces["audio"] = dict(_audio_state)
+    return faces
 
 
 # ─── /v1/health：探活（无需 Cap Token，由 auth.allow_no_token_endpoints 放行）───
@@ -210,6 +454,13 @@ async def health(nonce: str | None = None) -> dict:
         "platform": sys.platform,
         "python": platform.python_version(),
         "screen": screen_info,
+        # W4-5 移动 Surface：能力申报 —— host 显示器 + android 设备统一入列
+        # 虚拟显示器（surface id 方言）。android 部分读缓存（health 高频探活
+        # 不得每次都跑 adb 子进程 —— 30s 清单缓存 / /v1devices 现场探测）。
+        "surfaces": await _surfaces_report(),
+        # W5-1（W4-6/W4-8 落盘）：L2 零 API 设备面 + 声学通道的能力申报 ——
+        # 读缓存态（backend/frames/已探测事实），不触发任何设备打开或建链。
+        "hardware": _hardware_faces(),
         # J 纪元修正：capabilities 语义撞名 —— 旧实现返回控制器名列表，
         # 与 auth.ALL_CAPS 的能力位图语义冲突，误导 Node 端 CapabilityCache。
         # 现在 capabilities = 能力位图；控制器清单另立 controllers 字段。
@@ -249,35 +500,98 @@ async def health(nonce: str | None = None) -> dict:
 @router.post("/click_mouse")
 @safe_call
 async def click_mouse(req: ClickRequest) -> dict:
-    ctrl: InputController = _get("input")
+    # W4-5：surface 路由 —— android → adb input tap/长按；host:<i> → 坐标
+    # 换算到目标显示器后走主机 pyautogui；None → 主机现状（字节兼容）。
+    if req.surface is not None:
+        kind, key = parse_surface_id(req.surface)
+        if kind == "android":
+            android = _android_ctrl()
+            return await _run_android(
+                android.tap, str(key), req.x, req.y, req.button, req.dry_run,
+            )
+        x, y, note = await _host_remap(int(key), req.x, req.y)  # type: ignore[arg-type]
+        ctrl: InputController = _get("input")
+        return _with_surface(
+            await ctrl.click(x, y, req.button, dry_run=req.dry_run), req.surface, note,
+        )
+    ctrl = _get("input")
     return await ctrl.click(req.x, req.y, req.button, dry_run=req.dry_run)
 
 
 @router.post("/type_text")
 @safe_call
 async def type_text(req: TypeRequest) -> dict:
-    ctrl: InputController = _get("input")
+    if req.surface is not None:
+        kind, key = parse_surface_id(req.surface)
+        if kind == "android":
+            android = _android_ctrl()
+            return await _run_android(
+                android.type_text, str(key), req.text, req.clear_first, req.dry_run,
+            )
+        x, y, note = await _host_remap(int(key), 0.5, 0.5)  # type: ignore[arg-type]
+        del x, y  # 打字与坐标无关；host:<i> 只需校验索引合法并如实降级申报
+        ctrl: InputController = _get("input")
+        return _with_surface(
+            await ctrl.type_text(req.text, req.clear_first, dry_run=req.dry_run),
+            req.surface, note,
+        )
+    ctrl = _get("input")
     return await ctrl.type_text(req.text, req.clear_first, dry_run=req.dry_run)
 
 
 @router.post("/scroll_page")
 @safe_call
 async def scroll_page(req: ScrollRequest) -> dict:
-    ctrl: InputController = _get("input")
+    if req.surface is not None:
+        kind, key = parse_surface_id(req.surface)
+        if kind == "android":
+            android = _android_ctrl()
+            return await _run_android(
+                android.scroll, str(key), req.direction, req.amount, req.dry_run,
+            )
+        _x, _y, note = await _host_remap(int(key), 0.5, 0.5)  # type: ignore[arg-type]
+        ctrl: InputController = _get("input")
+        return _with_surface(
+            await ctrl.scroll(req.direction, req.amount, dry_run=req.dry_run),
+            req.surface, note,
+        )
+    ctrl = _get("input")
     return await ctrl.scroll(req.direction, req.amount, dry_run=req.dry_run)
 
 
 @router.post("/press_hotkey")
 @safe_call
 async def press_hotkey(req: HotkeyRequest) -> dict:
-    ctrl: InputController = _get("input")
+    if req.surface is not None:
+        kind, key = parse_surface_id(req.surface)
+        if kind == "android":
+            android = _android_ctrl()
+            return await _run_android(android.key, str(key), req.keys, req.dry_run)
+        _x, _y, note = await _host_remap(int(key), 0.5, 0.5)  # type: ignore[arg-type]
+        ctrl: InputController = _get("input")
+        return _with_surface(
+            await ctrl.press_hotkey(req.keys, dry_run=req.dry_run), req.surface, note,
+        )
+    ctrl = _get("input")
     return await ctrl.press_hotkey(req.keys, dry_run=req.dry_run)
 
 
 @router.post("/drag_mouse")
 @safe_call
 async def drag_mouse(req: DragRequest) -> dict:
-    ctrl: InputController = _get("input")
+    if req.surface is not None:
+        kind, key = parse_surface_id(req.surface)
+        if kind == "android":
+            android = _android_ctrl()
+            return await _run_android(android.drag, str(key), req.start, req.end, None, req.dry_run)
+        ctrl: InputController = _get("input")
+        sx, sy, note = await _host_remap(int(key), float(req.start["x"]), float(req.start["y"]))  # type: ignore[arg-type]
+        ex, ey, _n = await _host_remap(int(key), float(req.end["x"]), float(req.end["y"]))  # type: ignore[arg-type]
+        return _with_surface(
+            await ctrl.drag({"x": sx, "y": sy}, {"x": ex, "y": ey}, dry_run=req.dry_run),
+            req.surface, note,
+        )
+    ctrl = _get("input")
     return await ctrl.drag(req.start, req.end, dry_run=req.dry_run)
 
 
@@ -289,8 +603,25 @@ async def move_mouse(req: MoveRequest) -> dict:
     Z-1 世界行动引擎：探针悬停 → 读光标形态 → 观察悬停重绘 → 复位。
     独立成端点（而非复用 click）是因为探针需要「移动但绝不按下」的
     零破坏语义 —— 复用 click 路径总有一天会带上按钮参数穿进来。
+
+    W4-5：android surface ⇒ 诚实拒绝（触屏无「悬停不按下」概念 ——
+    input swipe/motionevent 都会留下按压痕迹，伪装悬停 = 谎报）。
     """
-    ctrl: InputController = _get("input")
+    if req.surface is not None:
+        kind, _key = parse_surface_id(req.surface)
+        if kind == "android":
+            raise PhysicalError(
+                ErrorKind.INVALID_ARGS,
+                "move_mouse unsupported on android surface: touch input has no "
+                "hover-without-press semantics (honest refusal, no emulation)",
+            )
+        x, y, note = await _host_remap(int(_key), req.x, req.y)  # type: ignore[arg-type]
+        ctrl: InputController = _get("input")
+        return _with_surface(
+            await ctrl.move(x, y, duration_ms=req.duration_ms, dry_run=req.dry_run),
+            req.surface, note,
+        )
+    ctrl = _get("input")
     return await ctrl.move(req.x, req.y, duration_ms=req.duration_ms, dry_run=req.dry_run)
 
 
@@ -311,6 +642,7 @@ async def take_screenshot(req: ScreenshotRequest) -> dict:
         gate=req.gate, keep_frame=req.keep_frame, meta_only=req.meta_only,
         want_salience=req.want_salience,
         display=req.display,
+        surface=req.surface,
     )
     if handle is None:
         # captured_at 单位与 ShmHandle 对齐（unix 毫秒 —— 旧实现误用秒级 time.time()，
@@ -459,6 +791,104 @@ async def displays() -> dict:
     return {"displays": result}
 
 
+@router.get("/devices")
+@safe_call
+async def devices() -> dict:
+    """W4-5：adb 设备清单（移动 Surface 枚举）—— ``{devices, degraded}``。
+
+    每台设备：``{serial, state, surface_id, resolution?}``。真机/adb 缺席 ⇒
+    空清单 + ``degraded=True`` + 真实原因（诚实降级铁律 —— 不静默、不谎报）。
+    控制器为同步（adb 子进程阻塞）⇒ executor 内执行。
+    """
+    android = _controllers.get("android")
+    if android is None:
+        return {
+            "devices": [],
+            "degraded": True,
+            "reason": "android controller not initialized (mobile surface unavailable)",
+        }
+    return await asyncio.get_running_loop().run_in_executor(None, android.list_devices)
+
+
+# ─── W5-1（W4-6 落盘）：L2 零 API 设备面端点（UVC 眼睛 / HID 手）───
+# 硬件缺席安全律：控制器构造零硬件副作用（懒解析帧源/懒开串口）；端点调用
+# 在无硬件/无依赖时由控制器抛 PhysicalError 信封（safe_call ⇒ 200+failure），
+# 绝不带崩服务。safe_call 方言与 input 端点模板逐字对齐。
+
+
+@router.post("/uvc/capture")
+@safe_call
+async def uvc_capture(req: UvcCaptureRequest) -> dict:
+    """UVC 采集卡取帧 —— 校准 → dhash 门控 → PNG/JPEG 编码（base64 内联）。
+
+    cv2 缺席 / 无采集卡 ⇒ 诚实 ``screen_capture_failed`` 信封（附 remediation），
+    绝不静默降级主机截屏（帧源语义不同 —— 坐标基准污染）。
+    """
+    import base64
+
+    ctrl = _uvc_ctrl()
+    data, extras = await ctrl.capture(
+        req.format, req.quality,
+        req.region.model_dump() if req.region else None,
+        gate=req.gate, want_hashes=req.want_hashes, max_width=req.max_width,
+    )
+    out = dict(extras)
+    out["format"] = req.format
+    out["transport"] = "base64" if data is not None else "none"
+    out["image_base64"] = base64.b64encode(data).decode("ascii") if data is not None else ""
+    return out
+
+
+@router.post("/hid/click")
+@safe_call
+async def hid_click(req: HidClickRequest) -> dict:
+    """HID 棒点击（绝对鼠标两帧）—— 零 API 设备面的「手」。"""
+    ctrl = _hid_ctrl()
+    return await ctrl.click(req.x, req.y, req.button, dry_run=req.dry_run)
+
+
+@router.post("/hid/move")
+@safe_call
+async def hid_move(req: HidMoveRequest) -> dict:
+    """HID 棒绝对移动（单帧，无点击）—— 悬停/巡视的零 API 化。"""
+    ctrl = _hid_ctrl()
+    return await ctrl.move(req.x, req.y, dry_run=req.dry_run)
+
+
+@router.post("/hid/drag")
+@safe_call
+async def hid_drag(req: HidDragRequest) -> dict:
+    """HID 棒拖拽（移动→按下→移动→释放四帧）。"""
+    ctrl = _hid_ctrl()
+    return await ctrl.drag(req.start, req.end, dry_run=req.dry_run)
+
+
+@router.post("/hid/scroll")
+@safe_call
+async def hid_scroll(req: HidScrollRequest) -> dict:
+    """HID 棒滚轮（垂直走绝对帧 wheel 字节，水平走相对帧）。"""
+    ctrl = _hid_ctrl()
+    return await ctrl.scroll(req.direction, req.amount, dry_run=req.dry_run)
+
+
+@router.post("/hid/hotkey")
+@safe_call
+async def hid_hotkey(req: HidHotkeyRequest) -> dict:
+    """HID 棒组合键（1-5 键对称按下/释放）。"""
+    ctrl = _hid_ctrl()
+    return await ctrl.press_hotkey(req.keys, dry_run=req.dry_run)
+
+
+@router.post("/hid/type_text")
+@safe_call
+async def hid_type_text(req: HidTypeRequest) -> dict:
+    """HID 棒文本注入（auto: ASCII 逐键 / 长文非 ASCII 走 Ctrl+V 粘贴）。"""
+    ctrl = _hid_ctrl()
+    return await ctrl.type_text(
+        req.text, clear_first=req.clear_first, dry_run=req.dry_run, mode=req.mode,
+    )
+
+
 @router.post("/frame_stats")
 @safe_call
 async def frame_stats(req: FrameStatsRequest) -> dict:
@@ -495,6 +925,27 @@ async def frame_diff(req: FrameDiffRequest) -> dict:
     if annotated is not None:
         result["annotated_image_base64"] = base64.b64encode(annotated).decode("ascii")
     return result
+
+
+@router.get("/audio_events")
+@safe_call
+async def audio_events() -> dict:
+    """W5-1（W4-8 落盘）：系统音频非语义事件 —— L4 声学证据通道。
+
+    ``audio_events_payload`` 防御式绝不抛（通道不可用 ⇒ ``available=False``
+    + 真实 reason，``event=None`` 诚实缺席）；建链/读环是阻塞 COM 调用
+    ⇒ executor 内执行，不进事件循环。首调事实落 ``_audio_state`` 缓存
+    （health 能力申报读缓存，不在探活路径上建链）。
+    """
+    loop = asyncio.get_running_loop()
+    payload = await loop.run_in_executor(None, audio_events_payload)
+    _audio_state.update({
+        "probed": True,
+        "available": payload.get("available"),
+        "backend": payload.get("backend"),
+        "probed_at": int(time.time() * 1000),
+    })
+    return payload
 
 
 # ─── /v1/shm/{name}：共享内存显式释放（DELETE 方法）───

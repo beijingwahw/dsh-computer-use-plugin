@@ -233,8 +233,6 @@ export async function ringHash(buffer) {
         const energy = rings[k].reduce((a, b) => a + b * b, 0);
         const total = rings.reduce((a, rs) => a + rs.reduce((x, y2) => x + y2 * y2, 0), 0) || 1;
         bits += energy / total > 1 / K ? '1' : '0';
-        void above;
-        void q3;
     }
     // 8 环 × 8 位 = 64：目前每环 4 位 × 8 = 32 —— 补 32 位：环间差分符号
     for (let k = 0; k < K; k++) {

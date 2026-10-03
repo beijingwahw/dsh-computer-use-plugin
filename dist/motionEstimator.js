@@ -30,16 +30,12 @@ export function estimateRowShift(rowsA, rowsB, searchRange = 16) {
     const n = Math.min(rowsA.length, rowsB.length);
     if (n < 4)
         return { shift: 0, residual: 1, bestInteger: 0 };
-    let bestS = 0, bestE = Infinity, secondE = Infinity;
+    let bestS = 0, bestE = Infinity;
     for (let s = -searchRange; s <= searchRange; s++) {
         const e = misalignError(rowsA, rowsB, s);
         if (e < bestE) {
-            secondE = bestE;
             bestE = e;
             bestS = s;
-        }
-        else if (e < secondE) {
-            secondE = e;
         }
     }
     // 尺度归一：行亮度均值的平均量级（避免残差依赖画面明暗）
@@ -71,6 +67,19 @@ export function judgeScroll(est, direction) {
         directionConsistent: moved ? Math.sign(est.bestInteger) === expectedSign : null,
         atBoundary: est.residual < 0.35 && Math.abs(est.shift) < 0.5,
     };
+}
+/**
+ * W1-1（A5 稳态门控）：内容是否仍在平移 —— 稳态判定的运动维度一步判决。
+ * 与 judgeScroll 的 effective 同尺（|shift| ≥ 1 行且平移假设成立），但方向无关：
+ * 稳态只问「还在动吗」，不问往哪动。脏输入（NaN/Infinity）一律 false。
+ */
+export function stillTranslating(est) {
+    if (!est || typeof est !== 'object')
+        return false;
+    return (typeof est.shift === 'number' && Number.isFinite(est.shift) &&
+        Math.abs(est.shift) >= 1 &&
+        typeof est.residual === 'number' && Number.isFinite(est.residual) &&
+        est.residual < 0.5);
 }
 function avg(xs) {
     return xs.reduce((a, b) => a + b, 0) / (xs.length || 1);

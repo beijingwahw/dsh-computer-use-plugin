@@ -202,13 +202,16 @@ test('Σ-3②: 续跑后半世界（含关门标记、永不含开门标记）�
     assert.equal(out.state_anchor.criteria.met, 2);
     assert.equal(out.state_anchor.criteria.total, 2);
 
-    // 档案续用原 token：状态翻 done，步账累计（前 3 + 续 3），轨迹不断血脉
+    // 档案续用原 token：状态翻 done，步账累计，轨迹不断血脉。
+    // W2-0（接线修律）：后半 2 步即达成 —— 焦点短路步携带零成本判据核对
+    //（declare 同律：感知快照 textDigest 子串匹配），「关门标记」在第 2 步的
+    // 短路免截屏路径即核得，快于旧「第 3 次点击抽查」一拍（旧断言 6 = 3+3）。
     const rec = pilotStoreFor(makeConfig()).load(tokenA);
     assert.ok(rec);
     assert.equal(rec!.status, 'done');
     assert.equal(rec!.phase, 'achieved');
-    assert.equal(rec!.steps, 6, '断点前后同档累计：3 + 3');
-    assert.equal(rec!.trajectory.length, 6);
+    assert.equal(rec!.steps, 5, '断点前后同档累计：3 + 2（短路步免费判据提前一拍）');
+    assert.equal(rec!.trajectory.length, 5);
     assert.ok(
       rec!.trajectory.slice(0, 3).every(s => s.label === '开门标记'),
       '前半轨迹原样保留（断点前步账不动）',

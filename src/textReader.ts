@@ -22,6 +22,15 @@ import { kernelRegistry } from './kernel/registry';
 export interface OcrWord {
   text: string;
   confidence: number;
+  /** P2a-3（置信诚实）：true = confidence 是假设值而非测量值。双态语义
+   *  （缝隙闭合「词级真值跨线」PyS 兑现 P2a 声明的语义位）：
+   *    真值态 —— 服务端 L2 路径的 UIElement.score 在场且有限 ⇒ confidence
+   *      取真值（[0,1]×100 换算到 0-100 方言），本字段**缺席**（有测量值
+   *      不标假设）；legacy tesseract 路径有词级真值，同缺席。
+   *    旧态 —— score 缺席/非数/非有限（NaN/±∞）⇒ 90 + 本字段 true
+   *      （P2a-3 方言逐字节维持 —— 真值缺席时诚实标记假设值）。
+   *  下游按置信度过滤时可据此区分「测量值」与「假设值」的语义。 */
+  confidenceAssumed?: boolean;
   bbox_normalized: { x0: number; y0: number; x1: number; y1: number };
   center_normalized: { x: number; y: number };
 }
@@ -85,19 +94,34 @@ async function readScreenTextServer(region?: { x: number; y: number; width: numb
   serverOcrFailedAt = 0;
   const words: OcrWord[] = tree.elements
     .filter(el => el.source === 'L2-ocr')
-    .map(el => ({
-      text: el.name,
-      // 服务端已按 score≥0.5 过滤；这里给固定置信度（词级分数未跨线传）
-      confidence: 90,
-      bbox_normalized: {
-        x0: el.rect.x, y0: el.rect.y,
-        x1: el.rect.x + el.rect.width, y1: el.rect.y + el.rect.height,
-      },
-      center_normalized: {
-        x: el.rect.x + el.rect.width / 2,
-        y: el.rect.y + el.rect.height / 2,
-      },
-    }));
+    .map(el => {
+      // 缝隙闭合：词级真值跨线（PyS）—— 双态语义（P2a-3 的语义位兑现：
+      // 「python 端加 score 字段后此语义位可接真值」）：
+      //   真值态：UIElement.score 在场且为有限数 ⇒ 消毒律夹 [0,1] 后 ×100 换算
+      //     到 confidence 的 0-100 方言（tesseract 同尺度；autonomy/runtime.ts
+      //     消费按 confidence/100 归一），confidenceAssumed 缺席 —— 有真值
+      //     就不标假设；
+      //   旧态：score 缺席 / 非数 / 非有限（NaN/±∞）⇒ 90 + confidenceAssumed:
+      //     true 逐字节维持 P2a-3 方言（旧服务/旧帧真值缺席的诚实降级臂）。
+      const s = el.score;
+      const truth = typeof s === 'number' && Number.isFinite(s)
+        ? Math.min(Math.max(s, 0), 1) * 100
+        : null;
+      return {
+        text: el.name,
+        confidence: truth !== null ? truth : 90,
+        // P2a-3 语义位：仅旧态在场（真值态缺席 —— 有测量值不标假设值）
+        ...(truth === null ? { confidenceAssumed: true } : {}),
+        bbox_normalized: {
+          x0: el.rect.x, y0: el.rect.y,
+          x1: el.rect.x + el.rect.width, y1: el.rect.y + el.rect.height,
+        },
+        center_normalized: {
+          x: el.rect.x + el.rect.width / 2,
+          y: el.rect.y + el.rect.height / 2,
+        },
+      };
+    });
   return { text: words.map(w => w.text).join(' '), words };
 }
 

@@ -5,12 +5,17 @@
 //        「一机学习，本机万次共享」现在就成立。
 //   层二 联邦协议 —— 匿名经验包（只有哈希与统计，零截图零文本，隐私结构不可泄密）。
 //        swarmEndpoint 为空 ⇒ 零网络行为（与 localVisionApi 同款优雅降级）。
+//        W4-2（G3 策略联邦）：packet 升 v2 —— 可选技能联邦段（指纹+参数统计摘要，
+//        经注入的提供者铸造，见 attachSkillFederation / src/skillFederation.ts）。
 //   层三 UI 漂移预测 —— 数字孪生务实版：记录「坐标失效→重定位成功」的漂移增量，
 //        下次会话 predict() 预补偿。官方更新前的全局预测需群体中心（未来基建）。
 // 工程铁律：上报异步非阻塞（fire-and-forget + AbortSignal.timeout），
 //        热路径（截图/点击）永不 await 网络 —— 遥测是旁路义务，不是主路债主。
 import { journal, type JournalEntry } from './journal';
 import { Telemetry } from './telemetry';
+// W4-2（G3 策略联邦）：仅类型借用（编译期擦除）—— 技能联邦段的载荷与账目形状。
+// 运行时零依赖（skillFederation → swarm 是单向的；本行不产生模块环）。
+import type { SkillFederationUpload, SkillFederationLedgerStats } from './skillFederation';
 
 /** 层一：经验晶体。key = `${场景指纹前8位}:${工具}` —— 匿名聚合，天然去隐私 */
 export interface ExperienceCrystal {
@@ -21,13 +26,34 @@ export interface ExperienceCrystal {
   lastDrift?: { dx: number; dy: number; at: number };
 }
 
-/** 层二：群体经验包。schema 版本化 —— 群体中心的协议演进不破坏旧客户端 */
+/** 层二：群体经验包。schema 版本化 —— 群体中心的协议演进不破坏旧客户端。
+ *  W4-2（G3 策略联邦）：schema 升级 v2 —— 新增可选技能联邦段（skills）；向后
+ *  兼容律：老 peer 按 JSON 宽容语义忽略未知段，v1 字段（instanceId/crystals/
+ *  driftEvents/dp_epsilon）形状与语义逐字节不变。 */
 export interface SwarmPacket {
-  schema: 1;
+  schema: 1 | 2;
   /** 匿名实例 ID（启动时随机生成，不含任何用户信息） */
   instanceId: string;
   crystals: Array<{ key: string; successRate: number; attempts: number }>;
   driftEvents: Array<{ sceneHash: string; dx: number; dy: number }>;
+  /** W4-2：技能联邦段（v2 在场；缺省/未接线 ⇒ undefined —— 老 peer 零感知） */
+  skills?: SwarmSkillFederationSection;
+}
+
+/** W4-2：packet v2 的技能联邦段 —— 上传载荷白名单形状（指纹 + 数值槽统计 +
+ *  reliability + 使用计数，全部带 Laplace 噪声；绝无原始文本/坐标序列/截图引用） */
+export interface SwarmSkillFederationSection {
+  v: 1;
+  /** 本段使用的差分隐私 ε（与 packet 级 dp_epsilon 同源 —— 分段申报，审计面） */
+  dpEpsilon: number;
+  uploads: SkillFederationUpload[];
+}
+
+/** W4-2：swarm 与技能联邦模块的接线面（依赖注入 —— swarm 不 import 其运行时）。
+ *  uploads 的 ε/随机流由 buildPacket 透传（与晶体噪声同一 DP 纪律与确定性缝）。 */
+export interface SwarmSkillFederationProvider {
+  uploads(dpEpsilon: number, uniform: () => number): SkillFederationUpload[];
+  ledgerStats(): SkillFederationLedgerStats;
 }
 
 /** 层三：UI 漂移预测模型（场景指纹 → 漂移向量的最近邻回归）。
@@ -112,6 +138,17 @@ class Swarm {
   private consumedWatermark = 0;
   /** restore 武装位：true = 下一轮 crystalize 执行前缀跳过（跨会话水位执法） */
   private watermarkArmed = false;
+  /** W4-2（G3 策略联邦）：技能联邦接线面（null = 未接线 —— packet 无技能段、
+   *  report 联邦技能账诚实归零；reset 不摘线 —— 接线是宿主配置不是数据） */
+  private skillFedProvider: SwarmSkillFederationProvider | null = null;
+
+  /** W4-2：接/摘技能联邦提供者（wireSwarmSkillFederation 的宿主接线缝；测试注入桩） */
+  attachSkillFederation(provider: SwarmSkillFederationProvider | null): void {
+    this.skillFedProvider =
+      provider && typeof provider.uploads === 'function' && typeof provider.ledgerStats === 'function'
+        ? provider
+        : null; // 形状不合法按未接线处理（防御式，绝不抛）
+  }
 
   configure(endpoint: string, syncIntervalMs: number, crystalCapacity: number): void {
     this.endpoint = endpoint;
@@ -247,9 +284,21 @@ class Swarm {
         };
       });
     const driftEvents = this.drifts.slice(-20).map(d => ({ sceneHash: d.sceneHash, dx: Math.round(d.x * 1000) / 1000, dy: Math.round(d.y * 1000) / 1000 }));
+    // W4-2：技能联邦段（提供者在场才铸；防御式 —— 提供者任何故障都吞掉成
+    // 「无技能段」，绝不炸 packet：联邦是增益不是依赖）。ε 与随机流与晶体噪声
+    // 同源透传（同一次 buildPacket 的 DP 纪律与确定性测试缝统一）。
+    let skills: SwarmSkillFederationSection | undefined;
+    try {
+      if (this.skillFedProvider) {
+        skills = { v: 1, dpEpsilon: dpEpsilon, uploads: this.skillFedProvider.uploads(dpEpsilon, uniform) ?? [] };
+      }
+    } catch {
+      skills = undefined; // 提供者故障：诚实降级为无技能段
+    }
     const packet: SwarmPacket & { dp_epsilon: number } = {
-      schema: 1, instanceId: INSTANCE_ID, crystals, driftEvents,
+      schema: 2, instanceId: INSTANCE_ID, crystals, driftEvents,
       dp_epsilon: dpEpsilon,
+      skills,
     };
     return packet;
   }
@@ -291,18 +340,33 @@ class Swarm {
     this.fireUpload();
   }
 
-  /** 本地结晶报告（get_metrics / 自省消费 —— 群体智慧对模型可见） */
-  report(): { crystals: number; topRoutes: Array<{ key: string; successRate: number; attempts: number }>; driftModels: number; lastSyncAt: number; endpoint: string } {
+  /** 本地结晶报告（get_metrics / 自省消费 —— 群体智慧对模型可见）。
+   *  W4-2：新增 federatedSkills 段 —— 晶体层的联邦技能账（本地命中/激活计数、
+   *  dormant/active 候选规模、Thompson 尝试数；未接线 ⇒ wired:false 诚实归零）。 */
+  report(): { crystals: number; topRoutes: Array<{ key: string; successRate: number; attempts: number }>; driftModels: number; lastSyncAt: number; endpoint: string; federatedSkills: SkillFederationLedgerStats } {
     const topRoutes = [...this.crystals.values()]
       .sort((a, b) => b.attempts - a.attempts)
       .slice(0, 5)
       .map(c => ({ key: c.key, successRate: Math.round((c.successes / c.attempts) * 1000) / 1000, attempts: c.attempts }));
+    // W4-2：联邦技能账（防御式拉取 —— 提供者故障 ⇒ 未接线形状，绝不炸 report）
+    let federatedSkills: SkillFederationLedgerStats = {
+      wired: false, candidates: 0, dormant: 0, active: 0, localHits: 0, activations: 0, thompsonAttempts: 0, lastReceivedAt: 0,
+    };
+    try {
+      if (this.skillFedProvider) {
+        const stats = this.skillFedProvider.ledgerStats();
+        if (stats && typeof stats === 'object') federatedSkills = stats;
+      }
+    } catch {
+      /* 保持未接线形状 */
+    }
     return {
       crystals: this.crystals.size,
       topRoutes,
       driftModels: this.drifts.length,
       lastSyncAt: this.lastSyncAt,
       endpoint: this.endpoint || '(disabled)',
+      federatedSkills,
     };
   }
 
@@ -353,6 +417,8 @@ class Swarm {
   }
 
   reset(): void {
+    // W4-2：技能联邦提供者不随 reset 摘除 —— 接线是宿主配置不是数据（晶体/漂移
+    // 是学习数据故清，提供者是结构故留；测试用 attachSkillFederation(null) 摘线）
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.crystals.clear();
     this.drifts = [];

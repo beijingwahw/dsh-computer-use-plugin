@@ -5,7 +5,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { doctor, DOCTOR_RULES, ensureDoctorConfigured } from '../qualityDoctor.js';
 import { telemetry } from '../telemetry.js';
-import { toolErr } from '../toolResult.js';
+import { toolErr, toolOk } from '../toolResult.js';
+import { notary } from '../notary/index.js';
 export function createQualityCheckupTool(config) {
     return defineTool({
         name: 'quality_checkup',
@@ -15,11 +16,12 @@ export function createQualityCheckupTool(config) {
             'PRESCRIBE, DON\'T OPERATE: you diagnose always; mechanical fixes only under explicit authorization. ' +
             'Actions: diagnose (audit code genes + causal chain), heal (apply mechanical fixes — requires ' +
             'explicit authorize=true, max_risk="mechanical", dry_run=false), lessons (evolution memory), ' +
-            'self_audit (rule coverage of the six genesis laws).',
+            'self_audit (rule coverage of the six genesis laws), notarize (epoch Π: mint a notarial anchor ' +
+            'over the journal — chain tip + MMR root + timestamp — then verify the four badges).',
         parameters: {
             action: {
                 type: 'string', required: true,
-                description: 'diagnose | heal | lessons | self_audit',
+                description: 'diagnose | heal | lessons | self_audit | notarize',
             },
             files: {
                 type: 'string',
@@ -126,10 +128,40 @@ export function createQualityCheckupTool(config) {
                         registry: DOCTOR_RULES.map(r => `${r.id} [${r.severity}/${r.category}]`),
                     }, null, 2);
                 }
+                if (args.action === 'notarize') {
+                    // 纪元 Π（可公证行为账本）：铸一枚行为公证锚（journal 链尖 + MMR 根 +
+                    // 时间戳背书）并跑四绿章核验 —— agent 的行为史从此可对外公证。
+                    // 配置面：单例惰性兜底装配（index.ts 的显式接线优先 —— ensureConfigured
+                    // 只在从未装配时生效）；notaryEndpoint 空 = 本地时间锚（零网络、诚实标注）。
+                    notary.ensureConfigured({
+                        endpoint: config.notaryEndpoint ?? '',
+                        tracePath: config.notaryTracePath ?? '',
+                    });
+                    const anchor = await notary.anchorOnce();
+                    const report = notary.verifyNotary();
+                    telemetry.observe('quality_checkup', report.ok ? 'SUCCESS' : 'UNKNOWN', Date.now() - t0);
+                    // 四件套出证：章状态 + detail + 锚计数 + 时间戳来源（红章=篡改/降级证据，
+                    // n/a=诚实降级 —— 两者的恢复指引分叉写在 next_step）
+                    return toolOk('quality_checkup notarize — minted a notarial anchor over the journal (seq + chain tip + MMR root + timestamp) and verified the four badges', {
+                        anchor_minted: anchor !== null,
+                        anchor_seq: anchor?.seq ?? null,
+                        timestamp_source: anchor?.timestamp.source ?? report.lastAnchor?.source ?? 'none',
+                        anchors_total: report.anchors,
+                        notary_ok: report.ok,
+                        badges: Object.fromEntries(Object.entries(report.badges).map(([name, b]) => [name, `${b.status} — ${b.detail}`])),
+                        last_anchor: report.lastAnchor,
+                    }, report.ok
+                        ? 'All checkable badges hold (n/a badges are honest degradations, not failures). ' +
+                            'Re-run notarize after meaningful action bursts to keep the notarial chain fresh; ' +
+                            'export the notaryTracePath JSONL for external audit.'
+                        : 'A red badge means tampering or inconsistency was detected — read its detail ' +
+                            '(entry index / anchor number) and treat the journal as compromised evidence; ' +
+                            'compare with the on-disk JSONL before drawing conclusions.');
+                }
                 telemetry.observe('quality_checkup', 'FAILED', Date.now() - t0);
                 return JSON.stringify({
                     status: 'FAILED',
-                    reason: `unknown action "${args.action}" — use diagnose | heal | lessons | self_audit`,
+                    reason: `unknown action "${args.action}" — use diagnose | heal | lessons | self_audit | notarize`,
                 });
             }
             catch (error) {

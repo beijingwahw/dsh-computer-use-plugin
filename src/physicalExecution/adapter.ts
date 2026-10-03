@@ -28,6 +28,19 @@ import { ScreenshotHandle } from './screenshotHandle.js';
 /** Cap Token 提前刷新阈值（避免请求时刻过期） */
 const TOKEN_REFRESH_MARGIN_MS = 5_000;
 
+/** W4-5 移动 Surface：/v1/devices 响应体（镜像 Python 端 AndroidController.list_devices）。
+ *  impl 侧类型面（Σ-5 的 display 同型 —— 契约层 contracts.ts 不动）。 */
+export interface DeviceInventory {
+  devices: Array<{
+    serial: string;
+    state: string;
+    surface_id: string;
+    resolution: { width: number; height: number } | null;
+  }>;
+  degraded: boolean;
+  reason?: string;
+}
+
 /** 适配器内部状态 */
 interface AdapterState {
   config: PhysicalExecutionConfig;
@@ -182,40 +195,50 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
 
   async clickMouse(args: {
     x: number; y: number; button?: 'left' | 'right' | 'middle'; dryRun?: boolean;
+    /** W4-5 移动 Surface：'host:<i>' / 'android:<serial>'；缺省 = 主机现状 */
+    surface?: string;
   }): Promise<Result<ClickResult, PhysicalError>> {
     return this.call('/click_mouse', {
       x: args.x, y: args.y,
       button: args.button ?? 'left',
       dry_run: args.dryRun ?? false,
+      // W4-5：undefined ⇒ JSON 序列化丢键 ⇒ 请求字节与现状等同（兼容铁律）
+      surface: args.surface,
     });
   }
 
   async typeText(args: {
     text: string; clearFirst?: boolean; dryRun?: boolean;
+    surface?: string; // W4-5
   }): Promise<Result<TypeResult, PhysicalError>> {
     return this.call('/type_text', {
       text: args.text,
       clear_first: args.clearFirst ?? false,
       dry_run: args.dryRun ?? false,
+      surface: args.surface, // W4-5
     });
   }
 
   async scrollPage(args: {
     direction: 'up' | 'down' | 'left' | 'right'; amount: number; dryRun?: boolean;
+    surface?: string; // W4-5
   }): Promise<Result<ScrollResult, PhysicalError>> {
     return this.call('/scroll_page', {
       direction: args.direction,
       amount: args.amount,
       dry_run: args.dryRun ?? false,
+      surface: args.surface, // W4-5
     });
   }
 
   async pressHotkey(args: {
     keys: string[]; dryRun?: boolean;
+    surface?: string; // W4-5
   }): Promise<Result<HotkeyResult, PhysicalError>> {
     return this.call('/press_hotkey', {
       keys: args.keys,
       dry_run: args.dryRun ?? false,
+      surface: args.surface, // W4-5
     });
   }
 
@@ -223,22 +246,26 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     start: { x: number; y: number };
     end: { x: number; y: number };
     dryRun?: boolean;
+    surface?: string; // W4-5
   }): Promise<Result<DragResult, PhysicalError>> {
     return this.call('/drag_mouse', {
       start: args.start,
       end: args.end,
       dry_run: args.dryRun ?? false,
+      surface: args.surface, // W4-5
     });
   }
 
   /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
   async moveMouse(args: {
     x: number; y: number; durationMs?: number; dryRun?: boolean;
+    surface?: string; // W4-5（android surface 服务端诚实拒绝 —— 触屏无悬停语义）
   }): Promise<Result<MoveResult, PhysicalError>> {
     return this.call('/move_mouse', {
       x: args.x, y: args.y,
       duration_ms: args.durationMs ?? 0,
       dry_run: args.dryRun ?? false,
+      surface: args.surface, // W4-5
     });
   }
 
@@ -258,6 +285,9 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     /** Σ-5 多屏感知：显示器索引（0 起，/v1/displays 清单序）。缺省=主屏=现状；
      *  选定后 region/overlay 归一化基准 = 所选显示器矩形（服务端裁剪） */
     display?: number;
+    /** W4-5 移动 Surface：display 的字符串泛化 —— 'host:<i>' ≡ display=i、
+     *  'android:<serial>' 路由到 scrcpy/adb 帧源。与 display 并存时 surface 获胜 */
+    surface?: string;
   }): Promise<Result<ScreenshotResult, PhysicalError>> {
     return this.call('/take_screenshot', {
       format: args?.format ?? 'png',
@@ -274,7 +304,14 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
       want_salience: args?.wantSalience ?? false,
       // Σ-5：undefined ⇒ JSON.stringify 丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
       display: args?.display,
+      // W4-5：同律（缺省键缺席 ⇒ 兼容铁律）
+      surface: args?.surface,
     });
+  }
+
+  /** W4-5 移动 Surface：adb 设备清单（真机缺席 ⇒ 空清单 + degraded + 真实原因） */
+  async getDevices(): Promise<Result<DeviceInventory, PhysicalError>> {
+    return this.callGet('/devices');
   }
 
   /** 感知辅助（D-1 工具层接线）：当前鼠标位置（全屏像素） */

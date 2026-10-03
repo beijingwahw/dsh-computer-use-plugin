@@ -23,6 +23,7 @@ import { resolveProviderConfig as registryResolveProviderConfig } from './regist
 import { extractProviderJson, isLocalBaseUrl, sanitizeError } from './types';
 import type {
   ProviderMeterRecord,
+  ProviderTier,
   VisionChatRequest,
   VisionChatResult,
   VisionProvider,
@@ -115,6 +116,12 @@ export interface ProviderPoolOptions {
   breakers?: { failureThreshold?: number; cooldownMs?: number };
   /** 时钟注入 —— 缺省 Date.now；返回非有限值或抛错都被安全兜底 */
   now?: () => number;
+  /**
+   * W2-8（C2 成本级联路由）：tier 标注注入（配置序标注面）—— id → tier 的
+   * 显式覆盖表，优先于供应方自报的 provider.tier；未列出的 id 走自报/缺省
+   * 'primary'。仅级联路由消费，chat()/failover 语义零影响。
+   */
+  tiers?: Readonly<Record<string, ProviderTier>>;
 }
 
 /** note 环形缓冲容量 —— 只留最近 10 条切换决策 */
@@ -124,6 +131,8 @@ const NOTE_RING = 10;
 interface PoolEntry {
   readonly provider: VisionProvider;
   readonly breaker: VlmApiBreaker;
+  /** W2-8：成本档标注（options.tiers[id] > provider.tier > 'primary' 三级解析） */
+  readonly tier: ProviderTier;
 }
 
 /**
@@ -168,13 +177,25 @@ export class ProviderPool {
       }
     };
     const breakerOpts = opts.breakers;
+    // W2-8：tier 覆盖表（配置序标注面）—— 非对象安静视为缺席（不抛铁律）
+    const tierOverrides =
+      opts.tiers && typeof opts.tiers === 'object' ? (opts.tiers as Readonly<Record<string, ProviderTier>>) : undefined;
     const entries: PoolEntry[] = [];
     const source = Array.isArray(providers) ? providers : [];
     for (const p of source) {
       try {
         if (!p || typeof p !== 'object' || typeof p.chat !== 'function') continue;
         if (entries.some(e => e.provider.id === p.id)) continue; // 同 id 去重，先到先得
-        entries.push({ provider: p, breaker: new VlmApiBreaker(breakerOpts) });
+        // W2-8：tier 三级解析 —— options.tiers[id] 显式覆盖 > provider.tier 自报 > 'primary'。
+        // 只认 'cheap' 字面量，其余一切值（含脏值）归主力档（未标注零行为变化律）。
+        const override = tierOverrides?.[p.id];
+        const tier: ProviderTier =
+          override === 'cheap' || override === 'primary'
+            ? override
+            : (p as { tier?: unknown }).tier === 'cheap'
+              ? 'cheap'
+              : 'primary';
+        entries.push({ provider: p, breaker: new VlmApiBreaker(breakerOpts), tier });
       } catch { /* 垃圾条目静默剔除 */ }
     }
     this.entries = entries;
@@ -216,9 +237,37 @@ export class ProviderPool {
    * 全败回传末败，无脑可用回传合成 degraded。绝不抛异常。
    */
   async chat(req: VisionChatRequest): Promise<VisionChatResult> {
+    // W2-8：全池链 = 不筛 tier（chat 的池序切换语义逐字节保持，tier 正交不掺和）
+    return this.runChain(req, this.entries);
+  }
+
+  /**
+   * W2-8（C2 成本级联路由）：分档对话 —— 切换律与 chat() 完全同构（未配置跳过、
+   * 熔断 open 跳行、失败切同档下一脑、首胜直传、全败传末败、无可用脑回合成
+   * degraded），仅把战斗序列限制在指定 tier 档内。与 chat()（全池 failover）和
+   * ensemble（合议庭）正交 —— 级联路由的第三用途专用面：
+   *   - tier='cheap'：便宜臂尝试（池内最便宜档）；
+   *   - tier='primary'：主力档链（级联升级重做 / 高危直行）。
+   * 脏 tier 值归 'primary'（保守）。绝不抛异常。
+   */
+  async chatTier(req: VisionChatRequest, tier: ProviderTier): Promise<VisionChatResult> {
+    const want: ProviderTier = tier === 'cheap' ? 'cheap' : 'primary';
+    return this.runChain(req, this.entries.filter(e => e.tier === want));
+  }
+
+  /**
+   * W2-8：tier 花名册快照 —— 每脑一条 { id, tier }（池序）。级联路由据此判断
+   * 便宜档是否在场；观测面/健康报告亦可消费。只读，不改变状态，绝不抛。
+   */
+  tierRoster(): Array<{ id: string; tier: ProviderTier }> {
+    return this.entries.map(e => ({ id: e.provider.id, tier: e.tier }));
+  }
+
+  /** 切换律执行体 —— chat/chatTier 共用（entries 为本次战斗序列，语义见类 JSDoc） */
+  private async runChain(req: VisionChatRequest, entries: readonly PoolEntry[]): Promise<VisionChatResult> {
     try {
       let lastFailed: VisionChatResult | undefined;
-      for (const entry of this.entries) {
+      for (const entry of entries) {
         const p = entry.provider;
         if (p.configured !== true) {
           this.note(`跳过 ${p.id}（未配置）`);
@@ -348,6 +397,12 @@ export interface PoolBuildOptions {
   fetchImpl?: typeof fetch;
   /** 用量遥测回调 —— 透传给池内每个适配器（每次 chat 恰好一条） */
   meter?: (rec: ProviderMeterRecord) => void;
+  /**
+   * W2-8（C2 成本级联路由）：tier 标注注入（配置序标注面）—— 平台 id →
+   * 'cheap'/'primary'；透传 ProviderPoolOptions.tiers（自报 provider.tier 的
+   * 显式覆盖）。未给 ⇒ 全员主力档（零行为变化律）。
+   */
+  tiers?: Readonly<Record<string, ProviderTier>>;
 }
 
 /** 按预设协议选厂铸造 —— openai/anthropic/gemini 三兄弟适配器的分派点 */
@@ -434,7 +489,8 @@ export function createProviderPool(opts?: PoolBuildOptions): ProviderPool {
         ),
       );
     }
-    return new ProviderPool(providers);
+    // W2-8：tier 标注透传（配置序标注面）—— 级联路由专用，缺省全员主力档
+    return new ProviderPool(providers, o.tiers !== undefined ? { tiers: o.tiers } : undefined);
   } catch {
     // 铸造面意外故障 —— 空池兜底（chat 走合成 degraded，绝不抛）
     return new ProviderPool([]);

@@ -7,7 +7,7 @@
 //   loadCheckpoint   —— 版本校验 + 逐子系统恢复；单字段损坏不拖垮整档（防御性恢复）
 // 接线：启动时自动恢复（checkpointPath 配置时）+ 卸载时自动保存 + save_checkpoint 手动档。
 // 价值：崩溃/重启后，Agent 的「肌肉记忆」原地满血 —— 会话可中断，认知不回零。
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs';
 import path from 'path';
 import { uiMemory } from './uiMemory.js';
 import { probeMemory } from './probeMemory.js';
@@ -21,9 +21,18 @@ import { coordinator } from './subAgent.js';
 import { shaper } from './environmentShaper.js';
 import { quantum } from './quantumSense.js';
 import { sandboxLog } from './sandbox/log.js';
+import { selfModel } from './selfmodel/index.js';
+import { approvalQueue } from './approval.js';
+// W3-6（H3）：岔路账采集面 —— 每步决策的 Top-K 候选环形账（见 src/branchCards.ts）
+import { branchLedger } from './branchCards.js';
 // v3：新增 swarmAgents section（D-1 子代理花名册 + 报告 —— 崩溃后团队原地满血复活）。
 // v2：新增 contextManager（潜意识池）与 swarm（经验晶体/漂移模型）section。
 // 加载兼容 v1/v2 旧档：migrateCheckpoint 幂等归一化（见其注释），缺省 section 防御性跳过。
+// 纪元 Ζ 缝隙闭合（自我模型未持久化）：selfModel 段为**第四次原地扩展**（D-1/D-2/D-3
+// 同律 —— 加性可选段 + 防御水合免版本跃迁；shaper/quantum 先例在案）。版本字段
+// 保持在 4 的另一面是契约现实：epochR/agency 执法册逐字节钉住「v4 落盘」与
+// migrate(v3)=v4（本纪元禁改测试），而旧引擎读到多出的 selfModel 键只会静默
+// 忽略（sections 表只触已知键）—— 原地扩展双向兼容，版本跃迁反而撕裂契约。
 const CHECKPOINT_VERSION = 4;
 /**
  * 幂等迁移管线（架构师指令 #3）：v? → v3。
@@ -48,42 +57,97 @@ export function migrateCheckpoint(raw) {
     }
     return null;
 }
-/** 收集全认知态。日志链尖端与链基随行 —— 恢复后 append 续链、verify 不误报 */
+/**
+ * 收集全认知态。日志链尖端与链基随行 —— 恢复后 append 续链、verify 不误报。
+ * 纪元 Ζ 旁路律：selfModel 段以独立 try/catch 采集 —— 单例 dump 面（按 Ι 纪元
+ * 立法永不抛）万一故障，只记入 warnings 诚实跳过，绝不炸 checkpoint 主流程
+ * （持久化是旁路：失败 = 诚实跳过，绝不炸睡眠/卸载路径的保存链）。
+ */
 function collect() {
+    const warnings = [];
+    let selfModelSnap;
+    try {
+        selfModelSnap = selfModel.dump();
+    }
+    catch (e) {
+        selfModelSnap = undefined; // 缺段落盘 = 恢复时诚实冷启动
+        warnings.push(`selfModel: SKIPPED (dump 故障旁路吸收: ${e?.message ?? e})`);
+    }
+    // W2-1（H4）：待批队列随档 —— 采集面自带防御（dumpQueue 绝不抛），
+    // try/catch 与 selfModel 同律（旁路故障 = 缺段诚实跳过，绝不炸保存链）
+    let approvalQueueSnap;
+    try {
+        approvalQueueSnap = { entries: approvalQueue.dumpQueue() };
+    }
+    catch (e) {
+        approvalQueueSnap = undefined; // 缺段落盘 = 恢复时队列不动
+        warnings.push(`approvalQueue: SKIPPED (dump 故障旁路吸收: ${e?.message ?? e})`);
+    }
+    // W3-6（H3）：岔路账随档 —— 同律旁路采集（dump 恒出深拷贝，绝不抛；
+    // 万一故障 = 缺段诚实跳过，恢复时空账冷启动）
+    let branchLedgerSnap;
+    try {
+        branchLedgerSnap = branchLedger.dump();
+    }
+    catch (e) {
+        branchLedgerSnap = undefined; // 缺段落盘 = 恢复时空账（卡片诚实缺席）
+        warnings.push(`branchLedger: SKIPPED (dump 故障旁路吸收: ${e?.message ?? e})`);
+    }
     return {
-        version: CHECKPOINT_VERSION,
-        savedAt: Date.now(),
-        uiMemory: uiMemory.dump(),
-        probeMemory: probeMemory.dump(),
-        skillLibrary: skillLibrary.dump(),
-        failureMemory: failureMemory.dump(),
-        journal: { entries: journal.list(false), chainTip: journal.tip, chainBase: journal.base },
-        telemetry: telemetry.dump(),
-        // v2：群体经验先行结晶再入档（结晶是纯内存聚合，同步微秒级）
-        contextManager: { subconscious: contextManager.dumpSubconscious() },
-        swarm: (() => { swarm.crystalize(); return swarm.dump(); })(),
-        // v3：D-1 子代理花名册 + 报告 —— 崩溃后团队原地满血复活
-        swarmAgents: coordinator.dump(),
-        // D-2：撤销日志随行 —— 崩溃后复原义务不蒸发
-        shaper: { undoLog: shaper.dumpUndoLog() },
-        // D-3：感知相位随行 —— 叠加态急救跨崩溃续行
-        quantum: quantum.dump(),
-        // R-4：证据锚 —— 快照与证据链的一致性锚（恢复时可验：重算 MMR 根 == 锚）
-        journalMmrRoot: journal.mmrRoot(),
-        sandboxMmrRoot: sandboxLog.mmrRoot(),
+        cp: {
+            version: CHECKPOINT_VERSION,
+            savedAt: Date.now(),
+            uiMemory: uiMemory.dump(),
+            probeMemory: probeMemory.dump(),
+            skillLibrary: skillLibrary.dump(),
+            failureMemory: failureMemory.dump(),
+            journal: { entries: journal.list(false), chainTip: journal.tip, chainBase: journal.base },
+            telemetry: telemetry.dump(),
+            // v2：群体经验先行结晶再入档（结晶是纯内存聚合，同步微秒级）
+            contextManager: { subconscious: contextManager.dumpSubconscious() },
+            swarm: (() => { swarm.crystalize(); return swarm.dump(); })(),
+            // v3：D-1 子代理花名册 + 报告 —— 崩溃后团队原地满血复活
+            swarmAgents: coordinator.dump(),
+            // D-2：撤销日志随行 —— 崩溃后复原义务不蒸发
+            shaper: { undoLog: shaper.dumpUndoLog() },
+            // D-3：感知相位随行 —— 叠加态急救跨崩溃续行
+            quantum: quantum.dump(),
+            // R-4：证据锚 —— 快照与证据链的一致性锚（恢复时可验：重算 MMR 根 == 锚）
+            journalMmrRoot: journal.mmrRoot(),
+            sandboxMmrRoot: sandboxLog.mmrRoot(),
+            // 纪元 Ζ：自我模型账本随行 —— 经验胜任度后验跨崩溃存活（重启不清零）
+            selfModel: selfModelSnap,
+            // W2-1（H4）：待批/已批未续跑条目随行 —— 崩溃后队列原地满血（晨报照常
+            // 列待批清单、已批条目照常续跑）
+            approvalQueue: approvalQueueSnap,
+            // W3-6（H3）：岔路账随行 —— 崩溃后岔路账原地满血（失败铸卡/换支重放
+            // 不因重启而失去支点）
+            branchLedger: branchLedgerSnap,
+        },
+        warnings,
     };
 }
 /** 原子写：先写临时文件再改名。写一半崩溃 ⇒ 旧档完好，新档不存在，绝无损坏的半档 */
 export function saveCheckpoint(filePath) {
     if (!filePath)
         return { ok: false, error: 'checkpointPath is not configured' };
-    const cp = collect();
+    const { cp, warnings } = collect();
     const tmp = filePath + '.tmp';
     try {
         mkdirSync(path.dirname(filePath), { recursive: true });
-        writeFileSync(tmp, JSON.stringify(cp), 'utf8');
+        // fsync 落盘后再换名：rename 可先于数据块持久化 —— 崩溃后可能读到空/截断档
+        //（与 journal.ts 磁盘写的崩溃一致性同律：页缓存不算落盘）
+        const fd = openSync(tmp, 'w');
+        try {
+            writeSync(fd, Buffer.from(JSON.stringify(cp), 'utf8'));
+            fsyncSync(fd);
+        }
+        finally {
+            closeSync(fd);
+        }
         renameSync(tmp, filePath); // 原子换名
-        return { ok: true, steps: cp.journal.entries.length };
+        // 纪元 Ζ：旁路 warnings（如 selfModel dump 故障）随行上报 —— 保存照常 ok
+        return { ok: true, steps: cp.journal.entries.length, ...(warnings.length > 0 ? { warnings } : {}) };
     }
     catch (e) {
         try {
@@ -137,6 +201,56 @@ export function loadCheckpoint(filePath) {
         ['shaper', () => shaper.restoreUndoLog(cp.shaper?.undoLog)],
         // D-3 section：感知相位复活
         ['quantum', () => quantum.restore(cp.quantum)],
+        // 纪元 Ζ section：自我模型账本复活（坏段隔离不连坐 —— 沿本表防御水合风格）：
+        //   缺段（Ζ 前旧档）⇒ 不触账本（新进程即空模型 = 诚实冷启动，非错误）；
+        //   结构坏段（非对象/cells 非数组）⇒ 清账 + 上抛 ⇒ 本表 catch 记 SKIPPED（空模型）；
+        //   段内坏行 ⇒ Ι 单例 restore 的半水合语义（好行入账、坏行弃置）。
+        ['selfModel', () => {
+                if (cp.selfModel === undefined)
+                    return;
+                const snap = cp.selfModel;
+                if (!snap || typeof snap !== 'object' || !Array.isArray(snap.cells)) {
+                    selfModel.reset(); // 坏段 ⇒ 空模型（不残留进程内旧账冒充恢复产物）
+                    throw new Error('selfModel 段结构非法（弃置 ⇒ 空模型冷启动）');
+                }
+                selfModel.restore(cp.selfModel);
+            }],
+        // W2-1（H4）section：待批队列复活（防御性恢复 —— 垃圾值归零）：
+        //   缺段（W2-1 前旧档）⇒ 不触队列（新进程即空队列，非错误）；
+        //   结构坏段（非对象 / entries 非数组）⇒ 队列归零 + 上抛 ⇒ SKIPPED 注记；
+        //   段内坏条目 ⇒ 弃置保好（dropped 计数进报告 —— 好条目照常恢复）。
+        ['approvalQueue', () => {
+                if (cp.approvalQueue === undefined)
+                    return;
+                const snap = cp.approvalQueue;
+                if (!snap || typeof snap !== 'object' || !Array.isArray(snap.entries)) {
+                    approvalQueue.restoreQueue([]); // 垃圾段 ⇒ 归零（不残留进程内旧账冒充恢复产物）
+                    throw new Error('approvalQueue 段结构非法（弃置 ⇒ 空队列冷启动）');
+                }
+                const r = approvalQueue.restoreQueue(snap.entries);
+                if (r.dropped > 0) {
+                    report.push(`approvalQueue: DROPPED ${r.dropped} malformed entr${r.dropped === 1 ? 'y' : 'ies'} (defensive restore, garbage zeroed)`);
+                }
+            }],
+        // W3-6（H3）section：岔路账复活（防御性恢复 —— 垃圾归零、坏步弃置保好）：
+        //   缺段（W3-6 前旧档）⇒ 不触账（新进程即空账 = 诚实冷启动，非错误）；
+        //   结构坏段（非对象 / entries 非数组）⇒ 归零 + 上抛 ⇒ SKIPPED 注记；
+        //   段内坏步 ⇒ 弃置保好（dropped 计数进报告 —— 好步照常恢复）。
+        //   注：restore 收**段对象**（BranchLedgerSnapshot 形状）—— 与
+        //   approvalQueue.restoreQueue 收条目数组的约定不同，错配会静默 no-op。
+        ['branchLedger', () => {
+                if (cp.branchLedger === undefined)
+                    return;
+                const snap = cp.branchLedger;
+                if (!snap || typeof snap !== 'object' || !Array.isArray(snap.entries)) {
+                    branchLedger.restore(null); // 垃圾段 ⇒ 归零（不残留进程内旧账冒充恢复产物）
+                    throw new Error('branchLedger 段结构非法（弃置 ⇒ 空账冷启动）');
+                }
+                const r = branchLedger.restore(snap);
+                if (r.dropped > 0) {
+                    report.push(`branchLedger: DROPPED ${r.dropped} malformed step${r.dropped === 1 ? '' : 's'} (defensive restore, garbage zeroed)`);
+                }
+            }],
     ];
     for (const [name, fn] of sections) {
         try {

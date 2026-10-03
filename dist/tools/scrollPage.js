@@ -38,7 +38,9 @@ export function createScrollPageTool(config) {
             const dirMap = {
                 up: 'up', down: 'down', left: 'left', right: 'right',
             };
-            if (!dirMap[direction]) {
+            // hasOwnProperty 守卫：纯真值查表会被原型链上的 'toString'/'constructor'
+            // 等键绕过（dirMap['toString'] 真值 ⇒ 非法方向混入 system.scroll）
+            if (!Object.prototype.hasOwnProperty.call(dirMap, direction)) {
                 return toolErr('Scroll validation failed.', `Invalid direction "${direction}".`, 'Retry with one of: up, down, left, right.');
             }
             const dir = dirMap[direction];

@@ -10,7 +10,10 @@ import { dirname } from 'path';
 import { muscleReliability, } from './types.js';
 /** 步骤签名：同签名 = 同动作序列（去重强化的判定基准，对齐技能库去重哲学） */
 export function stepSignature(steps) {
-    return steps.map(s => `${s.kind}:${JSON.stringify(s.args, Object.keys(s.args).sort())}`).join('|');
+    // args 缺席（外部文件脏步 —— load() 校验明确放行 args===undefined）⇒ 稳定字面
+    // 'undefined' 入签：若在此抛 Object.keys(undefined)，load() 会在 entries.set 之后、
+    // bySignature.set 之前中断 —— 库内留下未索引条目（去重缺口 = 同签名重复入库）。
+    return steps.map(s => `${s.kind}:${s.args ? JSON.stringify(s.args, Object.keys(s.args).sort()) : 'undefined'}`).join('|');
 }
 /** 深冻：ReadonlyArray 类型层的运行时对偶（restore 后必须重跑） */
 function deepFreezeActions(steps) {

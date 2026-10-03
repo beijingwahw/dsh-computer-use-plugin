@@ -30,7 +30,9 @@ L3 实现分层：
   - ``disabled``：完全关闭，仅 L1+L2
 
 输出对齐 D-6 ``UIElement`` 类型：
-  { source, role, name, state?, rect: {x,y,width,height} }
+  { source, role, name, state?, rect: {x,y,width,height}, score? }
+  （score?：缝隙闭合「词级真值跨线」—— 仅 L2 OCR 路径携带 [0,1] 真值，
+   L1/L3 无分数 ⇒ 键缺席）
 """
 from __future__ import annotations
 
@@ -59,15 +61,25 @@ class UIElement:
     name: str
     state: str | None = None  # 'enabled' | 'disabled' | 'masked' | 'checked' | 'unchecked'
     rect: dict = field(default_factory=lambda: {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0})
+    # 缝隙闭合：词级真值跨线（PyS）—— L2 RapidOCR 的词级置信度 [0,1] 随元素
+    # 序列化跨线（旧世界：score_f 仅用于 <0.5 剔除后即丢，P2a-3 只能在 TS 侧
+    # 恒填 90 + confidenceAssumed:true）。L1 结构树 / L3 VLM 路径无分数 ⇒
+    # None（序列化缺席 —— 真值缺席的诚实方言，Node 端契约 score?: number 容忍）。
+    score: float | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "source": self.source,
             "role": self.role,
             "name": self.name[:20],  # D-3 LABEL_MAX 先例：≤20 字符
             "state": self.state,
             "rect": self.rect,
         }
+        # 缝隙闭合：词级真值跨线（PyS）—— 真值在场才出键；None ⇒ 键缺席
+        # （下游按「有真值不标假设」的双态语义消费 —— 见 textReader.ts PyS 注）。
+        if self.score is not None:
+            d["score"] = self.score
+        return d
 
 
 # ─── 坐标归一化辅助（J 纪元统一坐标方言）───
@@ -394,6 +406,13 @@ class L2OCRBackend:
                     continue
                 if not text or score_f < 0.5:
                     continue
+                # 缝隙闭合：词级真值跨线（PyS）—— 剔除律（<0.5 丢弃）在上行照旧
+                # 先行未动；幸存真值夹 [0,1] 后随元素序列化（旧世界：算出即丢）。
+                # NaN 判定（score_f != score_f）⇒ None —— 非有限值不是真值，
+                # 缺席交给 TS 侧回退 90+assumed 旧方言（双态语义的另一臂）。
+                score_out: float | None = (
+                    min(max(score_f, 0.0), 1.0) if score_f == score_f else None
+                )
                 # box = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]（四点多边形；放大后坐标除回）
                 xs = [p[0] / scale for p in box]
                 ys = [p[1] / scale for p in box]
@@ -413,6 +432,7 @@ class L2OCRBackend:
                     role="text",
                     name=text[:20],
                     rect=rect,
+                    score=score_out,  # 缝隙闭合：词级真值跨线（PyS）
                 ))
             return elements, None
         except Exception as e:  # noqa: BLE001

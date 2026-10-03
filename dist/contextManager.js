@@ -11,10 +11,22 @@
 // C-4 认知焦点引擎：
 //   注意力机制 —— 显著度权重（类型×任务相关×新近度）驱动驱逐顺序，核心目标钉扎永生；
 //   潜意识层 —— 被驱逐记录压缩为 (指纹, 要旨) 元组入有界池，场景重现时「灵光一闪」。
+// W1-9（P1 任务驱动注视）：任务锚点缓存与注入面 —— 记录上一轮任务目标锚点
+//   （grounding 命中/点击目标的 bbox），下次编码经 suggestFoveaCenter 组装三路
+//   候选（锚点 + visualDiff 质心 + 光标）交 gazeRouter 加权，产出的归一化注视
+//   中心直供 encodeForVlm 的 foveaCenter。参数式注入面：不读 config、不读注册表。
 import { journal } from './journal.js';
 import { embed, cosine } from './semanticHash.js';
 import { hammingDistance, similarity } from './perceptualHash.js';
 import { kernelRegistry } from './kernel/registry.js';
+// W1-9：gazeRouter 纯函数（vlm/codec 无反向依赖 —— 依赖方向 context → vlm 单向）
+import { gazeRouter } from './vlm/codec.js';
+/** W1-9：clamp 进 [0,1]（归一化坐标的防御收口；非有限按 0 记） */
+function clampUnit(v) {
+    if (!Number.isFinite(v))
+        return 0;
+    return Math.min(1, Math.max(0, v));
+}
 /** base64 字符数 → 近似 KB（data URL 前缀开销可忽略，预算用途足够精确） */
 function approxKb(b64) {
     return b64.length / 1024;
@@ -35,6 +47,9 @@ class ContextManager {
     subconsciousCapacity = 32; // 池容量：32 × ≤200 字符 ≈ 6KB 封顶
     subconsciousMatchDistance = 6; // 既视感触发阈值（dHash 汉明距离）
     taskQueryCache = null; // 任务向量缓存
+    // ── W1-9（P1 任务驱动注视）──
+    /** 上一轮任务目标锚点（null = 无锚点 —— suggestFoveaCenter 自然少一路候选） */
+    taskAnchor = null;
     constructor(maxImageCount = 3) {
         this.maxImageCount = maxImageCount;
         this.maxImageKb = 600;
@@ -66,6 +81,127 @@ class ContextManager {
         this.history = [];
         this.subconscious = [];
         this.taskQueryCache = null;
+        this.taskAnchor = null; // W1-9：锚点随会话清空（新任务不继承旧注视）
+    }
+    // ── W1-9（P1 任务驱动注视）：任务锚点缓存与注入面 ──
+    /**
+     * W1-9：记录上一轮任务目标锚点（下次编码消费的注视种子）。
+     * 参数式注入面 —— 不读 config / 不读注册表：调用方（grounding 命中、点击
+     * 目标确定）把目标 bbox + 视口尺寸交来即可。防御规整（绝不抛）：非对象 /
+     * bbox 缺席 / 坐标非有限 ⇒ 拒收返回 false；倒置盒先交换；floor/ceil 整数化
+     * 后压扁盒扩 1px；归一化中心仅在视口在场且 ≥1px 时计算（缺席 = normalized
+     * 诚实缺席，suggestFoveaCenter 少这一路候选）。重复记录以最后一次为准。
+     */
+    recordTaskAnchor(anchor) {
+        try {
+            const a = anchor;
+            if (a === null || typeof a !== 'object')
+                return false;
+            const b = a.bbox;
+            if (b === null || typeof b !== 'object')
+                return false;
+            const { x0, y0, x1, y1 } = b;
+            if (![x0, y0, x1, y1].every(n => typeof n === 'number' && Number.isFinite(n)))
+                return false;
+            let rx0 = Math.floor(Math.min(x0, x1));
+            let rx1 = Math.ceil(Math.max(x0, x1));
+            let ry0 = Math.floor(Math.min(y0, y1));
+            let ry1 = Math.ceil(Math.max(y0, y1));
+            if (rx1 <= rx0)
+                rx1 = rx0 + 1; // 压扁/压线盒扩 1px（无面积的盒没有几何身份）
+            if (ry1 <= ry0)
+                ry1 = ry0 + 1;
+            const cx = (rx0 + rx1) / 2;
+            const cy = (ry0 + ry1) / 2;
+            const vp = a.viewport;
+            const vpOk = vp !== null && typeof vp === 'object'
+                && typeof vp.width === 'number' && Number.isFinite(vp.width) && vp.width >= 1
+                && typeof vp.height === 'number' && Number.isFinite(vp.height) && vp.height >= 1;
+            const rel = a.taskRelevance;
+            const sid = a.screenshotId;
+            const rec = {
+                bbox: { x0: rx0, y0: ry0, x1: rx1, y1: ry1 },
+                center: { x: cx, y: cy },
+                route: typeof a.route === 'string' && a.route !== '' ? a.route : 'grounding',
+                capturedAt: Date.now(),
+                ...(vpOk ? {
+                    normalized: {
+                        x: clampUnit(cx / vp.width),
+                        y: clampUnit(cy / vp.height),
+                    },
+                } : {}),
+                ...(typeof rel === 'number' && Number.isFinite(rel) ? { taskRelevance: clampUnit(rel) } : {}),
+                ...(typeof sid === 'number' && Number.isFinite(sid) && sid >= 0 ? { screenshotId: sid } : {}),
+            };
+            this.taskAnchor = rec;
+            return true;
+        }
+        catch {
+            return false; // 绝不抛：锚点缓存是增益不是依赖
+        }
+    }
+    /** W1-9：读取上一轮任务锚点（防御副本；无锚点 = null） */
+    getTaskAnchor() {
+        if (!this.taskAnchor)
+            return null;
+        const a = this.taskAnchor;
+        return {
+            bbox: { ...a.bbox },
+            center: { ...a.center },
+            route: a.route,
+            capturedAt: a.capturedAt,
+            ...(a.normalized ? { normalized: { ...a.normalized } } : {}),
+            ...(a.taskRelevance !== undefined ? { taskRelevance: a.taskRelevance } : {}),
+            ...(a.screenshotId !== undefined ? { screenshotId: a.screenshotId } : {}),
+        };
+    }
+    /** W1-9：显式清锚点（任务目标切换/完成 —— 旧注视不再引用） */
+    clearTaskAnchor() {
+        this.taskAnchor = null;
+    }
+    /**
+     * W1-9（注入面）：组装三路候选交 gazeRouter 加权，产出下次编码的注视中心。
+     * 候选路：缓存锚点（按其 route 归位，未知串按 grounding 语义 —— 锚点定义即
+     * 「上一轮任务目标」）+ 可选 visualDiff 最大连通域质心（归一化方言直收）+
+     * 可选光标（像素方言，须 viewport 在场归一 —— 缺席则该路诚实跳过）。
+     * 纯组合：不编码、不落账、绝不抛；decision.center 即 encodeForVlm 的
+     * foveaCenter 方言（源图归一化 [0,1]²），全缺席 ⇒ 几何中心回退（gazeRouter 兜底）。
+     */
+    suggestFoveaCenter(extra) {
+        const cands = [];
+        const anchor = this.taskAnchor;
+        if (anchor?.normalized) {
+            const route = anchor.route === 'diff' || anchor.route === 'cursor' ? anchor.route : 'grounding';
+            cands.push({
+                route,
+                center: { ...anchor.normalized },
+                ...(anchor.taskRelevance !== undefined ? { taskRelevance: anchor.taskRelevance } : {}),
+            });
+        }
+        const d = extra?.diffCentroid;
+        if (d && typeof d === 'object'
+            && typeof d.x === 'number' && Number.isFinite(d.x)
+            && typeof d.y === 'number' && Number.isFinite(d.y)) {
+            cands.push({ route: 'diff', center: { x: clampUnit(d.x), y: clampUnit(d.y) } });
+        }
+        const cur = extra?.cursor;
+        const vp = extra?.viewport;
+        const vpOk = vp !== null && typeof vp === 'object'
+            && typeof vp.width === 'number' && Number.isFinite(vp.width) && vp.width >= 1
+            && typeof vp.height === 'number' && Number.isFinite(vp.height) && vp.height >= 1;
+        if (cur && typeof cur === 'object'
+            && typeof cur.x === 'number' && Number.isFinite(cur.x)
+            && typeof cur.y === 'number' && Number.isFinite(cur.y)
+            && vpOk) {
+            cands.push({
+                route: 'cursor',
+                center: {
+                    x: clampUnit(cur.x / vp.width),
+                    y: clampUnit(cur.y / vp.height),
+                },
+            });
+        }
+        return gazeRouter(cands);
     }
     /**
      * C-4 显著度评估：类型加权 × 任务相关度 × 时间衰减。
@@ -186,7 +322,8 @@ class ContextManager {
     restoreSubconscious(traces) {
         if (!Array.isArray(traces))
             return;
-        this.subconscious = traces.slice(-this.subconsciousCapacity);
+        // 容量 0 = 潜意识关闭：slice(-0) 会整表回灌（-0 === 0），必须显式清空
+        this.subconscious = this.subconsciousCapacity > 0 ? traces.slice(-this.subconsciousCapacity) : [];
     }
     /**
      * 添加新截图并执行降级清理。
@@ -206,8 +343,12 @@ class ContextManager {
         this.lastPhash = null;
         try {
             const { phash } = await import('./perceptualHash.js');
+            // 入参方言是 data URL（全部调用方都拼 `data:image/...;base64,` 前缀）。
+            // Buffer.from(x,'base64') 对前缀字符的宽容解码产出腐坏字节，sharp 必抛 ⇒
+            // lastPhash 恒 null、S-6 双指复核沦为死代码 —— 先剥前缀再解码。
+            const bare = base64.replace(/^data:[^;]+;base64,/, '');
             if (hash)
-                this.lastPhash = await phash(Buffer.from(base64, 'base64'));
+                this.lastPhash = await phash(Buffer.from(bare, 'base64'));
         }
         catch {
             this.lastPhash = null;
@@ -291,6 +432,9 @@ class ContextManager {
     }
     /** 最近 n 张仍在窗口内的图片（旧→新），供差分等下游消费 */
     recentImages(n) {
+        // n ≤ 0 必须返回空：slice(-0) === slice(0) 会整表泄漏（负数更会跳过头部）
+        if (n <= 0)
+            return [];
         return this.history.filter(h => h.base64).slice(-n).map(h => ({ id: h.id, base64: h.base64 }));
     }
     /**

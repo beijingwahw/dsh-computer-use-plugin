@@ -12,6 +12,12 @@
 // 全平台视觉模型由此点亮整套系统（ask_screen / grounding / semanticConfirm
 // 兜底 / autonomy —— 消费面零改动）。
 //
+// 纪元 P2a（VLM 栈加固 · P2a-1 单例-池贯通）：chat/chatJson 在自身重试全败后、
+// 返回 ok:false 之前咨询注入的故障切换池（attachFailoverPool —— 宿主 configureVlm
+// 铸池后接线）。备脑救回 ⇒ 整流结果附 providerId 归因 + note:'failover'；池缺席
+// （缺省，大多数既有测试形态）/ 空池 / 池全败 ⇒ 失败路径与返回值逐字节不变
+// （零回归红律）。注入采用结构化契约而非直接 import providers/failover —— 杜绝环引。
+//
 // 设计铁律（与全仓一致）：
 //   1. 永不抛异常 —— 一切失败以返回值 ok:false 表达（运行层零异常上抛）
 //   2. 零新增依赖 —— Node 18+ 内置 fetch + AbortSignal.timeout；测试经
@@ -79,6 +85,9 @@ export interface GlmChatResult {
   error?: string;
   /** 降级标记 —— true = 未配置 apiKey（调用方应走本地认知降级路径） */
   degraded?: boolean;
+  /** 切换备注（P2a-1）—— 'failover' = 本结果来自故障切换池的备脑（providerId
+   *  标注来源脑）；主脑直连路径恒缺省（不接线池时返回值逐字段不变） */
+  note?: string;
 }
 
 /** meter 上报记录 —— 云脑用量遥测（Ω 纪元观测面） */
@@ -333,6 +342,150 @@ function toGlmResult(res: {
   return out;
 }
 
+// ─── 纪元 P2a-1（单例-池贯通）：故障切换池注入面 ───
+
+/**
+ * 故障切换池的最小结构契约（P2a-1）—— 注入而非 import providers/failover：
+ * glmClient 已是 providers 三厂适配器的下游（构造期 castDelegate），直接回引
+ * failover 会把 providers 子图织回本模块（环引风险 + 依赖方向反转）；本接口
+ * 只声明咨询面需要的两件东西，providers/failover 的 ProviderPool 天然结构满足
+ * （size = 池内脑数；chat = 按池序尝试首个健康脑 —— 未配置跳过、熔断 open 跳行）。
+ */
+export interface GlmFailoverPool {
+  /** 池内脑数（0 = 空池 —— 咨询直接跳过，等价无池） */
+  readonly size: number;
+  /** 按池序尝试首个健康脑 —— 返回 VisionChatResult 形状（providerId 归因） */
+  chat(req: GlmVisionRequest): Promise<{
+    ok: boolean; text: string; latencyMs: number; model: string; providerId: string;
+    json?: unknown; usage?: { promptTokens?: number; completionTokens?: number };
+    error?: string; degraded?: boolean;
+  }>;
+}
+
+/** 模块级故障切换池 —— 宿主铸池后注入（vlm/index 的 configureVlm 接线）；
+ *  null = 未接线（缺省 —— 单例失败路径与既往逐字节一致，零回归红律） */
+let failoverPool: GlmFailoverPool | null = null;
+
+/**
+ * 注入/摘除故障切换池（P2a-1）—— 传 null 摘除；垃圾输入（非对象/无 chat 函数）
+ * 安静归 null（不抛铁律）。重复调用以最后一次为准（幂等）。
+ */
+export function attachFailoverPool(pool: GlmFailoverPool | null): void {
+  failoverPool = pool && typeof pool === 'object' && typeof pool.chat === 'function' ? pool : null;
+}
+
+// ─── W2-8（C2 成本级联路由）：级联咨询面 ───
+
+/**
+ * W2-8：成本级联路由的结构化咨询契约 —— 注入而非 import providers/cascade
+ * （与 GlmFailoverPool 同律：本模块是 providers 适配器的下游，回引 cascade 会
+ * 反转依赖方向）。providers/cascade 的 VlmCascade.runJson 天然结构满足本面
+ * （宿主接线：`attachCascadeFace({ consultJson: (req) => cascade.runJson(req) })`）。
+ *
+ * 咨询律（chatJson 入口最先咨询）：
+ *  - 返回 null = 级联弃权（高危直行主力 / 池无便宜档 / 无分诊因子 / 无校验
+ *    谓词 / 内部故障）⇒ 本类原路径照走，行为与未接线逐字节一致；
+ *  - 返回非 null = 级联已承接（便宜档过检直采，或升级主力重做 —— 含诚实
+ *    失败）⇒ 本类直接整流该结果，不再走自身请求路径；
+ *  - 咨询面自身抛错 ⇒ 视为弃权（不抛铁律），主路径照走。
+ */
+export interface GlmCascadeFace {
+  /** 结构化咨询：承接 ⇒ {ok, value?, error?, raw}；弃权 ⇒ null */
+  consultJson(req: GlmVisionRequest): Promise<{
+    ok: boolean;
+    value?: unknown;
+    error?: string;
+    raw: string;
+  } | null>;
+}
+
+/** 模块级级联咨询面 —— 宿主接线注入（缺省 null = 未接线，零行为变化律） */
+let cascadeFace: GlmCascadeFace | null = null;
+
+/**
+ * W2-8：注入/摘除级联咨询面 —— 传 null 摘除；垃圾输入（非对象/无 consultJson
+ * 函数）安静归 null（不抛铁律）。重复调用以最后一次为准（幂等）。
+ */
+export function attachCascadeFace(face: GlmCascadeFace | null): void {
+  cascadeFace =
+    face && typeof face === 'object' && typeof (face as { consultJson?: unknown }).consultJson === 'function'
+      ? face
+      : null;
+}
+
+/**
+ * W2-8：咨询级联面 —— chatJson 的最前置闸。承接 ⇒ 整流为 chatJson 形状返回；
+ * 弃权/面故障 ⇒ null（主路径照走）。绝不抛。
+ */
+async function consultCascadeFace<T>(req: GlmVisionRequest): Promise<{
+  ok: boolean;
+  value?: T;
+  error?: string;
+  raw: string;
+} | null> {
+  const face = cascadeFace;
+  if (face === null) return null;
+  try {
+    const r = await face.consultJson(req);
+    if (r === null || r === undefined) return null; // 弃权
+    if (typeof r !== 'object') return null; // 敌意返回 —— 视为弃权
+    const ok = (r as { ok?: unknown }).ok === true;
+    if (ok && r.value === undefined) {
+      // ok:true 却无值（敌意/违约面）—— 从 raw 自行剥壳补齐；剥不出 ⇒ 弃权
+      const salvaged = extractGlmJson(typeof r.raw === 'string' ? r.raw : '');
+      if (salvaged === undefined) return null;
+      return { ok: true, value: salvaged as T, raw: typeof r.raw === 'string' ? r.raw : '' };
+    }
+    return {
+      ok,
+      ...(ok && r.value !== undefined ? { value: r.value as T } : {}),
+      ...(!ok && typeof r.error === 'string' && r.error !== '' ? { error: r.error } : {}),
+      raw: typeof r.raw === 'string' ? r.raw : '',
+    };
+  } catch {
+    return null; // 咨询面故障 ⇒ 弃权（不抛铁律）
+  }
+}
+
+/**
+ * 咨询故障切换池（P2a-1）—— 单例自身重试全败后的备脑切换面：
+ *  - 池缺席 / 空池（size ≤ 0）/ size 读取抛错 ⇒ null（调用方走原失败路径，逐字节不变）；
+ *  - 池按序全败（ok:false）或违约上抛 ⇒ null（保留主脑失败现场 —— 不用池的失败覆盖归因）；
+ *  - 池救回（ok:true）⇒ 整流回 GlmChatResult 形状：providerId 标注备脑来源、
+ *    note:'failover'、latencyMs/model 取备脑自报值；计量由池内适配器自报
+ *    （铸造路径即 vlmMeterTap —— 主脑失败一条 + 备脑成功一条，各记各的诚实账，
+ *    本函数不重复上报）。
+ */
+async function consultFailoverPool(req: GlmVisionRequest): Promise<GlmChatResult | null> {
+  const pool = failoverPool;
+  if (!pool) return null;
+  let size = 0;
+  try {
+    size = Number(pool.size);
+  } catch {
+    return null; // 敌意 getter —— 视为不可咨询
+  }
+  if (!Number.isFinite(size) || size <= 0) return null;
+  try {
+    const res = await pool.chat(req);
+    if (!res || (res as { ok?: unknown }).ok !== true) return null; // 池全败 ⇒ 原失败路径
+    const r = res as Partial<GlmChatResult>;
+    const out = toGlmResult({
+      ok: true,
+      text: typeof r.text === 'string' ? r.text : '',
+      latencyMs: Number.isFinite(r.latencyMs) ? (r.latencyMs as number) : 0,
+      model: typeof r.model === 'string' && r.model !== '' ? r.model : 'failover',
+      providerId: typeof r.providerId === 'string' && r.providerId !== '' ? r.providerId : 'failover',
+      ...(r.json !== undefined ? { json: r.json } : {}),
+      ...(r.usage !== undefined ? { usage: r.usage } : {}),
+    });
+    out.note = 'failover';
+    return out;
+  } catch {
+    return null; // 池违约上抛 —— 收敛为原失败路径（不抛铁律）
+  }
+}
+
 /**
  * GLM 视觉对话客户端 —— 无状态、线程安全（每次 chat 独立请求）。
  * 构造期快照配置（options > 环境变量），之后环境变量变更不回读 ——
@@ -416,17 +569,22 @@ export class GlmClient {
    */
   async chat(req: GlmVisionRequest): Promise<GlmChatResult> {
     // 委托路径（纪元 Ψ）：全权交平台适配器（重试律/降级律/meter/密键卫生皆其自管），
-    // 壳层只整流结果形状；适配器违约上抛在此收敛（不抛铁律的最后一块拼图）
+    // 壳层只整流结果形状；适配器违约上抛在此收敛（不抛铁律的最后一块拼图）。
+    // P2a-1：委托路径自身重试全败后同样咨询池 —— 池救回 ⇒ 备脑结果；池缺席/全败
+    // ⇒ 原失败结果逐字段不变（零回归红律）。
     if (this.delegate !== null) {
+      let res: GlmChatResult;
       try {
-        return toGlmResult(await this.delegate.chat(req));
+        res = toGlmResult(await this.delegate.chat(req));
       } catch (e) {
-        return {
+        res = {
           ok: false, text: '', latencyMs: 0,
           model: this.delegate.model, providerId: this.delegate.id,
           error: sanitizeError(e, this.delegate.id),
         };
       }
+      if (res.ok) return res;
+      return (await consultFailoverPool(req)) ?? res;
     }
 
     const startedAt = Date.now();
@@ -442,15 +600,23 @@ export class GlmClient {
       return res;
     };
 
+    // 失败收尾（P2a-1）：先按原路径产出失败结果（meter 照报 —— 主脑失败是真实事件，
+    // 不因备脑救回而抹账），再咨询故障切换池；救回 ⇒ 整流备脑成功结果（note
+    // 'failover'），池缺席/空池/全败 ⇒ 原失败结果逐字段不变（零回归红律）。
+    const fail = async (r: Omit<GlmChatResult, 'latencyMs' | 'model'>): Promise<GlmChatResult> => {
+      const res = finish(r);
+      return (await consultFailoverPool(req)) ?? res;
+    };
+
     if (!this.configured) {
-      return finish({
+      return fail({
         ok: false, text: '', degraded: true,
         error: 'glm api key not configured (set GLM_API_KEY / ZHIPUAI_API_KEY / ZAI_API_KEY or pass options.apiKey)',
       });
     }
     const doFetch = this.fetchImpl ?? (typeof fetch === 'function' ? fetch : undefined);
     if (!doFetch) {
-      return finish({ ok: false, text: '', error: 'fetch is not available (Node >= 18 required)' });
+      return fail({ ok: false, text: '', error: 'fetch is not available (Node >= 18 required)' });
     }
 
     // OpenAI 兼容多模态消息：system（可选）在前，user = 文本 + 图片序列
@@ -491,7 +657,7 @@ export class GlmClient {
       } catch (e) {
         // 超时：调用方主动止损 —— 不重试，立即诚实归因
         if (isAbortError(e)) {
-          return finish({ ok: false, text: '', error: `glm request aborted after ${timeoutMs}ms` });
+          return fail({ ok: false, text: '', error: `glm request aborted after ${timeoutMs}ms` });
         }
         // 网络错误（连接拒绝 / DNS / 断流）：可重试
         if (attempt < maxRetries) {
@@ -499,7 +665,7 @@ export class GlmClient {
           attempt++;
           continue;
         }
-        return finish({ ok: false, text: '', error: `glm fetch failed after ${attempt + 1} attempts: ${errText(e)}` });
+        return fail({ ok: false, text: '', error: `glm fetch failed after ${attempt + 1} attempts: ${errText(e)}` });
       }
 
       if (resp.ok) {
@@ -507,11 +673,11 @@ export class GlmClient {
         try {
           body = await resp.json();
         } catch (e) {
-          return finish({ ok: false, text: '', error: `glm response JSON parse failed: ${errText(e)}` });
+          return fail({ ok: false, text: '', error: `glm response JSON parse failed: ${errText(e)}` });
         }
         const content = extractContent(body);
         if (content === null) {
-          return finish({ ok: false, text: '', error: 'glm response missing choices[0].message.content' });
+          return fail({ ok: false, text: '', error: 'glm response missing choices[0].message.content' });
         }
         const usage = mapUsage((body as { usage?: unknown }).usage);
         const r: Omit<GlmChatResult, 'latencyMs' | 'model'> = { ok: true, text: content };
@@ -534,7 +700,7 @@ export class GlmClient {
       const raw = (await safeBodyText(resp)).replace(/\s+/g, ' ').trim().slice(0, 300);
       // 密钥卫生律（纪元 Ψ 终审补刀）：错误体可能回显 apiKey，一律替换后才能进入 error/meter
       const snippet = this.apiKey ? raw.split(this.apiKey).join('[REDACTED]') : raw;
-      return finish({
+      return fail({
         ok: false, text: '',
         error: `glm chat/completions HTTP ${resp.status}${attempt > 0 ? ` after ${attempt + 1} attempts` : ''}: ${snippet}`,
       });
@@ -548,13 +714,29 @@ export class GlmClient {
    * 模型回复原文（成功也是），调用方可落日志/回退解析。
    */
   async chatJson<T>(req: GlmVisionRequest): Promise<{ ok: boolean; value?: T; error?: string; raw: string }> {
-    // 委托路径（纪元 Ψ）：适配器自带的 jsonMode 强制 + 剥壳提取（error 用适配器串）
+    // W2-8（C2 成本级联路由）：结构化路径最先咨询级联面 —— 承接 ⇒ 直接整流返回
+    // （便宜档过检直采 / 升级主力重做）；弃权/未接线/面故障 ⇒ null ⇒ 主路径照走
+    // （缺省未接线时本段恒不改变任何返回值 —— 零行为变化律）。
+    const cascaded = await consultCascadeFace<T>(req);
+    if (cascaded !== null) return cascaded;
+
+    // 委托路径（纪元 Ψ）：适配器自带的 jsonMode 强制 + 剥壳提取（error 用适配器串）。
+    // P2a-1：委托 jsonMode 全败 ⇒ 咨询池（与 chat 同咨询律）；救回且可剥壳 ⇒ 备脑值，
+    // 池缺席/全败/剥壳失败 ⇒ 原失败结果逐字段不变（零回归红律）。
     if (this.delegate !== null) {
+      let res: { ok: boolean; value?: T; error?: string; raw: string };
       try {
-        return await this.delegate.chatJson<T>(req);
+        res = await this.delegate.chatJson<T>(req);
       } catch (e) {
-        return { ok: false, error: sanitizeError(e, this.delegate.id), raw: '' };
+        res = { ok: false, error: sanitizeError(e, this.delegate.id), raw: '' };
       }
+      if (res.ok) return res;
+      const saved = await consultFailoverPool({ ...req, jsonMode: true });
+      if (saved) {
+        const value = extractGlmJson(saved.text);
+        if (value !== undefined) return { ok: true, value: value as T, raw: saved.text };
+      }
+      return res;
     }
     const res = await this.chat({ ...req, jsonMode: true });
     if (!res.ok) {

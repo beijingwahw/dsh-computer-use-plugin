@@ -47,6 +47,28 @@ export interface SettleOptions {
   regionRadius: number;
   /** C-1：物理规则启用清单（空 = 全部）；来自 config.physicsRules */
   physicsRules?: string;
+  /**
+   * W4-8 L4 声学证据注入端口：动作 settle 后查询最近 ~2s 回环窗口的
+   * **非语义**音频事件（python_service/dsh_physical/audio.py 产出；
+   * null = 无事件/通道不可用）。缺席 = 现状逐字节不变（兼容铁律）；
+   * 在场 = 门控证据（语义与法条见下方 W4-8 立法块）。防御式：端口抛错
+   * 视为证据缺席，绝不毒化判决主链。
+   */
+  audioEvidence?: () => AudioEvent | null;
+  /**
+   * W5-3（L3 跨机互证）远程世界变化谓词端口：向对端 peer 取证「A 的动作
+   * 效果是否出现在 B 屏」。provider 负责取 B 的前后帧差分（frame_diff +
+   * region dhash，visualDiff 方言）并按 expectedRegionHint 裁剪；返回
+   * null = 证据缺席（peer 离线/超时/通道不可用 —— 诚实缺席，不误判）。
+   * 缺席 = 现状逐字节不变（兼容铁律）；在场 = 只在**视觉阳性**（detected=
+   * true 且无退化注记）时被询问（法条见下方 W5-3 立法块）。防御式：端口
+   * 抛错视为证据缺席，绝不毒化判决主链。
+   */
+  remoteEvidence?: (peer: string, expectedRegionHint: RemoteRegion | null) => Promise<RemoteChange | null>;
+  /** W5-3：取证的对端清单（缺省/空 ⇒ 端口不被询问 —— remote 键缺席）；上界 REMOTE_PEERS_MAX */
+  remotePeers?: readonly string[];
+  /** W5-3：期望远程变化区域（归一化坐标 —— visualDiff 方言；缺省 null ⇒ 严格不互证） */
+  remoteRegionHint?: RemoteRegion | null;
 }
 
 /** 动作前状态：全屏指纹 + 可选的区域指纹（同一帧截屏，区域由 focus 决定） */
@@ -147,6 +169,219 @@ export interface CombinedEffect {
   unverifiable?: string;
   /** D-5 路径：稳定帧帧环 id（语义核对/物理规则/弹窗传感的服务端引用锚） */
   afterFrameId?: number | null;
+  /**
+   * W4-8 L4 声学证据：观察到的非语义音频事件（**端口在场时**才落键；
+   * null = 已查询无事件）。这是 failureMemory 签名维度的只读证据源 ——
+   * 消费方（failureMemory.record 的 actionSignature 语境）自行取用，
+   * 本引擎绝不在此改写任何视觉判决字段。
+   */
+  audioEvent?: AudioEvent | null;
+  /**
+   * W5-3（L3 跨机互证）远程取证报告：**仅 remoteEvidence 端口在场、remotePeers
+   * 非空、且本动作视觉阳性**时落键（其余情形键整体缺席 —— 逐字节兼容）。
+   * 这是「A 的动作效果必须出现在 B 屏」的旁路互证车道：corroborated 计数
+   * 不改写 detected/scale 等任何视觉判决字段（消费方自行决定采纳程度），
+   * unverified 是诚实缺席 —— peer 离线/超时/无期望区域都只降格，绝不误判。
+   */
+  remote?: {
+    /** 本次取证使用的期望区域（归一化；null = 未声明 —— 严格不互证） */
+    hint: RemoteRegion | null;
+    perPeer: Array<{ peer: string } & RemoteJudgement>;
+    corroborated: number;
+    unverified: number;
+  };
+  /**
+   * W4-8 门控音频判决：**仅视觉阴性**（detected=false 且无退化注记）时计算
+   * —— success_chime ⇒ probable_effect（no_effect 升级，置信 ≤ 法条二封顶）；
+   * error_beep ⇒ recheck（触发复核，判决不动）。视觉阳性在场时此键缺席
+   * （法条一：音频无权稀释/顶替视觉确定性证据）。detected 主字段恒为纯视觉
+   * 判决（quantumSense.recordEffect 的 boolean 契约锁死）—— 升级只活在
+   * 本旁路车道，消费方自行决定是否把 no_effect 改称 probable_effect。
+   */
+  audioGated?: { verdict: AudioGatedVerdict; event: AudioEventKind; confidence: number };
+}
+
+// ─── W5-3（L3 跨机互证）远程世界变化谓词：A 的动作效果必须出现在 B 屏 ───
+//
+// 法条（与 W4-8 声学通道对称立法 —— 音频补强视觉阴性，远程互证核对视觉阳性）：
+//   · 视觉阳性门控：只有本屏给出确定性阳性判决（detected=true 且无退化注记）
+//     时才向对端取证 —— 本屏无效果却去 B 屏找「对应变化」是伪证题；视觉
+//     阴性/未验证（unverifiable，Δ-7 同律）都不触发互证。
+//   · 判决只旁路：corroborated/unverified 是旁路车道的事实报告，绝不改写
+//     detected/scale/intent 等任何既有判决字段 —— 互证是证据增益，不是第二审判。
+//   · 谓词严格（立法常量 REMOTE_EVIDENCE_OVERLAP_MIN）：无期望区域（no-hint）
+//     ⇒ 严格不互证（说不出效果该出现在哪，就无权说「对上了」）；判据 =
+//     对端 frame_diff 变化区域与期望区域的交叠覆盖率（交集面积/期望面积）
+//     ≥ 0.25；无变化区域/证据缺席 ⇒ 诚实 unverified，绝不臆造 corroborated。
+//   · 防御式：端口抛错/载荷形状非法 ⇒ 证据缺席（unverified），绝不抛、
+//     绝不毒化判决主链；取证 peer 数上界 REMOTE_PEERS_MAX=4（旁路不透支）。
+
+/** W5-3：归一化矩形（visualDiff 方言 —— DiffRegion.bbox_normalized 同构） */
+export interface RemoteRegion {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** W5-3：对端一次取证的证据载荷（provider 产出：B 屏前后帧差分 + 区域指纹） */
+export interface RemoteChange {
+  /** 对端稳定帧全屏 dhash（hex；审计面 —— 不参与交叠判决） */
+  screen: string;
+  /** 对端期望区域 dhash（与 frame_diff 并列的第二证据；null = 未取到） */
+  region?: string | null;
+  /** 对端屏 frame_diff 变化区域清单（归一化坐标，visualDiff 方言，只读复用） */
+  regions: RemoteRegion[];
+}
+
+/** W5-3：互证谓词阈值（立法常量 —— 交叠覆盖率下限；改此值 = 修法，须过 w5cross 断言） */
+export const REMOTE_EVIDENCE_OVERLAP_MIN = 0.25 as const;
+
+/** W5-3：单动作取证 peer 数上界（旁路义务不透支主路预算） */
+export const REMOTE_PEERS_MAX = 4 as const;
+
+/** W5-3：互证判决（corroborated = 对端屏在期望区域看到变化；unverified = 诚实缺席/不达阈） */
+export type RemoteCorroborateVerdict = 'corroborated' | 'unverified';
+
+/** W5-3：互证判决报告（overlap = 最优交叠覆盖率，4 位小数确定性） */
+export interface RemoteJudgement {
+  verdict: RemoteCorroborateVerdict;
+  overlap: number;
+  reason?: string;
+}
+
+/** W5-3 防御式净化：归一化矩形形状/值域不合法或退化（x1≤x0 等）⇒ null */
+function sanitizeRemoteRegion(r: unknown): RemoteRegion | null {
+  try {
+    if (!r || typeof r !== 'object') return null;
+    const o = r as { x0?: unknown; y0?: unknown; x1?: unknown; y1?: unknown };
+    if (![o.x0, o.y0, o.x1, o.y1].every(v => typeof v === 'number' && Number.isFinite(v))) return null;
+    const c = (v: number): number => Math.max(0, Math.min(1, v));
+    const x0 = c(o.x0 as number), y0 = c(o.y0 as number), x1 = c(o.x1 as number), y1 = c(o.y1 as number);
+    if (!(x1 > x0 && y1 > y0)) return null; // 退化框：零面积 ⇒ 无判决资格
+    return { x0, y0, x1, y1 };
+  } catch {
+    return null;
+  }
+}
+
+/** W5-3 防御式净化：RemoteChange 载荷形状不合法 ⇒ null（证据缺席）；regions 内坏框静默剔除 */
+function sanitizeRemoteChange(c: unknown): RemoteChange | null {
+  try {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+    const o = c as { screen?: unknown; region?: unknown; regions?: unknown };
+    const regions = Array.isArray(o.regions)
+      ? o.regions.map(sanitizeRemoteRegion).filter((r): r is RemoteRegion => r !== null)
+      : [];
+    return {
+      screen: typeof o.screen === 'string' ? o.screen : '',
+      region: typeof o.region === 'string' ? o.region : null,
+      regions,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * W5-3：跨机互证谓词（纯函数、确定性、绝不抛）——「A 的动作效果必须出现在
+ * B 屏」的判决核心：
+ *   · 证据缺席（change=null）⇒ unverified 'absent'（peer 离线/超时/载荷坏）；
+ *   · 无期望区域（hint=null/非法）⇒ unverified 'no-hint'（严格：说不出该出现
+ *     在哪，就无权互证）；
+ *   · 无有效变化区域 ⇒ unverified 'no-change-regions'（B 屏没变 —— 诚实
+ *     缺席而非反驳：region 证据链断在哪环都不臆造）；
+ *   · 判据：max over regions of（区域∩期望）/（期望面积）≥ REMOTE_EVIDENCE_
+ *     OVERLAP_MIN ⇒ corroborated；否则 unverified 'overlap-below-min'
+ *     （overlap 照报最优值 —— 证据保留）。
+ */
+export function judgeRemoteChange(
+  hint: RemoteRegion | null,
+  change: RemoteChange | null,
+): RemoteJudgement {
+  const un = (reason: string): RemoteJudgement => ({ verdict: 'unverified', overlap: 0, reason });
+  try {
+    if (change === null) return un('absent');
+    const h = sanitizeRemoteRegion(hint);
+    if (h === null) return un('no-hint');
+    if (change.regions.length === 0) return un('no-change-regions');
+    const hArea = (h.x1 - h.x0) * (h.y1 - h.y0);
+    if (!(hArea > 0)) return un('no-hint');
+    let best = 0;
+    for (const r of change.regions) {
+      const iw = Math.min(h.x1, r.x1) - Math.max(h.x0, r.x0);
+      const ih = Math.min(h.y1, r.y1) - Math.max(h.y0, r.y0);
+      if (iw > 0 && ih > 0) best = Math.max(best, (iw * ih) / hArea);
+    }
+    const overlap = Math.round(best * 10000) / 10000;
+    return overlap >= REMOTE_EVIDENCE_OVERLAP_MIN
+      ? { verdict: 'corroborated', overlap }
+      : { verdict: 'unverified', overlap, reason: 'overlap-below-min' };
+  } catch {
+    return un('absent');
+  }
+}
+
+// ─── W4-8 L4 声学证据通道（有节制的破戒）：非语义物理证据，恒低于视觉 ───
+//
+// 破戒范围（创新提案 L4）：系统音频只作**非语义**物理证据 —— 五类声学纹理
+// 事件（通知叮声/错误提示/成功提示/按键音/静默），由物理层
+// python_service/dsh_physical/audio.py（WASAPI 回环 + 阈值级联分类）产出。
+// 绝不做语音识别/说话人识别/内容转录：声学**纹理**是证据，声学**内容**不是。
+//
+// 法条一（视觉优先律，立法为常量 AUDIO_VISUAL_PRIORITY）：
+//   音频证据的证明力恒低于视觉。视觉通道给出确定性判决时（detected=true
+//   的阳性，或 detected=false 且无指纹退化的阴性），音频**一律不改判** ——
+//   最多作为 audioEvent 附注被记录；视觉阳性在场时连门控判决（audioGated）
+//   都不产出。音频可以补强视觉的阴性，绝无权推翻视觉的阳性。
+// 法条二（置信封顶，立法为常量 AUDIO_EVIDENCE_CONFIDENCE_CAP）：
+//   音频单通道升级的效果判决，置信度硬上限 0.5 —— 恒低于任何视觉确定性
+//   证据（1.0）。封顶是立法不是调参：改此值 = 修法，须过 w4audio 封顶断言。
+//
+// 门控语义（仅视觉阴性时计算 audioGated）：
+//   · success_chime ⇒ no_effect 升级 probable_effect（置信 ≤ 法条二封顶）；
+//   · error_beep   ⇒ 触发复核（recheck）—— 判决不动，要求再看一眼；
+//   · notification_ding / key_click / silence ⇒ 只记录，不参与判决。
+//   视觉「未验证」（unverifiable，指纹退化）不是视觉阴性 —— 音频不得在
+//   视觉缺席处制造确定性（Δ-7 同律：证据不可用 ≠ 无变化）。
+
+/** W4-8：五类非语义音频事件（与 audio.py 的 EVENT_KINDS 字面镜像） */
+export type AudioEventKind =
+  | 'notification_ding'
+  | 'error_beep'
+  | 'success_chime'
+  | 'key_click'
+  | 'silence';
+
+/** W4-8：音频事件（audio.py 输出契约 {event, confidence, ts} 的 TS 镜像） */
+export interface AudioEvent {
+  event: AudioEventKind;
+  /** python 端分类置信（0..1）—— 未经封顶的原始探测器置信 */
+  confidence: number;
+  /** unix ms（audio.py 检出时刻） */
+  ts: number;
+}
+
+/** 法条一（W4-8 视觉优先律）：音频证据恒低权于视觉 —— 立法文本见上方注释块 */
+export const AUDIO_VISUAL_PRIORITY = true as const;
+/** 法条二（W4-8 置信封顶）：音频单通道效果判决的置信硬上限（0.5 < 视觉 1.0） */
+export const AUDIO_EVIDENCE_CONFIDENCE_CAP = 0.5 as const;
+
+/** W4-8：门控音频判决种类（probable_effect = 阴性升级；recheck = 触发复核） */
+export type AudioGatedVerdict = 'probable_effect' | 'recheck';
+
+/** W4-8 防御式净化：注入方给的 AudioEvent 形状/值域不合法 ⇒ 视为缺席（null）。
+ *  证据通道的垃圾输入绝不进入判决链（防御式绝不抛的外延）。 */
+function sanitizeAudioEvent(ev: unknown): AudioEvent | null {
+  if (!ev || typeof ev !== 'object') return null;
+  const e = ev as { event?: unknown; confidence?: unknown; ts?: unknown };
+  const kinds: readonly unknown[] = ['notification_ding', 'error_beep', 'success_chime', 'key_click', 'silence'];
+  if (typeof e.event !== 'string' || !kinds.includes(e.event)) return null;
+  const confidence = typeof e.confidence === 'number' && Number.isFinite(e.confidence)
+    ? Math.max(0, Math.min(1, e.confidence))
+    : 0;
+  const ts = typeof e.ts === 'number' && Number.isFinite(e.ts) ? e.ts : Date.now();
+  return { event: e.event as AudioEventKind, confidence, ts };
 }
 
 /** 轮询直到屏幕稳定：服务端指纹轮询（meta_only —— 不编码不传图）。
@@ -347,10 +582,85 @@ export async function settleAndVerify(
     } catch { phashCorroborates = undefined; }
   }
 
+  // ── W4-8 L4 声学证据（门控旁路）：防御式绝不抛 —— 端口故障 = 证据缺席 ──
+  // 端口缺席（opts.audioEvidence 未注入）⇒ 本块整体短路，返回体逐字节不变。
+  let audio: AudioEvent | null = null;
+  if (opts.audioEvidence) {
+    try {
+      audio = sanitizeAudioEvent(opts.audioEvidence());
+    } catch { audio = null; } // 防御式：证据通道的故障绝不毒化判决主链
+  }
+  let audioGated: CombinedEffect['audioGated'];
+  if (audio && AUDIO_VISUAL_PRIORITY) {
+    // 门控前提（法条一）：视觉阴性 = detected=false 且无退化注记。
+    //   视觉阳性 ⇒ 音频静默（连门控判决都不产出 —— audioEvent 仍附注）；
+    //   视觉未验证（unverifiable）⇒ 不升级（Δ-7 同律：证据不可用 ≠ 无变化）。
+    const visualNegative = detected === false && !unverifiable;
+    if (visualNegative) {
+      if (audio.event === 'success_chime') {
+        audioGated = {
+          verdict: 'probable_effect',
+          event: audio.event,
+          // 法条二（置信封顶）：音频单通道升级的置信硬上限 —— 立法不是调参
+          confidence: Math.min(audio.confidence, AUDIO_EVIDENCE_CONFIDENCE_CAP),
+        };
+      } else if (audio.event === 'error_beep') {
+        audioGated = {
+          verdict: 'recheck',
+          event: audio.event,
+          confidence: Math.min(audio.confidence, AUDIO_EVIDENCE_CONFIDENCE_CAP),
+        };
+      }
+      // 其余事件（notification_ding / key_click / silence）：只记录不判决
+    }
+  }
+
+  // ── W5-3（L3 跨机互证）：远程世界变化谓词（旁路义务 —— 失败不毒化判决）──
+  // 门控（法条）：视觉阳性（detected=true 且无退化注记）+ 端口在场 + peers
+  // 非空，三者齐备才取证 —— 与 W4-8 声学通道的「视觉阴性门控」对称立法。
+  // 端口缺席/门控不中 ⇒ 本块整体短路，返回体逐字节不变（兼容铁律）。
+  let remote: CombinedEffect['remote'];
+  if (typeof opts.remoteEvidence === 'function' && Array.isArray(opts.remotePeers) &&
+    opts.remotePeers.length > 0 && detected === true && !unverifiable) {
+    const hint = sanitizeRemoteRegion(opts.remoteRegionHint) ?? null; // 非法 hint = 未声明 ⇒ 严格 no-hint
+    const perPeer: Array<{ peer: string } & RemoteJudgement> = [];
+    for (const rawPeer of opts.remotePeers.slice(0, REMOTE_PEERS_MAX)) {
+      if (typeof rawPeer !== 'string' || rawPeer === '') {
+        perPeer.push({ peer: '', verdict: 'unverified', overlap: 0, reason: 'bad-peer' });
+        continue;
+      }
+      let change: RemoteChange | null = null;
+      let portError = false;
+      try {
+        change = await opts.remoteEvidence(rawPeer, hint);
+      } catch {
+        portError = true; // 防御式：证据通道的故障绝不毒化判决主链
+      }
+      if (portError) {
+        perPeer.push({ peer: rawPeer, verdict: 'unverified', overlap: 0, reason: 'port-error' });
+        continue;
+      }
+      const j = judgeRemoteChange(hint, sanitizeRemoteChange(change));
+      perPeer.push({ peer: rawPeer, ...j });
+    }
+    remote = {
+      hint,
+      perPeer,
+      corroborated: perPeer.filter(p => p.verdict === 'corroborated').length,
+      unverified: perPeer.filter(p => p.verdict !== 'corroborated').length,
+    };
+  }
+
   return {
     detected, screen, region, scale,
     afterBuffer: afterBuf, afterHash: afterScreen, oscillation,
     intent, phashCorroborates, unverifiable, afterFrameId,
+    // W4-8：端口缺席 ⇒ 两键均不落（逐字节不变）；在场 ⇒ audioEvent 恒附
+    //（null = 已查询无事件/事件形状非法），audioGated 仅门控命中时在场。
+    ...(opts.audioEvidence ? { audioEvent: audio, ...(audioGated ? { audioGated } : {}) } : {}),
+    // W5-3：门控不中 ⇒ remote 键整体缺席（逐字节不变）；门控命中 ⇒ 旁路互证
+    // 报告（只读证据 —— 不改写任何视觉判决字段）。
+    ...(remote ? { remote } : {}),
   };
 }
 

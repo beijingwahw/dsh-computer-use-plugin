@@ -35,10 +35,13 @@ from .auth import (
 )
 from .config import AppConfig, load_config_from_env
 from .errors import ErrorKind, failure, success, unhandled_exception_middleware
+from .hid import HidController, load_hid_config_from_env
 from .input import InputController
 from .screen import ScreenCapture
 from .ui_tree import UIFunnel
+from .uvc import UvcController, load_uvc_config_from_env
 from .window import WindowManager
+from .android import AndroidController
 
 
 # ─── 全局单例（被 create_app / shutdown 共享）───
@@ -59,12 +62,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     # 初始化控制器
     input_ctrl = InputController(config.actions)
-    screen_ctrl = ScreenCapture(config.screenshot)
+    # W4-5 移动 Surface：android 控制器（adb/scrcpy 子进程全经可注入 runner）
+    # 先造 —— ScreenCapture 的 android 帧源由它提供（同一实例 ⇒ /v1/devices
+    # 的清单与截图的帧源出自同一控制器，serial 语义一致）。
+    android_ctrl = AndroidController(config.android)
+    screen_ctrl = ScreenCapture(config.screenshot, surface_source=android_ctrl.grab_frame)
     funnel_ctrl = UIFunnel(config.funnel)
     window_ctrl = WindowManager(config.window)
 
+    # W5-1（W4-6 落盘）：L2 零 API 设备面控制器 —— UVC 采集卡（眼睛）+
+    # HID 棒（手）。构造零硬件副作用（帧源懒解析 / 串口懒打开），env 配置
+    # 装载走加载层方言（非法值 raise 拒绝带病上线；硬件/依赖缺席不影响启动
+    # —— 缺席事实由端点调用时诚实信封化，mock 源可经 env 显式选择）。
+    uvc_ctrl = UvcController(load_uvc_config_from_env())
+    hid_ctrl = HidController(load_hid_config_from_env())
+
     # 注入到 routes 模块
-    routes.set_controllers(input_ctrl, screen_ctrl, funnel_ctrl, window_ctrl, config)
+    routes.set_controllers(
+        input_ctrl, screen_ctrl, funnel_ctrl, window_ctrl, config,
+        android_ctrl, uvc=uvc_ctrl, hid=hid_ctrl,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -96,6 +113,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "screen": screen_ctrl,
             "funnel": funnel_ctrl,
             "window": window_ctrl,
+            "android": android_ctrl,  # W4-5 移动 Surface
+            "uvc": uvc_ctrl,          # W5-1（W4-6）：UVC 采集卡面
+            "hid": hid_ctrl,          # W5-1（W4-6）：HID 棒面
         })
         try:
             yield
@@ -103,7 +123,30 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             task = _app_state.get("chmod_task")
             if task is not None and not task.done():
                 task.cancel()
-            # 关闭：清理 shm + 退出日志
+            # 关闭：清理 shm + 移动 Surface 缓存归零 + L2 设备面句柄收口 + 退出日志
+            try:
+                android_ctrl.close()  # W4-5：清设备/分辨率缓存（帧源为一次性子进程，无常驻句柄）
+            except Exception:  # noqa: BLE001 —— 关闭路径不得掩盖其他清理
+                pass
+            # W5-1：UVC 帧源（cv2 捕获句柄）优雅收口 —— 未解析/未打开时为无害 no-op
+            try:
+                await uvc_ctrl.close()
+            except Exception:  # noqa: BLE001
+                pass
+            # W5-1：HID 串口句柄收口（HidController 无 close 门面 —— 经 transport
+            # 最佳努力；未写过帧 ⇒ 未开串口 ⇒ no-op）
+            try:
+                shutdown_loop = asyncio.get_running_loop()
+                shutdown_loop.run_in_executor(None, hid_ctrl._transport.close)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+            # W5-1（W4-8）：声学通道后台采集线程收口（未建链 ⇒ no-op）
+            try:
+                from . import audio as audio_module
+
+                audio_module.get_shared_monitor().stop()
+            except Exception:  # noqa: BLE001
+                pass
             shm_module.cleanup_all()
             _app_state.clear()
 

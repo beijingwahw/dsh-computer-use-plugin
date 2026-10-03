@@ -57,8 +57,27 @@ class UIMemory {
         };
         this.landmarks.push(landmark);
         // 容量驱逐：优先淘汰「低成功 + 陈旧」的条目
+        // P2b-2（缺陷修复，出处=全库遍历报告）：旧公式 successCount × lastUsedAt 是
+        // 量纲失衡的乘积排序 —— lastUsedAt（epoch 毫秒，~1.8e12）与 successCount
+        //（1~几十）相乘后，乘积序实际只被相对离散度更大的那一维决定（同会话内地标
+        // 时间戳的相对差 <0.1%，成功计数的相对差可达几十倍 ⇒ 新旧地标的排序话语权
+        // 被成功数独占，「陈旧该逐」的设计维度近乎为零），「低成功 + 陈旧」的二维
+        // 意图退化成一维。新公式把两维各自归一到可比尺度再相乘：
+        //   score = log1p(successCount) × 2^(-ageH / LANDMARK_HALF_LIFE_H)
+        // · log1p：成功计数压到 [0.69, ~4]（s=1..50）—— 保序但边际递减（第 50 次
+        //   成功不该有第 1 次的 50 倍权重），同新近度下 score 退化为 log1p(s)，
+        //   成功计数独占话语（s=8 是 s=1 的 3.2 倍 —— 真实话语权，不再被 epoch
+        //   毫秒基数淹没）；
+        // · 半衰因子：复用库内放射性半衰期常量 LANDMARK_HALF_LIFE_H=168h（Y-8 立法，
+        //   recall 的信任衰减同族同源 —— 同一地标在「召回打分」与「容量驱逐」按
+        //   同一时钟衰变，不引入新魔法数）。陈旧惩罚呈指数：一周减半、两周 1/4。
+        // 两维都有真实否决权：成功再多也敌不过时间 —— s=100（log1p≈4.6）在 3 个
+        // 半衰期后衰减 8 倍至 ~0.58，低于新鲜 s=1 的 0.69 ⇒ 该逐；时间再新也挡不住
+        // 成功劣势 —— 同龄下 s=1 恒败给 s=8。
         if (this.landmarks.length > this.capacity) {
-            this.landmarks.sort((a, b) => (b.successCount * b.lastUsedAt) - (a.successCount * a.lastUsedAt));
+            const now = Date.now();
+            const keepScore = (l) => Math.log1p(l.successCount) * Math.pow(2, -((now - l.lastUsedAt) / 3_600_000) / LANDMARK_HALF_LIFE_H);
+            this.landmarks.sort((a, b) => keepScore(b) - keepScore(a));
             this.landmarks = this.landmarks.slice(0, this.capacity);
         }
         return landmark;
@@ -93,8 +112,9 @@ class UIMemory {
             const lTokens = tokenize(l.description + ' ' + (l.appHint ?? ''));
             const text = overlapCoefficient(qTokens, lTokens);
             // S 纪元（S-4）：Beta(1,1) 后验信任 —— (s+1)/(s+2) 取代线性截断 min(s,6)。
-            // 同域 [0.05→0.3]：贝叶斯 grounded（一次成功不配满信任；渐近饱和），
-            // 曲率由后验自带而非硬帽。0.3 = 0.05×6 的旧上界保持量纲。
+            // 实际值域 [0.10→0.15)（s=0 起 0.10，渐近 0.15）：Y 纪元真机电池验证后的
+            // 现行刻度，信任项刻意轻于文本重合/场景加成（0.3 档）。式中 0.3 只是
+            // 与旧 0.05×min(s,6) 上界的量纲溯源，不构成值域承诺（勿据其反推量级）。
             // Y 纪元（Y-8）：放射性衰变半衰期 —— 信任再高也要随时间衰变：
             // w(t) = 2^(-t/T½)，T½ = 168h（一周）。UI 演化令旧地标的先验价值
             // 指数衰减；成功使用重置衰变时钟（remember 强化时 lastUsedAt 已滚动）。

@@ -47,8 +47,10 @@ function stripTrailingPunct(s) {
         }
         const open = (out.match(/\(/g) ?? []).length;
         const close = (out.match(/\)/g) ?? []).length;
-        if (close > open) {
-            out = out.slice(0, out.length - (close - open));
+        let excess = close - open;
+        while (excess > 0 && out.endsWith(')')) {
+            out = out.slice(0, -1);
+            excess--;
             changed = true;
         }
     }

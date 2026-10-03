@@ -45,6 +45,9 @@ export async function apply(ctx, config) {
         void engine.receivePlan(payload.chain).then(outcome => {
             console.log(`[Sandbox] Rehearsed plan ${outcome.chainId}: verdict=${outcome.verdict} ` +
                 `steps=${outcome.steps.length} latency=${outcome.totalLatencyMs}ms report=${outcome.reportPath}`);
+        }).catch(e => {
+            // 观察者义务：排练崩溃不得变成 unhandled rejection 击穿宿主进程
+            console.warn(`[Sandbox] Plan rehearsal crashed: ${e?.message ?? e}`);
         });
     });
     // D-4 判决回执：入缓存（双闸门复核 + 重放时刻否决源）+ 与最近排练结果
@@ -188,7 +191,6 @@ export async function apply(ctx, config) {
             // 在场性判据说明（该函数对任意 RehearsalOutcome 可用；此处声明判据就绪性）。
             const layerGuide = ['L1-pixel', 'L2-diff', 'L3-semantic', 'L4-expectation']
                 .map(l => `${l}: 判据就绪(hasVerificationLayer)`).join(' | ');
-            void layerGuide;
             const r = engine.verifyLog();
             if (!r.ok)
                 return JSON.stringify({ status: 'FAILED', reason: r.reason });
@@ -197,6 +199,7 @@ export async function apply(ctx, config) {
                 chain_intact: r.value.ok,
                 entries: r.value.length,
                 broken_at: r.value.brokenAt,
+                verification_layers: layerGuide,
             });
         },
     }));

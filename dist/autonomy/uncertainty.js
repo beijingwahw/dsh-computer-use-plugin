@@ -234,3 +234,53 @@ export function adviseAction(opts) {
     }
     return { entropy: shannonEntropy(eff), confidence: eff, advise, reasons };
 }
+// ─── W2-7（R4 高风险链前金丝雀试演）：工具调用面的错误代价先验 ───
+/**
+ * 工具调用面的错误代价先验（W2-7 增量，纯函数、绝不抛异常）。
+ *
+ * 背景：adviseAction 的 costOfError 档位由调用方供给 —— 自主环（autoPilot）
+ * 从 PolicyAction.riskTier 映射；但守卫层看见的原始工具参数（click_mouse /
+ * type_text）不携带 riskTier。本函数把「可观察的工具参数信号」映射到代价档，
+ * 供金丝雀守卫（guards/canaryGuard）等下游消费，与 autoPilot 的
+ * epistemicCostOfError 同一哲学（结构信号 → 代价档），判据依序短路：
+ *
+ *   1. 显式声明档（declaredTier，如编排层注入的 risk_tier 参数）：
+ *      'benign' ⇒ low；'sensitive' / 'destructive' ⇒ high；
+ *      其余非法值不采信（不因脏输入收紧或放宽），落入结构先验；
+ *   2. 结构先验：consequenceDeclared === true（模型显式承诺了预期世界变化 ——
+ *      click 的 expected_change / expected_text、type 的 expected_change）
+ *      ⇒ high —— 对「点了会发生什么」下了断言的动作，断言落空的代价按高档
+ *      保守记（宁可多试演，不可错放）；
+ *   3. 缺省 medium（无断言的普通动作）。
+ *
+ * kind 参数当前仅作语义标注（click/type 同律）—— 留作未来按动作种类分化的缝。
+ */
+export function costPriorOfCall(kind, signals = {}) {
+    void kind; // 语义标注位：当前不分化（见 JSDoc）
+    const s = signals ?? {};
+    if (s.declaredTier === 'benign')
+        return 'low';
+    if (s.declaredTier === 'sensitive' || s.declaredTier === 'destructive')
+        return 'high';
+    if (s.consequenceDeclared === true)
+        return 'high';
+    return 'medium';
+}
+// ─── W3-5（H2 活意图与漂移检测）：熵超阈的漂移检查触发判据 ───
+/**
+ * W3-5 熵触发线（模块常量，纯函数消费面见 entropyWarrantsDriftCheck）。
+ * 数学：adviseAction 的有效置信恒被 α=4/β=1 校准进 [0.2,0.8]，故熵
+ * shannonEntropy(eff) 的可达值域为 [0,1]（eff=0.5 时最大 1）。0.95 以上
+ * 意味着 eff 被夹在约 (0.36,0.64) 的「拿不准」带内（H(0.36)≈0.943）——
+ * 此时值得立即做一次意图漂移检查，不等下一个 N 步周期（周期常量在
+ * src/tools/steerTools.ts —— 认识论中枢只管「熵够不够慌」，节律管在会话层）。
+ */
+export const DRIFT_ENTROPY_TRIGGER = 0.95;
+/**
+ * W3-5：熵超阈判据（纯函数、绝不抛）—— 认识论中枢对「该做漂移检查了」的裁决。
+ * 非数（NaN/±Infinity/垃圾）按不触发计（读数损坏不是慌的理由）；
+ * 严格大于才触发（恰等 0.95 不触发 —— 与本器官一切阈值的保守律同向）。
+ */
+export function entropyWarrantsDriftCheck(entropy) {
+    return typeof entropy === 'number' && Number.isFinite(entropy) && entropy > DRIFT_ENTROPY_TRIGGER;
+}

@@ -15,7 +15,13 @@ import type { StructuredSource, TraditionalVisionSource, SemanticSource } from '
 import {
   extractInteractiveElements, hasAccessibilityProvider,
 } from '../uiExtractor';
-import { isGlmConfigured, type GlmClient } from '../vlm/glmClient';
+import { isGlmConfigured, getGlmClient, type GlmClient } from '../vlm/glmClient';
+// W5-4: SoM 类型面（type-only —— 零运行时足迹，D-6 模块图零污染；renderSomOverlay
+// / assembleSomScores 运行时经动态引入，grounding/textReader 同款懒加载纪律）
+import type { SomMarker, SomScoreSeed } from '../vlm/som';
+// W2-0（C 接线）：Zoom 复核开关读内核注册表（宿主 index.ts 以 config.vlmZoomVerify
+// 铸入 grounding.verifyZoom；未注册 ⇒ 回声 1=开 —— grounding.nmsIou 同款缺省律）
+import { kernelRegistry } from '../kernel/registry';
 
 /** 屏幕尺寸供给口（像素 → 归一化的除数源；真机由 system.getScreenSize 注入） */
 export type ScreenSizeFn = () => Promise<{ width: number; height: number }>;
@@ -161,6 +167,45 @@ export function createTraditionalFromOcr(opts: TraditionalAdapterOpts): Traditio
 
 // ─── L3 语义源适配器：GLM-5.3-Flash 云脑皮层（grounding）→ SemanticSource ───
 
+/**
+ * W5-4: SoM 标记种子 —— 宿主把 L1/L2 元素与 interactivityProbe 判决以**数据面**
+ * 注入（本适配器绝不 import interactivityProbe：其顶部拉 physicalBackend，会
+ * 污染 D-6 模块图 —— som.ts 同款纪律）。bbox 为屏幕像素系，与 capture 缓冲
+ * 同系 —— 这是叠加零换算坐标闭环的前提（overlay 同尺寸合成，见 applySparseSom）。
+ */
+export interface SomMarkerSeed {
+  /** 屏幕像素包围盒（x1>x0、y1>y0；与 capture 缓冲/声明屏幕系同系） */
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+  /** 元素可见文本（taskRelevance 的输入；缺席 = 无语义证据） */
+  text?: string;
+  /** interactivityProbe 判决置信 0..1（缺席 = 无交互证据） */
+  probeConfidence?: number;
+}
+
+/**
+ * W5-4: SoM 叠加事件（可观测面：元素数 / 预算 / 回退原因）—— 每次 ground 至多
+ * 记一条。applied=false 时 reason 给出四路降级归因；degraded=true 表示「尝试过
+ * 叠加但失败 ⇒ 原图直通」的诚实降级注记（区别于预算关/供给缺席的常态直通）。
+ */
+export interface SomPipelineEvent {
+  /** true = 叠加成功，叠加图已替代原图进入编码 */
+  applied: boolean;
+  /** applied=false 时的回退归因 */
+  reason?: 'budget-off' | 'marker-port-absent' | 'marker-source-fault' | 'elements-empty' | 'overlay-failed';
+  /** true = 叠加尝试失败后原图直通（诚实降级注记） */
+  degraded?: boolean;
+  /** 本次生效预算（0 = 关；floor 语义与 renderSomOverlay 一致） */
+  budget: number;
+  /** 参与名额分派的种子数（区域过滤后；直通路径为 0） */
+  elementsIn: number;
+  /** 实际渲染的 marker id 序列（applied 时在场） */
+  selected?: number[];
+  /** 稀疏请求因证据缺席回退全量时为 true（renderSomOverlay.sparseFallback 透传） */
+  sparseFallback?: boolean;
+  /** 失败详情摘录（overlay-failed / marker-source-fault 时在场） */
+  detail?: string;
+}
+
 export interface SemanticAdapterOpts {
   /** 截屏供给（像素缓冲；真机由 system.captureScreen 注入） */
   capture: () => Promise<Buffer>;
@@ -170,24 +215,158 @@ export interface SemanticAdapterOpts {
   name?: string;
   /** VLM client 注入（缺省走 getGlmClient() 全局单例；测试注入假 client 绝不联网） */
   client?: GlmClient;
+  /** W2-0（C 接线）：Zoom 复核用 VLM 端口（W1-8 P3）—— 独立第二意见脑；缺省回落
+   *  client / 已配置单例（同脑自任复核，流量受 grounding 任务级预算 8 次封顶） */
+  verifyClient?: GlmClient;
+  /**
+   * W5-4: SoM 稀疏标注预算（Top-K 上限）。裁决序：显式入参 > 内核键
+   * 'som.sparseBudget'（宿主以 config.somSparseBudget 铸入 —— grounding.verifyZoom
+   * 同款配置通道）> 回声 0 = 关（缺省，与 config.somSparseBudget 缺省 0 一致）。
+   * <=0 / 非有限 ⇒ 原图直通（逐字节现状）。
+   */
+  somSparseBudget?: number;
+  /**
+   * W5-4: SoM 标记种子供给口（L1/L2 元素 + probe 置信的数据面）。缺席 ⇒ 原图
+   * 直通（证据链缺席不叠加）；返回空数组 ⇒ 同样直通（元素面为空）。供给口
+   * 抛错 ⇒ 诚实降级直通（SoM 是增益不是依赖，防御式绝不抛）。
+   */
+  somMarkers?: () => Promise<readonly SomMarkerSeed[]>;
+  /** W5-4: 叠加事件遥测回调（每次 ground 至多一条；回调抛错被吞 —— 遥测面绝不毒化主管线） */
+  onSomEvent?: (ev: SomPipelineEvent) => void;
 }
 
 /**
  * L3 适配器（花钱层 —— 仅 ceiling='L3' 时工位才会调用，闸门主权在中枢）。
  * 就绪条件 = GLM 云脑已配置（isGlmConfigured：config 铸造的单例或环境变量）。
- * ground 管线：截全屏 → groundElements（question 聚焦，坐标 = 屏幕像素系）→
- * 像素 bbox ÷ 屏幕尺寸归一化 → 中心落区过滤（与 L1/L2 同律）。
+ * ground 管线：截全屏 → [W5-4] 稀疏 SoM 叠加（预算>0 且证据在场 ⇒ renderSomOverlay
+ * 同尺寸合成，叠加图替代原图）→ groundElements（question 聚焦，坐标 = 屏幕像素系）
+ * → 像素 bbox ÷ 屏幕尺寸归一化 → 中心落区过滤（与 L1/L2 同律）。
  * 故障约定与 L1/L2 同（J 纪元立法）：**故障向上抛** —— groundElements 的
  * ok:false（云脑失败/降级）转 throw，由工位 safeGround 捕获归因为
  * 'L3 source fault' 补丁（失败空 ≠ 真空）；ok:true 空 elements 是诚实空集，
- * 原样返回 []。grounding（vlm/codec 惰性加载 sharp）经动态引入 ——
- * 沙箱环境零污染 D-6 模块图（textReader 先例）。
+ * 原样返回 []。
+ *
+ * W5-4 坐标闭环（叠加是视觉辅助，坐标仍以原图系为准）：renderSomOverlay 在
+ * **同一 buffer 的元数据尺寸**上合成（SVG W×H = 原图尺寸、top/left=0、无裁剪
+ * 无缩放）⇒ 叠加图与原图逐像素同尺寸 —— 模型在叠加图上作答的 bbox 天然就在
+ * 原图像素系，groundElements 的 clamp/反算/本适配器的归一化全部沿用原图基准，
+ * 零换算、零平移（测试 W5-4⑥ 四重闭环断言）。
  */
-export function createSemanticFromVlm(opts: SemanticAdapterOpts): SemanticSource {
-  return {
+export function createSemanticFromVlm(
+  opts: SemanticAdapterOpts,
+): SemanticSource & { somEventLog(): readonly SomPipelineEvent[] } {
+  // W5-4: 叠加事件账本（适配器级累积；somEventLog 防御拷贝读出）+ 遥测回调
+  const somLog: SomPipelineEvent[] = [];
+  const emitSom = (ev: SomPipelineEvent): void => {
+    somLog.push(ev);
+    try { opts.onSomEvent?.(ev); } catch { /* 遥测面绝不毒化主管线（防御式） */ }
+  };
+
+  /**
+   * W5-4: 稀疏 SoM 叠加步（编码前挂点 —— groundElements 内部才走 encodeForVlm，
+   * 此处替换进编码的 buffer 即「叠加图替代原图」）。幂等可降级四律 + 防御绝不抛：
+   *   1. 预算 <=0 / 非有限 ⇒ 原图直通（budget-off；缺省路径，逐字节现状）；
+   *   2. 种子供给口缺席（probe/元素证据链缺席）⇒ 直通（marker-port-absent）；
+   *   3. 元素面为空（供给空/全脏/区域外全滤）⇒ 直通（elements-empty）；
+   *   4. 叠加失败（sharp 缺席/解码失败/供给口抛错）⇒ 原图直通 + degraded 注记。
+   * scores 组装：confidence = 种子随行的 probe 置信（缺席省略键），relevance =
+   * taskRelevance(种子文本, question)—— assembleSomScores 纯函数成形。种子按
+   * 中心落区过滤（与 L1/L2 同一分派律：预算花在当前扫描区）。routeLabels /
+   * stableColors 随稀疏模式一并开（抗遮挡标签路由 + 跨帧稳定染色）。
+   */
+  async function applySparseSom(
+    buffer: Buffer,
+    size: { width: number; height: number },
+    region: RegionSpec,
+    question: string,
+  ): Promise<Buffer> {
+    // 预算裁决：显式入参 > 内核键 som.sparseBudget（config.somSparseBudget 的
+    // 宿主铸入通道）> 回声 0。非法（NaN/±∞/负）一律按关处理 —— 配置错误不毒化管线。
+    const rawOpt = opts.somSparseBudget;
+    const budget = typeof rawOpt === 'number' && Number.isFinite(rawOpt)
+      ? rawOpt
+      : kernelRegistry.getOrDefault('som.sparseBudget', 0);
+    if (!Number.isFinite(budget) || budget <= 0) {
+      emitSom({ applied: false, reason: 'budget-off', budget: 0, elementsIn: 0 });
+      return buffer;
+    }
+    if (typeof opts.somMarkers !== 'function') {
+      emitSom({ applied: false, reason: 'marker-port-absent', budget, elementsIn: 0 });
+      return buffer;
+    }
+    // 防御式绝不抛：供给口故障 / som 模块加载故障 / 渲染故障 ⇒ 原图直通 + degraded
+    try {
+      const supplied = await opts.somMarkers();
+      const seeds: SomMarkerSeed[] = Array.isArray(supplied) ? supplied : [];
+      // 种子规整 + 中心落区过滤（与 L1/L2 适配器同一分派语义）；脏种子跳过不毒化
+      const markers: SomMarker[] = [];
+      const scoreSeeds: SomScoreSeed[] = [];
+      for (const s of seeds) {
+        if (s === null || typeof s !== 'object') continue;
+        const b = s.bbox;
+        if (!b || ![b.x0, b.y0, b.x1, b.y1].every(Number.isFinite)) continue;
+        if (!(b.x1 > b.x0) || !(b.y1 > b.y0)) continue;
+        const cx = ((b.x0 + b.x1) / 2) / size.width;
+        const cy = ((b.y0 + b.y1) / 2) / size.height;
+        if (!centerInRegion(cx, cy, region)) continue;
+        markers.push({
+          id: markers.length + 1,
+          bbox: { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 },
+          center: { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 },
+          ...(typeof s.text === 'string' && s.text !== '' ? { text: s.text } : {}),
+        });
+        // scores 种子与 marker 平行对齐（text/probeConfidence 原样随行；缺席证据
+        // 的键省略语义由 assembleSomScores 收口 —— 无证据 ≠ 0 分）
+        scoreSeeds.push({ text: s.text, probeConfidence: s.probeConfidence });
+      }
+      if (markers.length === 0) {
+        emitSom({ applied: false, reason: 'elements-empty', budget, elementsIn: 0 });
+        return buffer;
+      }
+      const { renderSomOverlay, assembleSomScores } = await import('../vlm/som');
+      const scores = assembleSomScores(scoreSeeds, question);
+      const res = await renderSomOverlay(buffer, {
+        markers,
+        scores,
+        sparseBudget: budget,
+        routeLabels: true,   // W5-4: 抗遮挡标签路由随稀疏模式一并开
+        stableColors: true,  // W5-4: 跨帧稳定染色随稀疏模式一并开
+      });
+      if (res.ok && Buffer.isBuffer(res.buffer)) {
+        emitSom({
+          applied: true,
+          budget,
+          elementsIn: markers.length,
+          selected: res.selected,
+          ...(res.sparseFallback !== undefined ? { sparseFallback: res.sparseFallback } : {}),
+        });
+        return res.buffer;
+      }
+      emitSom({
+        applied: false, reason: 'overlay-failed', degraded: true,
+        budget, elementsIn: markers.length,
+        ...(res.error ? { detail: res.error.slice(0, 200) } : {}),
+      });
+      return buffer;
+    } catch (e) {
+      // 供给口抛错 / som 模块图加载失败等未知异常 —— 诚实降级原图直通，绝不抛
+      emitSom({
+        applied: false, reason: 'marker-source-fault', degraded: true,
+        budget, elementsIn: 0,
+        detail: (e instanceof Error ? e.message : String(e)).slice(0, 200),
+      });
+      return buffer;
+    }
+  }
+
+  const source: SemanticSource & { somEventLog(): readonly SomPipelineEvent[] } = {
     name: opts.name ?? 'glm-vision(L3-adapter)',
     isReady(): boolean {
       return isGlmConfigured();
+    },
+    /** W5-4: 叠加事件账本读出（防御拷贝 —— 观察面与账本解耦） */
+    somEventLog(): readonly SomPipelineEvent[] {
+      return [...somLog];
     },
     async ground(region: RegionSpec, question: string): Promise<Array<Pick<UIElement, 'role' | 'name' | 'rect'>>> {
       // 截屏 + 尺寸（任一故障向上抛 —— 工位记 fault，两种空两种决策）
@@ -195,11 +374,25 @@ export function createSemanticFromVlm(opts: SemanticAdapterOpts): SemanticSource
       if (!Number.isFinite(size.width) || size.width < 1 || !Number.isFinite(size.height) || size.height < 1) {
         throw new Error(`invalid screen size ${size.width}x${size.height}`);
       }
+      // W5-4: 编码前稀疏 SoM 叠加（条件直通/降级见 applySparseSom；绝不抛 ——
+      // 叠加失败时 groundElements 收到的仍是原图，行为与无 SoM 时逐字节一致）
+      const groundBuffer = await applySparseSom(buffer, size, region, question);
       // 云脑接地：坐标语义 = width×height 屏幕像素系（groundElements 内部编码+规整+NMS）
       const { groundElements } = await import('../vlm/grounding');
-      const result = await groundElements(buffer, {
+      const result = await groundElements(groundBuffer, {
         width: size.width, height: size.height, question,
         ...(opts.client ? { client: opts.client } : {}),
+        // W2-0（C 接线）：Zoom 复核端口（W1-8 P3）—— grounding.verifyZoom 内核键
+        //（宿主以 config.vlmZoomVerify 铸入，缺省 1=开）控制；显式 verifyClient 优先，
+        // 次选本适配器 client，再回落已配置单例（未配置 ⇒ 缺席 ⇒ port-absent 放行）。
+        ...(kernelRegistry.getOrDefault('grounding.verifyZoom', 1) > 0.5
+          ? {
+              verifyClient:
+                opts.verifyClient ??
+                opts.client ??
+                (isGlmConfigured() ? getGlmClient() : undefined),
+            }
+          : {}),
       });
       if (!result.ok) {
         throw new Error(result.error ?? 'vlm grounding failed');
@@ -222,4 +415,7 @@ export function createSemanticFromVlm(opts: SemanticAdapterOpts): SemanticSource
         centerInRegion(e.rect.x + e.rect.width / 2, e.rect.y + e.rect.height / 2, region));
     },
   };
+  // W5-4: 适配器返回结构携带叠加事件账本读出面（SemanticSource 契约零变更 ——
+  // 只加不自夺；既有消费方按 SemanticSource 面消费不受影响）
+  return source;
 }

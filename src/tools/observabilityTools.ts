@@ -20,6 +20,9 @@ import { fitReactPhases } from '../phaseHmm';
 import { reactTraceProperties, mineTraceProperties } from '../ltlf';
 import { Telemetry } from '../telemetry';
 import { organCensus } from '../organCensus';
+// 纪元 Ι（自我模型）：经验胜任度后验单例 —— get_metrics 的自省面（路径显式指到
+// 桶文件，目录导入在 Node strip 装载器是 ERR_UNSUPPORTED_DIR_IMPORT，Λ-4 同律）。
+import { selfModel } from '../selfmodel/index';
 
 export function createGetMetricsTool() {
   return defineTool({
@@ -141,6 +144,10 @@ export function createGetMetricsTool() {
             ? '(second-order: lower bad-tail accumulation at every threshold, percentiles may cross).'
             : '(faster at every percentile — no trade-off).'));
       }
+      // 纪元 Ι（自我模型）自省面：最擅长/最不擅长的（动作类×场景桶）格子各 3 条
+      // + 总格子数 + 总证据量 ——「知道自己不擅长什么」正是本纪元的立意。
+      // introspect 禁用时返回 null ⇒ 字段整体缺席（既有字段与结构零变化）。
+      const smView = selfModel.introspect(3);
       return JSON.stringify({
         status: 'SUCCESS',
         metrics: telemetry.snapshot(),
@@ -152,6 +159,7 @@ export function createGetMetricsTool() {
         ...(modality ? { modality_arbitration: modality } : {}),
         ...(phase ? { react_phase: { current: phase.current, occupancy: phase.occupancy, longest_stuck_run: phase.longestStuckRun } } : {}),
         ...(domPairs.length > 0 ? { latency_dominance: domPairs } : {}),
+        ...(smView ? { selfModel: smView } : {}),
         insights: insights.length > 0
           ? insights
           : ['No anomalies detected. Keep using verify-effective strategies.'],

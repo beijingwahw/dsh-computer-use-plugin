@@ -1,0 +1,69 @@
+[
+  {
+    "id": "w2-notepad-save-proof",
+    "category": "verify",
+    "prompt": "记事本存证任务:1) win+r 输入 notepad 回车打开记事本;2) type_text 输入两行文字:第一行 W2-VERIFY-MARKER,第二行 battery-e2-evidence;3) ctrl+s 保存到路径 D:\\dsh3\\test-runs\\playground\\w2-note.txt(目录已存在;若保存对话框出现就直接输入完整路径回车确认);4) 报告保存结果。保持记事本打开。",
+    "expect": ["type_text"],
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\w2-note.txt", "contains": "W2-VERIFY-MARKER", "containsRegex": "battery-e2-evidence", "minBytes": 10 },
+        { "kind": "processRunning", "name": "notepad.exe" },
+        { "kind": "windowExists", "titleRegex": "记事本|Notepad" }
+      ]
+    }
+  },
+  {
+    "id": "w2-notepad-close-proof",
+    "category": "verify",
+    "prompt": "关闭存证任务:1) 若记事本未打开,win+r 输入 notepad 打开;2) switch_window 切到记事本(titleKeyword 用 notepad);3) alt+f4 关闭(遇到保存提示选\"不保存\";若上一任务的 w2-note.txt 已存在则选保存覆盖亦可);4) take_screenshot 确认记事本已消失并报告。",
+    "expect": ["switch_window"],
+    "timeoutMs": 420000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processAbsent", "name": "notepad.exe" },
+        { "kind": "not", "check": { "kind": "windowExists", "titleRegex": "^无标题 - 记事本|^\\*?Untitled - Notepad" } }
+      ]
+    }
+  },
+  {
+    "id": "w2-system-anchor-proof",
+    "category": "verify",
+    "prompt": "系统锚点观察任务(不改动任何系统设置,只读):1) take_screenshot 截图;2) 打开运行对话框(win+r)输入 cmd 回车打开命令提示符;3) 在命令提示符里输入 echo %USERNAME% 并回车,报告输出;4) 报告完成后 exit 关闭命令提示符。",
+    "expect": ["take_screenshot"],
+    "timeoutMs": 420000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "dirExists", "path": "D:\\dsh3\\test-runs" },
+        { "kind": "registryKey", "hive": "HKCU", "key": "Environment" },
+        { "kind": "registryValue", "hive": "HKCU", "key": "Environment", "value": "TEMP", "contains": ":" },
+        { "kind": "envVar", "name": "USERNAME" },
+        { "kind": "processAbsent", "names": ["cmd.exe", "conda.exe"], "comment": "W2-3:任务声明 cmd 应已 exit(锚点谓词兼演示 names 数组)" }
+      ]
+    }
+  },
+  {
+    "id": "w2-mspaint-draw-proof",
+    "category": "verify",
+    "prompt": "画图哈希存证任务:1) win+r 输入 mspaint 回车打开画图;2) 用 drag_mouse 在画布上从 (0.35, 0.4) 拖到 (0.65, 0.6) 画一条线;3) ctrl+s 保存为 D:\\dsh3\\test-runs\\playground\\w2-draw.png(类型选 PNG);4) 保存成功后 alt+f4 关闭画图(不再保存);5) 报告全程结果。",
+    "expect": ["drag_mouse"],
+    "timeoutMs": 540000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\w2-draw.png", "minBytes": 1000 },
+        { "kind": "anyOf", "checks": [
+          { "kind": "processAbsent", "name": "mspaint.exe" },
+          { "kind": "windowAbsent", "titleRegex": "画图|Paint" }
+        ], "comment": "W2-3:关闭谓词演示 anyOf(进程名与窗口题不同机型有方言)" }
+      ]
+    }
+  }
+]

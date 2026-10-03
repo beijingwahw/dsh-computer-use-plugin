@@ -3,6 +3,7 @@ import { failureMemory } from '../failureMemory.js';
 import { journal } from '../journal.js';
 import { contextManager } from '../contextManager.js';
 import { classifyResult, isFailure, isSuccess } from '../resultContract.js';
+import { recoveryEfficacy, classifySyndromeSignature } from '../recoveryEfficacy.js'; // W2-5（R5）：恢复疗效账
 /** 把恢复提示附加到结果字符串：锚点 JSON 注入 recovery_hint 字段；非 JSON 则换行追加 */
 function appendHint(result, hint) {
     try {
@@ -15,8 +16,9 @@ function appendHint(result, hint) {
     catch { /* 前缀协议字符串，走下方追加 */ }
     return `${result}\n[${hint}]`;
 }
-/** 失败症状提炼：锚点 JSON 取 status/next_step 首句；前缀协议取首行 */
-function extractSymptom(result) {
+/** 失败症状提炼：锚点 JSON 取 status/next_step 首句；前缀协议取首行
+ *  W1-6：导出供 rootCauseGuard 复用（同上：单一推导源） */
+export function extractSymptom(result) {
     try {
         const obj = JSON.parse(result);
         if (obj?.status) {
@@ -33,10 +35,16 @@ function actionSignature(name, args) {
     const parts = keys.filter(k => args[k] !== undefined).map(k => `${k}=${String(args[k]).slice(0, 40)}`);
     return `${name}(${parts.join(', ')})`;
 }
-/** 写入失败记忆：query 取当前任务语境（无复杂任务则标注交互态），sceneHash 随行供场景加成 */
-function rememberFailure(name, args, symptom) {
+/** 写入失败记忆：query 取当前任务语境（无复杂任务则标注交互态），sceneHash 随行供场景加成
+ *  W1-6（R1 鉴别试验）：可选 rootCause —— 鉴别探针的归因结论随行入库/刷新
+ *  （同查询+同路径的近重复记录会更新病因字段，见 failureMemory.record）。
+ *  导出供 rootCauseGuard 复用：同一套 query/approach/signature 推导，保证
+ *  归因刷新命中同一条记录（两套推导 = 一次失败两条记录的污染）。
+ *  W2-5（R5）：返回写入/刷新的记录 —— 调用方可回读 effective rootCause
+ *  （近重复去重路径会把上一次鉴别结论带回来），喂给恢复疗效账的根因轴。 */
+export function rememberFailure(name, args, symptom, rootCause) {
     const query = journal.currentTask() || 'interactive session (no complex task)';
-    failureMemory.record(query, actionSignature(name, args), symptom, contextManager.lastImageRecord()?.hash);
+    return failureMemory.record(query, actionSignature(name, args), symptom, contextManager.lastImageRecord()?.hash, rootCause);
 }
 // ── R 纪元（R-3 熔断层）：Beta-Bernoulli 序贯后验臂 ──
 // 连续计数的盲区：交替成败型坏路线（fail-success-fail-…，真实失败率 50%+）
@@ -120,7 +128,29 @@ export function posteriorTripProbability(failures, successes, theta = 0.5) {
 const BREAKER_WINDOW = 20; // 滚动窗容量（后验臂的证据上限）
 const BREAKER_MIN_WINDOW = 8; // 最小判决样本（先验不越数据）
 const BREAKER_TRIP_MASS = 0.95; // 后验质量阈值（误熔断率 ≈ 5%）
-export function registerCircuitBreakerGuard(ctx, maxFailures) {
+// ── W2-5（R5 恢复策略疗效归因）：恢复提示的动作面 ──
+// 规范动作（diagnosis.RecoveryActionId）→ 提示文本。前两条是历史递进提示的
+// 逐字节原文（冷启动零回归承诺：n<5 时疗效表返回的固定梯子恰好命中它们）；
+// 其余四条按 ROOT_CAUSE_LADDER / RC_HYPOTHESIS 语义撰写 —— 疗效表样本量
+// 充足后，提示从固定递进改为后验均值排序的动态处方。
+// 导出供 metrics/doctor 消费（处方文案单一事实源），测试锁死冷启动等价性。
+export const RECOVERY_HINT_TEXT = {
+    'zoom-refine': "Recovery hint: call 'zoom_inspect' around the target to refine coordinates before retrying.",
+    'switch-modality': 'Recovery hint: switch modality — try keyboard navigation via press_hotkey (tab/enter), '
+        + "or scroll_page if the target may be off-screen. Also try recall_ui for remembered locations.",
+    're-observe': "Recovery hint: re-observe before retrying — take_screenshot (or diff_view) to refresh the "
+        + 'world model; the screen may have changed under you.',
+    'ground-target': 'Recovery hint: ground the target first — find_text to locate the labeled control, '
+        + 'or probe_interactivity to verify the point is actually clickable.',
+    'wait-settle': 'Recovery hint: the world may be stalling — let it settle (wait longer) before the next '
+        + 'action; avoid rapid retries that amplify tail latency.',
+    'stop-ask-user': 'Recovery hint: recovery attempts are not working — STOP retrying and ask the user for help.',
+};
+export function registerCircuitBreakerGuard(ctx, maxFailures, 
+/** W2-5（R5）：恢复疗效账的注入缝 —— 缺省进程级单例（guards/index.ts 零改动接线）；
+ *  测试注入隔离实例（离线确定性）。账本绝不抛，喂入/查询失败的成本是
+ *  「这一笔没记上 / 用固定梯子」，绝不是熔断路径异常。 */
+efficacy = recoveryEfficacy) {
     const MAX_TRACKED_SESSIONS = 16;
     const bySession = new Map();
     const stateFor = (sessionId) => {
@@ -148,12 +178,19 @@ export function registerCircuitBreakerGuard(ctx, maxFailures) {
             : 0;
         const posteriorTrip = tripMass >= BREAKER_TRIP_MASS;
         if (st.recentFailures >= maxFailures || posteriorTrip) {
-            // 聚合症状补记一条：这批连续失败已被熔断，match_skill 检索时会作为强负向信号
-            rememberFailure(toolCall.name, toolCall.args, `circuit-breaker: ${maxFailures} consecutive failures triggered a forced pause`);
-            st.recentFailures = 0;
             const why = posteriorTrip
                 ? `posterior arm: P(failure rate > 50% | last ${st.window.length} calls) = ${tripMass} ≥ 0.95 (flaky-broken route)`
                 : `${maxFailures} consecutive failures`;
+            // 聚合症状补记一条：按真实触发臂归因（match_skill 检索时作为强负向信号）
+            const tripSymptom = `circuit-breaker: ${why} triggered a forced pause`;
+            const tripRecord = rememberFailure(toolCall.name, toolCall.args, tripSymptom);
+            // W2-5（R5）：熔断事件入疗效事件流 —— 恢复回合允许从熔断事件起算
+            //（回读记录的病因：近重复去重可能带回上一次鉴别结论）
+            efficacy.ingest({
+                kind: 'failure', tool: toolCall.name, symptom: tripSymptom,
+                ...(tripRecord?.rootCause !== undefined ? { rootCause: tripRecord.rootCause } : {}),
+            });
+            st.recentFailures = 0;
             st.window.length = 0; // 熔断即冷静：窗口清空（强制冷静后还给机会）
             // U 纪元（U-3）：守卫裁决入链 —— 拦截即防篡改存证（proof 器官闭环到守卫层：
             // 每次拦截都是可被 MMR 证明的历史事实，事后不可抵赖）
@@ -175,18 +212,30 @@ export function registerCircuitBreakerGuard(ctx, maxFailures) {
             if (isFailure(c)) {
                 st.recentFailures++;
                 // 失败即时入记忆：下一次 match_skill 即可召回「这条路走不通」
-                rememberFailure(toolCall.name, toolCall.args, extractSymptom(result));
+                const symptom = extractSymptom(result);
+                const record = rememberFailure(toolCall.name, toolCall.args, symptom);
+                // W2-5（R5）：失败事件喂疗效账（回合划定从失败事件起算；症候签名 ×
+                // 回读病因 —— 近重复去重可能带回上一次鉴别结论，垃圾值由账本收口）
+                efficacy.ingest({
+                    kind: 'failure', tool: toolCall.name, symptom,
+                    ...(record?.rootCause !== undefined ? { rootCause: record.rootCause } : {}),
+                });
                 // 递进式恢复策略：第一次失败教「放大精定位」，第二次教「换模态」
+                // W2-5（R5）：提示选择消费疗效表排序 —— n<5 冷启动 = 固定递进梯子
+                // （与历史行为逐字节等价）；n≥5 = 后验均值降序的动态处方
                 if (st.recentFailures === 1 || st.recentFailures === 2) {
-                    const hint = st.recentFailures === 1
-                        ? "Recovery hint: call 'zoom_inspect' around the target to refine coordinates before retrying."
-                        : 'Recovery hint: switch modality — try keyboard navigation via press_hotkey (tab/enter), ' +
-                            "or scroll_page if the target may be off-screen. Also try recall_ui for remembered locations.";
-                    return next(appendHint(result, hint));
+                    const order = efficacy.prescriptionOrder(classifySyndromeSignature(symptom, toolCall.name), record?.rootCause);
+                    const action = order[Math.min(st.recentFailures, order.length) - 1];
+                    return next(appendHint(result, RECOVERY_HINT_TEXT[action]));
                 }
             }
             else if (isSuccess(c)) {
                 st.recentFailures = 0; // 成功即重置
+                efficacy.ingest({ kind: 'success', tool: toolCall.name }); // W2-5：恢复回合的闭合事件
+            }
+            else {
+                // W2-5：不可判定结果仍消耗恢复回合窗口（是一次真实尝试），但不产生疗效观察
+                efficacy.ingest({ kind: 'unknown', tool: toolCall.name });
             }
         }
         return next(result); // 必须把 result 透传给下一个

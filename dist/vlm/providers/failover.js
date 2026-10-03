@@ -119,6 +119,8 @@ export class ProviderPool {
             }
         };
         const breakerOpts = opts.breakers;
+        // W2-8：tier 覆盖表（配置序标注面）—— 非对象安静视为缺席（不抛铁律）
+        const tierOverrides = opts.tiers && typeof opts.tiers === 'object' ? opts.tiers : undefined;
         const entries = [];
         const source = Array.isArray(providers) ? providers : [];
         for (const p of source) {
@@ -127,7 +129,15 @@ export class ProviderPool {
                     continue;
                 if (entries.some(e => e.provider.id === p.id))
                     continue; // 同 id 去重，先到先得
-                entries.push({ provider: p, breaker: new VlmApiBreaker(breakerOpts) });
+                // W2-8：tier 三级解析 —— options.tiers[id] 显式覆盖 > provider.tier 自报 > 'primary'。
+                // 只认 'cheap' 字面量，其余一切值（含脏值）归主力档（未标注零行为变化律）。
+                const override = tierOverrides?.[p.id];
+                const tier = override === 'cheap' || override === 'primary'
+                    ? override
+                    : p.tier === 'cheap'
+                        ? 'cheap'
+                        : 'primary';
+                entries.push({ provider: p, breaker: new VlmApiBreaker(breakerOpts), tier });
             }
             catch { /* 垃圾条目静默剔除 */ }
         }
@@ -167,9 +177,34 @@ export class ProviderPool {
      * 全败回传末败，无脑可用回传合成 degraded。绝不抛异常。
      */
     async chat(req) {
+        // W2-8：全池链 = 不筛 tier（chat 的池序切换语义逐字节保持，tier 正交不掺和）
+        return this.runChain(req, this.entries);
+    }
+    /**
+     * W2-8（C2 成本级联路由）：分档对话 —— 切换律与 chat() 完全同构（未配置跳过、
+     * 熔断 open 跳行、失败切同档下一脑、首胜直传、全败传末败、无可用脑回合成
+     * degraded），仅把战斗序列限制在指定 tier 档内。与 chat()（全池 failover）和
+     * ensemble（合议庭）正交 —— 级联路由的第三用途专用面：
+     *   - tier='cheap'：便宜臂尝试（池内最便宜档）；
+     *   - tier='primary'：主力档链（级联升级重做 / 高危直行）。
+     * 脏 tier 值归 'primary'（保守）。绝不抛异常。
+     */
+    async chatTier(req, tier) {
+        const want = tier === 'cheap' ? 'cheap' : 'primary';
+        return this.runChain(req, this.entries.filter(e => e.tier === want));
+    }
+    /**
+     * W2-8：tier 花名册快照 —— 每脑一条 { id, tier }（池序）。级联路由据此判断
+     * 便宜档是否在场；观测面/健康报告亦可消费。只读，不改变状态，绝不抛。
+     */
+    tierRoster() {
+        return this.entries.map(e => ({ id: e.provider.id, tier: e.tier }));
+    }
+    /** 切换律执行体 —— chat/chatTier 共用（entries 为本次战斗序列，语义见类 JSDoc） */
+    async runChain(req, entries) {
         try {
             let lastFailed;
-            for (const entry of this.entries) {
+            for (const entry of entries) {
                 const p = entry.provider;
                 if (p.configured !== true) {
                     this.note(`跳过 ${p.id}（未配置）`);
@@ -338,7 +373,8 @@ export function createProviderPool(opts) {
                 continue; // 无钥且非本机免钥 —— 不进池
             providers.push(castProvider(found.preset, r.apiKey, r.baseUrl, r.model, o.fetchImpl, o.meter));
         }
-        return new ProviderPool(providers);
+        // W2-8：tier 标注透传（配置序标注面）—— 级联路由专用，缺省全员主力档
+        return new ProviderPool(providers, o.tiers !== undefined ? { tiers: o.tiers } : undefined);
     }
     catch {
         // 铸造面意外故障 —— 空池兜底（chat 走合成 degraded，绝不抛）

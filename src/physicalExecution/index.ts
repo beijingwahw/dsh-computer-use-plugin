@@ -37,6 +37,14 @@ export {
   ensureKey, mintNonce, mintToken, parseToken, type CapTokenPayload,
 } from './capToken.js';
 export { microFetch, type HttpClientConfig } from './httpClient.js';
+// W2-0（E 桶导出）：W1-1 执行层世界探针 —— Result 方言 → autonomy 运行时 null
+// 降级方言的桥（集成接线：autonomy/index.ts 的 buildAutonomyStack 消费）。
+export {
+  createExecWorldProbe,
+  type ExecWorldProbe,
+  type FrameSample,
+  type HitTestProbeOutcome,
+} from './execProbe.js';
 
 // 世界级创新：RAII 资源管理 + Capability-Driven Routing
 export { ScreenshotHandle, ScreenshotBatch } from './screenshotHandle.js';

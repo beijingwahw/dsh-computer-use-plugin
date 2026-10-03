@@ -233,6 +233,16 @@ export class EnsembleCourt {
         return this.roster.length;
     }
     /**
+     * 纪元 Β（反驳法院）纯增量导出：庭员名册只读快照（座次序浅拷贝）。
+     * 反驳法院的第二意见面（vlm/refute.ts）据此按身份（providerId）剔除与主脑
+     * 同源的庭员、再请首颗异构脑作证 —— 本方法只暴露既有 roster 的防御性
+     * 副本（成员对象仍为原引用，chatJson 直接绑定零包装零额外调用），对既有
+     * 合议庭行为零影响。绝不抛。
+     */
+    listRoster() {
+        return [...this.roster];
+    }
+    /**
      * 并席发问的公共底座：Promise.allSettled 并行问全部 configured 庭员，
      * 未配置成员不拨号但记普查条目（ok:false + 'not configured'）。
      * 成员违约上抛（契约要求永不抛）⇒ 就地收敛为该成员失败（sanitizeError 面）。

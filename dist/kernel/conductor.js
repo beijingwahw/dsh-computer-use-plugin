@@ -51,6 +51,8 @@ export class EvolutionConductor {
     maybeTick() {
         if (!this._enabled)
             return [];
+        if (!this.calibrator)
+            return []; // 缺位与故障同律：恒空且不推进节流账（缺位不是成功 tick）
         const t = this.now();
         if (this.tickCount > 0 && t - this.lastTickAt < this.minIntervalMs)
             return [];

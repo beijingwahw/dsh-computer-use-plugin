@@ -138,7 +138,8 @@ export function extractHotkey(text) {
     const tokens = residueTokens(text);
     const keys = [];
     for (const raw of tokens) {
-        const key = KEY_ALIASES[raw] ?? (/^[a-z0-9]$/.test(raw) ? raw : raw);
+        // tokenize 已小写化拉丁 token —— 别名收敛后直取（键全集即小写宇宙）
+        const key = KEY_ALIASES[raw] ?? raw;
         if (!KEY_UNIVERSE.has(key)) {
             return { kind: 'refused', reason: `'${raw}' is not a key name` };
         }

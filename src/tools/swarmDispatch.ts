@@ -5,7 +5,11 @@
 // 全员报告后 arbitrate 交叉裁决。物理 IO 由 system.serialize 保证互斥。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
-import { coordinator, SubAgentSpec } from '../subAgent';
+// W5-0（D 接线顺带修雷）：SubAgentSpec 拆 import type —— 接口按值导入在
+// Node strip 型装载器下链接即炸（index.ts 头注同律地雷；工具桶动态装载就是
+// 为绕它）。类型擦除后零运行时差，测试可直连本模块。
+import { coordinator } from '../subAgent';
+import type { SubAgentSpec } from '../subAgent';
 
 export function createSwarmDispatchTool(config: Config) {
   return defineTool({
@@ -79,7 +83,31 @@ function handleSpawn(rawSpecs: string | undefined): string {
     lines.join('\n') + '\n' +
     `Active agent: ${cur?.spec.id} [${cur?.spec.role}]. ` +
     `NOW pursue ITS objective as this persona, using the normal tools. ` +
-    `Forget the main task's framing while in persona; check status anytime; report when its mission is done.`;
+    `Forget the main task's framing while in persona; check status anytime; report when its mission is done.` +
+    auctionSummaryLine();
+}
+
+// ─── W5-0（D 接线 · W4-7 G5）：拍卖市场摘要面（spawn/status 输出的附段） ───
+//
+// auctionStatus()/auctionLedger() 的工具面投递：市场开（enableStepAuction ⇒
+// index.ts enableStepAuction 接线）⇒ status 附市场全貌（池余/已扣费/轮内步/
+// 账本最近一轮的配额分账），spawn 附一行池况（组队时刻的总预算可见性）；
+// 市场关（缺省）⇒ 附段缺席 —— 输出与接线前逐字节一致（零回归红律）。绝不抛。
+function auctionSummaryLine(): string {
+  try {
+    const st = coordinator.auctionStatus();
+    if (!st.enabled) return '';
+    const ledger = coordinator.auctionLedger();
+    const last = ledger[ledger.length - 1];
+    const quotas = last && last.agents.length > 0
+      ? ` last-round quotas: ${last.agents.map(b => `${b.agentId}=${b.quota}`).join(', ')}` : '';
+    return `\n[Step auction] pool ${st.poolRemaining} steps remaining` +
+      (st.budget !== null ? ` of budget ${st.budget}` : ' (derived = sum of maxSteps)') +
+      `, charged ${st.poolCharged}, epoch step ${st.epochStep}/${st.k}, ${st.activeAgents} active agent(s)` +
+      `${quotas}. ${st.note}`;
+  } catch {
+    return ''; // 摘要是旁路义务：故障 = 缺席
+  }
 }
 
 function handleStatus(): string {
@@ -94,11 +122,13 @@ function handleStatus(): string {
   const cur = coordinator.current();
   if (!cur) {
     return `[System]: All agents reported.\n${lines.join('\n')}\n` +
-      `Next: swarm_dispatch(action="arbitrate") for the cross-validated final verdict.`;
+      `Next: swarm_dispatch(action="arbitrate") for the cross-validated final verdict.` +
+      auctionSummaryLine();
   }
   return `[System]: Roster (${roster.length} agents).\n${lines.join('\n')}\n` +
     `Active agent: ${cur.spec.id} [${cur.spec.role}] — mission: ${cur.spec.objective} ` +
-    `(steps ${cur.stepsUsed}/${cur.spec.maxSteps}).`;
+    `(steps ${cur.stepsUsed}/${cur.spec.maxSteps}).` +
+    auctionSummaryLine();
 }
 
 function handleReport(findings: string | undefined, confidence: number | undefined): string {

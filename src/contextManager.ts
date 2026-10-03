@@ -11,10 +11,44 @@
 // C-4 认知焦点引擎：
 //   注意力机制 —— 显著度权重（类型×任务相关×新近度）驱动驱逐顺序，核心目标钉扎永生；
 //   潜意识层 —— 被驱逐记录压缩为 (指纹, 要旨) 元组入有界池，场景重现时「灵光一闪」。
+// W1-9（P1 任务驱动注视）：任务锚点缓存与注入面 —— 记录上一轮任务目标锚点
+//   （grounding 命中/点击目标的 bbox），下次编码经 suggestFoveaCenter 组装三路
+//   候选（锚点 + visualDiff 质心 + 光标）交 gazeRouter 加权，产出的归一化注视
+//   中心直供 encodeForVlm 的 foveaCenter。参数式注入面：不读 config、不读注册表。
 import { journal } from './journal';
 import { embed, cosine, type SparseVector } from './semanticHash';
 import { hammingDistance, similarity } from './perceptualHash';
 import { kernelRegistry } from './kernel/registry';
+// W1-9：gazeRouter 纯函数（vlm/codec 无反向依赖 —— 依赖方向 context → vlm 单向）
+import { gazeRouter, type GazeCandidate, type GazeDecision } from './vlm/codec';
+
+/**
+ * W1-9（P1 任务驱动注视）：任务锚点 —— 上一轮任务目标的屏幕位置记忆。
+ * 供下次编码消费：normalized 是 encodeForVlm.foveaCenter 的直接方言
+ * （源图归一化 [0,1]²）；bbox/center 保留像素系原值供点击层复核。
+ */
+export interface TaskAnchor {
+  /** 源图像素系 bbox（记录时防御规整：倒置交换、压扁扩 1px、整数化） */
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+  /** bbox 几何中心（源图像素，不取整 —— 取整权留给点击层） */
+  center: { x: number; y: number };
+  /** 源图归一化中心 [0,1]²（记录时给了 viewport 才在场；缺席 = 无法归一） */
+  normalized?: { x: number; y: number };
+  /** 锚点来源路（'grounding' | 'diff' | 'cursor'；自定义串原样保留 —— 路由器按已知路过滤） */
+  route: string;
+  /** 任务相关度 [0,1]（缺省 1 —— 路由先验即分数；目标已完成可下调） */
+  taskRelevance?: number;
+  capturedAt: number;
+  /** 锚点指向的截图 id（可选 —— 与窗口内记录解耦） */
+  screenshotId?: number;
+}
+
+/** W1-9：clamp 进 [0,1]（归一化坐标的防御收口；非有限按 0 记） */
+function clampUnit(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.min(1, Math.max(0, v));
+}
+
 export interface ScreenshotRecord {
   id: number;
   timestamp: number;
@@ -75,6 +109,9 @@ class ContextManager {
   private subconsciousCapacity = 32;       // 池容量：32 × ≤200 字符 ≈ 6KB 封顶
   private subconsciousMatchDistance = 6;   // 既视感触发阈值（dHash 汉明距离）
   private taskQueryCache: { text: string; vec: SparseVector } | null = null; // 任务向量缓存
+  // ── W1-9（P1 任务驱动注视）──
+  /** 上一轮任务目标锚点（null = 无锚点 —— suggestFoveaCenter 自然少一路候选） */
+  private taskAnchor: TaskAnchor | null = null;
 
   constructor(maxImageCount: number = 3) {
     this.maxImageCount = maxImageCount;
@@ -106,6 +143,142 @@ class ContextManager {
     this.history = [];
     this.subconscious = [];
     this.taskQueryCache = null;
+    this.taskAnchor = null; // W1-9：锚点随会话清空（新任务不继承旧注视）
+  }
+
+  // ── W1-9（P1 任务驱动注视）：任务锚点缓存与注入面 ──
+
+  /**
+   * W1-9：记录上一轮任务目标锚点（下次编码消费的注视种子）。
+   * 参数式注入面 —— 不读 config / 不读注册表：调用方（grounding 命中、点击
+   * 目标确定）把目标 bbox + 视口尺寸交来即可。防御规整（绝不抛）：非对象 /
+   * bbox 缺席 / 坐标非有限 ⇒ 拒收返回 false；倒置盒先交换；floor/ceil 整数化
+   * 后压扁盒扩 1px；归一化中心仅在视口在场且 ≥1px 时计算（缺席 = normalized
+   * 诚实缺席，suggestFoveaCenter 少这一路候选）。重复记录以最后一次为准。
+   */
+  recordTaskAnchor(anchor: {
+    bbox: { x0: number; y0: number; x1: number; y1: number };
+    viewport?: { width: number; height: number };
+    route?: string;
+    taskRelevance?: number;
+    screenshotId?: number;
+  }): boolean {
+    try {
+      const a = anchor as
+        | {
+          bbox?: unknown; viewport?: unknown; route?: unknown;
+          taskRelevance?: unknown; screenshotId?: unknown;
+        }
+        | null
+        | undefined;
+      if (a === null || typeof a !== 'object') return false;
+      const b = a.bbox as { x0?: unknown; y0?: unknown; x1?: unknown; y1?: unknown } | null | undefined;
+      if (b === null || typeof b !== 'object') return false;
+      const { x0, y0, x1, y1 } = b as Record<string, unknown>;
+      if (![x0, y0, x1, y1].every(n => typeof n === 'number' && Number.isFinite(n))) return false;
+      let rx0 = Math.floor(Math.min(x0 as number, x1 as number));
+      let rx1 = Math.ceil(Math.max(x0 as number, x1 as number));
+      let ry0 = Math.floor(Math.min(y0 as number, y1 as number));
+      let ry1 = Math.ceil(Math.max(y0 as number, y1 as number));
+      if (rx1 <= rx0) rx1 = rx0 + 1; // 压扁/压线盒扩 1px（无面积的盒没有几何身份）
+      if (ry1 <= ry0) ry1 = ry0 + 1;
+      const cx = (rx0 + rx1) / 2;
+      const cy = (ry0 + ry1) / 2;
+      const vp = a.viewport as { width?: unknown; height?: unknown } | null | undefined;
+      const vpOk = vp !== null && typeof vp === 'object'
+        && typeof vp.width === 'number' && Number.isFinite(vp.width) && (vp.width as number) >= 1
+        && typeof vp.height === 'number' && Number.isFinite(vp.height) && (vp.height as number) >= 1;
+      const rel = a.taskRelevance;
+      const sid = a.screenshotId;
+      const rec: TaskAnchor = {
+        bbox: { x0: rx0, y0: ry0, x1: rx1, y1: ry1 },
+        center: { x: cx, y: cy },
+        route: typeof a.route === 'string' && a.route !== '' ? a.route : 'grounding',
+        capturedAt: Date.now(),
+        ...(vpOk ? {
+          normalized: {
+            x: clampUnit(cx / (vp!.width as number)),
+            y: clampUnit(cy / (vp!.height as number)),
+          },
+        } : {}),
+        ...(typeof rel === 'number' && Number.isFinite(rel) ? { taskRelevance: clampUnit(rel) } : {}),
+        ...(typeof sid === 'number' && Number.isFinite(sid) && sid >= 0 ? { screenshotId: sid } : {}),
+      };
+      this.taskAnchor = rec;
+      return true;
+    } catch {
+      return false; // 绝不抛：锚点缓存是增益不是依赖
+    }
+  }
+
+  /** W1-9：读取上一轮任务锚点（防御副本；无锚点 = null） */
+  getTaskAnchor(): TaskAnchor | null {
+    if (!this.taskAnchor) return null;
+    const a = this.taskAnchor;
+    return {
+      bbox: { ...a.bbox },
+      center: { ...a.center },
+      route: a.route,
+      capturedAt: a.capturedAt,
+      ...(a.normalized ? { normalized: { ...a.normalized } } : {}),
+      ...(a.taskRelevance !== undefined ? { taskRelevance: a.taskRelevance } : {}),
+      ...(a.screenshotId !== undefined ? { screenshotId: a.screenshotId } : {}),
+    };
+  }
+
+  /** W1-9：显式清锚点（任务目标切换/完成 —— 旧注视不再引用） */
+  clearTaskAnchor(): void {
+    this.taskAnchor = null;
+  }
+
+  /**
+   * W1-9（注入面）：组装三路候选交 gazeRouter 加权，产出下次编码的注视中心。
+   * 候选路：缓存锚点（按其 route 归位，未知串按 grounding 语义 —— 锚点定义即
+   * 「上一轮任务目标」）+ 可选 visualDiff 最大连通域质心（归一化方言直收）+
+   * 可选光标（像素方言，须 viewport 在场归一 —— 缺席则该路诚实跳过）。
+   * 纯组合：不编码、不落账、绝不抛；decision.center 即 encodeForVlm 的
+   * foveaCenter 方言（源图归一化 [0,1]²），全缺席 ⇒ 几何中心回退（gazeRouter 兜底）。
+   */
+  suggestFoveaCenter(extra?: {
+    diffCentroid?: { x: number; y: number };
+    cursor?: { x: number; y: number };
+    viewport?: { width: number; height: number };
+  }): GazeDecision {
+    const cands: GazeCandidate[] = [];
+    const anchor = this.taskAnchor;
+    if (anchor?.normalized) {
+      const route: GazeCandidate['route'] =
+        anchor.route === 'diff' || anchor.route === 'cursor' ? anchor.route : 'grounding';
+      cands.push({
+        route,
+        center: { ...anchor.normalized },
+        ...(anchor.taskRelevance !== undefined ? { taskRelevance: anchor.taskRelevance } : {}),
+      });
+    }
+    const d = extra?.diffCentroid as { x?: unknown; y?: unknown } | undefined;
+    if (d && typeof d === 'object'
+      && typeof d.x === 'number' && Number.isFinite(d.x)
+      && typeof d.y === 'number' && Number.isFinite(d.y)) {
+      cands.push({ route: 'diff', center: { x: clampUnit(d.x), y: clampUnit(d.y) } });
+    }
+    const cur = extra?.cursor as { x?: unknown; y?: unknown } | undefined;
+    const vp = extra?.viewport as { width?: unknown; height?: unknown } | undefined;
+    const vpOk = vp !== null && typeof vp === 'object'
+      && typeof vp.width === 'number' && Number.isFinite(vp.width) && (vp.width as number) >= 1
+      && typeof vp.height === 'number' && Number.isFinite(vp.height) && (vp.height as number) >= 1;
+    if (cur && typeof cur === 'object'
+      && typeof cur.x === 'number' && Number.isFinite(cur.x)
+      && typeof cur.y === 'number' && Number.isFinite(cur.y)
+      && vpOk) {
+      cands.push({
+        route: 'cursor',
+        center: {
+          x: clampUnit((cur.x as number) / (vp!.width as number)),
+          y: clampUnit((cur.y as number) / (vp!.height as number)),
+        },
+      });
+    }
+    return gazeRouter(cands);
   }
 
   /**

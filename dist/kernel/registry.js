@@ -314,6 +314,20 @@ export class EvidenceLedger {
         }
         return { n: win.length, successRate: succ / win.length, margins };
     }
+    /**
+     * 纪元 Μ（万脑联邦）纯增量导出：窗口逐条证据的防御副本（旧 → 新）。
+     * 动机：stats() 只给汇总（n / successRate / margins），「成败 × margin」联合
+     * 分布无法从汇总重建 —— 联邦摘要铸造（src/federation/index.ts 的
+     * mintEvidenceDigest）需要逐条读账才能铸出真联合直方图。
+     * 契约：未知 key / 垃圾 key ⇒ 空数组；返回防御副本（改返回值不穿透账本）；
+     * 零副作用、不触任何既有路径（纯增量立法，既有字节逐位不变）。
+     */
+    entries(key) {
+        const win = typeof key === 'string' ? this.windows.get(key) : undefined;
+        if (!win)
+            return [];
+        return win.map(e => (e.margin !== undefined ? { ...e } : { success: e.success, ts: e.ts }));
+    }
     /** 有入账的 key 目录（插入序副本 —— 与注册表入册序解耦） */
     keys() {
         return [...this.windows.keys()];

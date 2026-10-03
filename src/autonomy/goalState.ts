@@ -43,6 +43,13 @@ export interface CriterionStatus {
   status: 'unverified' | 'met' | 'violated';
 }
 
+/**
+ * W3-5（H2 活意图与漂移检测）：漂移趋势 —— 与上一次记录的漂移评分相比的走向。
+ * 'unknown' = 无前值可比（首记 / 评分缺席）。趋势只做审计展示，
+ * **绝不参与相位推导**（七相纯推导铁律不破）。
+ */
+export type DriftTrend = 'rising' | 'falling' | 'flat' | 'unknown';
+
 /** 进度快照：相 + 步账 + 判据账 + 时间账 + 阻塞账（getter 返回防御性深拷贝）。 */
 export interface GoalProgress {
   phase: GoalPhase;
@@ -95,6 +102,10 @@ export class GoalStateMachine {
   private _startedAt = 0;
   private _stepIndex = 0;
   private _lastUpdateAt: number;
+  // W3-5（H2）：漂移账 —— 评分（[0,1]，null = 缺席）+ 趋势。纯数据落账，
+  // 与相位推导完全解耦（computePhase 不读它 —— 七相纯推导铁律不破）。
+  private _driftScore: number | null = null;
+  private _driftTrend: DriftTrend = 'unknown';
 
   /**
    * 构造一台目标状态机（绝不抛异常，非法 spec 按降级律处理并记 blocker）。
@@ -286,6 +297,53 @@ export class GoalStateMachine {
     this._lastUpdateAt = this.nowSafe();
   }
 
+  /**
+   * W3-5（H2 活意图与漂移检测）：记录一次漂移评分（纯数据落账，绝不抛异常）。
+   *
+   * · score 为 [0,1] 有限数 ⇒ 夹取后入账（三位小数量子化，读数跨平台确定），
+   *   并与上次评分比较推趋势：差 > +0.05 ⇒ rising、< -0.05 ⇒ falling、
+   *   否则 flat；首记（无前值）⇒ 'unknown'。
+   * · score 为 null / 非数 ⇒ **缺席记账**：评分置 null、趋势归 'unknown'
+   *   （指纹源缺席时漂移评分诚实缺席，绝不冒充 0 分）。
+   * · 漂移账**绝不参与相位推导**——evaluate()/progress.phase 与落账前逐字节
+   *   同律（七相纯推导铁律不破）；消费面仅 toAnchor().drift。
+   */
+  recordDrift(score: number | null): void {
+    if (typeof score !== 'number' || !Number.isFinite(score)) {
+      this._driftScore = null;
+      this._driftTrend = 'unknown';
+      this._lastUpdateAt = this.nowSafe();
+      return;
+    }
+    const next = Math.round(Math.min(1, Math.max(0, score)) * 1000) / 1000;
+    if (this._driftScore !== null) {
+      const delta = next - this._driftScore;
+      this._driftTrend = delta > 0.05 ? 'rising' : delta < -0.05 ? 'falling' : 'flat';
+    } else {
+      this._driftTrend = 'unknown'; // 首记无前值
+    }
+    this._driftScore = next;
+    this._lastUpdateAt = this.nowSafe();
+  }
+
+  /**
+   * W3-5（H2 活意图与漂移检测）：修正单条判据文本（steer 应答 B 的写回通道，
+   * 与 recordCriterion 同一 API 风格：越界索引 / 非字符串 / 空白串静默忽略绝不抛，
+   * 返回是否生效供调用方如实回显）。
+   *
+   * · 新文本 trim 后超 GOAL_MAX_CHARS 截断（与 goal 原文同律 —— 机器内部零超长文本）；
+   * · 修正即新主张：该判据状态重置 'unverified'（旧文本的证据不算数），
+   *   相位由判定律从新账即时重推导 —— 修正本身不是相变指令。
+   */
+  amendCriterion(index: number, newCriterion: string): boolean {
+    if (!Number.isInteger(index) || index < 0 || index >= this._criteria.length) return false;
+    if (typeof newCriterion !== 'string' || newCriterion.trim() === '') return false;
+    const text = newCriterion.trim().slice(0, GOAL_MAX_CHARS);
+    this._criteria[index] = { criterion: text, status: 'unverified' };
+    this._lastUpdateAt = this.nowSafe();
+    return true;
+  }
+
   /** 判定当前相并给出一句话中文理由（纯确定，见类 JSDoc 六条有序规则）。 */
   evaluate(): { phase: GoalPhase; reason: string } {
     return this.computePhase();
@@ -295,11 +353,14 @@ export class GoalStateMachine {
    * 导出锚点（供上层 prompt/日志直接嵌入的扁平快照）：
    * {phase, step_index, steps_budget, elapsed_ms, criteria:{met,total}, blockers}
    * （blockers 为副本；未 begin 时 elapsed_ms 恒 0）。
+   * W3-5（H2）：确有漂移评分时增补 drift:{score,trend} 键 —— 仅在评分非 null 时
+   * 落键（与 spec 的空 failureCriteria 不落键同律）：无指纹源 ⇒ drift 键诚实
+   * 缺席，从未记录过漂移的锚点逐字节不变（既有消费方零回归）。
    */
   toAnchor(): Record<string, unknown> {
     const total = this._criteria.length;
     const met = this._criteria.filter(c => c.status === 'met').length;
-    return {
+    const out: Record<string, unknown> = {
       phase: this.computePhase().phase,
       step_index: this._stepIndex,
       steps_budget: this._maxSteps,
@@ -307,5 +368,7 @@ export class GoalStateMachine {
       criteria: { met, total },
       blockers: [...this._blockers],
     };
+    if (this._driftScore !== null) out.drift = { score: this._driftScore, trend: this._driftTrend };
+    return out;
   }
 }

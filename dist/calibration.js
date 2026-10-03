@@ -70,7 +70,7 @@ export function calibrateKalmanQR(pairsRaw) {
         // 稳态 Kalman：P 递推至收敛 → K（DARE 闭式解的数值形态，P-6 执法）
         let p = 1;
         for (let i = 0; i < 200; i++)
-            p = (p + ratio) * 1 / (1 + (p + ratio)); // R=1 归一：Q=ratio
+            p = (p + ratio) / (1 + (p + ratio)); // R=1 归一：Q=ratio
         const k = p;
         // P 纪元修正（第十只 bug 之 b）：predicted 不再是装饰字段 —— 互补滤波
         // 一步预测 ŷ_t = k·观测_{t-1} + (1−k)·模型预测_t（模型先验与观测后验
@@ -108,7 +108,7 @@ export function calibrateSchmittEvidence(frames) {
                 let lo = 0; // 先验 log-odds 0（中性 —— 与 POPUP_PRIOR 形状解耦）
                 for (let i = 0; i < 12; i++)
                     lo += f.semantic ? sem : f.geometric ? geo : -0.5;
-                return sigmoid(lo / 12 + lo * 0); // 稳态近似：平均证据率下的 log-odds
+                return sigmoid(lo / 12); // 稳态近似：平均证据率下的 log-odds
             };
             const posMean = pos.reduce((s, f) => s + steady(f), 0) / pos.length;
             const negMean = neg.reduce((s, f) => s + steady(f), 0) / neg.length;

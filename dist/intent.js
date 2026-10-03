@@ -14,13 +14,18 @@ import { getSharp } from './_legacyDeps.js';
 import * as backend from './physicalBackend.js';
 /** 平移检测的缩放网格边长（8×8=64 行亮度签名）—— 与 dHash 网格维度同源 */
 const SHIFT_GRID = 64;
-/** 以归一化点为中心的归一化矩形（越界夹取） */
+/** 以归一化点为中心的归一化矩形（越界双侧夹取） */
 function focusRegionNorm(x, y, radius) {
     const rx = Math.max(0.01, radius);
     const ry = Math.max(0.01, radius);
+    // 双侧夹取（与服务端 _region_from_center 的 Y6 修正同律）：终点也夹到 1.0，
+    // 宽高 = 夹取后差值 —— 单夹原点会让近缘焦点得到 x+w>1 的 region
+    // （sharp extract 越界直接抛错、服务端半分辨率换算也越界）。
+    const x0 = Math.max(0, x - rx), y0 = Math.max(0, y - ry);
     return {
-        x: Math.max(0, x - rx), y: Math.max(0, y - ry),
-        width: Math.min(1, rx * 2), height: Math.min(1, ry * 2),
+        x: x0, y: y0,
+        width: Math.max(0.01, Math.min(1 - x0, rx * 2)),
+        height: Math.max(0.01, Math.min(1 - y0, ry * 2)),
     };
 }
 /** 区域统计（双路径）：frameId → 服务端 frame_stats；否则 buffer+sharp */
@@ -38,11 +43,14 @@ async function regionStats(ctx, which, region) {
     const buf = which === 'before' ? ctx.beforeBuf : ctx.afterBuf;
     const meta = await sharp(buf).metadata();
     const W = meta.width, H = meta.height;
+    const left = Math.max(0, Math.min(W - 1, Math.round(region.x * W)));
+    const top = Math.max(0, Math.min(H - 1, Math.round(region.y * H)));
     const px = {
-        left: Math.max(0, Math.min(W - 1, Math.round(region.x * W))),
-        top: Math.max(0, Math.min(H - 1, Math.round(region.y * H))),
-        width: Math.max(1, Math.round(region.width * W)),
-        height: Math.max(1, Math.round(region.height * H)),
+        left, top,
+        // 宽高夹到图像边界内（舍入可让 left+width 越过 W —— extract 越界即抛；
+        // 与服务端 frame_stats 的 sw = min(sw, w - sx) 同律）
+        width: Math.max(1, Math.min(W - left, Math.round(region.width * W))),
+        height: Math.max(1, Math.min(H - top, Math.round(region.height * H))),
     };
     const stats = await sharp(buf).extract(px).stats();
     const mean = stats.channels.reduce((n, c) => n + c.mean, 0) / stats.channels.length;

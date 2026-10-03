@@ -150,13 +150,13 @@ export class StubVisionStation {
     constructor(opts) {
         this.opts = opts;
     }
-    async perceive(env) {
+    async perceive(env, signal) {
         const req = env.payload;
         if (!this.opts.source) {
             return faultPatches(req.grid, 'no scene source wired (stub era — honest degradation)');
         }
         try {
-            const patches = await this.opts.source.perceive(req);
+            const patches = await this.opts.source.perceive(req, signal);
             return Array.isArray(patches) ? patches : [];
         }
         catch (e) {
@@ -193,13 +193,13 @@ export class StubDecisionStation {
             'OUTPUT (strict JSON): {"type":"action","action":{"kind":"click_mouse|type_text|...","args":{...}},"rationale":"..."} ' +
             'or {"type":"need-grounding","reason":"...","focus":"..."}';
     }
-    async decide(env, retryCtx) {
+    async decide(env, retryCtx, signal) {
         if (!this.opts.chat) {
             return { reason: 'no decision channel wired (stub era — honest degradation)', focus: 'full-scene' };
         }
         let raw;
         try {
-            raw = await this.opts.chat(this.buildPrompt(env.payload, retryCtx));
+            raw = await this.opts.chat(this.buildPrompt(env.payload, retryCtx), signal);
         }
         catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -293,9 +293,9 @@ export class ReflexiveDecisionStation {
         this.motorOn = !opts.disableMotorArc;
         this.llm = opts.chat ? new StubDecisionStation({ chat: opts.chat }) : null;
     }
-    async decide(env, retryCtx) {
+    async decide(env, retryCtx, signal) {
         if (this.llm)
-            return this.llm.decide(env, retryCtx);
+            return this.llm.decide(env, retryCtx, signal);
         const ctx = env.payload;
         // 压制评估（Tier 0）与本能弧（Tier 1）并行计算 —— 探针需要被压制的弧
         const suppression = this.assessSuppression(ctx);

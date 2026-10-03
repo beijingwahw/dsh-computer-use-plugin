@@ -5,7 +5,8 @@
 // 第七轮：SHA-256 哈希链 —— 每条记录携带前条哈希的哈希（区块链式防篡改审计）。
 // 事后任何对历史记录的增/删/改都会断裂链条，verify_journal 立即定位第一个断点。
 // 这是金融级审计日志的世界标准：日志不仅要记，还要能证明自己没被改过。
-import { appendFile, mkdir } from 'fs/promises';
+import { mkdir, open } from 'fs/promises';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { createHash } from 'crypto';
 import path from 'path';
 import { onToolPost } from './guards/hooks.js';
@@ -20,7 +21,7 @@ export const ACTION_TOOLS = [
     'open_url',
 ];
 /** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'） */
-const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED']);
+const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE']);
 const GENESIS = 'GENESIS';
 /** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提） */
 function canonical(obj) {
@@ -28,7 +29,10 @@ function canonical(obj) {
         return JSON.stringify(obj);
     if (Array.isArray(obj))
         return '[' + obj.map(canonical).join(',') + ']';
+    // 值为 undefined 的自有键与缺键同域：JSON.stringify 落盘时丢弃前者
+    // （checkpoint 落盘-恢复往返），若哈希域区分两者，恢复后 verify 重算即误报断链。
     return '{' + Object.keys(obj).sort()
+        .filter(k => obj[k] !== undefined)
         .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
 }
 function sha256(s) {
@@ -51,15 +55,23 @@ class ActionJournal {
     lastObserved = ''; // C-3：最近观察摘要（[观察]→[行动] 因果桥）
     /** 磁盘写尾链（J 纪元）：并发 append 的 JSONL 行序与链序保持一致 */
     diskTail = Promise.resolve();
-    /** Δ-6：日志目录一次保证标志 —— 首写建立后置位，configure 换路径时归零重探 */
-    dirEnsured = false;
+    /** Δ-6：日志目录一次保证集（按路径记账）—— 首写建立后入集，configure 换路径时清空重探 */
+    ensuredDirs = new Set();
+    // ── W2-2（S4）：先行审计 WAL 通道的簿记 ──
+    /** WAL 自身的小哈希链尖端（与主链独立；跨记录防篡改，铸造时引用主链尖端） */
+    walTip = GENESIS;
+    /** WAL 序号（单调递增 —— 落盘行的对账锚点） */
+    walSeq = 0;
+    /** WAL 目录一次保证集（同步通道的按路径记账 —— 与 ensuredDirs 同律） */
+    ensuredWalDirs = new Set();
     // 容量驱逐（shift）把被驱逐条的哈希升格为新链基 —— verify 从链基起重放，
     // 存活窗口内任何篡改仍可定位；被驱逐条目的取证职责由磁盘 JSONL 承载。
     configure(enabled, filePath, capacity) {
         this.enabled = enabled;
         this.filePath = filePath;
         this.capacity = capacity;
-        this.dirEnsured = false; // 路径可能变更：目录保证随之重置（新路径首写重建）
+        this.ensuredDirs.clear(); // 路径可能变更：目录保证随之重置（新路径首写重建）
+        this.ensuredWalDirs.clear(); // W2-2（S4）：WAL 同步通道同律重置
     }
     reset() {
         this.entries = [];
@@ -70,6 +82,9 @@ class ActionJournal {
         // 源与显著度评估的任务向量源，残留上个任务的描述会毒化新会话的两种语义
         this.taskDescription = '';
         this.lastObserved = '';
+        // W2-2（S4）：WAL 链一并归零（测试隔离缝 —— 与主链同一确定性基线）
+        this.walTip = GENESIS;
+        this.walSeq = 0;
     }
     /** 当前任务描述（未处于复杂任务中则为空串） */
     currentTask() {
@@ -93,24 +108,107 @@ class ActionJournal {
             this.taskStartIndex = Math.max(0, this.taskStartIndex - 1);
         }
         if (this.filePath) {
-            // J 纪元修正：磁盘写经尾链串行化 —— 旧实现两个并发 append 各自 await
-            // mkdir 后再 appendFile，完成顺序可倒置：内存哈希链正确，磁盘 JSONL
-            // 行序却可能违反链序（B-1 承诺"被驱逐条的取证职责交磁盘"被架空）。
-            this.diskTail = this.diskTail.then(async () => {
+            this.enqueueDisk(entry);
+        }
+    }
+    /**
+     * J 纪元磁盘写尾链的入队原语（W2-2 抽取：append 与 appendPreDispatch 共用）。
+     * 旧实现两个并发 append 各自 await mkdir 后再 appendFile，完成顺序可倒置：
+     * 内存哈希链正确，磁盘 JSONL 行序却可能违反链序。入队时快照 filePath
+     * （configure 换路径后在途条目不得写进新路径）；追加失败不阻断主流程（旁路义务）。
+     */
+    enqueueDisk(entry) {
+        const filePath = this.filePath;
+        this.diskTail = this.diskTail.then(async () => {
+            try {
+                // Δ-6：目录保证一次化（按路径记账）—— 每条路径首写建立后入集；
+                // 旧实现每条 append 都 recursive mkdir，高频动作流上是无谓的系统调用税。
+                // mkdir 失败不入集（下次 append 重试）；追加失败不阻断主流程（旁路义务）
+                if (!this.ensuredDirs.has(filePath)) {
+                    await mkdir(path.dirname(filePath), { recursive: true });
+                    this.ensuredDirs.add(filePath);
+                }
+                // 崩溃一致性：fsync 落盘的追加写 —— appendFile 只进 OS 页缓存，
+                // 断电可丢/撕裂 JSONL 尾部行（磁盘取证半边与内存链不同等可靠）；
+                // open('a') + write + sync 逐条提交，句柄必经 finally 关闭（无泄漏）。
+                const fh = await open(filePath, 'a');
                 try {
-                    // Δ-6：目录保证一次化 —— 首写（或 configure 换路径后首写）建立后置位；
-                    // 旧实现每条 append 都 recursive mkdir，高频动作流上是无谓的系统调用税。
-                    // mkdir 失败不置位（下次 append 重试）；追加失败不阻断主流程（旁路义务）
-                    if (!this.dirEnsured) {
-                        await mkdir(path.dirname(this.filePath), { recursive: true });
-                        this.dirEnsured = true;
-                    }
-                    await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
+                    await fh.write(JSON.stringify(entry) + '\n', null, 'utf8');
+                    await fh.sync();
                 }
-                catch (e) {
-                    console.warn(`[Journal] write failed: ${e.message}`);
+                finally {
+                    await fh.close();
                 }
-            });
+            }
+            catch (e) {
+                console.warn(`[Journal] write failed: ${e.message}`);
+            }
+        });
+    }
+    // ── W2-2（S4）：先行审计 WAL —— 派发前 fail-closed 提交通道 ──
+    //
+    // 语义（write-ahead audit）：变更类工具（click/drag/scroll/type/hotkey）的
+    // 审计行必须在**物理派发之前**成为既成事实 —— 「动作可执行」以「审计已入链」
+    // 为前提。三步提交，任一步失败 ⇒ ok=false（调用方拒派该动作，fail-closed）：
+    //   1. 铸造：AUDIT_PRE 标记 + 主链哈希计算（canonical 序列化可在病态载荷上
+    //      抛出 —— 深嵌套/环形参数是对审计面的注入向量，抛出即拒绝，绝不下沉）；
+    //   2. WAL 同步落盘：单行 appendFileSync（journalPath + '.wal'，独立轻量通道
+    //      —— 主 JSONL 是异步批写 + 逐条 fsync，吞吐导向，不满足先行性；WAL 是
+    //      数据库 write-ahead log 的标准形态：一条小行、同步写、派发前返回）。
+    //      无磁盘路径（内存态 journal）⇒ 跳过本步（内存链即事实源）；
+    //   3. 内存提交：主链尖端前滚 + entries.push（与 append() 同律，含容量驱逐）
+    //      + 异步入队主 JSONL（磁盘取证副本，旁路义务）。
+    // 诚实边界：enableJournal=false 是部署配置态而非故障 —— 返回 ok:true +
+    //  skipped:'journal-disabled'（审计子系统整体未武装时不得瘫痪全部动作；
+    //  fail-closed 只针对「已武装通道的失败」）。绝不抛（防御式：任何意外
+    //  异常捕获为 ok:false —— 拒绝派发，把故障暴露给调用方而非静默放行）。
+    appendPreDispatch(tool, args) {
+        if (!this.enabled)
+            return { ok: true, skipped: 'journal-disabled' };
+        try {
+            // 步骤 1：铸造 + 主链哈希（不提交 —— WAL 成功后才前滚内存态）
+            const entry = {
+                ts: Date.now(), tool: 'AUDIT_PRE',
+                args: { tool, ...(args !== undefined ? { args } : {}) },
+                status: 'MARKER',
+            };
+            const hash = chainHash(this.chainTip, entry); // 病态载荷在此抛出 ⇒ fail-closed
+            // 步骤 2：WAL 同步落盘（先行性保证：appendFileSync 返回即已交割 OS）
+            if (this.filePath) {
+                const walPath = this.filePath + '.wal';
+                if (!this.ensuredWalDirs.has(walPath)) {
+                    mkdirSync(path.dirname(walPath), { recursive: true });
+                    this.ensuredWalDirs.add(walPath);
+                }
+                this.walSeq += 1;
+                const record = {
+                    v: 1, seq: this.walSeq, ts: entry.ts, tool,
+                    main_tip_before: this.chainTip,
+                    prev_wal: this.walTip,
+                    hash, // 主链将采用的哈希（WAL 行与主链行的交叉锚）
+                    args: entry.args.args ?? null,
+                };
+                const walHash = sha256(this.walTip + canonical(record));
+                appendFileSync(walPath, JSON.stringify({ ...record, wal_hash: walHash }) + '\n', 'utf8');
+                this.walTip = walHash;
+            }
+            // 步骤 3：内存提交（WAL 既已成功，此处与 append() 的链语义完全同律）
+            entry.hash = hash;
+            this.chainTip = hash;
+            this.entries.push(entry);
+            if (this.entries.length > this.capacity) {
+                const evicted = this.entries.shift();
+                this.chainBase = evicted.hash ?? GENESIS;
+                this.taskStartIndex = Math.max(0, this.taskStartIndex - 1);
+            }
+            if (this.filePath)
+                this.enqueueDisk(entry); // 主 JSONL 取证副本（旁路；无磁盘路径 no-op）
+            return { ok: true, hash };
+        }
+        catch (e) {
+            // fail-closed 的唯一出口：任何提交失败（哈希抛出/WAL 磁盘错误/…）⇒ ok=false。
+            // 内存态在此步之后才前滚 ⇒ 失败路径链上绝无半提交残留。
+            return { ok: false, error: String(e?.message ?? e) };
         }
     }
     /**
@@ -165,6 +263,10 @@ class ActionJournal {
         this.chainTip = chainTip ?? entries.at(-1)?.hash ?? GENESIS;
         this.chainBase = chainBase ?? GENESIS;
         this.taskStartIndex = 0;
+        // Δ-6 同律：checkpoint 不随行任务语境 —— 残留旧任务的描述会毒化恢复后
+        // currentTask() 的失败记忆 query 源与因果桥观察（诚实态 = 无任务语境）
+        this.taskDescription = '';
+        this.lastObserved = '';
     }
     list(actionOnly = true) {
         return actionOnly ? this.entries.filter(e => ACTION_TOOLS.includes(e.tool)) : [...this.entries];
@@ -277,15 +379,54 @@ class ActionJournal {
     }
 }
 export const journal = new ActionJournal();
+// ─── W4-0（E 接线）：动作验证实证三字段的防御提取 ───
+/**
+ * W4-0（E）：从工具返回的 state_anchor.effect 防御直录 scale / intent /
+ * phashCorroborates（缺席 ⇒ 三键不落 —— 旧工具/验证关闭的面零污染）。任何
+ * 解析故障 ⇒ 空对象（旁路义务：实证提取绝不炸日志管线）。
+ */
+function verifyEvidenceOf(result) {
+    const out = {};
+    try {
+        if (typeof result !== 'string')
+            return out;
+        const obj = JSON.parse(result);
+        const eff = obj?.state_anchor?.effect;
+        if (!eff || typeof eff !== 'object' || Array.isArray(eff))
+            return out;
+        if (eff.scale === 'page-level' || eff.scale === 'element-level' || eff.scale === 'none') {
+            out.scale = eff.scale;
+        }
+        const it = eff.intent;
+        if (it && typeof it === 'object' && !Array.isArray(it)) {
+            const r = it;
+            if (typeof r.satisfied === 'boolean') {
+                out.intent = {
+                    expected: typeof r.expected === 'string' ? r.expected : '',
+                    satisfied: r.satisfied,
+                    evidence: typeof r.evidence === 'string' ? r.evidence : '',
+                };
+            }
+        }
+        if (typeof eff.phashCorroborates === 'boolean')
+            out.phashCorroborates = eff.phashCorroborates;
+        return out;
+    }
+    catch {
+        return out;
+    }
+}
 /** 以观察者身份挂进工具管线：记录一切动作类调用 */
 export function registerJournalGuard(ctx, config) {
     journal.configure(config.enableJournal, config.journalPath, 1000);
     onToolPost(ctx, async (call, result, next) => {
         const c = classifyResult(result); // B-2：统一契约解析
         // C-3 因果链注入：思考来自模型行动前的出声思考，观察来自最近截图锚点
+        // W4-0（E）：动作验证实证三字段顶层直录（state_anchor.effect → 链上行）
         await journal.append({
             ts: Date.now(), tool: call.name, args: call.args,
             status: c.status, effect_detected: c.effectDetected,
+            ...verifyEvidenceOf(result),
             thought: typeof call.args?.reasoning === 'string' && call.args.reasoning.trim()
                 ? call.args.reasoning.trim().slice(0, 500) // 思考预算：防长篇推理反噬 Token
                 : undefined,
@@ -329,7 +470,8 @@ export function lempelZivComplexity(seq) {
  * F-4 归一化行为熵率：c(n)·log₂(n) / (n·log₂(α))，α = 观测字母表大小。
  * ≈1 ⇒ 与同字母表均匀随机等复杂（真探索）；→0 ⇒ 周期/确定（卡死签名 ——
  * 与屏幕侧 oscillationTracker 互补：屏幕不变但动作在转的循环只有行为侧可见）。
- * n < 4 或 α < 2 ⇒ null（统计诚实下限）。
+ * n < 4 ⇒ null（统计诚实下限）；α < 2（单字母表）⇒ 0（周期 1 极限态，
+ * log₂(1)=0 的除零安全等价 —— 见下行实现注释）。
  */
 export function normalizedActionComplexity(seq) {
     const n = seq.length;
