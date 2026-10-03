@@ -24,7 +24,12 @@ import { PhysicalErrorKind } from './contracts.js';
 export function parseUnixBaseUrl(baseUrl: string): { socketPath: string; urlPath: string } | null {
   const m = /^http\+unix:\/\/(.+)$/i.exec(baseUrl);
   if (!m) return null;
-  const decoded = decodeURIComponent(m[1]);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(m[1]);
+  } catch {
+    return null; // 畸形百分号序列：不可解析即非 UDS 基址（microFetch 永不抛契约）
+  }
   const idx = decoded.lastIndexOf('.sock');
   if (idx < 0) return null;
   return {
@@ -100,6 +105,8 @@ export async function microFetch<T>(
     body?: unknown;
     timeoutMs?: number; // 缺省 = config.defaultTimeoutMs
     extraHeaders?: Record<string, string>;
+    /** 外部止损信号（流水线步超时 abort）：与内部超时组合 —— 任一触发即断流 */
+    signal?: AbortSignal;
   } = {},
 ): Promise<{ ok: true; response: MicroResponse<T> } | { ok: false; error: PhysicalError }> {
   const timeout = options.timeoutMs ?? config.defaultTimeoutMs;
@@ -121,7 +128,9 @@ export async function microFetch<T>(
         },
       };
     }
-    url = `http://localhost${uds.urlPath === '/' ? '' : uds.urlPath}${path.startsWith('/') ? path : '/' + path}`;
+    // 与 joinUrl 同律：基址 path 尾斜杠去重（'…sock/v1/' + '/exec' 不得拼出 '//exec'）
+    const basePath = uds.urlPath === '/' ? '' : uds.urlPath.replace(/\/+$/, '');
+    url = `http://localhost${basePath}${path.startsWith('/') ? path : '/' + path}`;
   }
 
   // 构造请求头
@@ -132,17 +141,34 @@ export async function microFetch<T>(
     ...(options.extraHeaders ?? {}),
   };
 
-  // AbortSignal.timeout —— Node 18+ 原生支持
+  // AbortSignal.timeout —— Node 18+ 原生支持；外部止损信号在场时手动组合
+  //（Node 18 无 AbortSignal.any）：外部 abort 或内部超时任一触发即断流
   let signal: AbortSignal;
-  try {
-    signal = AbortSignal.timeout(timeout);
-  } catch {
-    // 旧 Node fallback：手动 AbortController（J 纪元：timer unref ——
-    // 主路径 AbortSignal.timeout 不会阻止进程退出，fallback 不该有差别）
+  let cleanupComposed: (() => void) | undefined;
+  const external = options.signal instanceof AbortSignal ? options.signal : undefined;
+  if (external) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeout);
     t.unref?.();
+    const onAbort = () => ctrl.abort();
+    if (external.aborted) ctrl.abort();
+    else external.addEventListener('abort', onAbort, { once: true });
+    cleanupComposed = () => {
+      clearTimeout(t);
+      external.removeEventListener('abort', onAbort);
+    };
     signal = ctrl.signal;
+  } else {
+    try {
+      signal = AbortSignal.timeout(timeout);
+    } catch {
+      // 旧 Node fallback：手动 AbortController（J 纪元：timer unref ——
+      // 主路径 AbortSignal.timeout 不会阻止进程退出，fallback 不该有差别）
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeout);
+      t.unref?.();
+      signal = ctrl.signal;
+    }
   }
 
   let resp: Response;
@@ -174,6 +200,10 @@ export async function microFetch<T>(
         detail: `fetch ${method} ${path} failed: ${code} ${e.message}`,
       },
     };
+  } finally {
+    // 组合信号的定时器/监听器随 fetch 结束（成功/失败皆然）拆除 ——
+    // 长命外部 signal 上不留残听（body 读取阶段无需 signal：abort 只断传输本身）
+    if (cleanupComposed) cleanupComposed();
   }
 
   // HTTP 状态检查 —— Python 端铁律恒 200；非 200 即传输层异常

@@ -18,7 +18,7 @@ export function asVirtualWidget(raw) {
         name: String(raw.name ?? '').slice(0, 20),
         rect: { x, y, width: w, height: h },
         acceptsText: raw.acceptsText === true,
-        scrollable: raw.scrollable === true,
+        scrollable: raw.scrollable === true, // K 纪元补全：滚动证据前提
         popup: raw.popup === true, // K 纪元补全：esc 可关闭对象
     };
 }

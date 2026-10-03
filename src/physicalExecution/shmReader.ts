@@ -66,10 +66,16 @@ function startFdGc(): void {
 
 /** SHM 对象路径解析（POSIX shm_open 在不同平台的文件系统映射） */
 function resolveShmPath(name: string): string {
-  if (platform() === 'darwin') {
-    return `/tmp/shm.${name.replace(/^\//, '')}`;
+  const clean = name.replace(/^\//, '');
+  // POSIX shm 对象名内部不允许 '/'，也不允许 '.'/'..'（剥离首斜杠后为空/点
+  // 同为非法名）。放行即路径遍历：'/dev/shm/../..' 逃出 shm 目录读写任意文件。
+  if (clean === '' || clean === '.' || clean === '..' || clean.includes('/')) {
+    throw makeError('invalid_args', `invalid shm object name: ${name}`);
   }
-  return `/dev/shm/${name.replace(/^\//, '')}`;
+  if (platform() === 'darwin') {
+    return `/tmp/shm.${clean}`;
+  }
+  return `/dev/shm/${clean}`;
 }
 
 /** 把异常包装为 PhysicalError 对象 */
@@ -77,13 +83,13 @@ function makeError(kind: PhysicalErrorKind, detail: string): PhysicalError {
   return { kind, detail };
 }
 
-/** 从 FD 池取或新开 file handle。返回 [fh, isFromCache] */
-async function acquireFd(path: string, name: string): Promise<[FileHandle, boolean]> {
+/** 从 FD 池取或新开 file handle。返回 [fh, 池条目本体]（release 按条目归还） */
+async function acquireFd(path: string, name: string): Promise<[FileHandle, FdCacheEntry]> {
   const now = Date.now();
   const cached = _fdCache.get(name);
   if (cached && cached.expiresAt > now) {
     cached.refCount++;
-    return [cached.fh, true];
+    return [cached.fh, cached];
   }
   // 过期但尚未被 30s GC 收走的条目：替换前关闭旧 fh（否则被覆盖后永无人关闭 ——
   // 每次 TTL 过期重读泄漏一个 fd）
@@ -101,24 +107,28 @@ async function acquireFd(path: string, name: string): Promise<[FileHandle, boole
     }
     throw makeError('screen_capture_failed', `open ${path} failed: ${e.message}`);
   }
-  _fdCache.set(name, { fh, expiresAt: now + FD_CACHE_TTL_MS, refCount: 1, evictPending: false });
+  const entry: FdCacheEntry = { fh, expiresAt: now + FD_CACHE_TTL_MS, refCount: 1, evictPending: false };
+  _fdCache.set(name, entry);
   if (stale && stale.refCount === 0) {
     stale.fh.close().catch(() => { /* 旧句柄关闭失败无害 */ });
   } else if (stale) {
-    // 在飞引用持有旧 fh：新条目已接管缓存键，旧句柄等引用方 releaseFd 后由其关闭
+    // 在飞引用持有旧 fh：新条目已接管缓存键，旧句柄等引用方按条目本体 release 后关闭
     stale.evictPending = true;
   }
   startFdGc();
-  return [fh, false];
+  return [fh, entry];
 }
 
-/** 归还 FD 到池（引用计数减一；驱逐挂起且引用归零 ⇒ 立即关闭） */
-async function releaseFd(name: string): Promise<void> {
-  const entry = _fdCache.get(name);
-  if (!entry) return;
+/** 归还 FD 到池（引用计数减一；驱逐挂起且引用归零 ⇒ 立即关闭）。
+ *  按 acquire 返回的条目本体归还，而非按键回查 —— 键可能已被 TTL 重开的新条目
+ *  接管：按名回查会误减新条目的引用数，旧条目的 fh 则永无人关闭（fd 泄漏）。 */
+async function releaseFd(name: string, entry: FdCacheEntry): Promise<void> {
   entry.refCount = Math.max(0, entry.refCount - 1);
-  if (entry.refCount === 0 && entry.evictPending) {
-    _fdCache.delete(name);
+  // evictPending，或该条目已不是缓存键的现役条目（并发双开竞态：两次 acquireFd
+  // 都未命中缓存、各自 open 后后者覆盖前者 —— 被覆盖的孤儿条目不在 Map 里，
+  // TTL GC 永远走不到它，引用归零时必须就地关闭，否则每撞一次竞态泄漏一个 fd）
+  if (entry.refCount === 0 && (entry.evictPending || _fdCache.get(name) !== entry)) {
+    if (_fdCache.get(name) === entry) _fdCache.delete(name);
     try { await entry.fh.close(); } catch { /* close 失败无害 */ }
     return;
   }
@@ -193,7 +203,7 @@ async function readFromFile(
   expectedSize: number,
   cacheKey: string,    // shm 模式 = screenshot.name；mmap-file 模式 = path
 ): Promise<Buffer> {
-  const [fh, fromCache] = await acquireFd(path, cacheKey || path);
+  const [fh, entry] = await acquireFd(path, cacheKey || path);
   try {
     if (expectedSize > STREAMING_THRESHOLD) {
       // 流式分块读：避免一次性 allocUnsafe 大 Buffer 的 V8 堆压力
@@ -214,8 +224,7 @@ async function readFromFile(
       `read ${path} failed: ${e.message}`,
     );
   } finally {
-    await releaseFd(cacheKey || path);
-    void fromCache;  // 调试用：可观测 FD 池命中率
+    await releaseFd(cacheKey || path, entry);
   }
 }
 
@@ -276,7 +285,7 @@ export async function* readShmStreaming(
   }
 
   const cacheKey = screenshot.transport === 'mmap-file' ? path : screenshot.name;
-  const [fh] = await acquireFd(path, cacheKey);
+  const [fh, entry] = await acquireFd(path, cacheKey);
   try {
     let offset = 0;
     while (offset < screenshot.size) {
@@ -288,7 +297,7 @@ export async function* readShmStreaming(
       offset += bytesRead;
     }
   } finally {
-    await releaseFd(cacheKey);
+    await releaseFd(cacheKey, entry);
   }
 }
 

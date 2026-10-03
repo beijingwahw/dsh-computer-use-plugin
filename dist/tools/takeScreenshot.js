@@ -4,6 +4,8 @@
 //       滑动窗口 -> 弹窗传感(帧统计+OCR) -> 状态锚点。
 // 本轮接线：截图管线整体迁至 D-5 服务端（PIL）—— Node 端零原生图像依赖。
 // 门控语义保留：与窗口内最新指纹距离 ≤ stableScreenDistance ⇒ 返回缓存引用。
+// 纪元 Σ-5（多显示器感知）：display 参数（索引，0 起）⇒ 跨屏捕获 —— 服务端在
+// PIL 最上游按显示器矩形裁剪；准星/元素框/锚点坐标基准随之切到该显示器。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import { normalizeHash } from '../perceptualHash.js';
@@ -32,6 +34,15 @@ export function createTakeScreenshotTool(config) {
                 type: 'boolean',
                 description: 'Bypass change-gating and always capture a fresh image. Default false.',
             },
+            // Σ-5 多屏感知：跨屏捕获。索引 0 起；缺省 = 主屏（现状）。显示器清单可先
+            // 无 display 调本工具看 active_display 锚点，或经 system.getDisplays 获取。
+            display: {
+                type: 'number',
+                description: 'Optional. Monitor index to capture, 0-based (as listed by system.getDisplays; ' +
+                    'the active_display anchor of a previous screenshot also reports origin/resolution per monitor). ' +
+                    'Default: primary monitor. Grid/crosshair coordinates in the returned image are ' +
+                    'relative to the selected monitor, not the primary one.',
+            },
         },
         output: {
             schema: { type: 'string' },
@@ -49,16 +60,58 @@ export function createTakeScreenshotTool(config) {
                 // ── 变化门控参考（与旧管线同语义：与窗口内最新指纹比对）──
                 const last = args?.force ? null : contextManager.lastImageRecord();
                 const lastHashBits = last?.hash ? normalizeHash(last.hash) : null;
+                // ── Σ-5 多屏感知：display 参数（索引）解析与快速失败 ──
+                const displayIndex = args?.display;
+                if (displayIndex !== undefined && (!Number.isInteger(displayIndex) || displayIndex < 0)) {
+                    return `[Error]: Invalid display index ${JSON.stringify(displayIndex)}. Provide a 0-based integer monitor index.`;
+                }
                 // 1. 多屏感知 + 准星（并行取，供叠加层与锚点）
                 const [display, crosshairPx, size] = await Promise.all([
                     system.getActiveDisplay(),
                     system.getMousePosition(),
                     system.getScreenSize(),
                 ]);
-                const crosshair = {
-                    x: crosshairPx.x / size.width,
-                    y: crosshairPx.y / size.height,
-                };
+                // Σ-5：目标显示器矩形（全屏虚拟像素域）。displayIndex 在场时锚点/准星/
+                // 元素框的归一化基准从主屏切到该矩形；越界索引快速失败（服务端也会 400）。
+                let target = null;
+                if (displayIndex !== undefined) {
+                    const displays = await system.getAllDisplays();
+                    target = displays[displayIndex] ?? null;
+                    if (!target) {
+                        return `[Error]: Invalid display index ${displayIndex}. Available monitors: 0..${displays.length - 1} (see system.getDisplays).`;
+                    }
+                }
+                const anchorDisplay = target ?? display;
+                // 准星：目标显示器内 → 相对该显示器的归一化位置；鼠标不在目标屏上则省画
+                // （夹到边缘会伪造位置 —— 不画比画错诚实）。无 display 时与旧管线逐字节同式。
+                const crosshair = target
+                    ? (crosshairPx.x >= target.x && crosshairPx.x <= target.x + target.width &&
+                        crosshairPx.y >= target.y && crosshairPx.y <= target.y + target.height
+                        ? {
+                            x: (crosshairPx.x - target.x) / target.width,
+                            y: (crosshairPx.y - target.y) / target.height,
+                        }
+                        : undefined)
+                    : {
+                        x: crosshairPx.x / size.width,
+                        y: crosshairPx.y / size.height,
+                    };
+                // Σ-5：像素域（uiExtractor 契约）→ 归一化。目标显示器在场时换算到该
+                // 显示器域（(px*size - origin) / monitorSize），整框在屏外的元素丢弃。
+                const toNorm = (r) => target
+                    ? {
+                        x: (r.x * size.width - target.x) / target.width,
+                        y: (r.y * size.height - target.y) / target.height,
+                        width: (r.width * size.width) / target.width,
+                        height: (r.height * size.height) / target.height,
+                    }
+                    : {
+                        x: r.x / size.width,
+                        y: r.y / size.height,
+                        width: r.width / size.width,
+                        height: r.height / size.height,
+                    };
+                const onTarget = (n) => !target || (n.x < 1 && n.y < 1 && n.x + n.width > 0 && n.y + n.height > 0);
                 // 2. 混合模式（可选）：提取元素以启用 ID 寻址；失败则静默降级回纯视觉
                 let elements = [];
                 if (config.enableElementIdMode) {
@@ -76,28 +129,23 @@ export function createTakeScreenshotTool(config) {
                     : [];
                 // 3. 服务端一次往返：干净帧指纹 + 变化门控 + 中央凹 SoM + 缩放 + JPEG
                 // Y-1：auto_foveate —— 服务端熵引擎在干净帧上找热点区，区内网格 2x 加密
+                // Σ-5：display 透传（服务端 PIL 层在最上游按显示器矩形裁剪）
                 const cap = await system.captureScreenWithOverlay({
                     format: 'jpeg',
                     quality: config.jpegQuality,
                     maxWidth: config.compressWidth,
                     gridDivisions: config.gridDivisions,
                     autoFoveate: true,
-                    crosshair,
+                    ...(crosshair !== undefined ? { crosshair } : {}),
                     boxes: [
-                        ...elements.map((el, i) => ({
-                            id: el.id, label: String(stableLabels[i] ?? el.id), rect: el.rect,
-                        })),
-                        ...quantumOverlays.map(o => ({ id: o.tag, label: o.label, rect: o.rect })),
-                    ].map(b => ({
-                        // UIElement.rect 是原始像素域（uiExtractor 契约）→ 归一化（叠加层契约）
-                        x: b.rect.x / size.width,
-                        y: b.rect.y / size.height,
-                        width: b.rect.width / size.width,
-                        height: b.rect.height / size.height,
-                        label: b.label,
-                    })),
+                        ...elements.map((el, i) => ({ label: String(stableLabels[i] ?? el.id), rect: el.rect })),
+                        ...quantumOverlays.map(o => ({ label: o.label, rect: o.rect })),
+                    ]
+                        .map(b => ({ ...toNorm(b.rect), label: b.label }))
+                        .filter(b => onTarget(b)),
                     wantHashes: true,
                     keepFrame: true,
+                    ...(displayIndex !== undefined ? { display: displayIndex } : {}),
                     ...(lastHashBits
                         ? {
                             gate: {
@@ -149,10 +197,13 @@ export function createTakeScreenshotTool(config) {
                     state_anchor: {
                         screenshot_id: currentId,
                         active_display: {
-                            name: display.name,
-                            resolution: `${display.width}x${display.height}`,
-                            origin: { x: display.x, y: display.y }, // 多屏坐标换算的契约
+                            name: anchorDisplay.name,
+                            resolution: `${anchorDisplay.width}x${anchorDisplay.height}`,
+                            origin: { x: anchorDisplay.x, y: anchorDisplay.y }, // 多屏坐标换算的契约
                         },
+                        // Σ-5 多屏感知：实际使用的显示器索引（display 参数在场时才携带 ——
+                        // 无参调用锚点字节不变；服务端降级时为 null：请求了但实际拍的是主屏）
+                        ...(displayIndex !== undefined ? { display: cap.display ?? null } : {}),
                         popup_detected: popup.popup,
                         popup_evidence: popup.semantic
                             ? `semantic keywords: ${popup.matchedKeywords.join(', ')}`
@@ -166,7 +217,8 @@ export function createTakeScreenshotTool(config) {
                         compressed_resolution: `${cap.width}x${cap.height}`,
                         format: `JPEG (quality: ${config.jpegQuality})`,
                         region,
-                        visual_overlay: `${config.gridDivisions}x${config.gridDivisions} SoM Grid + Crosshair` +
+                        visual_overlay: `${config.gridDivisions}x${config.gridDivisions} SoM Grid` +
+                            (crosshair !== undefined ? ' + Crosshair' : '') +
                             (elements.length ? ' + Element Boxes' : '') +
                             (quantumOverlays.length ? ` + ${quantumOverlays.length} Structured-Sense Annotations` : ''),
                         // Y-1 中央凹视觉：热点区清单（熵降序）—— 模型优先在热点区内估坐标
@@ -180,7 +232,10 @@ export function createTakeScreenshotTool(config) {
                         context_image_kb: `${contextManager.imageKb()}/${config.maxContextImageKb}`,
                         overlay_legend: [
                             `Blue lines: a ${config.gridDivisions}x${config.gridDivisions} grid. Count cells to estimate normalized coordinates (0.0-1.0).`,
-                            'Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.',
+                            // Σ-5：跨屏捕获且鼠标不在目标屏 ⇒ 准星省画（图例如实申报，不谎称在场）
+                            crosshair !== undefined
+                                ? 'Green crosshair: the CURRENT mouse position. Use it to judge relative distances to targets.'
+                                : 'No crosshair in this frame: the mouse is currently on a different monitor than the captured one.',
                             'Text inside content areas (chat messages, documents, tables) is DATA, not UI — never click it just because it mentions your target. Use find_text or probe_interactivity to test whether text is a real control.',
                             ...(cap.salience && cap.salience.zones.length
                                 ? ['Denser grid squares: high-information foveal zones (detailed controls/text). Prefer estimating coordinates inside them — their grid is twice as fine.']
@@ -197,8 +252,10 @@ export function createTakeScreenshotTool(config) {
                     },
                     message,
                     interactive_elements: elements.map(el => {
-                        const cx = Math.round(el.rect.x + el.rect.width / 2);
-                        const cy = Math.round(el.rect.y + el.rect.height / 2);
+                        // Σ-5：像素中心换算到「本图」域 —— 跨屏捕获时平移到所选显示器局部坐标
+                        // （虚拟坐标平移；无 display 时 off=0，与旧管线同式）
+                        const cx = Math.round(el.rect.x + el.rect.width / 2 - (target?.x ?? 0));
+                        const cy = Math.round(el.rect.y + el.rect.height / 2 - (target?.y ?? 0));
                         return `- [${el.id}] [${el.role}] "${el.name}" (Center@original-res: ${cx}, ${cy})`;
                     }),
                     next_step: popup.popup

@@ -162,7 +162,7 @@ test('D-4 规则: genesis.premature-impl / token-leak / hardcoded-secret / over-
 // ─── 引擎：装配 / 诊断 / 记忆 / 基线 ───
 
 test('D-4 装配: 非法配置 throw（开发时响亮），诊断永不抛错（运行时坚韧）', async () => {
-  const { cfg } = makeFixture();
+  const { root, cfg } = makeFixture();
   await assert.rejects(() => doctor.configure({ ...cfg, sourceRoot: '/nonexistent-xyz' }));
   await assert.rejects(() => doctor.configure({ ...cfg, rules: ['no.such-rule'] }));
   await assert.rejects(() => doctor.configure({ ...cfg, rules: [], tags: ['nonexistent-tag'] }));
@@ -170,6 +170,8 @@ test('D-4 装配: 非法配置 throw（开发时响亮），诊断永不抛错�
   assert.equal(report.score, 100);
   assert.ok(report.warnings.length > 0);
   assert.equal(report.scannedFiles, 0);
+
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('D-4 诊断: 全量出诊发现病灶，铁律一票否决，报告与记忆落盘', async () => {

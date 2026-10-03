@@ -13,6 +13,7 @@
 //      绝不假装进入叠加态（simulated success 是债的地层教训的对称面：simulated rescue 同罪）。
 import { journal } from './journal.js';
 import { extractInteractiveElements, hasAccessibilityProvider } from './uiExtractor.js';
+import { kernelRegistry } from './kernel/registry.js';
 /** label 截断预算：标注文本最长 20 字符（Token 纪律） */
 const LABEL_MAX = 20;
 /** IoU > 0.5 或中心点互相包含 ⇒ 同一视觉元素（去重策略：白盒只补盲区，不重复标注） */
@@ -30,7 +31,9 @@ function centerInside(a, b) {
     return cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height;
 }
 function overlaps(a, b) {
-    return iou(a, b) > 0.5 || centerInside(a, b) || centerInside(b, a);
+    // 纪元 Ξ（Ξ-D 生产接线）：去重 IoU 门读内核注册表 —— quantum.iou（缺省
+    // 0.5）。未注册 ⇒ getOrDefault 回声字面量，去重判决逐字节不变；每次比对读。
+    return iou(a, b) > kernelRegistry.getOrDefault('quantum.iou', 0.5) || centerInside(a, b) || centerInside(b, a);
 }
 /** UiExtractorWhitebox：元素 ID 模式基础设施的白盒适配器（零新依赖的通道复用） */
 export class UiExtractorWhitebox {

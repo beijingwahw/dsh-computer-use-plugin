@@ -99,7 +99,13 @@ export function wireDoctorVerdictChannel(ctx, config) {
             return; // 非法载荷：拒绝回执（沉默 ⇒ 冻结，保守方向）
         }
         if (busy) {
-            pendingReceipts.filter(p => p.chainId !== p.chainId).concat(p);
+            // Δ 纪元（审计#2）：原实现用「元素与自身比较」的 filter 且未赋值回——
+            // 到达回执照旧静默丢。改为同链替换、异链追加（FIFO 上限语义保留）。
+            const idx = pendingReceipts.findIndex(r => r.chainId === p.chainId);
+            if (idx >= 0)
+                pendingReceipts.splice(idx, 1, p);
+            else
+                pendingReceipts.push(p);
             while (pendingReceipts.length > PENDING_RECEIPTS_MAX) {
                 const dropped = pendingReceipts.shift();
                 console.warn(`[DoctorChannel] receipt queue overflow — dropped verdict for ${dropped?.chainId} (D-5 freezes for review, honest).`);

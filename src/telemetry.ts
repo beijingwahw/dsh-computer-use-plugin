@@ -555,7 +555,7 @@ export class Telemetry {
   }
 
   /** I-6 消费面：逐工具延迟对的占优扫描（≥8 样本才参战 —— 小样本 CDF 无分辨力） */
-  latencyDominancePairs(minSamples = 8): Array<{ faster: string; slower: string }> {
+  latencyDominancePairs(minSamples = 8): Array<{ faster: string; slower: string; order: 'FSD' | 'SSD' }> {
     const cands: Array<{ tool: string; lat: number[] }> = [];
     for (const [name, s] of this.tools) {
       if (s.latencies.length >= minSamples) cands.push({ tool: name, lat: s.latencies });

@@ -83,6 +83,10 @@ export class SandboxLog {
   private capacity = 2000;
   private chainTip = GENESIS;
   private chainBase = GENESIS;
+  /** 落盘写串行队列：append 可并发重入（fire-and-forget 调用方在场），链推进是
+   *  同步节（内存序 = 调用序），但并发 appendFile 交错会让 JSONL 行序与链序
+   *  脱钩（取证重放断链）—— 单写队列保行序与链序一致 */
+  private writeQueue: Promise<void> = Promise.resolve();
 
   configure(filePath: string, capacity: number): void {
     this.filePath = filePath;
@@ -110,12 +114,18 @@ export class SandboxLog {
       this.chainBase = evicted.hash ?? GENESIS; // 链基前滚（对齐 journal B-1 语义）
     }
     if (this.filePath) {
-      try {
-        await mkdir(path.dirname(this.filePath), { recursive: true });
-        await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
-      } catch (e: any) {
-        console.warn(`[SandboxLog] write failed: ${e.message}`);
-      }
+      const filePath = this.filePath; // configure 可能在队列排空前换址 —— 逐条快照
+      const line = JSON.stringify(entry) + '\n';
+      const write = this.writeQueue.then(async () => {
+        try {
+          await mkdir(path.dirname(filePath), { recursive: true });
+          await appendFile(filePath, line, 'utf8');
+        } catch (e: any) {
+          console.warn(`[SandboxLog] write failed: ${e.message}`);
+        }
+      });
+      this.writeQueue = write;
+      await write;
     }
   }
 

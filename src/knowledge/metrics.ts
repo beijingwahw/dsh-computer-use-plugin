@@ -202,7 +202,8 @@ export function mannWhitney(
     }
   }
   const sigmaU = Math.sqrt((n1 * n2 / (N * (N - 1))) * ((N ** 3 - N - tieTerm) / 12));
-  const z = (Math.min(u1, u2) - muU + 0.5) / Math.max(1e-9, sigmaU);
+  if (sigmaU <= 0) return { u1, u2, p: 1 }; // 全并列 ⇒ σ=0 且 U 恰在期望上：无差异证据，诚实 p=1（除零护栏曾给出虚假显著）
+  const z = (Math.min(u1, u2) - muU + 0.5) / sigmaU;
   const p = 2 * (1 - normalCdf(Math.abs(z)));
   return { u1, u2, p: Math.round(p * 10000) / 10000 };
 }

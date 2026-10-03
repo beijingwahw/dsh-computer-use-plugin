@@ -99,7 +99,7 @@ export function createDiffViewTool() {
                 noteDiffObserved(regions, persistence);
                 const persistentCount = [...persistence.values()].filter(v => v === 'persistent').length;
                 // H-1 Wasserstein 空间位移：变化发生在你动作的地方吗（最优传输因果验证）
-                const focus = focusTracker.get(60000);
+                const focus = focusTracker.get(60_000);
                 const displacement = focus ? spatialDisplacement(focus, regions) : null;
                 const regionLines = regions.slice(0, 8).map(r => `- Δ${r.index}${persistence.get(r.index) === 'persistent' ? ' [persistent]' : ''}: bbox=(${r.bbox_normalized.x0.toFixed(2)},${r.bbox_normalized.y0.toFixed(2)})-(${r.bbox_normalized.x1.toFixed(2)},${r.bbox_normalized.y1.toFixed(2)}) center=(${r.center.x.toFixed(3)}, ${r.center.y.toFixed(3)}) size=${r.tiles_changed}`);
                 return JSON.stringify({

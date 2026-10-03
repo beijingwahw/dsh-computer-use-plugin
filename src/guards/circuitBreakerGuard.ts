@@ -161,13 +161,13 @@ export function registerCircuitBreakerGuard(ctx: Context, maxFailures: number): 
       : 0;
     const posteriorTrip = tripMass >= BREAKER_TRIP_MASS;
     if (st.recentFailures >= maxFailures || posteriorTrip) {
-      // 聚合症状补记一条：这批连续失败已被熔断，match_skill 检索时会作为强负向信号
-      rememberFailure(toolCall.name, toolCall.args,
-        `circuit-breaker: ${maxFailures} consecutive failures triggered a forced pause`);
-      st.recentFailures = 0;
       const why = posteriorTrip
         ? `posterior arm: P(failure rate > 50% | last ${st.window.length} calls) = ${tripMass} ≥ 0.95 (flaky-broken route)`
         : `${maxFailures} consecutive failures`;
+      // 聚合症状补记一条：按真实触发臂归因（match_skill 检索时作为强负向信号）
+      rememberFailure(toolCall.name, toolCall.args,
+        `circuit-breaker: ${why} triggered a forced pause`);
+      st.recentFailures = 0;
       st.window.length = 0; // 熔断即冷静：窗口清空（强制冷静后还给机会）
       // U 纪元（U-3）：守卫裁决入链 —— 拦截即防篡改存证（proof 器官闭环到守卫层：
       // 每次拦截都是可被 MMR 证明的历史事实，事后不可抵赖）

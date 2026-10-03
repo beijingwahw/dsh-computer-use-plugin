@@ -18,10 +18,11 @@ import type { DoctorVerdictPayload } from '../doctorEvents';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts';
 import type { AttemptRecord, IntentPayload, PipelineConfig, PipelineReport } from './contracts';
 import type { SandboxAction } from '../sandbox/types';
+import { isGlmConfigured } from '../vlm/glmClient';
 
 export { PipelineOrchestratorImpl } from './pipeline';
 export { DefaultVisionStation, DefaultDecisionStation, DefaultExecutionStation } from './stations';
-export { createStructuredFromUiExtractor, createTraditionalFromOcr } from './visionAdapters';
+export { createStructuredFromUiExtractor, createTraditionalFromOcr, createSemanticFromVlm } from './visionAdapters';
 export { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts';
 export type {
   PipelineConfig, PipelineOrchestrator, PipelineReport, PipelineVerdict,
@@ -68,9 +69,6 @@ const intentIdGen = createDefaultIdGenerator();
 
 const inflightReports = new Map<string, PipelineReport>();
 const attemptVerdicts = new Map<string, DoctorVerdictPayload>(); // key: verdict.subject（三方言）
-
-/** 进程内序号：同毫秒并发 run 的 intent id 不再碰撞（J 纪元修正） */
-let intentSeq = 0;
 
 /** 有界 Map 写入：重写刷新插入序，超限 FIFO 淘汰最旧键（Map 迭代序 = 插入序） */
 function boundedSet<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
@@ -181,7 +179,8 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
   // system（nut-js 原生）动态引入：沙箱/无屏环境 import 失败 ⇒ 回退源缺席，零污染。
   let structuredSource = (ctx as any).get?.('dsh.vision.structured') ?? null;
   let traditionalSource = (ctx as any).get?.('dsh.vision.traditional') ?? null;
-  const semanticSource = (ctx as any).get?.('dsh.vision.semantic') ?? null;
+  // 纪元 Ω：semantic 源改为 let —— 自铸分支（VLM 云脑）可能补位（宿主源仍优先）
+  let semanticSource = (ctx as any).get?.('dsh.vision.semantic') ?? null;
   // D-6 自铸源记账：回退分支构造的源才是 D-6 属主权可及的（外部源归外部注册方）
   const ownedSources: Array<[string, unknown]> = [];
   if (!structuredSource || !traditionalSource) {
@@ -209,11 +208,34 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
     }
   }
 
+  // 纪元 Ω（云脑皮层）：L3 语义源自铸一档 —— 宿主未供 'dsh.vision.semantic'
+  // 且云脑可用（插件 config.vlmApiKey 已铸单例，或环境变量已配置）时由
+  // GLM 接地器官补位。「宿主 ctx.get 优先、缺席自铸」立法不变 —— 只加不自夺。
+  if (!semanticSource) {
+    const vlmKeyInConfig = typeof (config as any)?.vlmApiKey === 'string'
+      && (config as any).vlmApiKey.trim().length > 0;
+    if (vlmKeyInConfig || isGlmConfigured()) {
+      try {
+        const { createSemanticFromVlm } = await import('./visionAdapters');
+        const { system } = await import('../system');
+        semanticSource = createSemanticFromVlm({
+          capture: () => system.captureScreen(),
+          screenSize: () => system.getScreenSize(),
+        });
+        ownedSources.push(['dsh.vision.semantic', semanticSource]);
+        console.log('[Orchestration] VLM semantic source wired (Ω cloud cortex — L3 grounding).');
+      } catch {
+        console.log('[Orchestration] VLM semantic source unavailable — L3 honest degradation.');
+      }
+    }
+  }
+
   // L 纪元服务归属法（#6 兑现）：外部源缺席时 D-6 以自带回退源成为
-  // 'dsh.vision.structured' / 'dsh.vision.traditional' 的天然属主 —— 向总线自荐，
-  // 其余消费方（含未来的独立视觉插件）从此有可探测的注册方。只自荐 D-6 自己
-  // 铸造的源；外部源在场 ⇒ 属主权归外部注册方，不覆写（单属主铁律）。
-  // 宿主无 set 面 ⇒ 注册不成立，各消费方保持既有诚实降级（与 D-5/D-7 同律）。
+  // 'dsh.vision.structured' / 'dsh.vision.traditional'（纪元 Ω 起：缺席时
+  // 'dsh.vision.semantic' 亦同）的天然属主 —— 向总线自荐，其余消费方（含未来
+  // 的独立视觉插件）从此有可探测的注册方。只自荐 D-6 自己铸造的源；外部源在场
+  // ⇒ 属主权归外部注册方，不覆写（单属主铁律）。宿主无 set 面 ⇒ 注册不成立，
+  // 各消费方保持既有诚实降级（与 D-5/D-7 同律）。
   const selfRegisteredVision: string[] = [];
   for (const [name, source] of ownedSources) {
     try {
@@ -352,7 +374,7 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
           report: report.reportPath,
         });
       } catch (e: any) {
-        return JSON.stringify({ status: 'FAILED', reason: `malformed input: ${e.message}` });
+        return JSON.stringify({ status: 'FAILED', reason: `malformed input: ${e?.message ?? 'unknown error'}` });
       }
     },
   }));

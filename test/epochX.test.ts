@@ -95,7 +95,9 @@ test('X-3: 残差 —— 引号内词不参加落点选举', () => {
   const r1 = residueTokens('type "hello world" into the server field');
   assert.ok(r1.includes('server') && r1.includes('field'), '落点词在场');
   assert.ok(!r1.includes('hello') && !r1.includes('world'), '载荷词被剥夺');
-  assert.ok(!r1.includes('type') && !r1.includes('into') || !r1.includes('type'), '动词被切除');
+  // 残差只切动词词表（into/the 非动词、照常保留 —— 见下行 r2）；原式
+  // `!A && !B || !A` 恒等于 `!A`，'into' 分支是从不生效的死逻辑。
+  assert.ok(!r1.includes('type'), '动词被切除');
   const r2 = residueTokens('type "alpha.local"');
   assert.equal(r2.filter(t => t !== 'into' && t !== 'the').length, 0, '纯载荷意图残差为空（只剩虚词）');
 });

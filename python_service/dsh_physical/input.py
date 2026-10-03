@@ -272,11 +272,14 @@ class InputController:
         py = min(int(round(y * h)), h - 1)
         return max(0, px), max(0, py)
 
-    async def click(self, x: float, y: float, button: str = "left") -> dict:
+    async def click(self, x: float, y: float, button: str = "left", dry_run: bool | None = None) -> dict:
         """点击鼠标。
 
         返回 ``{ pixel, screen }`` 用于审计回执。
+        ``dry_run``：调用级覆盖（并发安全 —— ``set_dry_run`` 是共享可变态，
+        并发请求互踩标志会把真实点击静默变空操作）；None = 沿用控制器标志。
         """
+        dry = self._dry_run if dry_run is None else dry_run
         if button not in _BUTTON_MAP:
             raise PhysicalError(
                 ErrorKind.UNKNOWN_BUTTON,
@@ -286,7 +289,7 @@ class InputController:
         size = await self.get_screen_size()
         px, py = self._normalize_to_pixel(x, y)
 
-        if self._dry_run:
+        if dry:
             return {"pixel": {"x": px, "y": py}, "screen": {"width": size[0], "height": size[1]}}
 
         async with _get_lock():
@@ -299,12 +302,14 @@ class InputController:
 
         return {"pixel": {"x": px, "y": py}, "screen": {"width": size[0], "height": size[1]}}
 
-    async def type_text(self, text: str, clear_first: bool = False) -> dict:
+    async def type_text(self, text: str, clear_first: bool = False, dry_run: bool | None = None) -> dict:
         """输入文本。
 
         ``clear_first=True``：Mac=Cmd+A / Win=Ctrl+A 然后 Backspace 全选删除。
+        ``dry_run``：调用级覆盖（见 ``click`` —— 并发安全）。
         """
-        if self._dry_run:
+        dry = self._dry_run if dry_run is None else dry_run
+        if dry:
             return {"typed_chars": len(text)}
 
         async with _get_lock():
@@ -332,7 +337,7 @@ class InputController:
 
         return {"typed_chars": len(text)}
 
-    async def scroll(self, direction: str, amount: int) -> dict:
+    async def scroll(self, direction: str, amount: int, dry_run: bool | None = None) -> dict:
         """滚动鼠标滚轮。``amount`` 是 pyautogui 的 clicks 单位。"""
         if direction not in {"up", "down", "left", "right"}:
             raise PhysicalError(
@@ -345,7 +350,8 @@ class InputController:
                 f"scroll amount out of range: {amount} (1-1000)",
             )
 
-        if self._dry_run:
+        dry = self._dry_run if dry_run is None else dry_run
+        if dry:
             return {"scrolled": amount}
 
         async with _get_lock():
@@ -363,7 +369,7 @@ class InputController:
 
         return {"scrolled": amount}
 
-    async def press_hotkey(self, keys: list[str]) -> dict:
+    async def press_hotkey(self, keys: list[str], dry_run: bool | None = None) -> dict:
         """组合键：白名单映射 + 数量对账 + 对称按下/释放。"""
         if not keys or len(keys) > 5:
             raise PhysicalError(
@@ -381,7 +387,8 @@ class InputController:
                 )
             mapped.append(_KEY_MAP[key_lower])
 
-        if self._dry_run:
+        dry = self._dry_run if dry_run is None else dry_run
+        if dry:
             return {"pressed": mapped}
 
         async with _get_lock():
@@ -392,16 +399,17 @@ class InputController:
 
         return {"pressed": mapped}
 
-    async def move(self, x: float, y: float, duration_ms: float = 0.0) -> dict:
+    async def move(self, x: float, y: float, duration_ms: float = 0.0, dry_run: bool | None = None) -> dict:
         """移动鼠标（不点击）—— Z-1 交互性探针的悬停动作。
 
         与 ``click`` 的差异：无 ``pause_after_action_ms`` 等待 —— 探针自己
         控制悬停停留与复位时序（dwell 在调用方）。
         """
+        dry = self._dry_run if dry_run is None else dry_run
         size = await self.get_screen_size()
         px, py = self._normalize_to_pixel(x, y)
 
-        if self._dry_run:
+        if dry:
             return {
                 "pixel": {"x": px, "y": py},
                 "screen": {"width": size[0], "height": size[1]},
@@ -417,12 +425,13 @@ class InputController:
 
         return {"pixel": {"x": px, "y": py}}
 
-    async def drag(self, start: dict, end: dict) -> dict:
+    async def drag(self, start: dict, end: dict, dry_run: bool | None = None) -> dict:
         """拖拽鼠标：start/end 都是归一化 {x, y}。
 
         pyautogui ``dragTo`` 的默认拖拽时长是 0.0；我们用 ``mouseDownTimer`` 风格的
         两阶段：``moveTo(start)`` → ``mouseDown`` → ``moveTo(end)`` → ``mouseUp``。
         """
+        dry = self._dry_run if dry_run is None else dry_run
         try:
             sx, sy = float(start["x"]), float(start["y"])
             ex, ey = float(end["x"]), float(end["y"])
@@ -432,7 +441,7 @@ class InputController:
                 f"drag start/end must be {{x,y}}: {e}",
             ) from e
 
-        if self._dry_run:
+        if dry:
             # J 纪元修复：旧实现用 int(sx*1000) 伪造像素（把 1000 当屏幕宽高）。
             # 诚实回执：有显示则给真实像素换算；无显示则只回归一化坐标并注明。
             try:

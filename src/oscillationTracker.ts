@@ -13,6 +13,14 @@
 // 动机（原诚实边界）：中途一帧噪声（光标闪烁/轻微动画）即断尾 —— 检测器对
 // 真实 UI 的微小变化过度敏感。容差取 6/64 位：远小于场景切换（≥24 位），
 // 足以吸收采集噪声 —— 阈值与 subconsciousMatchDistance（既视感）同律。
+import { kernelRegistry } from './kernel/registry';
+//
+// 纪元 Ξ（Ξ-D 生产接线）：三常量读内核注册表 —— osc.ringSize（缺省 12）/
+// osc.maxPeriod（缺省 4，区间 1..6）/ osc.fuzzTol（缺省 6，区间 0..12）。
+// 未注册 ⇒ getOrDefault 回声字面量，行为逐字节不变。
+// 结构序守护：观测窗必须容得下 3×maxPeriod 帧（尾部 3p 帧的自相关检验是
+// 检测的数学前提）—— 读点处 ringSize = Math.max(3*maxPeriod, round(值))，
+// 越序值就地抬到结构下限（夹序不是拒绝，与 registry 夹值同律）。
 const RING_SIZE = 12;   // 3 × 最大周期 4：容纳三份完整周期块的观测窗
 const MAX_PERIOD = 4;
 const FUZZ_TOL = 6;     // 64 位指纹的容差位（同律阈值：既视感 6 / 场景切换 ≥24）
@@ -28,11 +36,11 @@ function hamming(a: string, b: string): number {
 }
 
 /** 尾部 3p 帧是否构成 p-周期循环（残差类内逐对距离 ≤ 容差 ⇒ 模糊自相关满秩） */
-function isPCycle(w: string[], p: number): boolean {
+function isPCycle(w: string[], p: number, fuzzTol: number): boolean {
   if (w.length < 3 * p) return false;
   const tail = w.slice(w.length - 3 * p);
   for (let i = 0; i + p < tail.length; i++) {
-    if (hamming(tail[i], tail[i + p]) > FUZZ_TOL) return false;
+    if (hamming(tail[i], tail[i + p]) > fuzzTol) return false;
   }
   return true;
 }
@@ -40,11 +48,15 @@ function isPCycle(w: string[], p: number): boolean {
 export const oscillationTracker = {
   /** 记录一次稳定帧指纹，返回振荡告警（或 null）。非阻塞、不抛错。 */
   observe(hash: string): string | null {
+    // Ξ-D：三键每次 observe 单次读取（set 即时生效）；ringSize 结构序兜底见上注
+    const maxPeriod = Math.round(kernelRegistry.getOrDefault('osc.maxPeriod', MAX_PERIOD));
+    const fuzzTol = kernelRegistry.getOrDefault('osc.fuzzTol', FUZZ_TOL);
+    const ringSize = Math.max(3 * maxPeriod, Math.round(kernelRegistry.getOrDefault('osc.ringSize', RING_SIZE)));
     ring.push(hash);
-    if (ring.length > RING_SIZE) ring.shift();
+    if (ring.length > ringSize) ring.shift();
 
-    for (let p = 1; p <= MAX_PERIOD; p++) {
-      if (!isPCycle(ring, p)) continue;
+    for (let p = 1; p <= maxPeriod; p++) {
+      if (!isPCycle(ring, p, fuzzTol)) continue;
       const shape = p === 1
         ? 'same state repeating ≥3 times'
         : `${p}-state cycle (A→B→${p === 2 ? 'A' : '…'}→A loop, 3 full periods)`;

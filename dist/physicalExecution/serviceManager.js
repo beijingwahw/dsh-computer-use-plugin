@@ -4,7 +4,11 @@
 // 职责：
 //   1. 生成 HMAC 密钥文件（缺省时）—— 三层纵深认证的 Capability Token 基础
 //   2. spawn Python 子进程（dsh_physical 模块），配置 TCP 端口 / 密钥路径 / 截图传输
-//   3. 轮询 /v1/health 直至就绪（含超时与指数退避）
+//   3. 轮询 /v1/health 直至就绪（含超时与指数退避；Δ 纪元：包体校验 ——
+//      2xx + 信封 success + pid 吻合才算就绪，子进程死亡立即早退；Σ 纪元：
+//      nonce 质询应答 —— 探活附随机 nonce，服务用共享密钥 HMAC 回签，验签
+//      通过即证应答者持有本回合密钥 ⇒ pid 漂移也放行，根治 Windows Python
+//      启动器 re-exec 的「spawn pid ≠ 上报 pid」盲区误判 port_squatted）
 //   4. dispose：关闭子进程（SIGTERM → 3s → SIGKILL），清理临时密钥
 //
 // 无侵入：本文件不 new PhysicalExecutionAdapter；仅提供 baseUrl + keyPath 的连接信息，
@@ -13,10 +17,11 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { resolvePythonBin } from './pythonBin.js';
+import { ensureKey } from './capToken.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** 计算 Python 服务根目录（从本文件物理路径相对推导） */
 function defaultPythonRoot() {
@@ -37,17 +42,104 @@ function createTempKey() {
     };
     return { keyPath, cleanup };
 }
-/** 健康探活 —— 轮询直至服务返回 200 或超时 */
-async function probeHealth(baseUrl, timeoutMs) {
+export function judgeHealthBody(body, expectedPid, expectedProof) {
+    if (body === null || typeof body !== 'object')
+        return { verdict: 'wait' };
+    const envelope = body;
+    if (envelope.status !== 'success')
+        return { verdict: 'wait' };
+    const data = envelope.data !== null && typeof envelope.data === 'object'
+        ? envelope.data
+        : null;
+    const pid = data?.pid;
+    const pidFinite = typeof pid === 'number' && Number.isFinite(pid);
+    // Σ 纪元：nonce 质询应答 —— proof 在场 ⇒ 验签优先于 pid 等值判定。
+    // 每次探活随机发难，服务用共享密钥 HMAC 回签；回签不泄密钥（HMAC 单向），
+    // 无密钥的占坑者给不出正确回签 —— pid 可能漂移/撞库，密钥无法伪造。
+    const proof = data?.proof;
+    if (typeof proof === 'string' && proof.length > 0) {
+        const verified = typeof expectedProof === 'string'
+            // timingSafeEqual 长度不等即抛 —— 先守长度再恒定时间比对（绝不炸）
+            && expectedProof.length === proof.length
+            && timingSafeEqual(Buffer.from(proof, 'utf-8'), Buffer.from(expectedProof, 'utf-8'));
+        if (verified) {
+            // 验签通过 ⇒ 密钥持有者必是自己人 —— pid 不匹配也放行（盲区根治）
+            return { verdict: 'healthy' };
+        }
+        return {
+            verdict: 'squatted',
+            reportedPid: pidFinite ? pid : -1,
+            expectedPid: expectedPid ?? -1,
+            detail: typeof expectedProof === 'string'
+                ? '质询应答失败：密钥不持有（health 回执 proof 与本回合期望 HMAC 回签不符）'
+                : '质询应答失败：本端密钥不可用，无法验证应答者的 proof',
+        };
+    }
+    // proof 缺席（旧版服务）⇒ 退回 Δ 纪元 pid 等值判定（现状语义原样保留）
+    if (!pidFinite) {
+        // 老版本服务（无 pid 字段）按现状放行 —— 版本收养闸门由 physicalBackend
+        // 的 MIN_SVC_VERSION 另行把守，这里不立第二道版本墙（别破坏收养语义）。
+        return { verdict: 'healthy' };
+    }
+    if (expectedPid !== null && pid !== expectedPid) {
+        return {
+            verdict: 'squatted',
+            reportedPid: pid,
+            expectedPid,
+            detail: `health body reported pid ${pid} but spawned child pid is ${expectedPid}` +
+                ' — 若为 Windows Python 启动器（PythonManager/py 别名）安装形态，启动器会' +
+                ' re-exec 真实解释器致 pid 漂移，可设 DSH_PYTHON 指向真实解释器' +
+                '（如 C:\\Python312\\python.exe）；否则为陌生占坑者，请停掉它或另选 tcpPort',
+        };
+    }
+    return { verdict: 'healthy' };
+}
+/** 健康探活 —— 轮询直至包体证明就绪，或超时 / 子进程死亡 / 查明占坑者。
+ *  Σ 纪元：key 在场 ⇒ 每次探测附随机 nonce 质询，本地算期望回签交
+ *  judgeHealthBody 验（密钥持有 = 自己人，pid 漂移也放行）；key 缺席 ⇒
+ *  不发 nonce、纯 pid 判定（旧 Δ 语义，向后兼容老服务）。 */
+async function probeHealth(baseUrl, timeoutMs, child, key) {
+    const expectedPid = child?.pid ?? null;
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
     while (Date.now() < deadline) {
+        // Δ 纪元：子进程已死 ⇒ 立即失败早退 —— 傻等满超时只会把崩溃伪装成超时
+        if (child && child.exitCode !== null) {
+            return { ok: false, detail: `python process exited during health probe (exit code ${child.exitCode})` };
+        }
         attempt++;
         try {
             const signal = AbortSignal.timeout(Math.min(500, deadline - Date.now()));
-            const resp = await fetch(`${baseUrl}/health`, { signal });
-            if (resp.ok)
-                return { ok: true };
+            // Σ 纪元：nonce 质询 —— hex 随机串本身 URL 安全，无需转义。
+            // 老服务无 nonce 参数 ⇒ 忽略之，走 pid 路径（向后兼容）。
+            const nonce = key ? randomBytes(16).toString('hex') : null;
+            const url = nonce ? `${baseUrl}/health?nonce=${nonce}` : `${baseUrl}/health`;
+            const resp = await fetch(url, { signal });
+            if (resp.ok) {
+                // Δ 纪元：包体校验 —— 2xx 只证明「端口有人应答」，不证明应答者是本
+                // manager spawn 的子进程。Σ 纪元升级：nonce 回签验签（密钥持有 =
+                // 自己人）优先；proof 缺席退回信封 success + pid 吻合（或老版本无
+                // pid）判定；两者皆败 ⇒ 占坑者在场，如实快报（不再误收养）。
+                let body = null;
+                try {
+                    body = await resp.json();
+                }
+                catch { /* 非 JSON 包体：视同未就绪，继续等 */ }
+                const expectedProof = nonce && key
+                    ? createHmac('sha256', Buffer.from(key)).update(nonce, 'utf-8').digest('hex')
+                    : null;
+                const verdict = judgeHealthBody(body, expectedPid, expectedProof);
+                if (verdict.verdict === 'healthy')
+                    return { ok: true };
+                if (verdict.verdict === 'squatted') {
+                    return {
+                        ok: false,
+                        squatted: { reportedPid: verdict.reportedPid, expectedPid: verdict.expectedPid },
+                        detail: verdict.detail,
+                    };
+                }
+                // 'wait'：信封非 success —— 继续等
+            }
             // 404 之类：继续等
         }
         catch {
@@ -175,16 +267,30 @@ export class PhysicalServiceManager {
         proc.stdout?.on('data', (chunk) => {
             stdoutTail = (stdoutTail + chunk.toString('utf-8')).slice(-1024);
         });
-        // 5. 探活
-        const timeoutMs = this.opts.startupTimeoutMs ?? 15000;
-        const probe = await probeHealth(this._baseUrl, timeoutMs);
+        // 5. 探活（Δ 纪元：传入子进程 —— 死亡早退 + 包体 pid 校验；
+        //    Σ 纪元：传入共享密钥 —— nonce 质询应答式服务身份证明）
+        const timeoutMs = this.opts.startupTimeoutMs ?? 15_000;
+        // Σ 纪元：读取共享密钥 —— 与 Python 端同一密钥文件（DSH_PHYSICAL_KEY_PATH），
+        // capToken.ensureKey 与 auth.ensure_key 字节级一致（文件原样字节即 HMAC key）。
+        // 读取失败 ⇒ key=null 退回 pid-only 判定（旧 Δ 语义），绝不抛（start 永不抛错铁律）。
+        let key = null;
+        try {
+            key = await ensureKey(this._keyPath);
+        }
+        catch { /* 密钥不可读：降级 pid-only 判定 */ }
+        const probe = await probeHealth(this._baseUrl, timeoutMs, proc, key);
         if (!probe.ok) {
-            // 诊断信息：是否已崩溃？
+            // 诊断信息：被占坑？已崩溃？
+            const squatted = probe.squatted;
             const crashed = proc.exitCode !== null;
-            const errorKind = crashed ? 'crashed' : 'startup_timeout';
-            const detail = crashed
-                ? `Python process exited with code ${proc.exitCode}. stderr tail: ${stderrTail}`
-                : `${probe.detail}. stdout: ${stdoutTail}; stderr: ${stderrTail}`;
+            const errorKind = squatted ? 'port_squatted' : crashed ? 'crashed' : 'startup_timeout';
+            const detail = squatted
+                ? `tcp port ${port} is held by a foreign process (health reported pid ${squatted.reportedPid}, ` +
+                    `expected spawned child pid ${squatted.expectedPid}) — refusing to adopt a stranger; ` +
+                    `stop the squatter or choose another tcpPort. ${probe.detail ?? ''}`
+                : crashed
+                    ? `Python process exited with code ${proc.exitCode}. stderr tail: ${stderrTail}`
+                    : `${probe.detail}. stdout: ${stdoutTail}; stderr: ${stderrTail}`;
             await this._killProcess();
             this._cleanupLocal();
             return {

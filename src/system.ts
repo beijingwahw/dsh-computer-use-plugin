@@ -110,7 +110,9 @@ async function _getKey(keyName: string): Promise<any> {
   const name = keyName.toLowerCase();
   try {
     const nj = await _getNutJS();
-    return nj.Key[name] ?? fallbackMap[name] ?? keyName;
+    // fallbackMap 的值是 nut-js 枚举成员名（PascalCase）—— 必须经 nj.Key 再索引
+    // 取枚举值；直接回传字符串名，pressKey 收到的是非法键（legacy 热键全灭的隐形根因）
+    return nj.Key[name] ?? nj.Key[fallbackMap[name]] ?? keyName;
   } catch {
     return fallbackMap[name] ?? keyName;
   }
@@ -226,7 +228,9 @@ export const system = {
     const size = await backend.getScreenSize();
     const nx = Math.min(1, Math.max(0, x / size.width));
     const ny = Math.min(1, Math.max(0, y / size.height));
-    await backend.clickMouse(nx, ny, button as 'left' | 'right' | 'middle', dryRun);
+    // D-1 物理躯体公理：动作派发入互斥队列（legacy 路径与 typeText/drag 同律；
+    // pressHotkey 例外 —— shaper 的 set_zoom 在 serialize 内复用本管线，嵌套即死锁）
+    await serialize(() => backend.clickMouse(nx, ny, button as 'left' | 'right' | 'middle', dryRun));
   },
 
   /**
@@ -243,7 +247,7 @@ export const system = {
     const size = await backend.getScreenSize();
     const nx = Math.min(1, Math.max(0, x / size.width));
     const ny = Math.min(1, Math.max(0, y / size.height));
-    await backend.moveMouse(nx, ny, durationMs, dryRun);
+    await serialize(() => backend.moveMouse(nx, ny, durationMs, dryRun));
   },
 
   async typeText(text: string, clearFirst: boolean = false): Promise<void> {
@@ -304,7 +308,7 @@ export const system = {
       });
       return;
     }
-    await backend.scrollPage(direction, amount, dryRun);
+    await serialize(() => backend.scrollPage(direction, amount, dryRun));
   },
 
   async pressHotkey(keys: string[]): Promise<void> {
@@ -376,21 +380,30 @@ export const system = {
   async openUrl(url: string): Promise<{ method: string }> {
     if (guardDryRun('openUrl', { url })) return { method: 'dry-run' };
     const { spawn } = await import('child_process');
+    // fire-and-forget 的另一半：spawn 失败（ENOENT/EACCES，如缺失 xdg-open）经
+    // 异步 'error' 事件到达 —— 无监听即 uncaught exception 炸宿主进程。启动成败
+    // 本就由世界回击验证（见 JSDoc），此处只封崩溃面
     if (process.platform === 'win32') {
       // windowsVerbatimArguments：URL 由本层手工加引号 —— Node 默认的 argv
       // 引用只在含空格时触发，`&`（查询参数常态）裸露会被 cmd 当命令分隔符
       const quoted = `"${url.replace(/"/g, '')}"`;
-      spawn('cmd.exe', ['/c', 'start', '""', quoted], {
+      const child = spawn('cmd.exe', ['/c', 'start', '""', quoted], {
         detached: true, stdio: 'ignore',
         windowsVerbatimArguments: true,
-      }).unref();
+      });
+      child.on('error', () => {});
+      child.unref();
       return { method: 'shell:start' };
     }
     if (process.platform === 'darwin') {
-      spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+      const child = spawn('open', [url], { detached: true, stdio: 'ignore' });
+      child.on('error', () => {});
+      child.unref();
       return { method: 'open' };
     }
-    spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+    const child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+    child.on('error', () => {});
+    child.unref();
     return { method: 'xdg-open' };
   },
 };
@@ -401,7 +414,8 @@ async function _getButton(button: string): Promise<any> {
   };
   try {
     const nj = await _getNutJS();
-    return nj.Button[button as 'LEFT' | 'RIGHT' | 'MIDDLE'] ?? fallbackMap[button];
+    // 同 _getKey：fallbackMap 的值须再经 nj.Button 索引取枚举值，不能回传字符串名
+    return nj.Button[button as 'LEFT' | 'RIGHT' | 'MIDDLE'] ?? nj.Button[fallbackMap[button] as 'LEFT' | 'RIGHT' | 'MIDDLE'] ?? fallbackMap[button];
   } catch {
     return fallbackMap[button] ?? button;
   }

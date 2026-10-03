@@ -285,11 +285,18 @@ class Coordinator implements SubAgentCoordinator {
   restore(states: SubAgentState[] | undefined): void {
     if (!Array.isArray(states)) return;
     // 防御性恢复：结构非法的条目跳过，不拖垮整档
+    // （anchorImageIds 必查：chargeStep 对其调用数组方法，缺席会炸守卫挂点）
     this.agents = states.filter(s =>
-      s && s.spec && typeof s.spec.id === 'string' && s.focus,
+      s && s.spec && typeof s.spec.id === 'string'
+      && s.focus && Array.isArray(s.focus.anchorImageIds),
     );
     this.cursor = 0;
-    this.idSeq = this.agents.length; // 后续自动命名不撞号
+    // 后续自动命名不撞号：取恢复档中最大 agent-N 后缀（档内乱序/有空洞时
+    // agents.length 会低估 ⇒ 同号重生被去重分支静默拒绝）
+    this.idSeq = this.agents.reduce((m, a) => {
+      const hit = /^agent-(\d+)$/.exec(a.spec.id);
+      return hit ? Math.max(m, Number(hit[1])) : m;
+    }, 0);
   }
 
   reset(): void {

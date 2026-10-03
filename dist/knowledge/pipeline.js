@@ -562,7 +562,7 @@ export class KnowledgePipelineOrchestrator {
             verdict,
             outcomes,
             knowledgeUsed,
-            terminalReason: terminalReason.slice(0, 120),
+            terminalReason: terminalReason.slice(0, 120), // Token 纪律：对话流只进这一行
             reportPath: this.persistReport(intent.id, verdict, { outcomes, startedAt, knowledgeUsed }),
             chainTip: sandboxLog.tip, // P1-5：报告锚定链尖端（D-6 同方言，D-4 审计定位）
         };

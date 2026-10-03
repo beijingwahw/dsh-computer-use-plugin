@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 import traceback
@@ -70,6 +71,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         # 启动：UDS 文件初始化
         if config.server.transport == "uds":
             init_uds_file(config.server.uds_path)
+            # Layer 1 收口：uvicorn 在 lifespan startup 之后才 bind UDS socket，
+            # chmod 必须等文件出现再执行。旧实现（run() 里的 on_event 版本）
+            # 双重失效：FastAPI 传入 lifespan= 参数后不再派发 on_event 处理器
+            # （chmod 从未执行，socket 权限停留 umask 缺省）；且其固定 sleep(0.1)
+            # 早于 bind（对不存在的文件 chmod → ENOENT）。
+            async def _chmod_when_bound() -> None:
+                for _ in range(200):  # ≤10s
+                    if os.path.exists(config.server.uds_path):
+                        chmod_uds_file(config.server.uds_path)
+                        return
+                    await asyncio.sleep(0.05)
+                print(
+                    f"[warn] UDS {config.server.uds_path} not bound within 10s; "
+                    "chmod 0600 skipped (Layer 2+3 still armed)",
+                    file=sys.stderr,
+                )
+
+            _app_state["chmod_task"] = asyncio.create_task(_chmod_when_bound())
         _app_state.update({
             "config": config,
             "key": key,
@@ -81,6 +100,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         try:
             yield
         finally:
+            task = _app_state.get("chmod_task")
+            if task is not None and not task.done():
+                task.cancel()
             # 关闭：清理 shm + 退出日志
             shm_module.cleanup_all()
             _app_state.clear()
@@ -245,16 +267,11 @@ def run() -> None:
         _peercred_http = make_peercred_protocol()
         if _peercred_http is not None:
             print("[dsh-physical] SO_PEERCRED peer-pid capture armed (UDS).", file=sys.stderr)
-        # UDS 模式：uvicorn 原生支持 ``--uds``
-        # 在 uvicorn 启动后，需要 chmod socket 文件权限到 0600
-        # 但 uvicorn 创建 socket 时不主动收口权限；我们用 startup 事件 + 异步任务补
-        # 简化：在 lifespan 启动时延迟 chmod（uvicorn 创建 socket 后才有效）
-        @app.on_event("startup")
-        async def _chmod_uds():
-            # 异步稍等让 uvicorn 完成 socket 绑定
-            await asyncio.sleep(0.1)
-            chmod_uds_file(config.server.uds_path)
-
+        # UDS 模式：uvicorn 原生支持 ``--uds``。
+        # socket 文件权限 0600 收口由 create_app 的 lifespan 里
+        # ``_chmod_when_bound`` 任务负责（uvicorn bind 后文件才出现；
+        # 注意：app 已传 ``lifespan=`` ⇒ FastAPI 不再派发 on_event 处理器，
+        # 此处不能再挂 startup 钩子）。
         uvicorn.run(
             app,
             http=_peercred_http,  # type: ignore[arg-type]

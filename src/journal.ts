@@ -5,7 +5,7 @@
 // 第七轮：SHA-256 哈希链 —— 每条记录携带前条哈希的哈希（区块链式防篡改审计）。
 // 事后任何对历史记录的增/删/改都会断裂链条，verify_journal 立即定位第一个断点。
 // 这是金融级审计日志的世界标准：日志不仅要记，还要能证明自己没被改过。
-import { appendFile, mkdir } from 'fs/promises';
+import { mkdir, open } from 'fs/promises';
 import { createHash } from 'crypto';
 import path from 'path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -62,7 +62,10 @@ const GENESIS = 'GENESIS';
 function canonical(obj: any): string {
   if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
   if (Array.isArray(obj)) return '[' + obj.map(canonical).join(',') + ']';
+  // 值为 undefined 的自有键与缺键同域：JSON.stringify 落盘时丢弃前者
+  // （checkpoint 落盘-恢复往返），若哈希域区分两者，恢复后 verify 重算即误报断链。
   return '{' + Object.keys(obj).sort()
+    .filter(k => obj[k] !== undefined)
     .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
 }
 
@@ -88,6 +91,8 @@ class ActionJournal {
   private lastObserved = '';   // C-3：最近观察摘要（[观察]→[行动] 因果桥）
   /** 磁盘写尾链（J 纪元）：并发 append 的 JSONL 行序与链序保持一致 */
   private diskTail: Promise<void> = Promise.resolve();
+  /** Δ-6：日志目录一次保证集（按路径记账）—— 首写建立后入集，configure 换路径时清空重探 */
+  private ensuredDirs = new Set<string>();
   // 容量驱逐（shift）把被驱逐条的哈希升格为新链基 —— verify 从链基起重放，
   // 存活窗口内任何篡改仍可定位；被驱逐条目的取证职责由磁盘 JSONL 承载。
 
@@ -95,6 +100,7 @@ class ActionJournal {
     this.enabled = enabled;
     this.filePath = filePath;
     this.capacity = capacity;
+    this.ensuredDirs.clear(); // 路径可能变更：目录保证随之重置（新路径首写重建）
   }
 
   reset() {
@@ -102,6 +108,9 @@ class ActionJournal {
     this.chainTip = GENESIS;
     this.chainBase = GENESIS;
     this.taskStartIndex = 0;
+    // Δ-6：taskDescription 漏清归零 —— currentTask() 是失败记忆 match 的 query
+    // 源与显著度评估的任务向量源，残留上个任务的描述会毒化新会话的两种语义
+    this.taskDescription = '';
     this.lastObserved = '';
   }
 
@@ -130,11 +139,28 @@ class ActionJournal {
       // J 纪元修正：磁盘写经尾链串行化 —— 旧实现两个并发 append 各自 await
       // mkdir 后再 appendFile，完成顺序可倒置：内存哈希链正确，磁盘 JSONL
       // 行序却可能违反链序（B-1 承诺"被驱逐条的取证职责交磁盘"被架空）。
+      // 入队时快照 filePath：旧实现在闭包内读 this.filePath，configure 换路径
+      // 后仍在途的条目会写进新路径（链序跨文件断裂 + 落错档案）。
+      const filePath = this.filePath;
       this.diskTail = this.diskTail.then(async () => {
         try {
-          // 目录不存在则创建；追加失败不阻断主流程（日志是旁路义务）
-          await mkdir(path.dirname(this.filePath), { recursive: true });
-          await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
+          // Δ-6：目录保证一次化（按路径记账）—— 每条路径首写建立后入集；
+          // 旧实现每条 append 都 recursive mkdir，高频动作流上是无谓的系统调用税。
+          // mkdir 失败不入集（下次 append 重试）；追加失败不阻断主流程（旁路义务）
+          if (!this.ensuredDirs.has(filePath)) {
+            await mkdir(path.dirname(filePath), { recursive: true });
+            this.ensuredDirs.add(filePath);
+          }
+          // 崩溃一致性：fsync 落盘的追加写 —— appendFile 只进 OS 页缓存，
+          // 断电可丢/撕裂 JSONL 尾部行（磁盘取证半边与内存链不同等可靠）；
+          // open('a') + write + sync 逐条提交，句柄必经 finally 关闭（无泄漏）。
+          const fh = await open(filePath, 'a');
+          try {
+            await fh.write(JSON.stringify(entry) + '\n', null, 'utf8');
+            await fh.sync();
+          } finally {
+            await fh.close();
+          }
         } catch (e: any) {
           console.warn(`[Journal] write failed: ${e.message}`);
         }
@@ -200,6 +226,10 @@ class ActionJournal {
     this.chainTip = chainTip ?? entries.at(-1)?.hash ?? GENESIS;
     this.chainBase = chainBase ?? GENESIS;
     this.taskStartIndex = 0;
+    // Δ-6 同律：checkpoint 不随行任务语境 —— 残留旧任务的描述会毒化恢复后
+    // currentTask() 的失败记忆 query 源与因果桥观察（诚实态 = 无任务语境）
+    this.taskDescription = '';
+    this.lastObserved = '';
   }
 
   list(actionOnly = true): JournalEntry[] {
@@ -407,7 +437,8 @@ export function lempelZivComplexity(seq: readonly string[]): number {
  * F-4 归一化行为熵率：c(n)·log₂(n) / (n·log₂(α))，α = 观测字母表大小。
  * ≈1 ⇒ 与同字母表均匀随机等复杂（真探索）；→0 ⇒ 周期/确定（卡死签名 ——
  * 与屏幕侧 oscillationTracker 互补：屏幕不变但动作在转的循环只有行为侧可见）。
- * n < 4 或 α < 2 ⇒ null（统计诚实下限）。
+ * n < 4 ⇒ null（统计诚实下限）；α < 2（单字母表）⇒ 0（周期 1 极限态，
+ * log₂(1)=0 的除零安全等价 —— 见下行实现注释）。
  */
 export function normalizedActionComplexity(seq: readonly string[]): number | null {
   const n = seq.length;

@@ -67,7 +67,6 @@ export function sequitur(input: readonly string[]): SequiturGrammar {
 
   for (;;) {
     // 1. 内联回消：引用 <2 的规则展开回去（规则效用约束），可能复原重复双元组 → 外层再跑
-    let inlined = false;
     for (;;) {
       const usage = countUsage(rules, root);
       const dead = [...rules.keys()].filter(k => (usage.get(k) ?? 0) < 2);
@@ -80,7 +79,6 @@ export function sequitur(input: readonly string[]): SequiturGrammar {
         root.splice(0, root.length, ...subst(root));
         for (const r of rules.values()) r.symbols = subst(r.symbols);
       }
-      inlined = true;
     }
     // 2. 成规则：首个非重叠重复双元组 ⇒ 新规则 + 全体替换
     const dig = repeatedDigram(root);
@@ -95,7 +93,6 @@ export function sequitur(input: readonly string[]): SequiturGrammar {
         replaced++;
       } else i++;
     }
-    void replaced; void inlined;
     if (replaced < 2) {
       // 理论不可达（repeatedDigram 只报 ≥2 非重叠）；防御性回滚防死循环
       rules.delete(id);

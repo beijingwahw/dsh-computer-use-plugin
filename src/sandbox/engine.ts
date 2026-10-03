@@ -76,7 +76,6 @@ export class SandboxEngineImpl implements SandboxEngine {
   private readonly memory = new MuscleMemoryStore();
   /** 宿主观察缓存（TRUST IS A FINGERPRINT 的镜像源头；嗅探缺席 = null = 保守拒绝） */
   private hostFingerprint: string | null = null;
-  private hostFingerprintAt = 0;
   /** D-4 判决缓存（subject=chainId → 最新回执；重放时刻的复核源） */
   private verdictCache = new Map<string, DoctorVerdictPayload>();
   private replayTokens = new Map<string, ReplayToken>();
@@ -117,7 +116,6 @@ export class SandboxEngineImpl implements SandboxEngine {
     }
     if (/^[01]{64}$/.test(fingerprint)) {
       this.hostFingerprint = fingerprint;
-      this.hostFingerprintAt = Date.now();
     }
   }
 
@@ -534,7 +532,6 @@ export class SandboxEngineImpl implements SandboxEngine {
     this.verdictCache.clear();
     this.pendingOutcomes.clear();
     this.hostFingerprint = null;
-    this.hostFingerprintAt = 0;
     sandboxLog.reset();
   }
 }

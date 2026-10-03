@@ -82,6 +82,9 @@ export async function startRealWorldWin(): Promise<RealWorldWin> {
     },
     async dispose() {
       killApp();
+      // harness 自建的临时状态目录一并清空（调用方只清自己的 stateDir）。
+      // taskkill 异步迟释句柄 ⇒ maxRetries 兜底竞态；仍失败则目录遗留 tmp，不毒化收尾。
+      try { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* handle lingering */ }
     },
   };
 }

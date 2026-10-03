@@ -51,18 +51,24 @@ class ActionJournal {
     lastObserved = ''; // C-3：最近观察摘要（[观察]→[行动] 因果桥）
     /** 磁盘写尾链（J 纪元）：并发 append 的 JSONL 行序与链序保持一致 */
     diskTail = Promise.resolve();
+    /** Δ-6：日志目录一次保证标志 —— 首写建立后置位，configure 换路径时归零重探 */
+    dirEnsured = false;
     // 容量驱逐（shift）把被驱逐条的哈希升格为新链基 —— verify 从链基起重放，
     // 存活窗口内任何篡改仍可定位；被驱逐条目的取证职责由磁盘 JSONL 承载。
     configure(enabled, filePath, capacity) {
         this.enabled = enabled;
         this.filePath = filePath;
         this.capacity = capacity;
+        this.dirEnsured = false; // 路径可能变更：目录保证随之重置（新路径首写重建）
     }
     reset() {
         this.entries = [];
         this.chainTip = GENESIS;
         this.chainBase = GENESIS;
         this.taskStartIndex = 0;
+        // Δ-6：taskDescription 漏清归零 —— currentTask() 是失败记忆 match 的 query
+        // 源与显著度评估的任务向量源，残留上个任务的描述会毒化新会话的两种语义
+        this.taskDescription = '';
         this.lastObserved = '';
     }
     /** 当前任务描述（未处于复杂任务中则为空串） */
@@ -92,8 +98,13 @@ class ActionJournal {
             // 行序却可能违反链序（B-1 承诺"被驱逐条的取证职责交磁盘"被架空）。
             this.diskTail = this.diskTail.then(async () => {
                 try {
-                    // 目录不存在则创建；追加失败不阻断主流程（日志是旁路义务）
-                    await mkdir(path.dirname(this.filePath), { recursive: true });
+                    // Δ-6：目录保证一次化 —— 首写（或 configure 换路径后首写）建立后置位；
+                    // 旧实现每条 append 都 recursive mkdir，高频动作流上是无谓的系统调用税。
+                    // mkdir 失败不置位（下次 append 重试）；追加失败不阻断主流程（旁路义务）
+                    if (!this.dirEnsured) {
+                        await mkdir(path.dirname(this.filePath), { recursive: true });
+                        this.dirEnsured = true;
+                    }
                     await appendFile(this.filePath, JSON.stringify(entry) + '\n', 'utf8');
                 }
                 catch (e) {

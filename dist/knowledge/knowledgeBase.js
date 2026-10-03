@@ -162,6 +162,9 @@ export class InMemoryKnowledgeBase {
         const text = `${query.sceneDescription} ${query.intentDescription}`;
         const tokens = tokenize(text);
         const queryVec = embed(text);
+        // Δ-1：BM25 语料统计在 query 入口一次成型（O(N) 单遍），逐条目下传 ——
+        // 旧实现把统计埋进 hybridScore 逐条目重算，见 bm25Corpus 注记
+        const corpus = tokens.length > 0 ? this.bm25Corpus(tokens) : null;
         const minConfidence = query.minConfidence ?? 0;
         const maxResults = query.maxResults ?? 5;
         // 域执法（与 insert 同律 —— 域外拒绝，不钳制）：NaN/负数经 slice/filter
@@ -176,7 +179,7 @@ export class InMemoryKnowledgeBase {
             // 遗忘曲线执法点：过滤与排序均用有效置信度 —— 老知识自然让位
             .map(e => ({ entry: e, eff: decay(e.confidence, e.updatedAt, startedAt, e.halfLifeMs) }))
             .filter(({ entry, eff }) => eff >= minConfidence)
-            .map(({ entry, eff }) => ({ entry, eff, score: this.hybridScore(entry, tokens, queryVec) }))
+            .map(({ entry, eff }) => ({ entry, eff, score: this.hybridScore(entry, queryVec, corpus) }))
             .filter(s => s.score > 0)
             .sort((a, b) => b.score - a.score || b.eff - a.eff)
             .slice(0, maxResults);
@@ -189,6 +192,39 @@ export class InMemoryKnowledgeBase {
         };
     }
     /**
+     * Δ-1 BM25 语料统计（query 入口一次成型的 O(N) 单遍）：每条目恰好 tokenize
+     * 一次，同时产出文档长度表、查询词 tf 表（逐条目）与 df 表、avgdl。
+     * 旧实现把统计埋进 hybridScore 逐条目重算 —— 求avgdl 每条目重 tokenize
+     * 全语料、求 df 每查询词全库子串扫描，O(N²)；满库（1000 条）时单次检索
+     * 付出百万次分词。df 口径同步收敛为 token 精确匹配：旧实现用子串 includes
+     * （含 'clickable' 的条目被计入 'click' 的 df —— 与 tf 的 token 域不同构，
+     * 稀有词 IDF 被无关条目稀释）。
+     */
+    bm25Corpus(tokens) {
+        const df = new Map();
+        const docLen = new Map();
+        const tf = new Map();
+        const querySet = new Set(tokens);
+        let lenSum = 0;
+        for (const e of this.entries.values()) {
+            const docTokens = tokenize(`${e.scenario} ${e.content}`.toLowerCase());
+            docLen.set(e.id, docTokens.length);
+            lenSum += docTokens.length;
+            const entryTf = new Map();
+            for (const t of docTokens) {
+                if (querySet.has(t))
+                    entryTf.set(t, (entryTf.get(t) ?? 0) + 1);
+            }
+            if (entryTf.size > 0) {
+                tf.set(e.id, entryTf);
+                for (const t of entryTf.keys())
+                    df.set(t, (df.get(t) ?? 0) + 1);
+            }
+        }
+        const N = this.entries.size;
+        return { N, avgdl: Math.max(1, lenSum / Math.max(1, N)), df, docLen, tf };
+    }
+    /**
      * hybrid 双通道评分（纯函数视角）：**BM25** 词法通道主导 + 语义 cosine 补零样本泛化。
      * R 纪元（R-2 检索层）升级：词法通道从**二值命中计数**升格为 BM25
      * （Robertson & Spärck Jones 血统；k1=1.2、b=0.75 惯例甜点）——
@@ -198,36 +234,19 @@ export class InMemoryKnowledgeBase {
      *   二值计数把它们等权；② 条目长度归一 —— 长文本不再靠篇幅堆命中；
      * ③ tf 饱和 —— 同词重复出现边际递减。
      * J 纪元 Set 去重口径保留（query 侧）；tf 按条目侧真实词频计数。
+     * Δ-1：语料统计（df/avgdl/tf/docLen）由 bm25Corpus 在 query 入口一次算好
+     * 下传 —— 本方法退化为纯算术，不再触碰语料（O(N²) → O(N)）。
      */
-    hybridScore(entry, tokens, queryVec) {
+    hybridScore(entry, queryVec, corpus) {
         let bm25 = 0;
-        if (tokens.length > 0 && this.entries.size > 0) {
+        const entryTf = corpus?.tf.get(entry.id);
+        if (corpus && entryTf && corpus.N > 0) {
             const k1 = 1.2, b = 0.75;
-            const N = this.entries.size;
-            const docText = `${entry.scenario} ${entry.content}`.toLowerCase();
-            const docTokens = tokenize(docText);
-            const tfMap = new Map();
-            for (const t of docTokens)
-                tfMap.set(t, (tfMap.get(t) ?? 0) + 1);
-            // 语料统计（df / avgdl —— 检索时刻实算，条目集小到无需缓存）
-            let lenSum = 0;
-            const docLen = docTokens.length;
-            for (const e of this.entries.values()) {
-                lenSum += tokenize(`${e.scenario} ${e.content}`.toLowerCase()).length;
-            }
-            const avgdl = Math.max(1, lenSum / N);
-            const norm = k1 * (1 - b + b * (docLen / avgdl));
-            for (const t of new Set(tokens)) {
-                const tf = tfMap.get(t);
-                if (!tf)
-                    continue;
-                // df：含该 token 的条目数（首次出现位置线性扫 —— N 小，即用即算）
-                let dcount = 0;
-                for (const e of this.entries.values()) {
-                    if (`${e.scenario} ${e.content}`.toLowerCase().includes(t))
-                        dcount++;
-                }
-                const idf = Math.log((N - dcount + 0.5) / (dcount + 0.5) + 1);
+            const docLen = corpus.docLen.get(entry.id) ?? 1;
+            const norm = k1 * (1 - b + b * (docLen / corpus.avgdl));
+            for (const [t, tf] of entryTf) { // Map 迭代天然去重（J 纪元 query 侧口径）
+                const dcount = corpus.df.get(t) ?? 0;
+                const idf = Math.log((corpus.N - dcount + 0.5) / (dcount + 0.5) + 1);
                 bm25 += idf * (tf * (k1 + 1)) / (tf + norm);
             }
         }
@@ -285,7 +304,7 @@ export class InMemoryKnowledgeBase {
         this.entries.set(id, {
             id,
             category: entry.category,
-            content: content.slice(0, CONTENT_MAX_CHARS),
+            content: content.slice(0, CONTENT_MAX_CHARS), // ≤500 铸造点截断 —— 结构保证
             scenario: String(entry.scenario ?? ''),
             confidence: entry.confidence,
             source: entry.source,

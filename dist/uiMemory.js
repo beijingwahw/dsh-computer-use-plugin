@@ -98,7 +98,7 @@ class UIMemory {
             // Y 纪元（Y-8）：放射性衰变半衰期 —— 信任再高也要随时间衰变：
             // w(t) = 2^(-t/T½)，T½ = 168h（一周）。UI 演化令旧地标的先验价值
             // 指数衰减；成功使用重置衰变时钟（remember 强化时 lastUsedAt 已滚动）。
-            const ageH = (now - l.lastUsedAt) / 3600000;
+            const ageH = (now - l.lastUsedAt) / 3_600_000;
             const decay = Math.pow(2, -ageH / 168);
             const trust = (0.3 * ((l.successCount + 1) / (l.successCount + 2)) * (1 / 3) + 0.05) * decay;
             const recency = 0.1 * Math.exp(-ageH / 24);

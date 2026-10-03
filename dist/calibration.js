@@ -122,7 +122,7 @@ export function calibrateSchmittEvidence(frames) {
     return {
         evidenceSem: best.sem,
         evidenceGeo: best.geo,
-        evidenceClean: -0.5,
+        evidenceClean: -0.5, // 干净帧的负证据：固定小步（迟滞带的另一半由 OFF 阈守）
         separation: Math.round(best.sep * 1000) / 1000,
         n: frames.length,
     };

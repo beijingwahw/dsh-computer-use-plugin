@@ -88,4 +88,27 @@ export const Config = Schema.object({
     doctorRules: Schema.string().default('').description('Comma-separated rule-ID whitelist (empty = all rules active)'),
     doctorStrict: Schema.boolean().default(false).description('Strict mode: genesis violations surface loudly (CLI exit code 1); never throws'),
     doctorMemoryPath: Schema.string().default('doctor-memory.json').description('Evolution-memory file for lessons and baselines (developer asset, not runtime cognition)'),
+    // ─── 纪元 Ω（GLM-5.3-Flash 云脑皮层） ───
+    vlmApiKey: Schema.string().default('').description('GLM vision-model API key; empty = fall back to env (GLM_API_KEY/ZHIPUAI_API_KEY/ZAI_API_KEY). Takes priority over env when set'),
+    vlmBaseUrl: Schema.string().default('https://open.bigmodel.cn/api/paas/v4').description('GLM OpenAI-compatible base URL'),
+    vlmModel: Schema.string().default('glm-5.3-flash').description('GLM vision model name'),
+    vlmAssistOcr: Schema.boolean().default(false).description('Allow the VLM cloud cortex to read the screen as a third path when BOTH local OCR paths (server L2 + legacy tesseract) fail (semanticConfirm fallback)'),
+    // ─── 纪元 Ψ（万脑归一：多协议统一层） ───
+    vlmProvider: Schema.string().default('').description('Vision-model platform id (openai/anthropic/gemini/qwen/moonshot/doubao/xai/siliconflow/openrouter/ollama/lmstudio/vllm/custom; unknown ids are treated as OpenAI-compatible custom endpoints); empty = auto-detect from env (GLM envs first, then each platform envKeys)'),
+    vlmFallbackProviders: Schema.string().default('').description('CSV fallback platform chain (e.g. "anthropic,gemini") minted into a failover pool behind the primary; empty = no pool'),
+    // ─── 纪元 Λ（开箱即亮） ───
+    vlmAutoAdoptLocal: Schema.boolean().default(true).description('When NO vision brain is configured at all (no config, no env), auto-adopt a local zero-key vision service (Ollama/LM Studio/vLLM loopback probe, 1.5s budget each); off = skip straight to the wizard'),
+    vlmOnboardingEnabled: Schema.boolean().default(true).description('When NO vision model is resolvable at all (no archive, no local service, no env), pop up the local connection wizard page (loopback HTTP server + default browser); off = stay dark until manual configuration'),
+    vlmOnboardingPort: Schema.number().default(18432).description('Default port for the connection wizard server (falls back +1 up to +8 when occupied)'),
+    // ─── 纪元 Φ（自主智能环） ───
+    autonomyEnabled: Schema.boolean().default(false).description('Enable the autonomous loop meta-tool (autonomous_run): goal -> perceive -> judge -> constitution -> execute -> verify -> evolve. Off = tool not mounted'),
+    autonomyMaxSteps: Schema.number().default(24).description('Autonomous loop per-run step cap (both the loop fuse and the constitution hard stop), default 24'),
+    autonomyTimeBudgetSec: Schema.number().default(300).description('Autonomous loop per-run wall-clock budget in seconds, default 300'),
+    autonomyAllowTiers: Schema.string().default('benign').description('CSV of risk tiers allowed to run autonomously without approval (values: benign, sensitive; destructive is always constitution-gated), default "benign"'),
+    autonomyVlmWhenUncertain: Schema.boolean().default(true).description('Consult the GLM cortex when element matching is low-confidence or tied (PolicyEngine uncertainty arbitration), default true'),
+    autonomyForbiddenKeywords: Schema.string().default('').description('CSV of extra danger keywords appended to the autonomy constitution scan list (goal/target/payload text scan), empty = none'),
+    autonomyTracePath: Schema.string().default('').description('Append-only JSONL trace path for autonomous runs (begin/step/finish event lines replayed on load) enabling autonomy_resume across processes; empty = in-memory only (resume tokens live and die with the process)'),
+    // ─── 纪元 Ξ（Ξ-A 进化存档与进化编排） ───
+    kernelStatePath: Schema.string().default('').description('Kernel evolution-state JSON path (atomic tmp+rename write): params/evidence/generations carried across sessions (restored on load, saved on unload and after evolution ticks); empty = memory only'),
+    kernelEvolutionEnabled: Schema.boolean().default(false).description('Master switch for production kernel evolution: throttled calibrator ticks on user-message hooks; false (default) = bookkeeping only, zero behavior change'),
 });

@@ -44,8 +44,8 @@ const KEY_UNIVERSE = new Set([
     'ctrl', 'alt', 'shift', 'meta',
     'esc', 'enter', 'tab', 'space', 'delete', 'backspace', 'home', 'end',
     'up', 'down', 'left', 'right', 'pagedown', 'pageup',
-    ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i)),
-    ...Array.from({ length: 10 }, (_, i) => String(i)),
+    ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i)), // a-z
+    ...Array.from({ length: 10 }, (_, i) => String(i)), // 0-9
     ...Array.from({ length: 12 }, (_, i) => `f${i + 1}`), // f1-f12
 ]);
 const QUOTE_PAIRS = [

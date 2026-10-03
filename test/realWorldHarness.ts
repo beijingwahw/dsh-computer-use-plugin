@@ -100,6 +100,8 @@ export async function startRealWorld(): Promise<RealWorld> {
     click,
     async dispose() {
       killApp();
+      // 状态目录随世界火化：mkdtemp 目录不随进程退出回收，bench 只清理自建目录
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
     },
   };
 }

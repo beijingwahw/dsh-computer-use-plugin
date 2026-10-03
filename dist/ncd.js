@@ -13,9 +13,13 @@
 //
 // 诚实边界：短语数是 K(s) 的粗糙上界（比值仍单调反映共享结构）；生产级 NCD 用
 // gzip/zstd 级压缩器（熵编码阶段更接近 K）—— 零依赖哲学下的留白，形状由测试守护。
+/** lzCount 输入契约上限：最坏 O(n³)（全同字符）——超长输入按契约截断。
+ * 调用方（failureMemory 短 symptom 串）远低于此界；接线全文对齐前必须换 KMP 窗口实现。 */
+const LZ_COUNT_MAX_CHARS = 2000;
 /** 字符串 LZ76 短语数（Kolmogorov 复杂度的上界代理 —— journal.lempelZivComplexity
  *  的字符域孪生；独立实现避免 symbol→char 的转译歧义） */
-export function lzCount(s) {
+export function lzCount(raw) {
+    const s = raw.length > LZ_COUNT_MAX_CHARS ? raw.slice(0, LZ_COUNT_MAX_CHARS) : raw;
     if (s.length === 0)
         return 0;
     let phrases = 1;

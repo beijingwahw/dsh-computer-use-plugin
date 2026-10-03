@@ -187,14 +187,17 @@ export interface DecisionContext {
 }
 
 // ─── 11. 工位接口（D-7 最小方言，桩纪元；信封字面量参数化 —— 跨工位投递 = 编译错误）───
+/** 工位止损信号（可选）：流水线步超时即 abort —— 工位尽力向下游传播（真机源
+ *  直通 fetch 断流）；不支持消费的实现忽略之，由其内层超时兜底（浪费窗口有界）。 */
 export interface VisionStation {
-  perceive(env: AttentionEnvelope<'vision', PerceptionRequest>): Promise<ScenePatch[]>;
+  perceive(env: AttentionEnvelope<'vision', PerceptionRequest>, signal?: AbortSignal): Promise<ScenePatch[]>;
 }
 
 export interface DecisionStation {
   decide(
     env: AttentionEnvelope<'decision', DecisionContext>,
     retryCtx?: FailureFeedback,
+    signal?: AbortSignal,
   ): Promise<AtomicAction | NeedGrounding>;
 }
 

@@ -31,7 +31,10 @@ test('T-2: 期望物理词表对称性认证 —— appear/vanish、expand/colla
 
 test('T-3: 判决通道 —— 同 chainId 重复回执合并（保留最新）', async () => {
   const src = readFileSync(new URL('../src/doctorChannel.ts', import.meta.url), 'utf8');
-  assert.ok(src.includes('chainId !==') && src.includes('.concat('), '同链去重执法点在场');
+  // Δ 纪元（审计#2）：原实现 filter(p => p.chainId !== p.chainId).concat(p) 自比恒 false
+  // 且未赋值回——去重从未生效。现断言活实现：findIndex 同链定位 + splice 原位替换。
+  assert.ok(src.includes('pendingReceipts.findIndex') && src.includes('splice(idx, 1, p)'), '同链去重执法点在场（活实现）');
+  assert.ok(!src.includes('p.chainId !== p.chainId'), '死代码自比去重已退役');
 });
 
 // ─── T-4 服务层：全抖动指数退避 ───

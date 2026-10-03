@@ -135,8 +135,11 @@ export function createGetMetricsTool() {
       // I-6 一阶随机占优：延迟的全序裁决（每个分位都不晚才算快 —— 交叉分布不裁）
       const domPairs = telemetry.latencyDominancePairs();
       for (const d of domPairs.slice(0, 3)) {
+        // K 纪元后配对含 SSD（二阶）裁决 —— 分位可交叉但坏尾累积更轻，措辞须按 order 区分
         insights.push(`LATENCY DOMINANCE: ${d.faster} stochastically dominates ${d.slower} ` +
-          '(faster at every percentile — no trade-off).');
+          (d.order === 'SSD'
+            ? '(second-order: lower bad-tail accumulation at every threshold, percentiles may cross).'
+            : '(faster at every percentile — no trade-off).'));
       }
       return JSON.stringify({
         status: 'SUCCESS',

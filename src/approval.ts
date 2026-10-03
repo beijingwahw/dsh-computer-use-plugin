@@ -30,10 +30,14 @@ export interface PendingApproval {
   attempts: number;
   /** V 纪元：尝试次数上限 —— 一次同意覆盖的自动重试预算 */
   maxAttempts: number;
-  /** V 纪元：重试续期不可越过的生命周期硬顶（铸造时锚定） */
+  /** V 纪元：生命周期硬顶：重试续期不可越过的天花板（铸造时锚定） */
   lifetimeCapAt: number;
   /** V 纪元：铸造时的初始有效期（重试续期复用同一宽度） */
   ttlMs: number;
+  /** Δ 纪元（审计#2）：在途预留数 —— beginAttempt 已计数、尚未经 consume/
+   *  attemptFailed 结算的物理回合（并发双花封堵的簿记；缺省 0，不参与任何
+   *  既有 status/consume 语义 —— 只约束 beginAttempt 的并发准入） */
+  inFlight?: number;
 }
 
 const pending = new Map<string, PendingApproval>();
@@ -191,6 +195,38 @@ export const approval = {
     return pa.granted && Date.now() <= pa.expiresAt;
   },
 
+  /** Δ 纪元（审计#2·双花窗口封堵）：派发预留 —— 必须在物理动作派发**之前**、
+   *  与派发调用之间零 await 地调用（clickMouse 已按此接线）。
+   *  时序背景：validate（只查不烧）与验收式消费（consume/attemptFailed）之间
+   *  隔着多个 await —— 并发两次同令牌调用都能通过 validate 并各自派发物理
+   *  点击，预算计数事后才补，双花窗口敞开。
+   *  语义：
+   *    · 无效/过期/未授予 ⇒ false（顺手焚毁僵尸令牌，与 attemptFailed 同律）；
+   *    · 已有在途预留（inFlight>0）⇒ false —— 一次同意同时只担保一个在途物理
+   *      回合，并发的第二次派发在落到物理世界之前即被拒（恰一次派发）；
+   *    · attempts+1 后越过 maxAttempts ⇒ 焚毁并 false（重试预算在**派发前**
+   *      执法 —— 旧实现先派发后计数，第 maxAttempts+1 次点击仍会落到物理世界）。
+   *  计数时序（单次点击全链路 attempts 恰 +1）：
+   *    beginAttempt 预留 +1 → 验收通过 ⇒ consume（焚毁，计数随行）；
+   *    验收失败/派发异常 ⇒ attemptFailed（释放预留，**不再重复 ++**）。
+   *  maxAttempts 语义保留：未走 beginAttempt 的直接 attemptFailed 调用维持
+   *  既有自增语义（测试与旧路径的事实源不变）。 */
+  beginAttempt(token: string): boolean {
+    const pa = pending.get((token || '').trim());
+    if (!pa || !pa.granted || Date.now() > pa.expiresAt) {
+      if (pa) pending.delete(pa.token); // 过期/无效即焚，不留僵尸
+      return false;
+    }
+    if ((pa.inFlight ?? 0) > 0) return false; // 在途回合未结算：并发双花在此闭合
+    pa.attempts += 1;
+    if (pa.attempts > pa.maxAttempts) {
+      pending.delete(pa.token); // 重试预算耗尽：派发前焚毁
+      return false;
+    }
+    pa.inFlight = (pa.inFlight ?? 0) + 1;
+    return true;
+  },
+
   /** V 纪元·验收失败登记：物理点击已派发但世界未出现预期变化（点空/落错窗口/
    *  变化不是预期的）。未生效的尝试没有消耗用户的同意 —— 令牌保留，TTL 续期
    *  （不越生命周期硬顶），模型在同一份授权内自动重试，**不得再打扰用户**。
@@ -201,10 +237,17 @@ export const approval = {
       if (pa) pending.delete(pa.token); // 过期/无效即焚，不留僵尸
       return { valid: false, remainingAttempts: 0, reArmedMs: 0, reason };
     }
-    pa.attempts += 1;
-    if (pa.attempts > pa.maxAttempts) {
-      pending.delete(pa.token); // 重试预算耗尽：重新审批（新描述应说明为何屡试不中）
-      return { valid: false, remainingAttempts: 0, reArmedMs: 0, reason };
+    // Δ 纪元（计数时序）：beginAttempt 已预留计数的回合在此**结算** —— 只释放
+    // 预留（inFlight-1），不再重复 ++（否则单次点击 attempts +2）。
+    // 未经 beginAttempt 的直接调用（测试/旧路径）维持原自增语义不变。
+    if ((pa.inFlight ?? 0) > 0) {
+      pa.inFlight = (pa.inFlight ?? 0) - 1;
+    } else {
+      pa.attempts += 1;
+      if (pa.attempts > pa.maxAttempts) {
+        pending.delete(pa.token); // 重试预算耗尽：重新审批（新描述应说明为何屡试不中）
+        return { valid: false, remainingAttempts: 0, reArmedMs: 0, reason };
+      }
     }
     // 续期：给重试留出与初始等宽的窗口，但不越过铸造时锚定的生命周期硬顶
     const now = Date.now();

@@ -8,6 +8,7 @@ import { quantum } from '../quantumSense.js';
 import { focusTracker } from '../focusTracker.js';
 import { semanticConfirm } from '../textReader.js';
 import { matchesRiskPatterns } from '../riskGate.js';
+import { assertActionAllowed } from './actionGate.js';
 export function createTypeTextTool(config) {
     return defineTool({
         name: 'type_text',
@@ -33,14 +34,17 @@ export function createTypeTextTool(config) {
         },
         async execute(args) {
             const { text, clearFirst = false, expected_change } = args;
-            // 前哨闸门：工具参数是被模型控制的输入面，防注入恶意长文本
-            if (text.length > config.maxTextLength) {
-                return `[Error]: Text too long. Maximum length is ${config.maxTextLength} characters.`;
-            }
-            // ── 风险闸门（第五轮）：凭据类输入不代劳 ──
-            // 两级判定：焦点被标记为敏感区（点击密码框后），或文本自身命中风险语义
-            // （如 "验证码 123456"）。拦截且绝不回显待输入内容。
-            if (config.enableRiskGate && (focusTracker.isSensitive(config.focusMaxAgeMs) || matchesRiskPatterns(text, config.riskPatterns))) {
+            // ── 前哨闸门（Δ 纪元·审计#1：判定抽取至 actionGate.assertActionAllowed ——
+            // 工具层与重放层共用同一事实源；语义与原工具内实现逐条等价）──
+            // ① 长度防御：工具参数是被模型控制的输入面，防注入恶意长文本；
+            // ② 风险闸门（第五轮）：凭据类输入不代劳 —— 两级判定：焦点被标记为
+            //    敏感区（点击密码框后），或文本自身命中风险语义（如 "验证码 123456"）。
+            //    拦截且绝不回显待输入内容。
+            const gate = assertActionAllowed('type_text', { text }, config);
+            if (!gate.allowed) {
+                if (gate.reason === 'text-too-long') {
+                    return `[Error]: Text too long. Maximum length is ${config.maxTextLength} characters.`;
+                }
                 return JSON.stringify({
                     status: 'ACTION_REQUIRED',
                     state_anchor: {

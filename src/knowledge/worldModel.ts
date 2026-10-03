@@ -289,12 +289,15 @@ export class InMemoryWorldModel implements WorldModel {
       return bad('snapshot', 'types and transitions must be arrays');
     }
     const typeIds = new Set<string>();
+    let maxSeq = 0; // types 里 screen-N 序号的最大值（计数器同步用，见水合尾部）
     for (const t of s.types) {
       const ty = t as { id?: unknown; tokens?: unknown; members?: unknown } | null;
       if (!ty || typeof ty.id !== 'string' || !ty.id || typeIds.has(ty.id)) {
         return bad('snapshot.types', `type id must be unique non-empty string, got ${JSON.stringify(ty?.id)}`);
       }
       typeIds.add(ty.id);
+      const seq = /^screen-(\d+)$/.exec(ty.id)?.[1];
+      if (seq !== undefined) maxSeq = Math.max(maxSeq, Number.parseInt(seq, 10));
       if (!Array.isArray(ty.tokens) || ty.tokens.length === 0 || !ty.tokens.every((x: unknown) => typeof x === 'string')) {
         return bad('snapshot.types', `type "${ty.id}" tokens must be non-empty string array`);
       }
@@ -350,8 +353,10 @@ export class InMemoryWorldModel implements WorldModel {
       const next = new Map<string, number>(tr.next);
       this.transitions.set(`${tr.from}|${tr.action}`, { total: tr.total, success: tr.success, next });
     }
+    // 计数器同步到已水合 id 的最大序号（与 merge 的同步律同源）—— 否则快照
+    // 携带偏小 typeCounter 时，下次铸造会同号覆写既有类型（members/tokens 静默丢失）
     this.typeCounter = typeof s.typeCounter === 'number' && Number.isFinite(s.typeCounter)
-      ? Math.max(0, Math.floor(s.typeCounter)) : this.types.size;
+      ? Math.max(0, Math.floor(s.typeCounter), maxSeq) : Math.max(this.types.size, maxSeq);
     return { ok: true, value: undefined };
   }
 }

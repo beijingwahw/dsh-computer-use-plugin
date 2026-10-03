@@ -188,15 +188,11 @@ test('E1b 陷阱改道：高置信陷阱记忆 + 字面诱惑 intent ⇒ 免疫�
   const blind = await runIntent('no-knowledge', INTENT, { seeds: 'none', ablation: { disableKnowledge: true } });
   lines.push(row('无知识（反射直扑陷阱）', blind.report, blind.probe));
 
-  const knowTrapOnly = await runIntent('trap-only', INTENT, { seeds: 'none' });
   // 手工注入：只有陷阱记忆（知道哪错，不知道活路在哪）
-  {
-    const kb = new InMemoryKnowledgeBase();
-    kb.insert({ category: 'error-pattern', content: 'delete item button is broken, clicks fail', scenario: 'record cleanup', confidence: 0.55, source: 'manual' });
-    const r = await runIntent('trap-only', INTENT, { kb });
-    lines.push(row('仅陷阱记忆（无活路知识）', r.report, r.probe));
-    knowTrapOnly.report = r.report; knowTrapOnly.probe = r.probe;
-  }
+  const trapOnlyKb = new InMemoryKnowledgeBase();
+  trapOnlyKb.insert({ category: 'error-pattern', content: 'delete item button is broken, clicks fail', scenario: 'record cleanup', confidence: 0.55, source: 'manual' });
+  const knowTrapOnly = await runIntent('trap-only', INTENT, { kb: trapOnlyKb });
+  lines.push(row('仅陷阱记忆（无活路知识）', knowTrapOnly.report, knowTrapOnly.probe));
 
   console.log(lines.join('\n'));
 

@@ -26,7 +26,7 @@ SERVICE_ROOT = HERE.parent.parent / "python_service"
 sys.path.insert(0, str(SERVICE_ROOT))
 
 from dsh_physical.config import ScreenshotConfig  # noqa: E402
-from dsh_physical.shm import write_image, release_by_name, _active_handles  # noqa: E402
+from dsh_physical.shm import write_image, release_by_name  # noqa: E402
 
 
 def make_test_image() -> tuple[bytes, int, int]:

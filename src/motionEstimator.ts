@@ -40,11 +40,10 @@ export function estimateRowShift(rowsA: number[], rowsB: number[], searchRange =
   const n = Math.min(rowsA.length, rowsB.length);
   if (n < 4) return { shift: 0, residual: 1, bestInteger: 0 };
 
-  let bestS = 0, bestE = Infinity, secondE = Infinity;
+  let bestS = 0, bestE = Infinity;
   for (let s = -searchRange; s <= searchRange; s++) {
     const e = misalignError(rowsA, rowsB, s);
-    if (e < bestE) { secondE = bestE; bestE = e; bestS = s; }
-    else if (e < secondE) { secondE = e; }
+    if (e < bestE) { bestE = e; bestS = s; }
   }
 
   // 尺度归一：行亮度均值的平均量级（避免残差依赖画面明暗）

@@ -47,18 +47,20 @@ export function createExtractUiVisionTool(config: Config) {
         if (!response.ok) throw new Error(`Local vision API responded ${response.status}`);
         const data: any = await response.json();
 
-        // 3. bbox -> 归一化中心
+        // 3. bbox -> 归一化中心（畸形条目剔除 —— 缺 bbox/非数值会产生 NaN→null 坐标污染 SUCCESS 载荷）
         const elements = (data.elements ?? []) as Array<{ label: string; bbox: [number, number, number, number] }>;
-        const normalizedElements = elements.map(el => {
-          const [x1, y1, x2, y2] = el.bbox;
-          return {
-            label: el.label,
-            center_normalized: {
-              x: parseFloat(((x1 + x2) / 2 / size.width).toFixed(3)),
-              y: parseFloat(((y1 + y2) / 2 / size.height).toFixed(3)),
-            },
-          };
-        });
+        const normalizedElements = elements
+          .filter(el => Array.isArray(el?.bbox) && el.bbox.length >= 4 && el.bbox.every(Number.isFinite))
+          .map(el => {
+            const [x1, y1, x2, y2] = el.bbox;
+            return {
+              label: el.label,
+              center_normalized: {
+                x: parseFloat(((x1 + x2) / 2 / size.width).toFixed(3)),
+                y: parseFloat(((y1 + y2) / 2 / size.height).toFixed(3)),
+              },
+            };
+          });
 
         // 4. 状态锚点：只回传前 10 个关键元素 —— 返回值也做 Token 预算
         return JSON.stringify({

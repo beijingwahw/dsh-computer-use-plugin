@@ -43,7 +43,7 @@ export function sanitizeScreenSize(screen) {
         return { width: w, height: h };
     return null;
 }
-class D7PhysicalHostPort {
+export class D7PhysicalHostPort {
     name = 'd5-microservice-host';
     opts;
     mgr;
@@ -156,7 +156,7 @@ class D7PhysicalHostPort {
         }
         const els = tree.elements.map(e => ({
             role: e.role,
-            name: e.name.slice(0, 20),
+            name: e.name.slice(0, 20), // D-3 LABEL_MAX 先例（与 capability 源同律）
             rect: { x: e.rect.x, y: e.rect.y, width: e.rect.width, height: e.rect.height },
         }));
         if (tree.funnel_depth === 'empty' && els.length === 0) {
@@ -278,4 +278,3 @@ class D7PhysicalHostPort {
         }
     }
 }
-export { D7PhysicalHostPort };

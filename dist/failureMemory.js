@@ -7,13 +7,14 @@
 import { similarity } from './perceptualHash.js';
 import { tokenize, overlapCoefficient } from './uiMemory.js';
 import { ncdSimilarity } from './ncd.js';
+import { kernelRegistry } from './kernel/registry.js';
 class FailureMemory {
     records = [];
     nextId = 1;
     capacity = 30;
     record(query, approach, symptom, sceneHash) {
         // 近重复去重：同查询+同路径 5 分钟内不重复记录
-        const dup = this.records.find(r => r.query === query && r.approach === approach && Date.now() - r.at < 300000);
+        const dup = this.records.find(r => r.query === query && r.approach === approach && Date.now() - r.at < 300_000);
         if (dup) {
             dup.at = Date.now();
             return dup;
@@ -35,6 +36,13 @@ class FailureMemory {
         // k=60 惯例）。为什么不用加权和：三通道分数量纲悬殊（重合系数 [0,1]、
         // NCD 相似 [0,1] 但分布不同、场景是 0/0.4 脉冲）—— 加权需要逐通道定标，
         // 排名是量纲自由的。旧加权和保留为 score2 字段（消费方按需取用，零回归）。
+        // 纪元 Ξ（Ξ-D 生产接线）：三常量读内核注册表 —— failure.score2Floor（相关性
+        // 闸门，缺省 0.2）/ failure.rrfK（RRF 平滑常数，缺省 60，区间 10..200）/
+        // failure.sceneBonus（同场景脉冲，缺省 0.4）。未注册 ⇒ getOrDefault 回声
+        // 字面量，召回与排序逐字节不变；每次 match 单次读取。
+        const score2Floor = kernelRegistry.getOrDefault('failure.score2Floor', 0.2);
+        const RRF_K = Math.round(kernelRegistry.getOrDefault('failure.rrfK', 60));
+        const sceneBonus = kernelRegistry.getOrDefault('failure.sceneBonus', 0.4);
         const scored = this.records.map(r => {
             const hay = `${r.query} ${r.approach} ${r.symptom}`;
             const text = overlapCoefficient(qTokens, tokenize(hay));
@@ -43,7 +51,7 @@ class FailureMemory {
             const compress = ncdSimilarity(query, r.symptom);
             let scene = 0;
             if (currentSceneHash && r.sceneHash && similarity(currentSceneHash, r.sceneHash) >= 0.9)
-                scene = 0.4;
+                scene = sceneBonus;
             return { r, text, compress, scene };
         });
         // 通道排名（降序；并列取同秩 —— 标准竞争排名）
@@ -54,7 +62,6 @@ class FailureMemory {
             return m;
         };
         const rText = rank('text'), rComp = rank('compress'), rScene = rank('scene');
-        const RRF_K = 60;
         return scored
             .map(({ r, text, compress, scene }) => {
             const rrf = 1 / (RRF_K + rText.get(r)) + (compress > 0 ? 1 / (RRF_K + rComp.get(r)) : 0)
@@ -63,7 +70,12 @@ class FailureMemory {
             // score = RRF × 量纲还原（×1000 保持旧阈值 0.2 的语义近邻）
             return { ...r, score: Math.round(rrf * 1000 * 1000) / 1000, score2: legacy };
         })
-            .filter(r => r.score > 0.2)
+            // Δ-2 过滤修正：RRF 分恒 ≥ 1000/(60+N)（rank ≤ N）—— 旧实现 filter(score>0.2)
+            // 对任何非空库恒真（两条记录时下限 16.1），任意查询必召回全部无关失败。
+            // 相关性闸门回归 score2（legacy 加权和）域：三通道证据至少其一实质在场
+            // （词面重合 / 压缩相似 / 场景指纹）才过闸 —— R-6 之前的既有阈值语义。
+            // 排序仍用 score（RRF 排名融合无量纲 —— R-6 的本意只在排序，不在过滤）。
+            .filter(r => r.score2 > score2Floor)
             .sort((a, b) => b.score - a.score)
             .slice(0, k);
     }

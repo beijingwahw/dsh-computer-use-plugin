@@ -324,7 +324,8 @@ export function calibrateCptFromTelemetry(
       const expert = BN_CPT[s][i];
       if (n === 0) return expert;
       const fitted = (c + 1) / (n + 2);
-      return Math.round((0.8 * fitted + 0.2 * expert) * 1000) / 1000;
+      const w = n / (n + 4); // 收缩权重与 calibrateCptFromRules 同律（样本少 ⇒ 专家律主导）
+      return Math.round((w * fitted + (1 - w) * expert) * 1000) / 1000;
     }) as [number, number, number, number, number];
   }
   return {

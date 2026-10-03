@@ -4,11 +4,18 @@
 // 范围：审批授予门 / swarm 增量游标 / 钉扎名额泄漏 / 相似度长度自适应 /
 //       Tier0 压制口径 / 预演 degraded 放行 + rehearsalChainId / grounding
 //       幻觉 id 拒绝 / 快照发号器 / heal 多行空 catch / to_step 下界钳制。
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { stopBackend } from '../src/physicalBackend.ts';
+
+// click 工具的 regionHash/uiMemory 链会懒拉起 D-5 物理服务（本地有 python 即真实
+// spawn）。测试进程无卸载钩子 —— 不关停则子进程占住事件循环，node --test 永不退出
+after(async () => {
+  await stopBackend();
+});
 
 import { approval } from '../src/approval.ts';
 import { similarity } from '../src/perceptualHash.ts';
@@ -295,22 +302,25 @@ function makeDoctorFixture(): { root: string; cfg: { sourceRoot: string; memoryP
 
 test('J-9: 多行空 catch 的机械修复真实改写文件（旧实现 no-op 却计为已应用）', async () => {
   const { root, cfg } = makeDoctorFixture();
-  const file = join(root, 'src', 'multiline.ts');
-  writeFileSync(file, 'try { a(); } catch (e) {\n}\n', 'utf8');
-  await doctor.configure(cfg);
-  const report = await doctor.diagnose();
-  assert.ok(report.findings.some(f => f.ruleId === 'smell.empty-catch'), '多行空 catch 被诊断发现');
+  try {
+    const file = join(root, 'src', 'multiline.ts');
+    writeFileSync(file, 'try { a(); } catch (e) {\n}\n', 'utf8');
+    await doctor.configure(cfg);
+    const report = await doctor.diagnose();
+    assert.ok(report.findings.some(f => f.ruleId === 'smell.empty-catch'), '多行空 catch 被诊断发现');
 
-  const res = await doctor.heal(report, { maxRisk: 'mechanical', authorized: true, dryRun: false });
-  assert.equal(res.applied.length, 1, '补丁真实应用');
-  const healed = readFileSync(file, 'utf8');
-  assert.ok(healed.includes('/* FIXME(doctor)'), 'open 行尾被注释化（多行形态真实改写）');
-  assert.ok(!/\{\s*\}/.test(healed), '不再有空洞块');
-  assert.equal(doctor.memory().totalFixesApplied, 1);
-
-  doctor.resetMemory();
-  doctor.resetConfig();
-  rmSync(root, { recursive: true, force: true });
+    const res = await doctor.heal(report, { maxRisk: 'mechanical', authorized: true, dryRun: false });
+    assert.equal(res.applied.length, 1, '补丁真实应用');
+    const healed = readFileSync(file, 'utf8');
+    assert.ok(healed.includes('/* FIXME(doctor)'), 'open 行尾被注释化（多行形态真实改写）');
+    assert.ok(!/\{\s*\}/.test(healed), '不再有空洞块');
+    assert.equal(doctor.memory().totalFixesApplied, 1);
+  } finally {
+    // 断言失败也要火化临时目录并归还 doctor 全局配置（否则污染后续用例）
+    doctor.resetMemory();
+    doctor.resetConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ─── J-10 to_step 下界钳制：负数不再触发 slice 尾部语义 ───

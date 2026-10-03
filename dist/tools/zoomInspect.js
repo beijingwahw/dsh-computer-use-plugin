@@ -100,7 +100,7 @@ export function createZoomInspectTool(config) {
                     format: 'jpeg',
                     quality: config.jpegQuality,
                     region,
-                    gridDivisions: config.gridDivisions * 2,
+                    gridDivisions: config.gridDivisions * 2, // 细网格：相对全屏网格加密一倍
                     maxWidth: config.compressWidth,
                 });
                 if (!cap.buffer) {

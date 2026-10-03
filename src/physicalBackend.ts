@@ -18,7 +18,9 @@ import {
   PhysicalServiceManager,
   createPhysicalExecution,
   type PhysicalExecutionAdapter,
+  type PhysicalExecutionAdapterImpl,
   type HealthInfo,
+  type ScreenshotResult,
 } from './physicalExecution/index.js';
 
 /** 稳定密钥路径 —— 与 Python 端默认值一致（收养已存活服务的前提） */
@@ -48,6 +50,12 @@ export interface ProcessedCapture {
   transport: string;
   /** Y-1/Y-2：显著度图（服务端熵引擎） */
   salience: import('./physicalExecution/contracts.js').SalienceMap | null;
+  /**
+   * Σ-5 多屏感知：实际捕获的显示器索引。null = 主屏缺省（未请求 display，
+   * 或非 Windows 平台诚实降级 —— 此时服务端响应附 note）。仅 opts.display
+   * 在场时由服务端回填。
+   */
+  display?: number | null;
 }
 
 export interface OverlayBox {
@@ -81,6 +89,13 @@ export interface CaptureOptions {
   metaOnly?: boolean;
   /** Y-1/Y-2：块级梯度熵显著度图 */
   wantSalience?: boolean;
+  /**
+   * Σ-5 多屏感知：显示器索引（0 起，/v1/displays 清单序）。缺省 = 主屏 = 现状
+   * （请求字节等同）。选定后 region / crosshair / boxes 的归一化基准 = **所选
+   * 显示器的矩形**（服务端在 PIL 最上游裁剪，下游管线无感继承）。
+   * 非 Windows 服务端诚实降级主屏并附 note。
+   */
+  display?: number;
 }
 
 interface BackendState {
@@ -108,7 +123,10 @@ async function probeAlive(port: number): Promise<boolean> {
     const resp = await fetch(`http://127.0.0.1:${port}/v1/health`, {
       signal: AbortSignal.timeout(800),
     });
-    return resp.ok;
+    const alive = resp.ok;
+    // 取消响应体：未消费的 body 会占住连接池里挂起的 socket
+    resp.body?.cancel().catch(() => { /* 取消失败与探活结论无关 */ });
+    return alive;
   } catch {
     return false;
   }
@@ -131,15 +149,33 @@ async function startOnPort(port: number): Promise<PhysicalExecutionAdapter> {
     timeoutMs: 15_000,
     keyPath: res.keyPath,
   });
-  unwrap(await adapter.init(), 'adapter.init');
-  const health = unwrap(await adapter.health(), 'adapter.health');
-  state.manager = manager;
-  state.adapter = adapter;
-  state.health = health;
-  if (health.screen && 'width' in health.screen) {
-    state.screen = { width: health.screen.width, height: health.screen.height };
+  try {
+    unwrap(await adapter.init(), 'adapter.init');
+    const health = unwrap(await adapter.health(), 'adapter.health');
+    state.manager = manager;
+    state.adapter = adapter;
+    state.health = health;
+    if (health.screen && 'width' in health.screen) {
+      state.screen = { width: health.screen.width, height: health.screen.height };
+    }
+  } catch (e) {
+    // init/health 失败：服务进程已 spawn，必须随失败一并处置 ——
+    // 否则逐端口重试每失败一个端口就泄漏一个存活进程
+    try { await manager.dispose(); } catch { /* dispose 失败不掩盖原始错误 */ }
+    throw e;
   }
   return adapter;
+}
+
+/** 语义化版本比较（数字段逐段）：字符串序会把 '0.10.0' 判小于 '0.4.0'，必须按段数值比 */
+function versionLt(a: string, b: string): boolean {
+  const pa = a.split('.').map(s => parseInt(s, 10) || 0);
+  const pb = b.split('.').map(s => parseInt(s, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d < 0;
+  }
+  return false;
 }
 
 /** 收养已存活服务：稳定密钥路径 ⇒ 同一 HMAC ⇒ 令牌互通 */
@@ -155,7 +191,7 @@ async function adoptExisting(port: number): Promise<boolean> {
   // 版本闸门：旧版本服务（旧键表/旧端点面）不收养 —— 宁可换端口 spawn 新码。
   // 0.4.0：Z-1 世界行动端点（/move_mouse、/cursor_kind）入伍
   const MIN_SVC_VERSION = '0.4.0';
-  if ((health.value.version ?? '0.0.0') < MIN_SVC_VERSION) return false;
+  if (versionLt(health.value.version ?? '0.0.0', MIN_SVC_VERSION)) return false;
   // 鉴权握手验证（收养的前提是同一密钥）：cursor 是最便宜的已鉴权端点
   const cursor = await adapter.getCursor();
   if (!cursor.ok) return false;
@@ -172,7 +208,7 @@ export function ensureBackend(): Promise<PhysicalExecutionAdapter> {
   if (state.adapter) return Promise.resolve(state.adapter);
   if (state.starting) return state.starting;
 
-  state.starting = (async () => {
+  const starting = (async () => {
     let lastErr: Error | null = null;
     for (let i = 0; i < PORT_SPAN; i++) {
       const port = BASE_PORT + i;
@@ -192,9 +228,11 @@ export function ensureBackend(): Promise<PhysicalExecutionAdapter> {
     state.starting = null;
     throw lastErr ?? new Error('[physicalBackend] no free port in range');
   })();
+  state.starting = starting;
 
-  state.starting.catch(() => { state.starting = null; });
-  return state.starting;
+  // 拒绝清理只认自身承诺：迟到的 catch 不得清掉后来者新铸的 starting（并发双 spawn 竞态）
+  starting.catch(() => { if (state.starting === starting) state.starting = null; });
+  return starting;
 }
 
 async function adapter(): Promise<PhysicalExecutionAdapter> {
@@ -211,7 +249,9 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
   if (opts.crosshair) overlay.crosshair = opts.crosshair;
   if (opts.boxes?.length) overlay.boxes = opts.boxes;
 
-  const meta = unwrap(await a.takeScreenshot({
+  // Σ-5：display 透传需 impl 的扩展参数面（contracts 的接口签名未含 display ——
+  // 产权铁律下不改 contracts.ts，桥接类型断言到 impl）
+  const meta = unwrap(await (a as PhysicalExecutionAdapterImpl).takeScreenshot({
     format: opts.format ?? 'jpeg',
     quality: opts.quality,
     region: opts.region,
@@ -224,7 +264,9 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
     keepFrame: opts.keepFrame,
     metaOnly: opts.metaOnly,
     wantSalience: opts.wantSalience,
-  }), 'take_screenshot');
+    // Σ-5：undefined ⇒ JSON 序列化丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
+    display: opts.display,
+  }), 'take_screenshot') as ScreenshotResult & { display?: number | null };
 
   const unchanged = !!meta.unchanged;
   if (unchanged || opts.metaOnly) {
@@ -235,6 +277,7 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
       unchanged, frameId: meta.frame_id ?? null,
       transport: meta.transport,
       salience: meta.salience ?? null,
+      display: meta.display ?? null,
     };
   }
 
@@ -257,6 +300,7 @@ export async function captureProcessed(opts: CaptureOptions = {}): Promise<Proce
     frameId: meta.frame_id ?? null,
     transport: meta.transport,
     salience: meta.salience ?? null,
+    display: meta.display ?? null,
   };
 }
 
@@ -417,5 +461,13 @@ export function _reset_forTests(): void {
   state.manager = null;
   state.health = null;
   state.screen = null;
+  state.displays = null;
+}
+
+/** Σ-5 测试面：假 adapter 直入 state（免 spawn —— CaptureOptions 透传的纯逻辑测试）。
+ *  传 null 等效 _reset_forTests 的 adapter 清除（不 dispose manager —— 测试自管）。 */
+export function _setAdapterForTests(a: PhysicalExecutionAdapter | null): void {
+  state.starting = null;
+  state.adapter = a;
   state.displays = null;
 }

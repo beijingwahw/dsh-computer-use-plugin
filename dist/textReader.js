@@ -8,9 +8,13 @@
 //
 // 双路径（本轮接线）：D-5 服务端 L2 OCR（RapidOCR，getUiTree）优先；
 // tesseract.js（懒动态导入）保留为 legacy 路径。enableOcr 语义不变。
+// 纪元 Ω（云脑皮层接线）：semanticConfirm 增第三路径 —— 本地双路径皆败且
+// vlmAssistOcr 开启且 GLM 可用时，readTextViaVlm 云脑兜底读屏（config 经
+// setSemanticVlmOptions 模块级注入 —— 本文件无 Config 通道，最小侵入方案）。
 import { fuzzyIncludes } from './fuzzy.js';
 import { getSharp, getTesseract, } from './_legacyDeps.js';
 import * as backend from './physicalBackend.js';
+import { kernelRegistry } from './kernel/registry.js';
 let workerPromise = null;
 let workerLang = '';
 async function getWorker(lang) {
@@ -50,7 +54,7 @@ const normalize = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
  * 服务端 L2 OCR 可用性探测缓存。失败只做**限时负缓存**（60s）—— 引擎可能
  * 随部署修复/依赖安装恢复，一次失败锁死整个会话会把语义验证层饿死。
  */
-const OCR_RETRY_MS = 60000;
+const OCR_RETRY_MS = 60_000;
 let serverOcrFailedAt = 0;
 async function readScreenTextServer(region) {
     if (Date.now() - serverOcrFailedAt < OCR_RETRY_MS)
@@ -96,6 +100,13 @@ export async function readTextAny(region, lang = 'eng') {
     if (server)
         return server;
     // 2) legacy：tesseract.js + sharp（开发仓 / DSH_FORCE_LEGACY_SYSTEM）
+    // Δ-5 探针前置：tesseract/sharp 是 devDeps（生产必挂）—— 先探可用性再截屏，
+    // 免为注定失败的识别付出 captureCleanPng 整帧往返（服务端 OCR 负缓存只盖
+    // 服务端路径，legacy 路径旧实现每次失败都先截屏再在 getTesseract 抛错）。
+    // 探针错误有模块级记忆缓存（_legacyDeps 的 _tesseractError/_sharpError）——
+    // 首败之后后续调用零成本直落（legacy 侧的负缓存语义）。
+    await getTesseract();
+    await getSharp();
     const buf = await backend.captureCleanPng(region);
     return readText(buf, lang);
 }
@@ -111,7 +122,9 @@ export async function readText(buffer, lang = 'eng') {
     const rawWords = anyData.words
         ?? anyData.lines?.flatMap((l) => l.words ?? []) ?? [];
     const words = rawWords
-        .filter(w => (w.confidence ?? 0) > 60 && w.text?.trim())
+        // 纪元 Θ（Θ-4 生产接线）：词置信截断线读内核注册表（ocr.wordConfidenceFloor，
+        // 区间 [30,90]）—— 未注册 ⇒ getOrDefault 回声 60，过滤行为逐字节不变。
+        .filter(w => (w.confidence ?? 0) > kernelRegistry.getOrDefault('ocr.wordConfidenceFloor', 60) && w.text?.trim())
         .map(w => {
         const b = w.bbox;
         return {
@@ -123,10 +136,65 @@ export async function readText(buffer, lang = 'eng') {
     });
     return { text: data.text ?? '', words };
 }
+let semanticVlmOpts = null;
+/**
+ * VLM 兜底配置注入（宿主 apply 接线；传 null 归零）。
+ * 不注入 / assistOcr=false ⇒ semanticConfirm 行为与本纪元之前逐字节一致（无 Key 用户零变化）。
+ */
+export function setSemanticVlmOptions(opts) {
+    semanticVlmOpts = opts && typeof opts === 'object'
+        ? { assistOcr: opts.assistOcr === true, ...(opts.client ? { client: opts.client } : {}) }
+        : null;
+}
+/**
+ * 第三路径取字：本地双路径皆败后由云脑读邻域。
+ * 邻域坐标是归一化百分比，readTextViaVlm 吃像素 —— 用 fullBuf 尺寸换算
+ * （fullBuf 缺席则跳过：D-5 路径下可为 null，无像素即无换算）。
+ * 对结果文本的模糊匹配由调用方（semanticConfirm）按 fuzzyIncludes 同律执行。
+ * 任何不可用/失败返回 null（降级律：绝不抛、未配置零网络 —— 不改变无 Key 用户的行为）。
+ */
+async function vlmFallbackText(fullBuf, region, lang) {
+    if (!semanticVlmOpts?.assistOcr)
+        return null; // 开关关闭：维持旧世界
+    if (!fullBuf || fullBuf.length === 0)
+        return null; // 像素换算无从谈起
+    try {
+        const { isGlmConfigured } = await import('./vlm/glmClient.js');
+        if (!semanticVlmOpts.client && !isGlmConfigured())
+            return null; // 无 Key：零网络零行为变化
+        const { readTextViaVlm } = await import('./vlm/vlmOcr.js');
+        const sharp = await getSharp();
+        const meta = await sharp(fullBuf).metadata();
+        const W = meta.width, H = meta.height;
+        if (!W || !H || W < 1 || H < 1)
+            return null;
+        // 归一化 → 像素 bbox：左上 floor、右下 ceil（整数盒包含原浮点盒），夹回图内
+        const px = {
+            x0: Math.max(0, Math.floor(region.x * W)),
+            y0: Math.max(0, Math.floor(region.y * H)),
+            x1: Math.min(W, Math.ceil((region.x + region.width) * W)),
+            y1: Math.min(H, Math.ceil((region.y + region.height) * H)),
+        };
+        if (px.x1 <= px.x0 || px.y1 <= px.y0)
+            return null;
+        const r = await readTextViaVlm(fullBuf, { region: px, lang, client: semanticVlmOpts.client });
+        return r.ok ? r.text : null;
+    }
+    catch {
+        return null; // 兜底自身失败 = 不可用：绝不抛、不毒化调用方（降级律最后一行）
+    }
+}
+/** 测试钩子：预置服务端 OCR 负缓存时刻（测试环境避免触发 D-5 微服务启动；命名对齐 _legacyDeps 的 _forTest 约定） */
+export function _setServerOcrFailedAt_forTest(ts) {
+    serverOcrFailedAt = typeof ts === 'number' && Number.isFinite(ts) ? ts : 0;
+}
 /**
  * 语义核对：在动作点邻域内 OCR，检查预期文字是否出现。
  * 大小写/空白不敏感的包含匹配。任何失败返回 null（调用方降级为 ocr-unavailable）。
  * fullBuf 在 D-5 路径下可为 null（服务端 OCR 直接读屏，无需本地解码）。
+ * 取字三路径（纪元 Ω）：服务端 L2 → legacy tesseract → VLM 云脑兜底
+ * （第三路径仅在 vlmAssistOcr 开启且 GLM 可用时激活；前两路径皆败且第三路径
+ * 不可用 ⇒ return null，与既往行为一致 —— 降级律：绝不抛）。
  */
 export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected, lang = 'eng') {
     try {
@@ -137,28 +205,38 @@ export async function semanticConfirm(fullBuf, cxPct, cyPct, radiusPct, expected
         if (width < 0.005 || height < 0.005)
             return null;
         const region = { x: left, y: top, width, height };
-        let text;
+        let text = null;
         const server = await readScreenTextServer(region);
         if (server) {
             text = server.text;
         }
         else if (fullBuf && fullBuf.length > 0) {
-            // legacy 放大路径：区域裁剪 + resize 1200（小字命中率关键）
-            const sharp = await getSharp();
-            const meta = await sharp(fullBuf).metadata();
-            const W = meta.width, H = meta.height;
-            const pxLeft = Math.round(left * W);
-            const pxTop = Math.round(top * H);
-            const pxW = Math.max(1, Math.round(width * W));
-            const pxH = Math.max(1, Math.round(height * H));
-            const crop = await sharp(fullBuf)
-                .extract({ left: pxLeft, top: pxTop, width: pxW, height: pxH })
-                .resize(1200)
-                .toBuffer();
-            text = (await readText(crop, lang)).text;
+            // legacy 放大路径：区域裁剪 + resize 1200（小字命中率关键）。
+            // 纪元 Ω：本路径失败不再直接落入总 catch —— 记 null 交第三路径裁决
+            //（VLM 兜底不可用时与旧行为一致：return null）。
+            try {
+                const sharp = await getSharp();
+                const meta = await sharp(fullBuf).metadata();
+                const W = meta.width, H = meta.height;
+                const pxLeft = Math.round(left * W);
+                const pxTop = Math.round(top * H);
+                const pxW = Math.max(1, Math.round(width * W));
+                const pxH = Math.max(1, Math.round(height * H));
+                const crop = await sharp(fullBuf)
+                    .extract({ left: pxLeft, top: pxTop, width: pxW, height: pxH })
+                    .resize(1200)
+                    .toBuffer();
+                text = (await readText(crop, lang)).text;
+            }
+            catch {
+                text = null; // legacy 亦败 —— 落第三路径（不可用则 return null，同旧律）
+            }
         }
-        else {
-            return null;
+        if (text === null) {
+            // 纪元 Ω 第三路径：本地双路径皆败 + vlmAssistOcr 开启 + 云脑可用 ⇒ VLM 兜底读屏
+            text = await vlmFallbackText(fullBuf, region, lang);
+            if (text === null)
+                return null;
         }
         const hay = normalize(text);
         const needle = normalize(expected);

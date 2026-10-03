@@ -14,12 +14,16 @@
 裁剪窗（``region`` 参数）：
   - 归一化坐标 [0,1]×[0,1] 的左上角与宽高
   - 缺省 = 全屏
+  - 纪元 Σ-5（多屏感知）：``display`` 参数选定显示器（索引，``/v1/displays``
+    清单序）后，``region`` 的归一化基准 = **所选显示器的矩形**（而非主屏）；
+    ``display=None``（缺省）= 主屏 = Σ-5 之前的行为（兼容铁律：逐字节不变）
 """
 from __future__ import annotations
 
 import asyncio
 import io
 import os
+import platform
 import sys
 import time
 from collections import deque
@@ -144,7 +148,13 @@ def draw_overlay(img: Image.Image, overlay: dict) -> Image.Image:
     d = ImageDraw.Draw(layer)
     base = overlay.get("color_rgb") or (59, 130, 246)
 
-    divisions = int(overlay.get("grid_divisions") or 0)
+    # 钳制（overlay 是未校验的原始 dict）：网格数/倍率直接进循环上界 ——
+    # 一个 10^9 的恶意/失控值会在共享线程池里画几十亿条线，物理动作
+    # （同一 executor）被整段饿死。上限远高于正常用法（TS 端缺省 10）。
+    try:
+        divisions = min(max(int(overlay.get("grid_divisions") or 0), 0), 256)
+    except (TypeError, ValueError):
+        divisions = 0
     if divisions and divisions > 1:
         line_rgba = (*base, 110)
         for i in range(1, divisions):
@@ -162,7 +172,11 @@ def draw_overlay(img: Image.Image, overlay: dict) -> Image.Image:
             if not isinstance(hz, dict):
                 continue
             hx, hy, hw, hh = _norm_to_px_rect(hz, w, h)
-            fine = int(overlay.get("foveate_factor") or 2) * max(divisions or 4, 4)
+            try:
+                factor = min(max(int(overlay.get("foveate_factor") or 2), 1), 8)
+            except (TypeError, ValueError):
+                factor = 2
+            fine = factor * max(divisions or 4, 4)
             for i in range(1, fine):
                 fx = hx + round(hw * i / fine)
                 fy = hy + round(hh * i / fine)
@@ -237,7 +251,7 @@ def compute_salience(
     gy = np.abs(np.diff(g, axis=0))[:, :-1]
     mag = np.sqrt(gx ** 2 + gy ** 2)
 
-    bh, bw = mag.shape[0] // grid[1], mag.shape[0] // grid[1]
+    bh = mag.shape[0] // grid[1]
     bw = mag.shape[1] // grid[0]
     entropies: list[float] = []
     for by in range(grid[1]):
@@ -290,6 +304,115 @@ def compute_salience(
     }
 
 
+# ─── Σ-5 多屏感知：显示器枚举（/displays 端点与 display 截图参数的共享地基）───
+#
+# 坐标系契约：全屏虚拟坐标系（Windows 惯例 —— 主屏左上角为原点，副屏矩形
+# 可为负坐标）。routes./displays 的清单与 _capture_image 的 display 裁剪必须
+# 出自同一枚举函数 —— 同一枚举顺序 ⇒ 「索引 i」在两端指同一块物理屏。
+
+
+def _enum_monitors_win32() -> list[dict]:
+    """Win32 EnumDisplayMonitors → 显示器矩形清单（全屏虚拟坐标系）。
+
+    纯同步函数：/displays 路由放线程池执行；``_capture_image`` 的 display
+    裁剪本就运行在线程池内，直接调用（不经过事件循环）。
+
+    修正（Σ-5 真机执法）：``ctypes.wintypes`` 并无 ``MONITORINFO`` —— 旧
+    /displays 内联代码引用 ``wt.MONITORINFO()`` 在回调内抛 AttributeError，
+    被 ctypes「Exception ignored」静默吞掉 ⇒ 枚举恒空 ⇒ /displays 恒降级
+    主屏单条（多屏清单从未真正工作过）。手写 MONITORINFOW 结构体修复。
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+
+    class _MonitorInfoW(ctypes.Structure):
+        """MONITORINFOW（布局与 Win32 一致）。"""
+
+        _fields_ = [
+            ("cbSize", wt.DWORD),
+            ("rcMonitor", wt.RECT),
+            ("rcWork", wt.RECT),
+            ("dwFlags", wt.DWORD),
+        ]
+
+    user32 = ctypes.windll.user32
+    monitors: list[dict] = []
+    MonitorEnumProc = ctypes.WINFUNCTYPE(
+        ctypes.c_int, wt.HMONITOR, wt.HDC, ctypes.POINTER(wt.RECT), ctypes.c_void_p,
+    )
+
+    def _cb(hmon, _hdc, rect, _lparam):
+        info = _MonitorInfoW()
+        info.cbSize = ctypes.sizeof(_MonitorInfoW)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+            r = info.rcMonitor
+            monitors.append({
+                "name": f"Monitor@{r.left},{r.top}",
+                "x": int(r.left), "y": int(r.top),
+                "width": int(r.right - r.left), "height": int(r.bottom - r.top),
+                "primary": bool(info.dwFlags & 1),
+            })
+        return 1
+
+    user32.EnumDisplayMonitors(None, None, MonitorEnumProc(_cb), 0)
+    return monitors
+
+
+async def list_displays(screen_ctrl: "ScreenCapture | None" = None) -> list[dict]:
+    """显示器清单（全屏虚拟坐标系）—— routes./displays 的唯一事实源。
+
+    Windows：``_enum_monitors_win32``；其余平台/枚举失败 ⇒ 诚实降级为
+    主屏单条（尺寸经 ``screen_ctrl.get_screen_size()`` —— 享受测试合成图
+    降级；``screen_ctrl`` 缺席时经 pyautogui.size() 同源读取）。
+    """
+    result: list[dict] = []
+    if platform.system() == "Windows":
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _enum_monitors_win32)
+    if not result:
+        if screen_ctrl is not None:
+            size = await screen_ctrl.get_screen_size()
+            w, h = int(size["width"]), int(size["height"])
+        else:
+            import pyautogui
+
+            size = pyautogui.size()
+            w, h = int(size.width), int(size.height)
+        result = [{
+            "name": "Primary", "x": 0, "y": 0,
+            "width": w, "height": h,
+            "primary": True,
+        }]
+    return result
+
+
+def _display_capture_rect(display: int) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """display 索引 → ``(显示器矩形, 虚拟桌面包围盒)``，均为枚举坐标系。
+
+    ``PIL.ImageGrab.grab(all_screens=True)`` 的图原点是虚拟桌面包围盒的
+    左上角（= 各显示器矩形的最小 x/y）。越界/非法索引 ⇒ ``INVALID_ARGS``
+    （诚实失败信封）。
+
+    DPI 缩放环境（真机执法战果）：EnumDisplayMonitors 可能报**逻辑**像素
+    （1920x1080@125% 实测报 1536x864）而 ImageGrab 抓到**物理**像素 ——
+    本函数同时返回包围盒，``_capture_image`` 按实际图像尺寸做比例映射对齐。
+    """
+    monitors = _enum_monitors_win32()
+    if display < 0 or display >= len(monitors):
+        rng = f" (valid indices: 0..{len(monitors) - 1})" if monitors else ""
+        raise PhysicalError(
+            ErrorKind.INVALID_ARGS,
+            f"invalid display index {display}: "
+            f"{len(monitors)} monitor(s) enumerated{rng}",
+        )
+    m = monitors[display]
+    vx0 = min(mn["x"] for mn in monitors)
+    vy0 = min(mn["y"] for mn in monitors)
+    vw = max(mn["x"] + mn["width"] for mn in monitors) - vx0
+    vh = max(mn["y"] + mn["height"] for mn in monitors) - vy0
+    return (m["x"], m["y"], m["width"], m["height"]), (vx0, vy0, vw, vh)
+
+
 class ScreenCapture:
     """屏幕截图控制器。
 
@@ -323,6 +446,7 @@ class ScreenCapture:
         keep_frame: bool = False,
         meta_only: bool = False,
         want_salience: bool = False,
+        display: int | None = None,
     ) -> tuple[ShmHandle | None, dict]:
         """截屏并写入共享内存通道。
 
@@ -340,6 +464,14 @@ class ScreenCapture:
                     时跳过编码/叠加，响应携带 ``unchanged=true``
           ``keep_frame``：干净帧入环缓存（frame_stats/frame_diff 的引用锚）
 
+        Σ-5 多屏感知（``display``）：显示器索引（``/v1/displays`` 清单序，0 起）；
+        ``None`` = 主屏 = Σ-5 之前的行为（兼容铁律：响应逐字节不变）。选定后
+        ``region`` / overlay 坐标的归一化基准 = **所选显示器的矩形**（裁剪发生在
+        ``_capture_image`` 最上游，overlay/salience/指纹等下游自然继承）。
+        非 Windows 平台请求 ``display`` ⇒ 诚实降级主屏 + ``note``（跨平台行为
+        可预期）；``extras['display']`` = 实际使用的索引（仅 display 请求在场时
+        附带，避免污染无参调用的响应字节）。
+
         返回 ``(handle, extras)``；extras = {dhash, phash, region_dhash,
         unchanged, frame_id, frame_count}。
         """
@@ -350,13 +482,29 @@ class ScreenCapture:
             )
 
         loop = asyncio.get_running_loop()
-        full = await loop.run_in_executor(None, self._capture_image, None)
+
+        # Σ-5：非 Windows 请求 display ⇒ 诚实降级主屏并 note 如实申报
+        # （不静默假装多屏，也不拒服务 —— 跨平台行为可预期）。
+        display_used: int | None = display
+        degrade_note: str | None = None
+        if display is not None and platform.system() != "Windows":
+            degrade_note = (
+                f"display={display} ignored: cross-screen capture is Windows-only; "
+                f"degraded to primary capture"
+            )
+            display_used = None
+
+        full = await loop.run_in_executor(None, self._capture_image, None, display_used)
 
         extras: dict = {
             "dhash": None, "phash": None, "region_dhash": None,
             "unchanged": False, "frame_id": None, "frame_count": len(self._frames),
             "salience": None,
         }
+        if degrade_note is not None:
+            extras["note"] = degrade_note
+        if display is not None:
+            extras["display"] = display_used
 
         if want_hashes or gate:
             extras["dhash"] = compute_dhash(full)
@@ -499,28 +647,78 @@ class ScreenCapture:
                 f"image encode failed: {e}",
             ) from e
 
-    def _capture_image(self, region: dict | None) -> Image.Image:
-        """同步截屏（线程池内执行）：真实截屏 → 测试降级 → 裁剪。"""
-        try:
-            import pyautogui
+    def _capture_image(self, region: dict | None, display: int | None = None) -> Image.Image:
+        """同步截屏（线程池内执行）：真实截屏 → 测试降级 → 裁剪。
 
-            img = pyautogui.screenshot()
-        except Exception as e:  # noqa: BLE001
-            # 测试降级：DSH_PHYSICAL_TEST_SCREEN=1 时返回合成图（无显示环境集成测试用）
-            if os.environ.get("DSH_PHYSICAL_TEST_SCREEN") == "1":
-                img = self._synthetic_test_image()
+        Σ-5 多屏感知：``display`` = 显示器索引（``list_displays`` 清单序，0 起）。
+        非 None 且 Windows 在场时：``PIL.ImageGrab.grab(all_screens=True)`` 抓
+        全屏虚拟桌面 → 按该显示器矩形裁剪（越界/非法索引 ⇒ INVALID_ARGS 失败
+        信封）。裁剪发生在最上游 —— 后续 region 裁剪 / overlay / salience /
+        指纹消费的「全图」即该显示器：
+
+        坐标系语义：
+          - ``display=None``（缺省）：``pyautogui.screenshot()`` 主屏 ——
+            与 Σ-5 之前逐字节一致（兼容铁律）；
+          - ``display=i``：``region`` 归一化 [0,1]² 的基准矩形 = **显示器 i**
+            （而非主屏）—— overlay 全屏归一化坐标同理。
+        """
+        if display is not None and platform.system() == "Windows":
+            (mx, my, mw, mh), (vx0, vy0, vw, vh) = _display_capture_rect(display)
+            try:
+                from PIL import ImageGrab
+
+                virtual = ImageGrab.grab(all_screens=True)
+            except Exception as e:  # noqa: BLE001
+                # 测试降级：DSH_PHYSICAL_TEST_SCREEN=1 时返回合成图（无显示环境集成测试用）
+                if os.environ.get("DSH_PHYSICAL_TEST_SCREEN") == "1":
+                    img = self._synthetic_test_image()
+                else:
+                    raise PhysicalError(
+                        ErrorKind.SCREEN_CAPTURE_FAILED,
+                        f"ImageGrab.grab(all_screens=True) failed for display {display}: {e}",
+                    ) from e
             else:
-                raise PhysicalError(
-                    ErrorKind.SCREEN_CAPTURE_FAILED,
-                    f"pyautogui.screenshot failed: {e}",
-                ) from e
+                # 枚举域 → 抓图像素域：包围盒比例映射（DPI 缩放下枚举报逻辑像素、
+                # ImageGrab 抓物理像素 —— 真机 1920x1080@125% 实测 1536x864 枚举值）。
+                # 同 DPI 环境 sx=sy=1（整数直裁）；边界夹取防微溢出。
+                sx = (virtual.width / vw) if vw > 0 else 1.0
+                sy = (virtual.height / vh) if vh > 0 else 1.0
+                x0 = max(0, int(round((mx - vx0) * sx)))
+                y0 = max(0, int(round((my - vy0) * sy)))
+                x1 = min(virtual.width, int(round((mx + mw - vx0) * sx)))
+                y1 = min(virtual.height, int(round((my + mh - vy0) * sy)))
+                if x1 - x0 < 1 or y1 - y0 < 1:
+                    raise PhysicalError(
+                        ErrorKind.SCREEN_CAPTURE_FAILED,
+                        f"display {display} rect degenerate after mapping: "
+                        f"({x0},{y0})-({x1},{y1}) in {virtual.width}x{virtual.height}",
+                    )
+                img = virtual.crop((x0, y0, x1, y1))
+        else:
+            try:
+                import pyautogui
+
+                img = pyautogui.screenshot()
+            except Exception as e:  # noqa: BLE001
+                # 测试降级：DSH_PHYSICAL_TEST_SCREEN=1 时返回合成图（无显示环境集成测试用）
+                if os.environ.get("DSH_PHYSICAL_TEST_SCREEN") == "1":
+                    img = self._synthetic_test_image()
+                else:
+                    raise PhysicalError(
+                        ErrorKind.SCREEN_CAPTURE_FAILED,
+                        f"pyautogui.screenshot failed: {e}",
+                    ) from e
 
         if region:
             img = self._crop_region(img, region)
         return img
 
     def _crop_region(self, img: Image.Image, region: dict) -> Image.Image:
-        """裁剪归一化 region → 像素坐标 box。"""
+        """裁剪归一化 region → 像素坐标 box。
+
+        归一化基准 = ``img`` 的矩形：display=None 时即主屏；display=i 时即
+        显示器 i（``_capture_image`` 已在最上游裁剪 ⇒ 本函数无需感知多屏）。
+        """
         try:
             x = float(region["x"])
             y = float(region["y"])

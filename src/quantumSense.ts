@@ -13,6 +13,7 @@
 //      绝不假装进入叠加态（simulated success 是债的地层教训的对称面：simulated rescue 同罪）。
 import { journal } from './journal';
 import { extractInteractiveElements, hasAccessibilityProvider } from './uiExtractor';
+import { kernelRegistry } from './kernel/registry';
 
 export type SenseMode = 'black_box' | 'superposition';
 
@@ -82,7 +83,9 @@ function centerInside(a: Rect, b: Rect): boolean {
 }
 
 function overlaps(a: Rect, b: Rect): boolean {
-  return iou(a, b) > 0.5 || centerInside(a, b) || centerInside(b, a);
+  // 纪元 Ξ（Ξ-D 生产接线）：去重 IoU 门读内核注册表 —— quantum.iou（缺省
+  // 0.5）。未注册 ⇒ getOrDefault 回声字面量，去重判决逐字节不变；每次比对读。
+  return iou(a, b) > kernelRegistry.getOrDefault('quantum.iou', 0.5) || centerInside(a, b) || centerInside(b, a);
 }
 
 /** UiExtractorWhitebox：元素 ID 模式基础设施的白盒适配器（零新依赖的通道复用） */

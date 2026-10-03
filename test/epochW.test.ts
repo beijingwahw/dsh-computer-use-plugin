@@ -12,7 +12,7 @@ test('W-1: 隔离缝矩阵 —— 脏化后 reset 必须把状态打回初值', 
     import('../src/visualDiff.ts'), import('../src/popupDetector.ts'),
     import('../src/journal.ts'), import('../src/swarm.ts'),
   ]);
-  const [orch, appr, focus, eltrack, vdiff, popup, journal] = mods;
+  const [orch, appr, focus, eltrack, vdiff, popup, journal, swarmMod] = mods;
   const { Telemetry } = await import('../src/telemetry.ts');
 
   // ① 通道 EMA：脏化 → 归零
@@ -45,6 +45,7 @@ test('W-1: 隔离缝矩阵 —— 脏化后 reset 必须把状态打回初值', 
   vdiff.resetDiffPersistence();
   popup.resetPopupBelief(); popup.resetPopupSprt();
   (journal as any).reset?.();
+  swarmMod.swarm.reset(); // ③ 注释在册的 swarm 归零缝 —— 导入即须抽查（不留只加载不执法的空位）
   const t = new Telemetry(); t.observe('w', 'SUCCESS', 1); t.reset?.();
   assert.ok(true, '全部归零缝在册');
 });

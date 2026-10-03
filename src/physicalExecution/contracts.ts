@@ -309,6 +309,8 @@ export interface PhysicalExecutionAdapter {
     source?: 'auto' | 'tree' | 'ocr' | 'vlm';
     region?: { x: number; y: number; width: number; height: number };
     funnelCeiling?: 'L1' | 'L2' | 'L3';
+    /** 外部止损信号（流水线感知步超时 abort）—— 与内部超时组合断流 */
+    signal?: AbortSignal;
   }): Promise<Result<UiTreeResult, PhysicalError>>;
   switchWindow(args: { keyword: string }):
     Promise<Result<SwitchWindowResult, PhysicalError>>;

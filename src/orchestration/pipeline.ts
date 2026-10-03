@@ -97,7 +97,6 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
   private cfg: PipelineConfig | null = null;
   private idGen: IdGenerator = createDefaultIdGenerator();
   private stations: PipelineStations | null = null;
-  private customRegionCounter = 0;
   private reportDir = '';
   private reportCounter = 0; // 报告文件名防碰撞序号（同 intent 同毫秒不互相覆盖）
 
@@ -269,7 +268,10 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
             tokenUsage.vision += perceiveL3.tokenBudget;
             try {
               for await (const patch of stations.vision.perceive(perceiveL3)) merged.push(patch);
-            } catch { /* Never-reject 纵深防御：保留旧分区继续（决策下轮再要兜底） */ }
+            } catch (e: any) {
+              // Never-reject 纵深防御：保留旧分区继续（决策下轮再要兜底）—— 违约仍须入链可审计
+              await logPipeline('pipeline-vision-breach', { intentRef: intent.id, detail: `L3 rescan rejected stream: ${e?.message ?? 'unknown'}` });
+            }
             scene = merged;
             feedback = undefined;
             continue;
@@ -396,7 +398,6 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
   }
 
   reset(): void {
-    this.customRegionCounter = 0;
     sandboxLog.reset();
   }
 

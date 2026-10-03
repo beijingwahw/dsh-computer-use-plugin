@@ -116,6 +116,12 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"env {name} must be int, got {raw!r}") from e
 
 
+def _is_loopback_host(host: str) -> bool:
+    """host 是否回环（localhost / ::1 / 127.0.0.0/8）。"""
+    h = host.strip().strip("[]").lower()
+    return h == "localhost" or h == "::1" or h.startswith("127.")
+
+
 def load_config_from_env() -> AppConfig:
     """从环境变量加载配置。
 
@@ -139,6 +145,15 @@ def load_config_from_env() -> AppConfig:
             raise ValueError(
                 "DSH_PHYSICAL_ALLOW_EXTERNAL=true requires DSH_PHYSICAL_I_KNOW_THIS_IS_DANGEROUS=true "
                 "(explicitly acknowledging you are binding to a public interface)"
+            )
+    if server.transport == "tcp" and not server.allow_external:
+        # 安全铁律堵口：不经 allow_external 险确认，TCP host 只允许回环 ——
+        # 否则 DSH_PHYSICAL_TCP_HOST=0.0.0.0 可直接绕过上面的显式 ack 开外网
+        if not _is_loopback_host(server.tcp_host):
+            raise ValueError(
+                f"DSH_PHYSICAL_TCP_HOST={server.tcp_host!r} is not loopback; binding a non-"
+                "loopback interface requires DSH_PHYSICAL_ALLOW_EXTERNAL=true + "
+                "DSH_PHYSICAL_I_KNOW_THIS_IS_DANGEROUS=true"
             )
 
     # ── auth ──

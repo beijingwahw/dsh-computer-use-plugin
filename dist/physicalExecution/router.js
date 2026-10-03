@@ -34,7 +34,7 @@ export class PhysicalActionRouterImpl {
             }
             return {
                 seq,
-                effectDetected: null,
+                effectDetected: null, // 物理执行不做效果验证
                 latencyMs,
                 rehearsed: false, // 真 deliver，非预演
             };

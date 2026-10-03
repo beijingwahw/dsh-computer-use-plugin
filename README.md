@@ -14,6 +14,9 @@
 - **企业级安全四守卫**：坐标边界校验、连续失败熔断、敏感操作审计、弹窗联动拦截（waterfall 短路语义）
 - **全量桌面操作**：截图、点击、输入、滚动、快捷键、拖拽、标签页/窗口切换、弹窗处理
 - **可插拔混合模式**：可选接入本地视觉模型（OmniParser 类）与无障碍 Provider 获得精确坐标
+- **GLM-5.3-Flash 云脑皮层（可选）**：十器官外接智谱视觉大模型（元素接地 / 语义判决 / 看屏问答 `ask_screen`），与本地感知保守双脑仲裁，零 Key 零成本优雅降级
+- **万脑归一（纪元 Ψ）**：全平台视觉模型统一支持——13 颗脑（智谱 / OpenAI / Anthropic / Gemini / 通义 / Kimi / 豆包 / Grok / 硅基流动 / OpenRouter + Ollama/vLLM/LM Studio 本地免钥）密钥给谁就用谁，主力挂了备补位；缺省 GLM 行为逐字节不变
+- **自主智能环（纪元 Φ，默认关闭）**：`autonomous_run` 元工具一次调用驱动"识别→判断→执行→进化"四环闭环——自主宪法六律立法（destructive 恒审批），立法者显式开启才自主
 
 ## 世界级突破：四大自研引擎
 
@@ -295,11 +298,279 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 - Z-2 点击闸门：被否决的正文若含 URL（UIA 控件名回执，零成本复用），拒绝信息直接给出改道出口：「别点，用 open_url 跳」。
 - 弹窗守卫：popup 激活期 open_url 一并冻结（先处理弹窗，世界秩序不破）。
 
+## 纪元 Ω：GLM-5.3-Flash 云脑皮层
+
+本地反射弧（OCR / 模糊匹配 / 探针）以毫秒级回答确定性事实，但**开放语义**——整屏理解、陌生界面形态、图文混读、状态推断——是纯本地栈的盲区。本纪元外接云脑：智谱 GLM-5.3-Flash 视觉大模型，十件器官（`src/vlm/`）各司其职，与本地感知保守双脑仲裁。
+
+十器官（`test/vlm.*.test.ts` 逐件执法）：
+
+| 器官 | 机制 | 解决的问题 |
+| --- | --- | --- |
+| **Ω-1 云脑客户端 `glmClient`** | 智谱 OpenAI 兼容协议 + 全抖动指数退避重试 + JSON 围栏剥壳（fetch 可注入） | 与云脑对话的可靠传输层：重试相位解相关、围栏/方言 JSON 健壮提取 |
+| **Ω-2 感知编解码 `codec`** | 1568 长边 / JPEG 80 / 兴趣区裁剪 + `VlmBudget` 任务级图量与字节配额 + 视觉 Token 估算 | 云脑往返的带宽礼仪：超支在下发前被拒绝，而非事后补救 |
+| **Ω-3 SoM 提示工程 `som`** | VLM 专用编号框叠加 + 中文铁律提示词族（grounding / verdict / ocr / 差分） | 把「像素绝对坐标、图外非法、不臆造」写进模型输入——云端坐标幻觉歼灭 |
+| **Ω-4 元素检测 `grounding`** | `groundElements` + NMS IoU≥0.6 去冗余 + `clampBbox` 图内夹取 | 截图进、可点击元素出；云输出方言归一为仓库标准，宁空不错 |
+| **Ω-5 语义 OCR `vlmOcr`** | `readTextViaVlm` / `findTextViaVlm`，匹配与本地 textReader 同律（大小写/空白不敏感） | 云端读字找字：本地 OCR 的云侧姊妹，命中返回中心像素坐标 |
+| **Ω-6 效果判决 `verdict`** | `judgeEffect` 前后双图对比 → confirmed/refuted/uncertain + `fuseWithPixelEvidence` 像素双脑融合（一致加成 +0.1、分歧降级 uncertain） | L3.5 云端语义判决：「变的对不对」只有看得懂语义的脑能答 |
+| **Ω-7 差分解说 `diffExplainer`** | 变化区域 + 双图 → 一句中文总述 + 区域级注解，label 对齐律 | 「哪里变了」升级为「变的是什么」；对不上号宁可丢弃注解，绝不硬凑 |
+| **Ω-8 故障会诊 `diagnosis`** | `diagnoseFailure`：任务/动作/锚点/错误/屏幕文本 + 可选截图 → 根因 + 假设概率归一 + 恢复步骤（循环引用防护） | 「为什么停」的云端归因——本地会诊（qualityDoctor）的云侧会诊室 |
+| **Ω-9 双脑仲裁 `arbitration`** | IoU 贪心配对 + 置信加权凸组合融合 + 一致加成 0.15 + winner 四分支 + `normalizedLevenshtein` 文本仲裁 | 本地感知与云端意见分歧时的纯数学裁决：仲裁不靠权威靠测度 |
+| **Ω-10 计量治理 `metering`** | `vlmMeter` 分位台账 p50/p95（千样本窗）+ 双桶滑动窗限速（分钟×小时）+ 连续失败熔断 5 次/60s 冷却 + 全抖动 uniform(0, b·2ⁿ) | 云脑的花费与心跳可观测、可限量、可熔断 |
+
+### 集成血脉
+
+- **config 四新字段**：`vlmApiKey` / `vlmBaseUrl`（默认 `open.bigmodel.cn/api/paas/v4`）/ `vlmModel`（默认 `glm-5.3-flash`）/ `vlmAssistOcr`（默认 `false`）；`index.ts` 经 `configureVlm` 铸造云脑单例——config 优先于环境变量（`GLM_API_KEY` > `ZHIPUAI_API_KEY` > `ZAI_API_KEY`）。
+- **SemanticSource 云脑适配器**（`createSemanticFromVlm`）：D-6 三级漏斗的 L3 语义源——宿主总线优先立法不变，宿主未供且云脑可用时缺席自铸一档，只加不自夺。
+- **`semanticConfirm` 第三路径**：本地双路径（服务端 L2 → legacy tesseract）皆败后 VLM 兜底读屏；签名不变，开关关闭或无 Key 时行为逐字节不变。
+- **新工具 `ask_screen`**：看屏问答——截当前干净屏 + 自然语言问题 → 云脑作答（只读不碰世界；分工律：毫秒级确定性归本地反射，秒级开放语义归云脑）。
+
+### 设计宪法
+
+- **零 Key 零成本优雅降级**：未配置 apiKey ⇒ `degraded:true` 零网络短路（不拨号、不编码、不发请求），本地反射层照常运转——degraded 语义贯穿十器官。
+- **绝不抛异常、绝不联网的离线测试**：一切失败以返回值表达；测试经假 client / 假 fetch 注入。
+- **双脑保守仲裁哲学**：本地与云端是两条独立观测信道——一致加成（判决 +0.1 / 仲裁 +0.15）、分歧一律降级 uncertain；融合框取置信加权凸组合，落在两框凸包内，永不仲裁出一条谁都没看见的框。
+
+### 使用方法
+
+配置任一通道即点亮云脑：
+
+```yaml
+config:
+  vlmApiKey: '你的智谱 API Key'   # 或 env：GLM_API_KEY / ZHIPUAI_API_KEY / ZAI_API_KEY
+  # vlmBaseUrl / vlmModel 已有默认值，按部署覆写；vlmAssistOcr: true 开启 OCR 兜底
+```
+
+点亮后 `ask_screen` 工具与系统提示词使用准则自动注入；`vlmAssistOcr: true` 激活 `semanticConfirm` 的 VLM 第三路径。审判数字：vlm 家族 127 测试 0 败（十器官 121 + 集成 6）；typecheck 0 错；build `dist/vlm` 全量产出；smoke 141 模块 import 干净。
+
+## 纪元 Φ：自主智能环
+
+本地栈至此已能"看得准、点得对"，但每一步仍由模型驱动。本纪元铸**四环闭环**：机器自己看世界快照（识别）、自己决定下一步（判断）、自己执行并验证（执行）、跑完自我审计并进化策略权重（进化）。高度自主的前提是立法——十器官 + 宪法 + 运行时适配（`src/autonomy/`）。
+
+十器官（`test/autonomy.*.test.ts` 逐件执法）：
+
+| 器官 | 机制 | 解决的问题 |
+| --- | --- | --- |
+| **Φ-1 目标状态机 `goalState`** | 七相 GoalPhase（planning/acting/verifying/blocked/achieved/failed/aborted），判据逐条核对、超步超时熔断、非法 spec 降级不抛 | 「任务到底完成没有」由判据账裁决，不由模型口说 |
+| **Φ-2 世界快照 `worldSnapshot`** | VLM+OCR 双源复用 `arbitration` 数学仲裁融合、interactive 三态、dhash 变化门控 | 五种感知方言对表成一张总账，决策层不再逐源对表 |
+| **Φ-3 策略引擎 `policyEngine`** | 七级确定性决策序：弹窗优先→判据关键词匹配点击→declare→no_effect 策略切换→技能召回→预算升级→ask_vlm 兜底 | 下一步先到先得全确定性；不确定（低置信/并列）时才咨询云脑一次 |
+| **Φ-4 自主执行环 `autoPilot`** | perceive→decide→宪法 check→execute→criteriaEvidence→tick→终局熔断；时间睡眠全注入 | 环本身：任何依赖异常收敛为 error 步，绝不炸环 |
+| **Φ-5 进化引擎 `evolutionEngine`** | 成败回写五策略权重 ±、失败签名教训去重升级、成功短路径蒸馏技能（reliability 复验递增）、下次运行建议 | 跑一次聪明一次：经验跨轮存活 |
+| **Φ-6 场景语义缓存 `sceneSemantics`** | VLM 读屏认场景，dhash 指纹 LRU 缓存 | 「这是什么场景」不再每步重烧云脑——同屏不问第二遍 |
+| **Φ-7 认识论中枢 `uncertainty`** | 香农熵 + 加权几何平均置信融合 + Beta 校准 + 三档代价决策表（proceed/ask_vlm/ask_human/abort） | 何时放行、何时问云脑、何时问人、何时收手，全凭数值说话 |
+| **Φ-8 自主宪法 `autonomyConstitution`** | 六律：黑名单/分层取重/危险词扫描（复用 riskGate 同形字归一——西里尔 dеlete 也命中）/白名单外审批/destructive 硬法恒审批/卡死与超步停机 | 哪些动作允许自主做、哪些必须请示人类——高度自主的前提是立法 |
+| **Φ-9 反事实规划器 `counterfactual`** | 效用 = 0.5×进展 + 0.3×信息增益 − 0.2×风险，重复动作折价，并列取信息增益高者 | 行动前沙盘预演，择优而非先到先得 |
+| **Φ-10 自我审计官 `selfAudit`** | 五判定（healthy/oscillating/wasteful/reckless/opaque）四症候：震荡/浪费/鲁莽/黑箱，100 起扣评分 | 跑完回看自己的轨迹——审计官首先得自己无害 |
+
+### 集成血脉
+
+- **config 六字段**：`autonomyEnabled`（默认 `false`——立法者显式开启才自主）/ `autonomyMaxSteps`（默认 24，环保险丝与宪法硬顶同源此值）/ `autonomyTimeBudgetSec`（默认 300）/ `autonomyAllowTiers`（默认 `'benign'`；destructive 即使列入也恒审批）/ `autonomyVlmWhenUncertain`（默认 `true`）/ `autonomyForbiddenKeywords`（默认空）；`buildAutonomyStack` 把六字段铸成闭环栈。
+- **新元工具 `autonomous_run`**（`goal, success_criteria?, max_steps?, time_budget_sec?`）：一次调用驱动整个环直到预算尽头；锚点携带 `phase` / `criteria` 账 / 自审 `verdict`/`score` / `lessons` / `next_run_advice` / 蒸馏技能。判据缺省律：goal 原文作唯一字面判据（OCR 折叠子串核对）。
+- **宪法升级 `ACTION_REQUIRED` 语义**：审批是人的裁决权——`approval-required` 批了就能做，`constitution-veto` 审批也救不了；dry-run 防线天然继承（system 层 guardDryRun）。
+
+### 设计宪法
+
+- **默认关闭 + 宪法先行**：`autonomyEnabled: false` 是缺省状态——自主是立法者显式授予的权限；destructive 恒审批的硬法不可让渡，宪法失灵时宁可保守停机。
+- **离线确定性测试**：时间/睡眠/截屏/OCR/云脑全注入（假 VLM client），零联网。
+- **识别层坐标系律**：快照活在捕获图空间，执行时归一化除以快照宽高——与 `click_mouse` 同一换算链。
+
+### 使用方法
+
+```yaml
+config:
+  autonomyEnabled: true        # 立法者显式开启
+  # autonomyMaxSteps: 24 / autonomyTimeBudgetSec: 300 / autonomyAllowTiers: 'benign'
+  # autonomyVlmWhenUncertain: true / autonomyForbiddenKeywords: ''
+```
+
+调用 `autonomous_run({ goal: '打开系统设置并进入蓝牙页', success_criteria: ['蓝牙'] })`；锚点结构：`{phase, steps, criteria:{met,total}, verdict, score, lessons, next_run_advice, …}`。审判数字：autonomy 家族 164 测试 0 败（十器官 158 + 集成 6）；typecheck 0 错；smoke 154 模块 import 干净。
+
+## 纪元 Ψ：万脑归一
+
+云脑皮层（纪元 Ω）只认智谱一家。本纪元立意**不绑定任何一家**：统一抽象吃下全平台视觉模型，密钥给谁就用谁，主力挂了备补位。七模块（`src/vlm/providers/`，经 `providers/index.ts` 桶再分发；`test/vlm.providers.*.test.ts` 逐件执法）：
+
+| 模块 | 机制 | 覆盖平台 |
+| --- | --- | --- |
+| **Ψ-1 统一契约 `types`** | VisionProvider 接口 + 密钥卫生律 `sanitizeError`（错误面与计量永不出现在密钥）+ 全抖动重试 `fetchWithRetry`（仅 429/5xx/网络错重试，超时不重试） | 全部（协议底座，叶子模块零依赖） |
+| **Ψ-2 OpenAI 兼容适配器 `openai`** | `/chat/completions` + Bearer 鉴权 + `response_format` JSON 模式；本地服务免钥直连 | OpenAI / 智谱 / 通义兼容模式 / Kimi / 豆包方舟 / Grok / 硅基流动 / OpenRouter / Ollama / vLLM / LM Studio（一族通吃） |
+| **Ψ-3 Anthropic 适配器 `anthropic`** | `/v1/messages` + `x-api-key` + `anthropic-version` 头 + image source 三字段；jsonMode 用提示词模拟 | Anthropic Claude |
+| **Ψ-4 Gemini 适配器 `gemini`** | `models/:generateContent` + 密钥走 `x-goog-api-key` 头不走 URL + `inline_data` + `responseMimeType` | Google Gemini |
+| **Ψ-5 平台注册表 `registry`** | 13 平台预设 + env 自动识别 + baseUrl 识别 + explicit/baseurl/env 四路解析 + custom 合成预设 | glm / openai / anthropic / gemini / qwen / moonshot / doubao / xai / siliconflow / openrouter / ollama / lmstudio / vllm |
+| **Ψ-6 故障切换池 `failover`** | 按序补位 + 复用 `VlmApiBreaker` 熔断跳行 + 切换决策环形笔记（最近 10 条） | 任意多脑战斗序列 |
+| **Ψ-7 探针 `probe`** | 1x1 白图 15s 体检 + `visionGuessed` 判定 + 三协议模型清单发现 + 全平台并行体检 | 全部 13 平台 |
+
+### 兼容层命门（五大命门全守）
+
+`GlmClient` 保持同名 class 与全部导出，构造器按 platform 委托对应适配器，**缺省 glm 路径行为逐字节不变**（错误前缀 / meter kind / GLM 环境变量语义原样）；`getGlmClient` 缺省解析增强——GLM env 优先，否则 env 自动识别他平台；`isGlmConfigured` 语义升格为「任一云脑可用」（仍不铸造单例）。整套系统（`ask_screen` / grounding / 语义 OCR 兜底 / 判决 / 会诊 / autonomy 策略咨询）随任一平台密钥自动点亮，消费面零改动。测试全程离线：`fetchImpl` 注入 + env 保存恢复法。
+
+### 使用方法
+
+三种点亮方式任选其一：
+
+```yaml
+# 方式一：单平台 env（零配置）——任一平台密钥在 env 即自动识别并点亮整套系统
+#   GLM_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / DASHSCOPE_API_KEY …
+config:
+  # 方式二：vlmProvider 显式指定平台（空 = 自动探测）
+  vlmProvider: 'openai'      # 或 anthropic / gemini / qwen / moonshot / doubao / xai /
+                             # siliconflow / openrouter / ollama / lmstudio / vllm
+  # 方式三：再加备选链 —— 主力挂了备补位（熔断跳行按序切换）
+  vlmFallbackProviders: 'anthropic,gemini'   # CSV 备选链
+```
+
+新工具 `vlm_platforms({ probe: true })`：列出 13 平台配置状态与健康（1x1 白图并行体检、15s 超时，绝不发送真实屏幕内容），附当前生效平台与备选池健康。审判数字：vlm 家族 250 测试 0 败（Ω 原 127 + providers 115 + universal 8，providers 分件 14/19/24/21/8/11/18）；typecheck 0 错；smoke 163 模块。
+
+## 纪元 Δ：全库跃迁
+
+器官时代既成，本纪元**不造新器官**：五个审计代理扫全库产出 52 项带证据改进点，实施军团按簇并行落地——把既有器官全部磨利。
+
+### 六大安全修复
+
+| 缺口 | 修复 |
+| --- | --- |
+| 重放/技能执行绕闸 | `replayOne` 前置共享闸门 `actionGate`：危险步（发送/支付/凭据）无令牌即拦，`replay_actions`/`run_skill` fail-fast |
+| 审批令牌双花窗口 | `beginAttempt` 在途预留 + 结算，并发同令牌恰一次派发 |
+| riskGate 全角折叠不对称 | 归一化迭代至不动点，ｓｕｂｍｉｔ 混淆变体不再逃逸 |
+| dragMouse 零安检 | 补 `target_description` + 危险词检查，危险目的地无令牌即拦 |
+| anthropic/gemini 错误面密钥 | 兜底擦除 + 单字符密钥误伤门槛 |
+| 弹窗自动点击扫描缺口 | 确定/同意/是 入确认词表；恢复出厂/重置系统 入不可逆词表——「OK 恢复出厂设置」不再被判 benign 自主点击 |
+
+### 正确性与性能
+
+| 修复 | 战果 |
+| --- | --- |
+| failureMemory RRF 过滤恒真 | 无关失败记忆不再污染召回 |
+| 潜意识 pHash 配错帧 | 既视感误压根除（scenePhash 记 victim 自己的指纹） |
+| actionVerifier 退化指纹假阳性 | 全零/长度不等指纹不再虚报"页面变化"焚毁审批令牌 |
+| doctorChannel 死代码复活 | 同链回执去重从未生效——T-3 断言升级为活实现 |
+| journal.reset 残留 taskDescription | 显著度毒化根除 + 目录保证一次化 |
+| BM25 O(N²)→O(N)；policyEngine 分词 WeakMap 缓存 | df 子串匹配收敛为 token 精确匹配；closedloop 基准行为零漂移 |
+| OCR 负缓存覆盖 legacy；ncd lzCount 输入闸 | 不再为注定失败的识别付整帧截屏；O(n³) 上界封顶 |
+
+### 工程治理
+
+- 卸载 disposer 补四件单例归零（SPRT/振荡环/元素跟踪/焦点）；进化引擎 reset + 环形 200 + history 副本；goalState 2000 字符闸；counterfactual 权重夹取
+- `start_complex_task` 失败报告尾附 `autonomous_run` 转轨建议（双轨互通）；serviceManager 探活升级——子进程早退 + 包体 pid 校验，端口占坑者 142ms 现形而非 8s 假等（Python `/health` 增 pid 字段）
+- organCensus 去装饰化：4 件真自检 + 29 件如实标 static，hedge-actor 描述纠偏为 EMA；vlmMeter 计量接线（`configureVlm` 缺省挂表，观测闭环合拢）；自主宪法 `effectiveRiskTier` 回写轨迹（审计可见宪法升级）；openai maxTokens 1024→2048 契约对齐；LM Studio/vLLM 探针不再错发 gpt-4o-mini；英文区补译五纪元 + 7 工具 + 云脑与自主配置段（README 877→1079 行）
+
+**审计否决（诚实）**：`Object.freeze(system)` 否决（杀死测试注入缝）；器官 API"死导出"清理否决（是交付面非死码）；telemetry 池化 GPD 分治缓议（形状被锁 + A² 自疑已在）。审判数字：epochDelta 四族 35 测试 0 败（safety 10 / perimeter 10 / infra 7 / 感知记忆 8）+ vlm 家族 250→258（+8）+ autonomy 171→189（含 bench 7，+18）≈ 净增 61；实测全套 941 测试 0 败（14 skipped 为平台性跳过）；typecheck 0 错。
+
+## 纪元 Σ：全军升维
+
+Δ 是修缺陷磨利；Σ 的立意升一级——**给每个模块家族升一件能力**。七件升维全部增量式落地，缺省字节等同（无 display 参数、无新配置时与 Δ 终态逐字节一致）。
+
+| 升维 | 机制 | 价值 |
+| --- | --- | --- |
+| **Σ-1 云脑合议庭**（`src/vlm/providers/ensemble.ts`） | 多平台视觉模型并席作答：`normalizedLevenshtein` ≥0.7 并查集聚类 ⇒ unanimous/majority/split 三级裁决；判决多数票（平票 uncertain、`dissents` 点名少数派）；元素多源折叠喂真 `arbitrateElements`；`createEnsembleCourt` 从 registry/env 铸庭 | 单颗脑是一家之言，庭是多脑互相作证——幻觉/方言/坐标漂移须骗过整庭才能成为答案 |
+| **Σ-2 自主训练营**（`src/autonomy/gym.ts`） | mulberry32 确定性任务生成 + 四世界（wizard 向导 / popup-maze 弹窗迷宫 / scroll-hunt 滚动狩猎 / danger-gate 危险门）+ sharp 合成帧 + 全注入闭环——真实策略/宪法/进化器官离线重放 | 自主环离线自我进化（跑一轮聪明一轮），零网络、零真钟、零真睡 |
+| **Σ-3 断点续跑**（`pilotStore.ts` + `autonomy_resume`） | JSONL 追加式运行档案（begin/step/finish 三型事件行、重载重放、磁盘故障降级内存）；`autonomous_run` 锚点携 `resume_token`；判据回放——已 met 不重核 | 中断的自主任务凭 token 续跑；`autonomyTracePath` 配置后跨进程存活 |
+| **Σ-4 计划自愈**（`orchestrator.ts`） | 子任务失败不再立即 fail-fast——带失败上下文重规划一次（闭包守卫只愈一次），新计划整体接管剩余队列（id 续编防撞号），失败行改判 `[RECOVERED]` 留痕；无 chat / 已愈过 / 空计划 / 环形 ⇒ 原 fail-fast 逐字不变 | 长链任务一次局部失败不再全盘报废；自愈不可能时旧语义原样 |
+| **Σ-5 多显示器感知** | `display` 参数全链贯通（screen.py / routes.py / adapter / physicalBackend / takeScreenshot）：全屏虚拟坐标系按显示器矩形最上游裁剪；顺手挖出并修复 `/displays` 从未真正工作的潜伏 bug（ctypes 无 MONITORINFO 致枚举恒空——手写 MONITORINFOW 结构体）与 DPI 逻辑/物理像素错位（包围盒比例映射） | 副屏可截可点，锚点携带目标屏 origin/resolution；缺省无 display 字节等同 |
+| **Σ-6 HMAC 质询应答式身份证明**（serviceManager + routes.py） | 探活发随机 nonce，服务用共享密钥 HMAC-SHA256 回签，`timingSafeEqual` 验签（回签不泄密钥）；旧服务回退 pid 等值 | 根治 Δ 留案的启动器别名 pid 盲区：异 pid+正确回签 = healthy；错回签快报 `port_squatted`，不再误报也不傻等 |
+| **Σ-7 遥测仪表盘**（`metricsDashboard.ts` + hooks.ts 打点） | `metrics_dashboard(section?)` 四分区文本仪表盘（≤80 列等宽对齐）：工具延迟分位 / 云脑用量 / 自主战绩 / 守卫拦截计数；守卫 deny 分支喂 `telemetry.note` 激活计数 | 全系统健康折叠为一张表——纯只读、零配置依赖、恒挂载 |
+
+训练营战绩（`test/autonomy.gym.test.ts`）：wizard 3 步达成；popup-maze 弹窗优先律先 dismiss 多付一步仍达成；scroll-hunt 死链两连后触发策略切换律（轨迹含 scroll）；danger-gate 点击账本只有「稍后提醒」——宪法硬法之下「立即支付」绝不被点；四轮全成 ⇒ 蒸馏 4 技能、click 权重 1.0→1.4。
+
+### 使用方法
+
+```yaml
+config:
+  autonomyTracePath: 'C:/dsh/autonomy-trace.jsonl'   # Σ-3：非空 ⇒ 运行档案落盘，resume token 跨进程存活（缺省空 = 纯内存，行为不变）
+```
+
+- **合议庭（Σ-1）**：编程面铸庭（经 providers 桶导出，密钥走各平台 env）——`createEnsembleCourt({ provider: 'openai', extraProviders: ['anthropic', 'gemini'] })`；问询面 `askText / askVerdict / askElements`，`fetchImpl` 可注入
+- **训练营（Σ-2）**：`new AutonomyGym({ seed: 4242 }).train(4)`——四世界各一轮；同 seed 两次 train 逐字段一致
+- **续跑（Σ-3）**：`autonomous_run` 非达成终局锚点携带 `resume_token`（如 `AUTO-1a2b3c4d`）⇒ `autonomy_resume({ token })` 判据回放后续跑；已 done 的 token 诚实拒绝
+- **跨屏（Σ-5）**：`take_screenshot({ display: 1 })`——0 起索引，锚点携带 `display` 与目标屏 `active_display`（origin/resolution）；不带参数 = 主屏现状，字节不变
+
+审判数字：纪元 Σ 新增 63 测试（vlm.providers.ensemble 16 / autonomy.gym 8 / epochSigma.plan 7 / epochSigma.resume 7 / epochSigma.identity 11 / epochSigma.display 9（真 FastAPI 端到端 + TS 纯逻辑）/ epochSigma.dashboard 5）；新工具 `autonomy_resume`、`metrics_dashboard` 与 `take_screenshot` 的 `display` 参数；新配置 `autonomyTracePath`。
+
+## 纪元 Θ：内核进化
+
+技能库早有系谱与灭绝剪枝（Q-5），数学内核却仍是全库写死的字面量——容差、门限、置信线散落在器官深处。本纪元给内核同等待遇：**约 50 个数学内核普查在册，首批 18 键生产接线**（`registerProductionKernels` 实测清单）——带血统、带证据门、带护栏与回滚；训练营里用 ground truth 离线进化，实验室与生产隔离、晋升须显式（`src/kernel/`）。
+
+四模块（`test/kernel.*.test.ts` + `test/epochTheta.wiring.test.ts` 逐件执法）：
+
+| 模块 | 机制 | 解决的问题 |
+| --- | --- | --- |
+| **Θ-1 注册表与证据账本**（`registry.ts`） | `KernelParamSpec{key,organ,default,min,max}` 幂等注册 + bounds 夹取（区间外不存在状态）+ drift 百分比 + snapshot/restore + **promoteFrom 实验室→生产晋升**（generation+1、evidence 继承、拷贝非移动）；EvidenceLedger 每 key 滑窗 200；getOrDefault 未注册回退 | 内核阈值有了唯一权威源与可行区间；未注册 ⇒ fallback 原样回声字面量——生产缺省零行为变化的关键缝 |
+| **Θ-2 在线校准器与参数血统**（`calibrator.ts`/`lineage.ts`） | optimalThreshold 网格扫描（样本 <8 诚实 null，致敬 calibration.ts 下限律）；四护栏（minEvidence 30 / maxStepPct 10% 值域 / rollbackDrop 0.05 / minPostEvidence 20）；回归守卫自动回滚上代；血统 promote/extinct（至少留 1 条、fitness 冠军例外存活——skillLibrary 灭绝剪枝的血统直译）/fitnessTrend | 进化可回滚、可审计、可复现——一次一小步，坏血统自动出局 |
+| **Θ-3 训练营实验室进化**（`gym.ts`） | perceive 闭包 ground-truth 对账：dhash 判决 vs 世界 stateKey 真相、元素融合 vs 控件真相、策略选择 vs 世界立法的正确下一步；实验室自建独立注册表**绝不触碰生产单例**；每轮收官 calibrator.tick()；GymReport.kernel 摘要 | 内核进化有免费且无穷的监督信号——虚拟世界自带对账单，真实世界拿不到 |
+| **Θ-4 生产接线** | 18 键 / 十读点 getOrDefault 化，七消费文件（arbitration 双参数+文本相似度 / worldSnapshot 容差+仲裁传参 / policyEngine 置信与并列阈 / uncertainty 校准与三档 / OCR 词置信截断 / NMS IoU / skillLibrary 场景门与加成）——**未注册场景行为逐字节等同**；启动幂等注册（值全默认 ⇒ drift 空）；仪表盘第五分区 kernel | 注册表现值 = 字面量 = fallback——入册只是为 set/promoteFrom 开合法通道；漂移可在仪表盘观测 |
+
+### 设计宪法
+
+- **实验室-生产隔离**：进化绝不泄漏——晋升唯一通道是显式 `kernelRegistry.promoteFrom(gym.lab.registry)`。
+- **证据门**：证据不满 30 观测不动参数——不满月不换血，字面量继续服役。
+- **步长护栏 + 回归回滚**：单次 ≤10% 值域，一次一小步；成功率跌出上代 fitness −0.05 自动回滚上代值。
+- **缺省零行为变化**：不注入内核时训练营轨迹与纪元 Σ 逐字段一致；生产入册值全默认 ⇒ drift 空。
+
+### 使用方法
+
+- **离线进化**：`new AutonomyGym({ seed }).train()` 训练 → `gym.lab` 检视台账与血统 → `kernelRegistry.promoteFrom(gym.lab.registry)` 晋升。
+- **手动调参**：`kernelRegistry.set(key, value)`（越界自动夹取，回执带 clampedTo）。
+- **观察漂移**：`metrics_dashboard('kernel')`——每键一行（key/器官/现值/缺省/漂移%/证据/代际）。
+
+审判数字：纪元 Θ 新增 49 测试（kernel.registry 16 / kernel.calibrator 23 含血统 7 / kernel.gym 5 / epochTheta.wiring 5）0 败；无新工具、无新配置（入册不设开关，恒入册、值全默认）。
+
+## 纪元 Ξ：内核进化·全域潮
+
+Θ 立了进化基建并接线首批 18 键；Ξ 把普查在册的内核尽数纳入进化版图，并补齐生产闭环——三路并进（`src/kernel/`）。
+
+| 路线 | 机制 | 价值 |
+| --- | --- | --- |
+| **二梯队全接线（Ξ-D）** | 注册表 18→55 键（第二梯队 37 键，覆盖判决 / 验证 / 记忆 / 治理 / vlm 五族 12 文件读点；另宪法两键生产册入册）。诚实否决两处立档在案：BM25 k1/b（模块立法「值即设计非旋钮」——排名函数的形状参数不降格为旋钮）、policyEngine 七处效用基线（只在日志里排序次序，进化价值低） | 普查在册内核全部获得可行区间、器官归属与晋升通道；结构序守护双保险（specs 区间不交叠 + 消费处 Math.min/max 兜序——施密特迟滞带、语义 ≥ 几何证据律不被旋钮拆毁） |
+| **生产自监督闭环（Ξ-B）** | 免费证据恒开：判据匹配点击的成败即 `policy.matchConfident` 对账（纯内存记账，零额外等待）；慢真值门控：`kernelEvolutionEnabled` 开时 click/type 走 settle-verify 稳定帧作真值，校准 `world.hammingTolerance`——快路径判决用慢而准的路径对账 | 生产环境白得证据流：不进化也记账，开闸即有粮；关闸零额外 await（连微任务都不添，性能铁律）；观察式旁路绝不改写 outcome / 轨迹 / 锚点 |
+| **进化成果持久化与编排（Ξ-A）** | `KernelStore` tmp+rename 原子存档（params / evidence / generations 三账，checkpoint 同律）+ `kernelStatePath` 配置 + `EvolutionConductor` 节流 tick（5 分钟窗——高频用户消息只记账不进化）+ session 边界钩子（入册后存档复载 / 卸载段 checkpoint 后落盘） | 进化成果跨会话存活；参数换血需要窗后新证据（窗是进化稳定器，不是性能补丁）；缺省全关零行为变化 |
+
+### 多代进化收敛证明（本纪元王牌）
+
+容差故意设错 8（已知良好值 3），`trainGenerations(10, 4)` 实测几何收敛：
+
+```
+8 → 5.9 → 4.075 → 3.5375 → 3.2687 → 3.1344 → 3.0672 → 3.0336 → 3.0168 → 3.0084 → 3.0042
+```
+
+末值 3.004，与良好值 3 偏差 0.14%；6 代即到 3.067（2.24%）。血统 16 代可溯、方向 10/10 正确、单步恒 ≤ 护栏 0.7（单步 ≤10% 值域的 Θ-2 宪法全程无违）。
+
+### 使用方法
+
+```yaml
+config:
+  kernelStatePath: 'C:/dsh/kernel-state.json'  # 进化成果存档（缺省 '' = 纯内存）
+  kernelEvolutionEnabled: true                 # 生产进化总开关（缺省 false = 只记账不进化）
+```
+
+实验室多代进化：`new AutonomyGym({ seed }).trainGenerations(10, 4)` → 检视 `report.trends`（血统趋势）/ `report.converged`（已知良好值收敛探针）→ `kernelRegistry.promoteFrom(gym.lab.registry)` 显式晋升。
+
+审判数字：纪元 Ξ 新增 33 测试（kernel.store 10 / kernel.conductor 7 / kernel.selfverify 5 / kernel.generations 6 / epochXi.wiring 5）0 败；新配置 `kernelStatePath`（''）/ `kernelEvolutionEnabled`（false）；新 API `AutonomyGym.trainGenerations(gens, rounds)` / `EvolutionConductor.maybeTick` / `KernelStore.save·load·applyTo`；无新工具。
+
+## 纪元 Λ：开箱即亮
+
+Ψ 让十三颗脑可选，但新装用户一颗未配：云脑全黑，`ask_screen` 恒降级。本纪元立意**装上即亮**——五级解析链按序点亮第一盏能亮的灯（`src/vlm/connection.ts` / `autoAdopt.ts` / `onboarding.ts`）：
+
+| 级 | 路径 | 机制 |
+| --- | --- | --- |
+| ① | 显式 config | `vlmApiKey` / `vlmProvider`（Ω/Ψ 既有路径，逐字节不变） |
+| ② | 连接存档 | `~/.dsh/vlm-connection.json`（`DSH_VLM_CONNECTION` 可覆写；tmp+rename 原子写 + 防御性消毒读 + chmod 0600 尽力）——重启 `apply()` 读档自动续连：用户切过什么，重启还是什么 |
+| ③ | env 自动识别 | 任一平台密钥在 env 即点亮（Ψ 既有） |
+| ④ | 本地自动接管 | 轻叩 Ollama 11434 / LM Studio 1234 / vLLM 8000 的 `/models`（串行、无鉴权头、单候选 1.5s 止损），视觉模型名优先（vl/vision/llava/minicpm/moondream/qwen-vl 命名家族）——免密钥零配置即用，`via:'auto-adopt'` 存档 |
+| ⑤ | 向导弹出 | `startOnboarding` 环回 HTTP 服务 + `system.openUrl` 开浏览器；fire-and-forget 绝不阻塞装载，失败静默 |
+
+**向导页**（onboarding.ts 内嵌单文件 HTML，离线无 CDN，中文 UI）：13 平台卡片单选（环境就绪绿点、本地免钥徽标）、密钥输入（本地平台提示免钥）、测试连接（`probeProvider` 探活延迟）、获取模型列表（`discoverModels` 下拉）、保存并启用（ConnectionStore 存档 + `onConnect` 热应用 + **迟到注册**——连接成功后补注册 `ask_screen` 工具与提示词段，宿主允许）、断开连接。**安全律**：只绑 127.0.0.1（非回环入参强制归环回）、密钥只回显 `maskKey` 打码形态、请求体 32KB 上限（413）、端口占用 +1..+8 回退（18432..18440）、30 分钟空闲自动关。
+
+**两工具恒注册**（无模型时恰是最需要的时刻）：`switch_vision_model(platform, api_key?, base_url?, model?)`——探活通过才切换（1×1 白图先探后切，失败零落档）、存档 `via:'tool'`、`resetGlmClient` 重铸单例（下游十器官每次现取 `getGlmClient` ⇒ 全库即时生效；热应用失败如实注明「存档已写未生效」）；`vlm_wizard()`——随时重开向导（模块级服务单例，地址跨调用稳定）。`ask_screen` 无模型降级的 `next_step` 现在指路 `vlm_wizard`。
+
+### 使用方法
+
+三种点亮方式沿用纪元 Ψ（env 自动识别 / 显式 `vlmProvider` / 备选链），本纪元补**第四种——什么都不配**：本机跑着 Ollama/LM Studio/vLLM 即被自动接管，开箱即亮；全无则向导页自动弹出，用户贴一次密钥两分钟内即亮。④⑤ 两级各设开关：`vlmAutoAdoptLocal: false` / `vlmOnboardingEnabled: false`。
+
+审判数字：纪元 Λ 新增 46 测试（vlm.connection 16 / vlm.onboarding 15 / vlm.tools 7 / epochLambda.onboarding 8）0 败；新工具 `switch_vision_model` / `vlm_wizard`；新配置 `vlmAutoAdoptLocal`（true）/ `vlmOnboardingEnabled`（true）/ `vlmOnboardingPort`（18432）。
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
 | --- | --- | --- |
-| `take_screenshot` | 截屏 + SoM 叠加 + 压缩 + 滑动窗口 + 弹窗传感 + 变化门控 | `region`, `force?` |
+| `take_screenshot` | 截屏 + SoM 叠加 + 压缩 + 滑动窗口 + 弹窗传感 + 变化门控 + 多屏感知（纪元 Σ-5） | `region`, `force?`, `display?` |
 | `click_mouse` | 归一化坐标点击，内置 dHash 效果验证 + 自动记忆 + Z-2 交互性闸门（静态正文上的左键点击被结构化拒绝） | `x`, `y`, `button`, `confidence?`, `target_description?`, `allow_text_click?` |
 | `type_text` | 焦点处输入文本，支持跨平台一键清空 | `text`, `clearFirst` |
 | `scroll_page` | 四方向滚动 | `direction`, `amount` |
@@ -310,8 +581,15 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 | `click_element` | 按 ID 点击（需开启元素模式，短时缓存防 ID 漂移） | `id` |
 | `extract_ui_vision` | 本地视觉模型精确提取（可选） | 无 |
 | `start_complex_task` | Planner-Actor 编排引擎 | `userRequest` |
+| `autonomous_run` | 自主智能环元工具（纪元 Φ，需 `autonomyEnabled: true`）：识别→判断→宪法→执行→验证→进化一次调用闭环 | `goal`, `success_criteria?`, `max_steps?`, `time_budget_sec?` |
+| `autonomy_resume` | 断点续跑（纪元 Σ-3，需 `autonomyEnabled: true`）：凭 `resume_token` 重载运行档案、判据回放（已 met 不重核）后驱动同一自主环续跑 | `token` |
 | `zoom_inspect` | 区域裁剪放大 + 细网格，二阶段精定位 | `x`, `y`, `half_size?` |
 | `find_text` / `read_text` | 文字→精确坐标（内置交互性探针判决）/ 区域文字读取（需 `enableOcr`；URL 自动浮出） | `keyword` / `x?`,`y?`,`half_size?` |
+| `ask_screen` | 看屏问答：截干净屏 + 自然语言问题 → GLM 视觉模型作答（需 `vlmApiKey` / `GLM_API_KEY`；只读不操作） | `question` |
+| `vlm_platforms` | 平台花名册与体检（纪元 Ψ）：13 平台配置状态 + 当前生效平台 + 备选池健康；`probe:true` 并行体检（1x1 白图，绝不发送真实屏幕内容） | `probe?` |
+| `switch_vision_model` | 手动换脑（纪元 Λ）：1×1 白图探活通过才切换 → 存档（via:'tool'）→ 热应用重铸单例（ask_screen 等云脑器官即时跟脑；探活失败零落档） | `platform`, `api_key?`, `base_url?`, `model?` |
+| `vlm_wizard` | 打开浏览器连接向导（纪元 Λ）：无 Key 用户的第 0 步——回环向导页选平台/贴密钥/试连/保存即亮（via:'wizard'，存档+热应用） | 无 |
+| `metrics_dashboard` | 五分区遥测仪表盘（纪元 Σ-7 + Θ-4）：工具延迟分位 / 云脑用量 / 自主战绩 / 守卫拦截计数 / 内核参数台账，≤80 列文本表 + 机读 health 锚点 | `section?` |
 | `probe_interactivity` | 三通道交互性判决：UIA 点查询 → 悬停光标形态 → 悬停重绘 | `x`, `y` |
 | `open_url` | URL 安检（scheme 白名单 http/https + 噪声提取）→ 系统默认浏览器跳转 | `url`（裸 URL 或含 URL 文本）, `reasoning?` |
 | `diff_view` | 最近两截图的视觉差分：红框变化图 + 区域坐标清单 | 无 |
@@ -539,6 +817,202 @@ World-class CUA consensus (e.g. Operator): **credential input belongs to the hum
 1. **Sensitive-focus marking**: `click_mouse`'s `target_description` hits a risk keyword (password / verification code / 2FA / OTP / API key…, configurable) ⇒ `focusTracker` marks the focus sensitive; the anchor carries `sensitive_focus` and warns
 2. **Input interception**: `type_text` into a sensitive focus (or text that itself hits risk semantics) ⇒ returns `ACTION_REQUIRED`, pausing for the human to type personally; **the pending content is never echoed** (`[REDACTED]`)
 
+## Epoch Ψ (Psi): One Brain, Every Platform
+
+The cloud cortex (Epoch Ω) recognized exactly one vendor: Zhipu. This epoch's founding intent is to **bind to no one** — one unified abstraction swallows the vision models of every platform: whoever's key you hold is the brain you use, and when the primary falls, a backup steps up. Seven modules (`src/vlm/providers/`, redistributed through the `providers/index.ts` barrel; each enforced item-by-item by `test/vlm.providers.*.test.ts`):
+
+| Module | Mechanism | Platforms covered |
+| --- | --- | --- |
+| **Ψ-1 Unified contract `types`** | VisionProvider interface + the key-hygiene law `sanitizeError` (keys never appear on error surfaces or in metering) + full-jitter retry `fetchWithRetry` (retries only 429/5xx/network errors, never timeouts) | All (the protocol base; a leaf module with zero dependencies) |
+| **Ψ-2 OpenAI-compatible adapter `openai`** | `/chat/completions` + Bearer auth + `response_format` JSON mode; local services connect keyless | OpenAI / Zhipu / Qwen-compatible mode / Kimi / Doubao Ark / Grok / SiliconFlow / OpenRouter / Ollama / vLLM / LM Studio (one adapter devours the family) |
+| **Ψ-3 Anthropic adapter `anthropic`** | `/v1/messages` + `x-api-key` + `anthropic-version` headers + three-field image source; jsonMode simulated via prompt | Anthropic Claude |
+| **Ψ-4 Gemini adapter `gemini`** | `models/:generateContent` + the key travels in the `x-goog-api-key` header, never the URL + `inline_data` + `responseMimeType` | Google Gemini |
+| **Ψ-5 Platform registry `registry`** | 13 platform presets + env auto-detection + baseUrl recognition + explicit/baseurl/env four-way resolution + synthesized custom presets | glm / openai / anthropic / gemini / qwen / moonshot / doubao / xai / siliconflow / openrouter / ollama / lmstudio / vllm |
+| **Ψ-6 Failover pool `failover`** | In-order standbys + reuses `VlmApiBreaker` (tripped lines are skipped) + a ring buffer of switch decisions (latest 10) | Any multi-brain battle sequence |
+| **Ψ-7 Probe `probe`** | 1×1 white-image 15s health check + `visionGuessed` verdict + model-list discovery over the three protocols + all-platform parallel checkups | All 13 platforms |
+
+### The compatibility layer's vital points (all five held)
+
+`GlmClient` keeps the same class name and every export; the constructor delegates to the matching adapter by platform, and the **default glm path stays byte-for-byte unchanged** (error prefixes / meter kind / GLM env-var semantics as-is). `getGlmClient` default resolution is enhanced — GLM env first, otherwise env auto-detection of the other platforms; `isGlmConfigured` is upgraded to mean "any cloud brain available" (still mints no singleton). The entire system (`ask_screen` / grounding / semantic-OCR fallback / verdict / consultation / autonomy policy advice) lights up automatically with any platform's key — zero changes on the consumer side. Tests stay fully offline: `fetchImpl` injection + env save/restore.
+
+### Usage
+
+Any one of three ways lights it up:
+
+```yaml
+# Way 1: single-platform env (zero config) — any platform key present in env is auto-detected and lights up the whole system
+#   GLM_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / DASHSCOPE_API_KEY …
+config:
+  # Way 2: vlmProvider names the platform explicitly (empty = auto-detect)
+  vlmProvider: 'openai'      # or anthropic / gemini / qwen / moonshot / doubao / xai /
+                             #    siliconflow / openrouter / ollama / lmstudio / vllm
+  # Way 3: add a fallback chain — when the primary falls, backups step up (breaker skips lines in order)
+  vlmFallbackProviders: 'anthropic,gemini'   # CSV fallback chain
+```
+
+New tool `vlm_platforms({ probe: true })`: lists the configuration status and health of the 13 platforms (a 1×1 white-image parallel checkup with a 15s timeout — real screen content is never sent), plus the currently active platform and the fallback provider pool's health. Judgment numbers: the vlm family — 250 tests, 0 failures (Ω's original 127 + providers 115 + universal 8; providers per-file 14/19/24/21/8/11/18); typecheck 0 errors; smoke — 163 modules.
+
+## Epoch Δ (Delta): The Global Lift
+
+With the organ era complete, this epoch forges **no new organ**: five audit agents swept the entire repository and produced 52 evidence-backed improvement points, landed in parallel by cluster — every existing organ, sharpened.
+
+Six security fixes headline the campaign: replay/skill execution bypassing the gate (a shared `actionGate` now runs ahead of `replayOne` — dangerous steps without a token are intercepted, `replay_actions`/`run_skill` fail fast); the approval-token double-spend window (an in-flight reservation in `beginAttempt` — a concurrent same-token click dispatches exactly once); asymmetric full-width folding in riskGate (normalization iterated to a fixed point — ｓｕｂｍｉｔ confusable variants no longer escape); dragMouse's zero screening (target description + danger-word checks added); key-scrub fallback on the anthropic/gemini error surfaces; and the popup auto-click scan gap (确定/同意/是 join the confirmation vocabulary; 恢复出厂/重置系统 join the irreversible one — "OK, restore factory settings" is no longer judged benign).
+
+Correctness and performance: the always-true RRF filter in failureMemory, the mis-framed subconscious pHash, actionVerifier's degenerate-fingerprint false positives (which burned approval tokens), doctorChannel's dead same-chain receipt coalescing revived (the T-3 assertion upgraded to a live implementation), journal.reset's taskDescription residue, openai maxTokens 1024→2048, and the LM Studio/vLLM probe no longer guessing gpt-4o-mini; BM25 O(N²)→O(N), a policyEngine tokenization WeakMap cache (zero drift on the closedloop bench), OCR negative caching over the legacy path, journal mkdir made once, and an input gate capping ncd lzCount at O(n³). Governance: four more singleton reset seams in the unload disposer, dual-track rerouting advice from `start_complex_task` to `autonomous_run`, pid-verified service liveness (a port squatter surfaces in 142ms instead of an 8s false wait; `/health` gains a pid field), organCensus de-decorated (4 real self-checks + 29 honestly static), vlmMeter wired into `configureVlm`, the constitution's `effectiveRiskTier` written back into trajectories. Honest rejections: `Object.freeze(system)` (would kill the test-injection seam); organ-API "dead export" cleanup (a delivery surface, not dead code); pooled-telemetry GPD divide-and-conquer (deferred). Judgment numbers: epochDelta four families — 35 tests, 0 failures (safety 10 / perimeter 10 / infra 7 / perception-memory 8); vlm 250→258 (+8); autonomy 171→189 (bench 7 included, +18) ≈ 61 net-new; full suite — 941 tests, 0 failures (14 platform skips); typecheck 0 errors.
+
+## Epoch Σ (Sigma): The Capability Lift
+
+Delta sharpened the existing organs; Sigma raises every module family one capability — seven lifts, all incremental, all byte-identical by default (no `display` argument and no new config ⇒ the exact Delta end-state). **Σ-1 ensemble court** (`src/vlm/providers/ensemble.ts`): multiple platform vision models answer in parallel; normalizedLevenshtein ≥0.7 union-find clustering issues unanimous/majority/split verdicts, judgments go by majority vote (ties → uncertain, `dissents` names the minority), and element lists from several brains fold through the real `arbitrateElements`. **Σ-2 autonomy gym** (`src/autonomy/gym.ts`): mulberry32 deterministic task generation + four worlds (wizard / popup-maze / scroll-hunt / danger-gate) + sharp-synthesized frames, all injected — the autonomy loop evolves itself offline (wizard achieved in 3 steps; popup-first law pays one extra step and still succeeds; scroll-hunt triggers the strategy-switch law; the danger-gate click ledger proves "Pay now" is never clicked under the constitution's hard law). **Σ-3 resume**: append-only JSONL pilot records (begin/step/finish event lines replayed on load, disk failure degrades to memory) + a `resume_token` anchor + `autonomy_resume(token)` replaying already-met criteria without re-verification; new config `autonomyTracePath`. **Σ-4 plan self-healing** (`orchestrator.ts`): a failed subtask no longer fails fast immediately — one contextual replan (closure guard: healed at most once), the failed line re-marked `[RECOVERED]` with the failure text preserved; no chat / already healed / empty or cyclic plan ⇒ the original fail-fast, verbatim. **Σ-5 multi-display awareness**: the `display` parameter runs the whole chain (screen.py / routes.py / adapter / physicalBackend / take_screenshot), cropping by monitor rectangle at the very source in the full-screen virtual coordinate system — and along the way unearthed and fixed a latent bug where `/displays` had never actually worked (ctypes lacks a MONITORINFO struct, so enumeration was always empty — hand-written MONITORINFOW) plus a DPI logical/physical pixel mismatch (bounding-box proportional mapping). **Σ-6 HMAC challenge-response identity**: the liveness probe sends a random nonce; the service signs it HMAC-SHA256 with the shared key; `timingSafeEqual` verifies — curing Delta's leftover launcher-alias pid blind spot (foreign pid + correct proof = healthy; wrong proof fails fast as `port_squatted`; old services fall back to pid equality). **Σ-7 telemetry dashboard**: `metrics_dashboard(section?)` renders a four-pane ≤80-column text dashboard (tool-latency percentiles / cloud-brain usage / autonomy track record / guard-interception counts), with the guard deny branch feeding `telemetry.note`. Judgment numbers: 63 Sigma tests (ensemble 16 / gym 8 / plan 7 / resume 7 / identity 11 / display 9 — real FastAPI end-to-end included / dashboard 5); new tools `autonomy_resume` and `metrics_dashboard`, plus `take_screenshot`'s `display` parameter; new config `autonomyTracePath`.
+
+## Epoch Θ (Theta): Kernel Evolution
+
+The skill library long had phylogeny and extinction pruning; the mathematical kernels deserved the same treatment. Theta turns the repo's hard-coded thresholds — roughly 50 surveyed, the first **18 keys wired into production** (the measured `registerProductionKernels` roster) — into evolvable parameters with lineage, evidence gates, guardrails, and rollback (`src/kernel/`). **Θ-1 registry & evidence ledger** (`registry.ts`): `KernelParamSpec{key,organ,default,min,max}` with idempotent registration and bounds clamping (no state outside the interval), drift percent, snapshot/restore, `promoteFrom` lab→production promotion (generation+1, evidence inherited, copy-not-move), a per-key 200-entry sliding-window ledger, and `getOrDefault` echoing the literal fallback for unregistered keys — the seam that keeps the default byte-identical. **Θ-2 calibrator & lineage** (`calibrator.ts`/`lineage.ts`): a grid-scan `optimalThreshold` (honest null under 8 samples, in homage to calibration.ts); four guardrails (minEvidence 30 / maxStep 10% of range / rollbackDrop 0.05 / minPostEvidence 20); a regression guard that rolls back to the previous generation; lineage promote/extinct (never fewer than one entry, the fitness champion survives) — the blood-line of skillLibrary's extinction pruning. **Θ-3 gym lab evolution** (`gym.ts`): the perceive closure reconciles kernel verdicts against the virtual world's ground truth (dhash verdict vs the world's stateKey truth; element fusion vs the control truth; policy choice vs the world's legislated correct next step) into a lab-owned registry that never touches the production singleton, with `calibrator.tick()` closing each round and a `GymReport.kernel` summary. **Θ-4 production wiring**: ten read points across seven consumer files go through `getOrDefault` (arbitration pair + text similarity / snapshot tolerance + arbitration pass-through / policy confidence & tie gap / uncertainty calibration & three tiers / OCR word-confidence floor / NMS IoU / skill scene gate & bonus) — unregistered keys behave byte-identically; startup registration is idempotent (all defaults ⇒ empty drift); the dashboard grows a fifth `kernel` pane. Usage: evolve offline in the gym, inspect `gym.lab`, promote explicitly via `kernelRegistry.promoteFrom(gym.lab.registry)`; tune manually via `kernelRegistry.set` (auto-clamped); watch drift via `metrics_dashboard('kernel')`. Judgment numbers: 49 Theta tests, 0 failures (registry 16 / calibrator 23, lineage 7 included / gym 5 / wiring 5); no new tools, no new config.
+
+## Epoch Ξ (Xi): Kernel Evolution — Full Sweep
+
+Theta built the evolution infrastructure and wired the first 18 keys; Xi sweeps every surveyed kernel into the evolution map and closes the production loop — three routes in parallel (`src/kernel/`). **Full second-tier wiring**: the registry grows 18→55 keys (37 new across the verdict / verification / memory / governance / vlm families, 12 consumer files), with two honest vetoes on record (BM25 k1/b — "the value is the design, not a knob"; seven policyEngine utility baselines — low evolution value) and structural-order guards held twice (non-overlapping spec intervals plus consumer-side Math.min/max clamping — Schmitt hysteresis and the semantic≥geometric evidence law survive knob-turning). **Production self-supervision**: free evidence always on (every criteria-matched click's outcome reconciles `policy.matchConfident` at zero extra cost); slow-truth reconciliation gated by `kernelEvolutionEnabled` — settle-verify stable frames serve as ground truth to calibrate `world.hammingTolerance`, the fast path calibrated by the slow path, with zero extra awaits when the gate is closed. **Persistence & orchestration**: `KernelStore` atomic tmp+rename archives (params/evidence/generations) behind `kernelStatePath`, an `EvolutionConductor` throttling calibration ticks to a 5-minute window on user-message hooks, and load-on-start / save-on-unload session seams — all off by default, zero behavior change. The epoch's trump card, the **multi-generation convergence proof**: tolerance deliberately mis-set to 8, `trainGenerations(10, 4)` converges geometrically 8→3.004 (0.14% off the known-good 3; 3.067 after 6 generations), lineage traceable across 16 generations, direction right 10/10, every single step within the 0.7 guardrail. New configs `kernelStatePath` ('') / `kernelEvolutionEnabled` (false); new APIs `AutonomyGym.trainGenerations(gens, rounds)` / `EvolutionConductor.maybeTick` / `KernelStore.save·load·applyTo`; the constitution pair (maxNoEffect/maxSteps) joins the production roster and evolves in the gym lab. Judgment numbers: 33 Xi tests, 0 failures (store 10 / conductor 7 / selfverify 5 / generations 6 / wiring 5).
+
+## Epoch Λ (Lambda): Zero-Config Onboarding
+
+Psi made thirteen brains selectable; Lambda makes the fresh install glow — a five-level resolution chain lights the first lamp it can: explicit config > saved connection (`~/.dsh/vlm-connection.json`, `DSH_VLM_CONNECTION` overridable; restart resumes whatever the user last chose) > env auto-detection > **local auto-adopt** (a loopback knock on Ollama 11434 / LM Studio 1234 / vLLM 8000 `/models` — serial, no auth header, 1.5s budget each — picking a vision-named model first: zero keys, zero config, archived `via:'auto-adopt'`) > **wizard popup** (`startOnboarding` loopback HTTP server + `system.openUrl`; fire-and-forget, never blocking plugin load). The wizard is an offline single-file Chinese page: 13 platform cards, key input (local platforms keyless), test-connect probe, model-list discovery, save-and-enable (archive + hot apply + **late registration** of `ask_screen`), disconnect — under the security laws: loopback-only bind, keys echoed only in masked form, 32KB body cap, port fallback +1..+8 from 18432, 30-minute idle auto-shutdown. Two always-registered tools — `switch_vision_model(platform, api_key?, base_url?, model?)` (probe first, persist `via:'tool'`, then re-mint the client hot: every VLM organ re-fetches `getGlmClient`, so the whole stack follows the new brain immediately) and `vlm_wizard()` (reopen the wizard anytime); `ask_screen`'s degraded `next_step` now points to it. New configs `vlmAutoAdoptLocal` (true) / `vlmOnboardingEnabled` (true) / `vlmOnboardingPort` (18432). Judgment numbers: 46 Lambda tests, 0 failures (vlm.connection 16 / vlm.onboarding 15 / vlm.tools 7 / epochLambda.onboarding 8).
+
+## Epoch Φ (Phi): The Autonomy Loop
+
+The local stack could by now "see precisely and click correctly" — but every step was still model-driven. This epoch forges the **four-ring loop**: the machine takes its own world snapshot (perceive), decides its own next step (judge), executes and verifies by itself (execute), and after the run audits itself and evolves its strategy weights (evolve). The precondition of high autonomy is legislation — ten organs + a constitution + runtime adaptation (`src/autonomy/`).
+
+Ten organs (each enforced item-by-item by `test/autonomy.*.test.ts`):
+
+| Organ | Mechanism | Problem solved |
+| --- | --- | --- |
+| **Φ-1 Goal state machine `goalState`** | Seven GoalPhases (planning/acting/verifying/blocked/achieved/failed/aborted), criteria checked item by item, over-step/over-time fuses, invalid specs degrade instead of throwing | "Is the task actually done" is ruled by the criteria ledger, not by the model's say-so |
+| **Φ-2 World snapshot `worldSnapshot`** | VLM+OCR dual sources fused by the `arbitration` mathematical arbiter, three-state interactivity, dhash change gating | Five perception dialects reconciled into one ledger — the decision layer stops cross-checking source by source |
+| **Φ-3 Policy engine `policyEngine`** | A seven-rung deterministic decision ladder: popup first → criteria-keyword matched click → declare → no-effect strategy switch → skill recall → budget escalation → ask_vlm fallback | First-match-wins and fully deterministic; the cloud brain is consulted exactly once — and only under uncertainty (low confidence / ties) |
+| **Φ-4 Autonomous execution loop `autoPilot`** | perceive → decide → constitution check → execute → criteriaEvidence → tick → terminal fuses; time & sleeps fully injected | The loop itself: any dependency exception converges into an error step — the loop never blows up |
+| **Φ-5 Evolution engine `evolutionEngine`** | Outcomes write the five strategy weights ±; failure-signature lessons deduplicated and upgraded; successful short paths distilled into skills (reliability re-verified upward); next-run advice | Smarter with every run: experience survives across rounds |
+| **Φ-6 Scene semantics cache `sceneSemantics`** | The VLM reads the screen to recognize the scene; a dhash-fingerprint LRU cache | "What scene is this" is no longer re-billed to the cloud at every step — the same screen is never asked twice |
+| **Φ-7 Epistemic hub `uncertainty`** | Shannon entropy + weighted-geometric-mean confidence fusion + Beta calibration + a three-tier cost decision table (proceed / ask_vlm / ask_human / abort) | When to proceed, when to ask the cloud, when to ask a human, when to stop — decided by numbers |
+| **Φ-8 Autonomy constitution `autonomyConstitution`** | Six laws: blacklist / tier-max weighting / danger-keyword scan (reusing riskGate's homoglyph normalization — a Cyrillic dеlete still hits) / approval outside the whitelist / the destructive hard law: always approval / deadlock & over-step shutdown | Which actions may run autonomously and which must petition a human — the precondition of high autonomy is legislation |
+| **Φ-9 Counterfactual planner `counterfactual`** | Utility = 0.5×progress + 0.3×information gain − 0.2×risk; repeated actions discounted; ties broken toward higher information gain | Sand-table rehearsal before acting — choose the best, not the first |
+| **Φ-10 Self-auditor `selfAudit`** | Five verdicts (healthy/oscillating/wasteful/reckless/opaque) over four syndromes: oscillation / waste / recklessness / black box; scored from 100 | Look back at your own trajectory after the run — the auditor must first be harmless itself |
+
+### Integration bloodstream
+
+- **Six config fields**: `autonomyEnabled` (default `false` — autonomy only upon the legislator's explicit opt-in) / `autonomyMaxSteps` (default 24; both the loop fuse and the constitution's hard stop derive from this value) / `autonomyTimeBudgetSec` (default 300) / `autonomyAllowTiers` (default `'benign'`; destructive stays always-approval even when listed) / `autonomyVlmWhenUncertain` (default `true`) / `autonomyForbiddenKeywords` (default empty); `buildAutonomyStack` mints the six fields into the closed-loop stack.
+- **New meta tool `autonomous_run`** (`goal, success_criteria?, max_steps?, time_budget_sec?`): one call drives the entire loop to the end of its budget; the anchor carries `phase` / the `criteria` ledger / the self-audit `verdict`/`score` / `lessons` / `next_run_advice` / distilled skills. Default-criteria law: absent criteria, the goal text stands as the sole literal criterion (an OCR-folded substring check).
+- **Constitutional upgrade of `ACTION_REQUIRED` semantics**: approval is the human's prerogative — `approval-required` becomes executable once granted; `constitution-veto` cannot be saved by approval; the dry-run line of defense is inherited for free (guardDryRun at the system layer).
+
+### Design constitution
+
+- **Off by default + constitution first**: `autonomyEnabled: false` is the resting state — autonomy is a permission the legislator grants explicitly; the destructive-always-approval hard law is inalienable, and when the constitution fails, the loop prefers conservative shutdown.
+- **Offline deterministic tests**: time / sleeps / screenshots / OCR / cloud brain all injected (a fake VLM client) — zero networking.
+- **Perception-layer coordinate law**: snapshots live in the captured-image space; execution normalizes by dividing by the snapshot's width and height — the same conversion chain as `click_mouse`.
+
+### Usage
+
+```yaml
+config:
+  autonomyEnabled: true        # the legislator explicitly opts in
+  # autonomyMaxSteps: 24 / autonomyTimeBudgetSec: 300 / autonomyAllowTiers: 'benign'
+  # autonomyVlmWhenUncertain: true / autonomyForbiddenKeywords: ''
+```
+
+Call `autonomous_run({ goal: 'Open System Settings and go to the Bluetooth page', success_criteria: ['Bluetooth'] })`; anchor structure: `{phase, steps, criteria:{met,total}, verdict, score, lessons, next_run_advice, …}`. Judgment numbers: the autonomy family — 164 tests, 0 failures (ten organs 158 + integration 6); typecheck 0 errors; smoke — 154 modules import clean.
+
+## Epoch Ω (Omega): GLM-5.3-Flash Cloud Cortex
+
+The local reflex arc (OCR / fuzzy matching / probes) answers deterministic facts in milliseconds, but **open semantics** — whole-screen understanding, unfamiliar interface shapes, mixed image-text reading, state inference — are the blind spots of a purely local stack. This epoch attaches a cloud brain: the Zhipu GLM-5.3-Flash vision LLM, with ten organs under `src/vlm/` each holding its own duty, arbitrated conservatively against local perception in a dual-brain arrangement.
+
+Ten organs (each enforced item-by-item by `test/vlm.*.test.ts`):
+
+| Organ | Mechanism | Problem solved |
+| --- | --- | --- |
+| **Ω-1 Cloud-brain client `glmClient`** | Zhipu's OpenAI-compatible protocol + full-jitter exponential-backoff retry + JSON fence stripping (injectable fetch) | The reliable transport layer for talking to the cloud brain: decorrelated retry phases; robust extraction of fenced / dialect JSON |
+| **Ω-2 Perception codec `codec`** | 1568 long edge / JPEG 80 / region-of-interest crops + `VlmBudget` task-level image-count and byte quotas + vision-token estimation | Bandwidth etiquette for cloud round trips: overruns are refused before dispatch, not patched after the fact |
+| **Ω-3 SoM prompt engineering `som`** | A VLM-specific Set-of-Mark numbered-box overlay + iron-law prompt families in Chinese (grounding / verdict / ocr / diff) | Writes "absolute pixel coordinates, nothing outside the image, no fabrication" into the model input — cloud-side coordinate hallucination annihilated |
+| **Ω-4 Element detection `grounding`** | `groundElements` + NMS IoU≥0.6 de-redundancy + `clampBbox` in-image clamping | Screenshot in, clickable elements out; cloud output dialects normalized to the repo standard — prefer empty over wrong |
+| **Ω-5 Semantic OCR `vlmOcr`** | `readTextViaVlm` / `findTextViaVlm`, matching under the same law as the local textReader (case/whitespace-insensitive) | Cloud-side reading and finding of text: the cloud sister of local OCR; hits return center pixel coordinates |
+| **Ω-6 Effect verdict `verdict`** | `judgeEffect` compares the before/after image pair → confirmed/refuted/uncertain + `fuseWithPixelEvidence` dual-brain pixel fusion (agreement bonus +0.1; disagreement demotes to uncertain) | The L3.5 cloud semantic verdict: "was it the right change" can only be answered by a brain that reads semantics |
+| **Ω-7 Diff explainer `diffExplainer`** | Changed regions + two images → a one-sentence summary + region-level annotations, under a label-alignment law | "Where it changed" upgraded to "what changed"; annotations that cannot be matched are dropped — never forced |
+| **Ω-8 Failure consultation `diagnosis`** | `diagnoseFailure`: task/action/anchor/error/screen text + optional screenshot → root cause + normalized hypothesis probabilities + recovery steps (cycle-reference protection) | Cloud-side attribution for "why did it stop" — the cloud consultation room beside the local qualityDoctor |
+| **Ω-9 Dual-brain arbitration `arbitration`** | IoU greedy pairing + confidence-weighted convex-combination fusion + agreement bonus 0.15 + a four-branch winner + `normalizedLevenshtein` text arbitration | Purely mathematical adjudication when local perception and cloud opinion disagree: arbitration by measure, not by authority |
+| **Ω-10 Metering governance `metering`** | `vlmMeter` percentile ledger p50/p95 (thousand-sample window) + dual-bucket sliding-window rate limiting (minute × hour) + a consecutive-failure breaker at 5 failures / 60s cooldown + full jitter uniform(0, b·2ⁿ) | The cloud brain's spend and heartbeat: observable, rate-limited, breakable |
+
+### Integration bloodstream
+
+- **Four new config fields**: `vlmApiKey` / `vlmBaseUrl` (default `open.bigmodel.cn/api/paas/v4`) / `vlmModel` (default `glm-5.3-flash`) / `vlmAssistOcr` (default `false`); `index.ts` mints the cloud-brain singleton via `configureVlm` — config takes priority over environment variables (`GLM_API_KEY` > `ZHIPUAI_API_KEY` > `ZAI_API_KEY`).
+- **SemanticSource cloud adapter** (`createSemanticFromVlm`): the L3 semantic source of the D-6 three-stage funnel — the host-bus-first legislation stands; when the host supplies none and the cloud brain is available, the missing tier self-mints, adding only, never usurping.
+- **`semanticConfirm` third path**: after both local paths fail (server L2 → legacy tesseract), the VLM reads the screen as the fallback; the signature is unchanged — with the switch off or no key present, behavior stays byte-for-byte identical.
+- **New tool `ask_screen`**: look-and-answer — capture the current clean screen + a natural-language question → the cloud brain answers (read-only, never touches the world; division-of-labor law: millisecond-scale deterministic facts belong to the local reflex, second-scale open semantics to the cloud).
+
+### Design constitution
+
+- **Zero-key, zero-cost graceful degradation**: no apiKey configured ⇒ `degraded:true`, a zero-network short-circuit (no dialing, no encoding, no requests) — the local reflex layer runs on as ever; `degraded` semantics run through all ten organs.
+- **Offline tests that never throw and never touch the network**: every failure is expressed as a return value; tests run on injected fake clients / fake fetch.
+- **Conservative dual-brain arbitration philosophy**: local and cloud are two independent observation channels — agreement bonuses (verdict +0.1 / arbitration +0.15), disagreements always demoted to uncertain; the fused box is the confidence-weighted convex combination, landing inside the convex hull of the two boxes — never arbitrating into a box neither channel saw.
+
+### Usage
+
+Configure any one channel to light up the cloud brain:
+
+```yaml
+config:
+  vlmApiKey: 'your Zhipu API key'   # or env: GLM_API_KEY / ZHIPUAI_API_KEY / ZAI_API_KEY
+  # vlmBaseUrl / vlmModel already have defaults — override per deployment; vlmAssistOcr: true enables the OCR fallback
+```
+
+Once lit, the `ask_screen` tool and its system-prompt usage rules are injected automatically; `vlmAssistOcr: true` activates the VLM third path of `semanticConfirm`. Judgment numbers: the vlm family — 127 tests, 0 failures (ten organs 121 + integration 6); typecheck 0 errors; the build emits the full `dist/vlm`; smoke — 141 modules import clean.
+
+## Epoch AA: The World Jump Engine — open_url
+
+**Target need**: "automatically follow web links". URLs on screen (inside chat body copy, documents, OCR noise) are not controls — clicking them is either vetoed by the Z-2 gate (body copy) or simply misses. The world action law's answer: **links are not clicked — hand them to the OS shell**.
+
+**AA-1 URL sense (`src/urlSense.ts`, pure functions, zero dependencies)**:
+
+- **Lossless extraction**: complete URL substrings are extracted from free text (full OCR text / control names); trailing punctuation is stripped (Chinese full stops and full-width parentheses are OCR adhesions) under a **parenthesis-balance law** — the paired parentheses of a Wikipedia-style `…wiki/Python_(lang)` are part of the URL and must never be stripped;
+- **Normalization without guessing**: a `www.` prefix gets `https://` completed (www is an explicit web self-declaration — the only authorized guess); bare domains (`example.com`) are refused — precision first, the same law as the motor arc's quote anchoring;
+- **Merciless security screening**: scheme allowlist `[http, https]` — `file://` (local filesystem), `javascript:` (script execution), `data:`/`vbscript:` (data/script payloads) are all structurally refused. The jump engine only ever takes the model to public web pages — **it is not an arbitrary-protocol launcher**; hostless URLs are refused (`http://foo` is a word, not a site), localhost excepted; over-long URLs (>2048) refused.
+
+**AA-1 jump body (`system.openUrl`)**: platform openers (win=`cmd start` / darwin=`open` / linux=`xdg-open`), fire-and-forget — the receipt proves "the shell request was issued", not "the page loaded"; verification is delegated to the world (take_screenshot / switch_window). Windows quote escaping is done by hand at the spawn layer (`windowsVerbatimArguments`) — `&` inside query parameters is routine, Node's default argv quoting does not cover it, and left bare, cmd would read it as a command separator. Real-machine result: `https://example.com/?a=1&b=2` lands intact (evidenced by the Edge window title).
+
+**Four wiring points**:
+
+- `open_url` (new tool, `enableOpenUrl` on by default): the input may be a bare URL or free text containing one (paste the OCR line directly); extraction is exact, and multi-candidate ambiguity is structurally refused (never flip a coin and open one); registered in `ACTION_TOOLS` — jumps are replayable, auditable, and inductible into skills.
+- `read_text`: URLs inside full OCR text surface automatically (an `urls_detected` field + next_step guidance toward open_url) — the perception face of "auto-jump"; the model never has to transcribe a link by hand.
+- Z-2 click gate: vetoed body copy that contains a URL (from the UIA control-name receipt, reused at zero cost) gets its rerouting exit written into the refusal itself: "don't click — jump with open_url".
+- Popup guard: open_url is frozen during popup-active periods as well (handle the popup first; the world's order holds).
+
+## Epoch Z: The World Action Engine — the Interactivity Probe
+
+**Target failure mode**: "conversational text misread as a clickable entry". A chat message that reads "click the login button", a menu name quoted in a document, a task instruction rendered on screen — each is **pixel-equivalent** to a real button; any visual classifier (the LLM included) can only guess.
+
+**World action law: when you cannot tell, ask the world.** Z-1 adjudicates interactivity over three evidence channels, ordered by descending discriminative power (`src/interactivityProbe.ts`):
+
+| Channel | Action | Evidence | Confidence |
+| --- | --- | --- | --- |
+| 1. UIA point query (Z-1c) | `ControlFromPoint` asks the structural layer about a single point | The officially registered control type (Button/Hyperlink/Text/Edit…); **ancestor-chain law**: a Text label inside a button climbs the ancestor chain until it finds the Button — verdict: control | control 0.97 / text 0.93 |
+| 2. Cursor proprioception (Z-1a) | Hover (`move_mouse`, never press) and read `cursor_kind` (Win32 `GetCursorInfo`) | `hand` ⇒ a clickable hotspot the OS itself acknowledges; `ibeam` ⇒ selectable text (body copy / chat messages) — not an entry | control 0.95–0.96 / text 0.92 |
+| 3. Hover repaint (Z-1b) | Region dHash before vs after the hover (`metaOnly` fingerprint, zero image transfer) | Controls repaint with hover highlight / underline / tooltip; body copy does not budge | control 0.8–0.85 |
+
+**Two-pass architecture (experimental economics)**: the first pass runs the UIA point query for every candidate — **zero physical side effects** (no mouse movement, no screenshots, no timing jitter), and verdicts are still issued under dry-run and popup-active periods (read-only perception is exempt from guard constraints). Only the residual points where UIA is absent or `unknown` enter the second-pass hover experiment (archive the original position → experiment point by point → restore in a `finally` — the leave-no-trace law). Most points are adjudicated in the first channel; the mouse never moves at all.
+
+**Z-1d verdict memoization (experiment cost amortized to once per scene)**: decisive verdicts (control/text) are recorded together with the full-screen fingerprint at formation (`probeMemory`, LRU + TTL + checkpoint survival); when the same scene recurs (fingerprint similarity ≥ 0.9) and a nearby point is probed again (distance ≤ 0.015, the OCR-bbox micro-jitter tolerance band), the verdict is reused directly — zero experiments, zero mouse movement, equally effective under dry-run / popup-active periods. **Negative memory is precisely the most valuable half**: chat-text `text` refusals are stable, and every `find_text` re-encounters them. Honesty laws: `inconclusive` is never recorded ("don't know" is not evidence); recalled verdicts are demoted one grade (confidence −0.03, capped at 0.9 — `via=memory` never impersonates a fresh experiment); scene drift (chat scrolling / a different screen ⇒ a different fingerprint) invalidates entries automatically and re-experiments. Real-machine measurement: same-scene reuse **877ms → 57ms (15.4×)** — the mouse untouched throughout.
+
+**Z-1e adaptive dwell (hover-experiment speedup)**: decisive cursor shapes (hand/ibeam) decide the moment they are read — the OS switches cursors instantly, so there is no need to wait out the redraw channel's 350ms dwell; only arrow/custom enters redraw polling (150ms steps, stop on detection, at most ceil(dwell/150) steps). The decisive path's per-point cost drops ~750ms → ~240ms; cooldown is only needed after the polling path.
+
+The degradation chain is complete: memory miss → UIA library absent / `DSH_PHYSICAL_L1_BACKEND=disabled` (the pure-vision ideology gate) / unregistered games & canvas ⇒ the channel is absent, silently falling back to the dual hover channels — harmless. `unknown` (Pane/Custom) falls back the same way.
+
+**Four wiring points**:
+
+- `find_text`: OCR hits pass the probe first (priority ambiguous > content-like > control-like, capped by `probeMaxTargets`); every coordinate carries `interactivity=control|text|unprobed` and the deciding channel (`via=uia(Button)` / `via=hover(cursor=ibeam)` / `via=memory`); `next_step` issues an explicit order: "click only control hits; text hits are body copy that merely mentions the keyword — clicking one is an incident".
+- `probe_interactivity` (new tool): three-channel adjudication for arbitrary coordinates (memory → UIA → hover experiment) — the model can ask the OS about any text it is unsure of, before clicking.
+- `take_screenshot` legend: text in content regions (chat / documents / tables) is data, not UI.
+- `click_mouse` (Z-2 click gate): see below.
+
+**Z-2 click gate (the verdict moves ahead of pointer-down)**: Z-1's verdicts only annotate `find_text` results — the model can simply not look. Z-2 wires the same three-channel verdict in front of `click_mouse` execution (`gateTextClick` pure function + `src/tools/clickMouse.ts`): before a left click, the target point is probed; a `text` verdict with confidence ≥ 0.9 (decisive) whose evidence is not an Edit input box ⇒ a structured refusal (`ACTION_REQUIRED`) telling the model "this point is body copy — the text merely *mentions* the label you are looking for", plus rerouting guidance (find a control hit via find_text / re-ground via screenshot / scroll). Every exception channel is explicit: **Edit passes** (clicking an input box to focus it is a legal action), **right-click passes** (context menus over body copy are legal), **`allow_text_click: true` self-certified pass** (the model knowingly clicks text: placing the caret in a document / selecting text), and dry-run / probe-absent keep zero regression. The gate runs before `captureBefore` — the hover experiment may trigger hover highlights, so the before-frame must be taken after the probe, or the "no change" baseline is polluted.
+The same law eradicates the zero-model path: L2 OCR tokens from the reflex-arc scene source first pass a geometric-prior cull (`ocrWordsToClickCandidates`, a pure module in `wordShape.ts`) — wide-row / multi-line paragraph shapes no longer stand for landing-point election; "body copy treated as a button" loses its fuel at the spinal-reflex layer (mistakenly culling a real entry ⇒ honest grounding, which is cheaper than mis-clicking body copy).
+
+Relation to the four-layer verification stack: `actionVerifier` verifies "did the click take effect" (after the fact); Z-1/Z-2 verify "should this be clicked at all" (before the fact) — the perception loop moves from the execution domain up into the decision domain. Guard integration: hover experiments are skipped during popup-active / dryRun (UIA verdicts unrestricted); probe failure degrades honestly to `unprobed` rather than lying. The physical service is version-gated at 0.4.0; `/hit_test` belongs to the structural-perception capability bit (`ui_tree`).
+
 ## Epoch X — The Graphomotor Epoch: Motor Reflexes for the Reflex-Era Brain
 
 The reflex-era decision brain could only do one thing with the world: click. This epoch gives it a **motor vocabulary** — `type_text` / `scroll_page` / `press_hotkey` — with zero LLM, via `src/intentGrammar.ts` (pure-function intent grammar) and the motor arc in `ReflexiveDecisionStation`:
@@ -643,13 +1117,20 @@ Every remaining item from the post-campaign ledger, delivered in recommended ord
 | `click_element` | Click by ID (element mode, short cache against ID drift) | `id` |
 | `extract_ui_vision` | Precise extraction via local vision model (optional) | none |
 | `start_complex_task` | Planner–Actor orchestration engine | `userRequest` |
+| `swarm_dispatch` | Multi-agent team coordinator (one physical body, many minds): spawn role-based sub-agents → act as the active one → report → arbitrate the cross-validated verdict | `action`, `specs?`, `findings?`, `confidence?` |
+| `shape_environment` | Reshape the physical workspace (raise / maximize / move window, set zoom / contrast) with a strict LIFO undo log; `capabilities` first, `restore` when done | `action`, `kind?`, `title_hint?`, `x?`, `y?`, `level?` |
+| `autonomous_run` | Autonomy-loop meta tool (Epoch Φ, requires `autonomyEnabled: true`): perceive → judge → constitution → execute → verify → evolve in one closed-loop call | `goal`, `success_criteria?`, `max_steps?`, `time_budget_sec?` |
 | `zoom_inspect` | Region crop + enlarge + fine grid, two-stage precise grounding | `x`, `y`, `half_size?` |
 | `find_text` / `read_text` | Text → exact coordinates / region text read (needs `enableOcr`; URLs auto-surfaced) | `keyword` / `x?`, `y?`, `half_size?` |
+| `ask_screen` | Look-and-answer: capture a clean screen + a natural-language question → answered by the GLM vision model (needs `vlmApiKey` / `GLM_API_KEY`; read-only, no actions) | `question` |
+| `vlm_platforms` | Platform roster & health check (Epoch Ψ): 13 platforms' configuration status + currently active platform + fallback-pool health; `probe:true` runs the parallel checkup (1×1 white image — real screen content is never sent) | `probe?` |
+| `probe_interactivity` | Three-channel interactivity verdict: UIA point query → hover cursor shape → hover repaint | `x`, `y` |
 | `open_url` | URL security check (http/https scheme allowlist + noise-tolerant extraction) → jump via the OS default browser | `url` (bare URL or text containing one), `reasoning?` |
 | `diff_view` | Visual diff of the last two screenshots: red-box diff image + changed-region list | none |
 | `remember_ui` / `recall_ui` | Scene-based UI memory write / natural-language recall | `description`, `x`, `y` / `query` |
 | `replay_actions` | Replay an action sequence from the journal (macro) | `confirm`, `from_step?`, `to_step?` |
 | `save_skill` / `match_skill` / `run_skill` | Skill persistence / reliability matching / one-click execution (outcomes write back reliability) | `description` / `query` / `id`, `confirm` |
+| `quality_checkup` | The Quality Doctor's clinic (D-4): diagnose code genes & causal chains, heal mechanical fixes under explicit authorization, lessons, self-audit | `action`, `files?`, `authorize?`, `max_risk?`, `dry_run?` |
 
 ## Quick Start
 
@@ -705,6 +1186,30 @@ To override defaults, merge the `insert` entry from the bundled `cordis.patch.ym
         jpegQuality: 75
         # ... every field has a code default; trim per deployment
 ```
+
+### Configuration for the cloud cortex & autonomy
+
+All fields below have code defaults; the cloud cortex and the autonomy loop are strictly opt-in:
+
+```yaml
+config:
+  # Cloud cortex (Epoch Ω) — any one channel lights it up:
+  vlmApiKey: 'your-api-key'        # or env: GLM_API_KEY / ZHIPUAI_API_KEY / ZAI_API_KEY
+  # vlmBaseUrl: 'https://open.bigmodel.cn/api/paas/v4'   (default)
+  # vlmModel: 'glm-5.3-flash'                              (default)
+  # vlmAssistOcr: true    # VLM reads the screen as the third path when both local OCR paths fail
+  # One brain, every platform (Epoch Ψ) — explicit platform + CSV fallback chain:
+  # vlmProvider: 'openai' # or anthropic / gemini / qwen / moonshot / doubao / xai /
+  #                       #    siliconflow / openrouter / ollama / lmstudio / vllm
+  #                       # empty = auto-detect from env (any platform key works)
+  # vlmFallbackProviders: 'anthropic,gemini'   # backups step up when the primary trips
+  # Autonomy loop (Epoch Φ) — off by default; the legislator explicitly opts in:
+  # autonomyEnabled: true
+  # autonomyMaxSteps: 24 / autonomyTimeBudgetSec: 300 / autonomyAllowTiers: 'benign'
+  # autonomyVlmWhenUncertain: true / autonomyForbiddenKeywords: ''
+```
+
+With no key configured, the cloud cortex reports `degraded` and performs zero network calls — the local reflex layer keeps running unchanged. With `autonomyEnabled: true`, one `autonomous_run({ goal: '…', success_criteria: ['…'] })` call drives the whole perceive → judge → constitution → execute → verify → evolve loop; use `vlm_platforms({ probe: true })` to check which of the 13 vision platforms are configured and healthy.
 
 ### 4. Local development (from source)
 

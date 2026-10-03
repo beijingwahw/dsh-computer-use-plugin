@@ -3,7 +3,7 @@ import { ensureKey, mintToken, mintNonce } from './capToken.js';
 import { microFetch, parseUnixBaseUrl } from './httpClient.js';
 import { ScreenshotHandle } from './screenshotHandle.js';
 /** Cap Token 提前刷新阈值（避免请求时刻过期） */
-const TOKEN_REFRESH_MARGIN_MS = 5000;
+const TOKEN_REFRESH_MARGIN_MS = 5_000;
 export class PhysicalExecutionAdapterImpl {
     state = null;
     /** 加载层方法（《异常诚实分层契约》第一条）：失败 throw —— 拒绝带病上线 */
@@ -90,7 +90,7 @@ export class PhysicalExecutionAdapterImpl {
                 error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
             };
         }
-        const ttl = this.state.config.healthCheckIntervalMs ?? 30000;
+        const ttl = this.state.config.healthCheckIntervalMs ?? 30_000;
         const cached = this.state.healthCache;
         if (cached && Date.now() - cached.fetchedAt < ttl) {
             return { ok: true, value: cached.info };
@@ -177,6 +177,8 @@ export class PhysicalExecutionAdapterImpl {
             keep_frame: args?.keepFrame ?? false,
             meta_only: args?.metaOnly ?? false,
             want_salience: args?.wantSalience ?? false,
+            // Σ-5：undefined ⇒ JSON.stringify 丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
+            display: args?.display,
         });
     }
     /** 感知辅助（D-1 工具层接线）：当前鼠标位置（全屏像素） */

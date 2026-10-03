@@ -35,14 +35,24 @@ def main() -> int:
     if args.path:
         target = args.path
     elif args.pid is not None and sys.platform == "linux":
-        target = os.readlink(f"/proc/{args.pid}/exe")
+        try:
+            target = os.readlink(f"/proc/{args.pid}/exe")
+        except OSError as e:
+            print(f"error: cannot resolve /proc/{args.pid}/exe ({e.strerror or e})", file=sys.stderr)
+            return 1
     elif sys.platform == "linux":
         target = "/proc/self/exe"
     else:
         print("error: non-Linux requires --path (no /proc to resolve a pid)", file=sys.stderr)
         return 1
 
-    digest = sha256_of(target)
+    try:
+        digest = sha256_of(target)
+    except OSError as e:
+        # 与 auth.py 的诚实失败同律：进程不存在/无权限/二进制已被删除
+        #（readlink 带 " (deleted)" 后缀）—— 明确报错退出，不吐裸 traceback
+        print(f"error: cannot read binary {target!r} ({e.strerror or e})", file=sys.stderr)
+        return 1
     print(f"# target: {target}")
     print(f"export DSH_PHYSICAL_PID_WHITELIST=\"${{DSH_PHYSICAL_PID_WHITELIST:+$DSH_PHYSICAL_PID_WHITELIST,}}{digest}\"")
     print(f'# (powershell) $env:DSH_PHYSICAL_PID_WHITELIST = ("{0},{1}" -f $env:DSH_PHYSICAL_PID_WHITELIST, "{digest}").Trim(\',\')')

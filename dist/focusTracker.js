@@ -17,7 +17,7 @@ export const focusTracker = {
             return { x: 0.5, y: 0.5, extrapolated: false };
         const dtMs = prevFocus ? focus.at - prevFocus.at : 0;
         const ageMs = now - focus.at;
-        if (!prevFocus || dtMs <= 0 || dtMs > 5000 || ageMs <= 0) {
+        if (!prevFocus || dtMs <= 0 || dtMs > 5_000 || ageMs <= 0) {
             return { x: focus.x, y: focus.y, extrapolated: false };
         }
         const vx = (focus.x - prevFocus.x) / dtMs; // 归一化坐标/ms
@@ -30,7 +30,7 @@ export const focusTracker = {
         return { x: px, y: py, extrapolated: true };
     },
     /** 读取未过期的焦点；过期或不存在返回 null */
-    get(maxAgeMs = 30000) {
+    get(maxAgeMs = 30_000) {
         if (!focus)
             return null;
         if (Date.now() - focus.at > maxAgeMs)
@@ -38,7 +38,7 @@ export const focusTracker = {
         return { x: focus.x, y: focus.y };
     },
     /** 焦点是否为敏感区（凭据输入将被人机协同闸门拦截） */
-    isSensitive(maxAgeMs = 30000) {
+    isSensitive(maxAgeMs = 30_000) {
         if (!focus || !focus.sensitive)
             return false;
         return Date.now() - focus.at <= maxAgeMs;

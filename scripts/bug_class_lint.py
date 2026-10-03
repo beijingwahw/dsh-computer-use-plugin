@@ -68,11 +68,17 @@ def check_closure_reassignment() -> None:
             for nested in ast.walk(node):
                 if nested is node or not isinstance(nested, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                # 名 → 首赋值语句序
+                # 名 → 首赋值语句序（AugAssign 目标不算首赋值：x += 1 先读 x，
+                # 若计入会让下方 AugAssign 检测分支永远不触发）
                 first_assign: dict[str, int] = {}
                 for idx, stmt in enumerate(nested.body):
+                    aug_names = {
+                        t.target.id
+                        for t in ast.walk(stmt)
+                        if isinstance(t, ast.AugAssign) and isinstance(t.target, ast.Name)
+                    }
                     for tgt in ast.walk(stmt):
-                        if isinstance(tgt, ast.Name) and isinstance(tgt.ctx, ast.Store):
+                        if isinstance(tgt, ast.Name) and isinstance(tgt.ctx, ast.Store) and tgt.id not in aug_names:
                             first_assign.setdefault(tgt.id, idx)
                 # 先于首赋值的 Load（含 AugAssign 读）
                 risky: dict[str, int] = {}
@@ -95,7 +101,7 @@ def check_closure_reassignment() -> None:
 
 # ─── BC-3：时钟单调假设 ───
 
-CLOCK_ID = re.compile(r"(const|let)\s+(\w*(?:id|Id|Id|seq|Seq)\w*)\s*=\s*Date\.now\(\)")
+CLOCK_ID = re.compile(r"(const|let)\s+(\w*(?:id|Id|ID|seq|Seq)\w*)\s*=\s*Date\.now\(\)")
 
 
 def check_clock_ids() -> None:
@@ -125,7 +131,9 @@ def check_ctor_param_properties() -> None:
                 i += 1
             params = text[m.end():i - 1]
             for ln, line in enumerate(params.splitlines(), 1):
-                if re.match(r"^\s*(public|protected|private)\s|readonly\s+\w+\s*:", line):
+                # readonly 形参缺类型注解（`readonly b,`/`readonly b)`）也是参数属性——
+                # 无类型的 transform 语法同样被 Node strip-only 拒载，一并检出
+                if re.match(r"^\s*(public|protected|private)\s|readonly\s+\w+\s*(?::|[,)]|$)", line):
                     report("BC-4", f"{p.relative_to(REPO)}:ctor",
                            f"构造器参数属性（transform 语法，Node strip-only 拒载）：{line.strip()[:60]}")
                     break

@@ -12,6 +12,7 @@
 // 守卫实现一律面向旧形状（{name, args} + 字符串 result）编写 —— 版本差异
 // 收口于此：入参归一化、出参决策转译。
 import type { Context } from '@deepseek-ai/cordis';
+import { telemetry } from '../telemetry';
 
 export interface ToolCall {
   name: string;
@@ -86,6 +87,11 @@ export function onToolPre(ctx: Context, handler: PreExecuteHandler): void {
   (ctx as any).on('tools/pre-execute', async (exec: any, next: () => Promise<any>) => {
     const call = normalizeExec(exec);
     const out = await handler(call, () => next());
+    // 纪元 Σ（Σ-7 遥测仪表盘）：deny 分支守卫拦截打点 —— 守卫返回字符串即拦截
+    // （与下方 toPreDecision 的 deny 转译同判）。counter 键 'guard:<工具名>'，
+    // note(counter, hit=false) 的语义即「未放行」；纯旁路：note 绝不抛、不改写
+    // 转译结果（metrics_dashboard 守卫区消费此计数）。
+    if (typeof out === 'string' && call.name !== '') telemetry.note('guard:' + call.name, false);
     return toPreDecision(out);
   });
 }

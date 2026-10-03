@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 任务矩阵执行器：逐任务建会话（隔离上下文）→ 下发 → 等完成 → 抓工具轨迹
-// 用法: node battery.mjs <suite-file.json> [concurrent=1]
+// 用法: node battery.mjs <suite-file.json>
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 
 const BASE = 'http://127.0.0.1:3080/api/';
@@ -19,6 +19,10 @@ async function rpc(method, payload) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 参数预览：对象走 JSON —— String({}) 只会得到 "[object Object]"，轨迹即失明 */
+const argsPreview = (v) =>
+  (typeof v === 'string' ? v : JSON.stringify(v) ?? String(v)).slice(0, 300);
 
 async function waitDone(sessionId, timeoutMs = 420000) {
   await sleep(2000);
@@ -43,7 +47,7 @@ function compact(history) {
     if (!e?.type) continue;
     if (e.type === 'tool/call') {
       calls.set(e.data.callId, { name: e.data.name, args: e.data.arguments });
-      out.push({ ev: 'call', name: e.data.name, args: String(e.data.arguments).slice(0, 300) });
+      out.push({ ev: 'call', name: e.data.name, args: argsPreview(e.data.arguments) });
     } else if (e.type === 'tool/result') {
       const c = e.data.message?.content?.[0];
       const text = c?.content?.map((p) => p.text || '').join('\n') ?? '';
@@ -85,6 +89,8 @@ async function runTask(t, idx, results) {
     }
   } catch (e) {
     rec.harnessError = e.message;
+    // 中途失败时会话可能仍在运行（如 prompt 已下发）—— 尽力取消，不泄漏运行中的会话
+    if (rec.sessionId) await rpc('session.cancel', { sessionId: rec.sessionId }).catch(() => {});
   }
   rec.finishedAt = new Date().toISOString();
   results.push(rec);

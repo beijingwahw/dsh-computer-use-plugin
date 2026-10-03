@@ -1,5 +1,5 @@
 /** 缓存 TTL：超过此时间自动失效（默认 60s） */
-const CACHE_TTL_MS = 60000;
+const CACHE_TTL_MS = 60_000;
 /** Capability Cache 实现 */
 export class CapabilityCache {
     snapshot = null;

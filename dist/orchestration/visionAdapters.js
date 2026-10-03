@@ -1,4 +1,5 @@
 import { extractInteractiveElements, hasAccessibilityProvider, } from '../uiExtractor.js';
+import { isGlmConfigured } from '../vlm/glmClient.js';
 /** 像素 rect → 归一化 rect（StructuredSource 契约：坐标归一化责任在适配器） */
 function normalizeRect(rect, size) {
     return {
@@ -73,7 +74,7 @@ export function createTraditionalFromOcr(opts) {
             const result = await readText(buffer, lang);
             const words = result.words.map(w => ({
                 role: 'text',
-                name: w.text.slice(0, 20),
+                name: w.text.slice(0, 20), // D-3 LABEL_MAX 先例：元素名 ≤20 字符
                 rect: {
                     x: w.bbox_normalized.x0,
                     y: w.bbox_normalized.y0,
@@ -101,6 +102,56 @@ export function createTraditionalFromOcr(opts) {
             // 词中心落区过滤（region 是归一化域 —— 与词框同域零换算；半开语义
             // 见 centerInRegion：格线中心不重复入区）
             return words.filter(w => centerInRegion(w.rect.x + w.rect.width / 2, w.rect.y + w.rect.height / 2, region));
+        },
+    };
+}
+/**
+ * L3 适配器（花钱层 —— 仅 ceiling='L3' 时工位才会调用，闸门主权在中枢）。
+ * 就绪条件 = GLM 云脑已配置（isGlmConfigured：config 铸造的单例或环境变量）。
+ * ground 管线：截全屏 → groundElements（question 聚焦，坐标 = 屏幕像素系）→
+ * 像素 bbox ÷ 屏幕尺寸归一化 → 中心落区过滤（与 L1/L2 同律）。
+ * 故障约定与 L1/L2 同（J 纪元立法）：**故障向上抛** —— groundElements 的
+ * ok:false（云脑失败/降级）转 throw，由工位 safeGround 捕获归因为
+ * 'L3 source fault' 补丁（失败空 ≠ 真空）；ok:true 空 elements 是诚实空集，
+ * 原样返回 []。grounding（vlm/codec 惰性加载 sharp）经动态引入 ——
+ * 沙箱环境零污染 D-6 模块图（textReader 先例）。
+ */
+export function createSemanticFromVlm(opts) {
+    return {
+        name: opts.name ?? 'glm-vision(L3-adapter)',
+        isReady() {
+            return isGlmConfigured();
+        },
+        async ground(region, question) {
+            // 截屏 + 尺寸（任一故障向上抛 —— 工位记 fault，两种空两种决策）
+            const [buffer, size] = await Promise.all([opts.capture(), opts.screenSize()]);
+            if (!Number.isFinite(size.width) || size.width < 1 || !Number.isFinite(size.height) || size.height < 1) {
+                throw new Error(`invalid screen size ${size.width}x${size.height}`);
+            }
+            // 云脑接地：坐标语义 = width×height 屏幕像素系（groundElements 内部编码+规整+NMS）
+            const { groundElements } = await import('../vlm/grounding.js');
+            const result = await groundElements(buffer, {
+                width: size.width, height: size.height, question,
+                ...(opts.client ? { client: opts.client } : {}),
+            });
+            if (!result.ok) {
+                throw new Error(result.error ?? 'vlm grounding failed');
+            }
+            // 像素 → 归一化 + 中心落区过滤（与 L1/L2 适配器同一分派语义）
+            const normalized = result.elements.map(el => {
+                const rect = {
+                    x: el.bbox.x0 / size.width,
+                    y: el.bbox.y0 / size.height,
+                    width: (el.bbox.x1 - el.bbox.x0) / size.width,
+                    height: (el.bbox.y1 - el.bbox.y0) / size.height,
+                };
+                return {
+                    role: el.role,
+                    name: el.label.slice(0, 20), // D-3 LABEL_MAX 先例：元素名 ≤20 字符
+                    rect,
+                };
+            });
+            return normalized.filter(e => centerInRegion(e.rect.x + e.rect.width / 2, e.rect.y + e.rect.height / 2, region));
         },
     };
 }

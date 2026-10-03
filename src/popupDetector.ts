@@ -11,6 +11,7 @@
 import { getSharp } from './_legacyDeps';
 import { readTextAny } from './textReader';
 import * as backend from './physicalBackend';
+import { kernelRegistry } from './kernel/registry';
 
 function avg(nums: number[]): number {
   return nums.reduce((a, b) => a + b, 0) / nums.length;
@@ -37,7 +38,18 @@ function centerRegion(w: number, h: number, fraction = 0.4) {
  *   frameId → 服务端帧环统计（中心 40% vs 全图）
  *   buffer + sharp → 本地统计（legacy/开发路径）
  * 失败返回 false —— 检测失败不应阻断截图主流程：宁可漏报，不可误杀。
+ * 纪元 Ξ（Ξ-D 生产接线）：几何比双份读内核注册表 —— popup.geoLow（中心
+ * 标准差比上限，缺省 0.55）/ popup.geoHigh（中心亮度比下限，缺省 1.15），
+ * 服务端与 legacy 两条路径同键同步。未注册 ⇒ getOrDefault 回声字面量，
+ * 几何判决逐字节不变；每次检测单次读取。
  */
+function popupGeoRatios(): { geoLow: number; geoHigh: number } {
+  return {
+    geoLow: kernelRegistry.getOrDefault('popup.geoLow', 0.55),
+    geoHigh: kernelRegistry.getOrDefault('popup.geoHigh', 1.15),
+  };
+}
+
 export async function detectPopupHeuristic(frameId: number | null, buffer: Buffer | null): Promise<boolean> {
   try {
     if (frameId != null) {
@@ -48,7 +60,8 @@ export async function detectPopupHeuristic(frameId: number | null, buffer: Buffe
       const g = global[0], c = center[0];
       if (!g || !c || g.mean == null || c.mean == null) return false;
       const gStd = g.stdev ?? 0, cStd = c.stdev ?? 0;
-      return cStd < gStd * 0.55 && c.mean > g.mean * 1.15;
+      const { geoLow, geoHigh } = popupGeoRatios();
+      return cStd < gStd * geoLow && c.mean > g.mean * geoHigh;
     }
     if (!buffer || buffer.length === 0) return false;
     const sharp = await getSharp();
@@ -64,7 +77,8 @@ export async function detectPopupHeuristic(frameId: number | null, buffer: Buffe
     const cStd = avg(centerStats.channels.map((c: { stdev: number }) => c.stdev));
     const gMean = avg(globalStats.channels.map((c: { mean: number }) => c.mean));
     const cMean = avg(centerStats.channels.map((c: { mean: number }) => c.mean));
-    return cStd < gStd * 0.55 && cMean > gMean * 1.15;
+    const { geoLow, geoHigh } = popupGeoRatios();
+    return cStd < gStd * geoLow && cMean > gMean * geoHigh;
   } catch {
     return false;
   }
@@ -101,6 +115,40 @@ const EVIDENCE_CLEAN = -1.5; // 清洁帧证据 —— 单帧清洁把 ON 态拉
 const ON_THRESHOLD = 0.6;
 const OFF_THRESHOLD = 0.35;
 
+/**
+ * 施密特全套内核读点（Ξ-D 生产接线）+ 结构序守护。
+ *
+ * 键域（未注册 ⇒ getOrDefault 回声字面量，行为逐字节不变）：
+ *   · popup.priorWeight（先验，缺省 0.05）—— 构造/reset 时读；
+ *   · popup.evidenceGeo / popup.evidenceSem / popup.evidenceClean（证据强度
+ *     nats，缺省 4.0 / 5.0 / −1.5）—— 每次 update 读；
+ *   · popup.onThreshold / popup.offThreshold（迟滞双阈，缺省 0.6 / 0.35）
+ *     —— 每次 update 读。
+ *
+ * 结构序守护（越序值就地兜序，绝不产生病态滤波器）：
+ *   · 迟滞带必须非负宽：off ≤ on —— specs 层 off 区间 (0.1..0.5) 与 on 区间
+ *     (0.55..0.9) 本不交叠，消费处再 Math.min(off, on) 兜底（未来 specs 被
+ *     改到交叠也不许 off 压过 on —— 施密特退化为逐帧抖动是结构崩坏，非旋钮）；
+ *   · 证据强度先验序：sem ≥ geo（词表命中强于几何启发式是模块立法）——
+ *     specs 层 geo 上限 6 = sem 下限 6，消费处再 Math.max(sem, geo) 兜底。
+ */
+function schmittKernelReads(): {
+  evidenceGeo: number; evidenceSem: number; evidenceClean: number;
+  onThreshold: number; offThreshold: number;
+} {
+  const evidenceGeo = kernelRegistry.getOrDefault('popup.evidenceGeo', EVIDENCE_GEO);
+  return {
+    evidenceGeo,
+    evidenceSem: Math.max(evidenceGeo, kernelRegistry.getOrDefault('popup.evidenceSem', EVIDENCE_SEM)),
+    evidenceClean: kernelRegistry.getOrDefault('popup.evidenceClean', EVIDENCE_CLEAN),
+    onThreshold: kernelRegistry.getOrDefault('popup.onThreshold', ON_THRESHOLD),
+    offThreshold: Math.min(
+      kernelRegistry.getOrDefault('popup.offThreshold', OFF_THRESHOLD),
+      kernelRegistry.getOrDefault('popup.onThreshold', ON_THRESHOLD),
+    ),
+  };
+}
+
 export interface PopupEvidenceFrame {
   geometric: boolean;
   semantic: boolean;
@@ -108,22 +156,24 @@ export interface PopupEvidenceFrame {
 
 /** 施密特弹窗滤波器（纯类 —— 可注入任意帧序列，测试的确定性事实源） */
 export class SchmittPopupFilter {
-  private logOdds = LOGIT(POPUP_PRIOR);
+  private logOdds = LOGIT(kernelRegistry.getOrDefault('popup.priorWeight', POPUP_PRIOR));
   private active = false;
 
   /** 单帧更新：返回滤波后的信念与迟滞态 */
   update(ev: PopupEvidenceFrame): { belief: number; active: boolean } {
-    const strength = ev.semantic ? EVIDENCE_SEM : ev.geometric ? EVIDENCE_GEO : EVIDENCE_CLEAN;
+    // Ξ-D：证据强度与迟滞双阈每次 update 读内核表（set 即时生效；序守护见上注）
+    const { evidenceGeo, evidenceSem, evidenceClean, onThreshold, offThreshold } = schmittKernelReads();
+    const strength = ev.semantic ? evidenceSem : ev.geometric ? evidenceGeo : evidenceClean;
     this.logOdds += strength;
     const belief = SIGMOID(this.logOdds);
     // 施密特触发：进入需越 ON 线，退出需跌破 OFF 线 —— 迟滞带内保持原态
-    if (!this.active && belief >= ON_THRESHOLD) this.active = true;
-    else if (this.active && belief <= OFF_THRESHOLD) this.active = false;
+    if (!this.active && belief >= onThreshold) this.active = true;
+    else if (this.active && belief <= offThreshold) this.active = false;
     return { belief: Math.round(belief * 1000) / 1000, active: this.active };
   }
 
   reset(): void {
-    this.logOdds = LOGIT(POPUP_PRIOR);
+    this.logOdds = LOGIT(kernelRegistry.getOrDefault('popup.priorWeight', POPUP_PRIOR));
     this.active = false;
   }
 }
@@ -268,6 +318,12 @@ export class SprtPopupFilter {
     return Math.log((1 - this.beta) / this.alpha);
   }
 
+  /** Wald 下界 B = ln(β/(1−α))：仅在 α=β 时与 −A 重合（旧实现 −A 在非对称
+   *  (α, β) 下把 H₀ 停止线收窄 —— 判 clean 需要更多帧） */
+  private get rejectBound(): number {
+    return Math.log(this.beta / (1 - this.alpha));
+  }
+
   /** 单帧更新：返回判决（终判后恒返回原判 —— SPRT 停止语义） */
   update(ev: PopupEvidenceFrame): SprtState {
     if (this.decided) return this.state();
@@ -277,7 +333,7 @@ export class SprtPopupFilter {
     else this.llr += Math.log(0.08 / 0.85);
     this.frames += 1;
     if (this.llr >= this.acceptBound) this.decided = 'popup';
-    else if (this.llr <= -this.acceptBound) this.decided = 'clean';
+    else if (this.llr <= this.rejectBound) this.decided = 'clean';
     return this.state();
   }
 
@@ -286,7 +342,10 @@ export class SprtPopupFilter {
       decision: this.decided,
       logLikelihoodRatio: Math.round(this.llr * 1000) / 1000,
       frames: this.frames,
-      bounds: { accept: Math.round(this.acceptBound * 1000) / 1000, reject: -Math.round(this.acceptBound * 1000) / 1000 },
+      bounds: {
+        accept: Math.round(this.acceptBound * 1000) / 1000,
+        reject: Math.round(this.rejectBound * 1000) / 1000,
+      },
     };
   }
 

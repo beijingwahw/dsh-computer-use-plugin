@@ -62,6 +62,7 @@ export function topoSortSubTasks(tasks: SubTask[]): TopoOrder {
   const done = new Set<number>();
   while (ready.length) {
     const id = ready.shift()!;
+    if (done.has(id)) continue; // 幻觉重复 id：同号任务不得在执行序中出现两次
     const t = byId.get(id)!;
     order.push(t);
     done.add(id);
@@ -116,7 +117,10 @@ export async function planTasks(userPrompt: string, chat?: ChatFn): Promise<SubT
           ? t.deps.filter((d: unknown) => typeof d === 'number').map((d: number) => d)
           : undefined,
       }));
-  } catch {
+  } catch (e: any) {
+    // 容错解析的失败面也要留痕（与上方 no-array 分支同律）—— LLM 输出畸形的
+    // 事实不落日志，降级 [] 就成了不可诊断的静默失败
+    console.warn(`[Planner] JSON parse failed: ${String(e?.message ?? e).slice(0, 200)}`);
     return [];
   }
 }

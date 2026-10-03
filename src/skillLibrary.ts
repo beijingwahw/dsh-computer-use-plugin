@@ -12,6 +12,7 @@ import { similarity } from './perceptualHash';
 import { tokenize, overlapCoefficient } from './uiMemory';
 import { embed, cosine, type SparseVector } from './semanticHash';
 import { sequitur, expandSymbols } from './sequitur';
+import { kernelRegistry } from './kernel/registry';
 
 export interface SkillStep {
   tool: string;
@@ -315,6 +316,19 @@ class SkillLibrary {
     const q = tokenize(query);
     const qVec = embed(query);
     const now = Date.now();
+    // 纪元 Θ（Θ-4 生产接线）：入口场景同屏判据读内核注册表 ——
+    //   skill.sceneGate（指纹相似门，缺省 0.9）/ skill.sceneBonus（同屏加成，缺省 0.3）
+    // 未注册 ⇒ getOrDefault 回声字面量，排序行为逐字节不变；每次 match 单次读取。
+    const sceneGate = kernelRegistry.getOrDefault('skill.sceneGate', 0.9);
+    const sceneBonus = kernelRegistry.getOrDefault('skill.sceneBonus', 0.3);
+    // 纪元 Ξ（Ξ-D 生产接线）：评分四常量同律入表 —— skill.scoreFloor（入选
+    // 地板，缺省 0.15）/ skill.reliabilityWeight（可靠度权重，缺省 0.3）/
+    // skill.ciDiscount（CI 不确定度折扣，缺省 0.1）/ skill.recencyHalfLifeH
+    //（新近度半衰期，缺省 72h，区间 1..720）。未注册 ⇒ 回声字面量，零行为变化。
+    const scoreFloor = kernelRegistry.getOrDefault('skill.scoreFloor', 0.15);
+    const reliabilityWeight = kernelRegistry.getOrDefault('skill.reliabilityWeight', 0.3);
+    const ciDiscount = kernelRegistry.getOrDefault('skill.ciDiscount', 0.1);
+    const recencyHalfLifeH = Math.max(1, kernelRegistry.getOrDefault('skill.recencyHalfLifeH', 72));
     return this.skills
       .map(s => {
         const overlap = overlapCoefficient(q, tokenize(s.description));
@@ -326,17 +340,17 @@ class SkillLibrary {
         // E-5 贝叶斯可靠度：Beta(1,1) 后验均值（= Laplace 平滑，逐字一致 —— 零回归）
         // − 0.1 × 95% CI 半宽（不确定度折扣：同均值下证据多者胜 —— 「8/12 的老技能」
         // 排在「0/0 的新直觉」之前，因为后者可能只是运气）。0.1 是算法形状字面量：
-        // 折扣只做同均值平票的裁决者，绝不做主排序信号。
+        // 折扣只做同均值平票的裁决者，绝不做主排序信号。（Ξ-D 起 0.1/0.3/72 读内核表。）
         const post = betaReliability(s.successCount, s.attemptCount);
-        const reliability = post.mean - 0.1 * post.hw;
+        const reliability = post.mean - ciDiscount * post.hw;
         let scene = 0;
-        if (currentSceneHash && s.entrySceneHash && similarity(currentSceneHash, s.entrySceneHash) >= 0.9) {
-          scene = 0.3;
+        if (currentSceneHash && s.entrySceneHash && similarity(currentSceneHash, s.entrySceneHash) >= sceneGate) {
+          scene = sceneBonus;
         }
         const ageH = (now - s.lastUsedAt) / 3_600_000;
-        const recency = 0.1 * Math.exp(-ageH / 72);
+        const recency = 0.1 * Math.exp(-ageH / recencyHalfLifeH);
         return {
-          ...s, score: Math.round((text + 0.3 * reliability + scene + recency) * 1000) / 1000,
+          ...s, score: Math.round((text + reliabilityWeight * reliability + scene + recency) * 1000) / 1000,
           // C-2 归因：命中通道对模型透明。overlap>=0.5 才算真正词面命中；
           // 零星共享字（CJK 单字/二元组）是子词噪声，此时排序信号实为语义向量。
           matched_via: overlap >= 0.5 && overlap >= semantic ? 'exact-tokens' : 'semantic-vector',
@@ -352,7 +366,7 @@ class SkillLibrary {
           _axes: { text, rel: post.mean, rec: recency },
         } as Skill & { score: number; matched_via: string };
       })
-      .filter(s => s.score > 0.15)
+      .filter(s => s.score > scoreFloor)
       .sort((a, b) => b.score - a.score)
       .slice(0, k)
       // G-5 非支配标注：A 支配 B ⇔ 三轴全 ≥ 且至少一轴 >。非支配者标

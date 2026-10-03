@@ -85,7 +85,15 @@ function buildHomoglyphMap(): Record<string, string> {
 }
 const HOMOGLYPH_MAP: Record<string, string> = buildHomoglyphMap();
 
-function normalizeForRisk(s: string): string {
+// Δ 纪元（安全外围#1）：单遍替换的折叠不对称 —— 全角 ｍ 单遍归一为 'm' 后不再
+// 折叠为 'rn'，而 ASCII 词表 'submit' 单遍即成 'subrnit'（CONFUSABLES_ASCII 的
+// m→rn 折叠）⇒ haystack 与 pattern 停在不同的中间形态（实测 ｓｕｂｍｉｔ 逃逸）。
+// 修法：迭代归一至不动点（haystack 与词表两侧同律）。上限 3 遍 —— 恶意构造的
+// 长折叠链（m→rn→…）不能把归一化变成放大器；真实混淆链（全角→ASCII→折叠）
+// 两遍内收敛，3 遍是安全裕度。
+const NORMALIZE_MAX_PASSES = 3;
+
+function normalizeOnce(s: string): string {
   let out = '';
   for (const ch of s.toLowerCase()) {
     if (LEET_MAP[ch] !== undefined) { out += LEET_MAP[ch]; continue; }
@@ -96,17 +104,64 @@ function normalizeForRisk(s: string): string {
   return out;
 }
 
+/** 风险域归一化（导出供同律消费者对齐；匹配语义只经 matches* 两函数） */
+export function normalizeForRisk(s: string): string {
+  let prev = s;
+  for (let i = 0; i < NORMALIZE_MAX_PASSES; i++) {
+    const next = normalizeOnce(prev);
+    if (next === prev) return next; // 不动点：再归一不变 ⇒ 已是最终形态
+    prev = next;
+  }
+  return prev; // 越过迭代上限：按已收敛部分匹配（有界保守，不为恶意长链无限付费）
+}
+
+// Δ 纪元（安全外围#2）：模式归一化记忆化 —— 旧实现每次 matches* 调用都重切
+// CSV 并逐 pattern 归一化（现在还是每 pattern 三遍迭代），而 csv 是每回合稳定
+// 的配置串。按「生效 csv 字符串」缓存归一化后的词表（上限 32 条，满时逐出最旧
+// —— Map 保序，首键即 LRU 牺牲者；词表配置的组合空间天然远小于 32）。
+const PATTERN_CACHE_LIMIT = 32;
+const patternCache = new Map<string, readonly string[]>();
+
+/** 归一化词表（记忆化；键 = 生效 csv，即 csv || fallback） */
+function normalizedPatterns(csv: string, fallback: string): readonly string[] {
+  const key = csv || fallback;
+  const hit = patternCache.get(key);
+  if (hit) return hit;
+  const pats = key
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+    .map(normalizeForRisk) // 与 haystack 同律（含不动点迭代 —— 两侧停在同一形态）
+    // 归一化后为空的模式（纯标点/符号词，如 "***"）必须剔除：'' 是一切串的
+    // 子串，留下它会令 matches* 对任意文本恒真 —— 风险门整体失效（全拦 = 失能）
+    .filter(p => p.length > 0);
+  if (patternCache.size >= PATTERN_CACHE_LIMIT) {
+    const oldest = patternCache.keys().next().value;
+    if (oldest !== undefined) patternCache.delete(oldest);
+  }
+  patternCache.set(key, pats);
+  return pats;
+}
+
+/** 记忆化探针（测试/可观测性用：断言缓存命中、无需重复归一化） */
+export function riskPatternCacheSize(): number {
+  return patternCache.size;
+}
+
 /** 文本是否命中任一风险词（混淆免疫：归一化后包含匹配） */
 export function matchesRiskPatterns(text: string, csv: string): boolean {
   if (!text) return false;
   const hay = normalizeForRisk(text);
-  return parseRiskPatterns(csv).some(p => hay.includes(normalizeForRisk(p)));
+  const pats = normalizedPatterns(csv, DEFAULT_RISK_PATTERNS);
+  for (let i = 0; i < pats.length; i++) if (hay.includes(pats[i])) return true;
+  return false;
 }
 
 /** 文本是否命中任一不可逆操作词（需审批令牌；同律归一化） */
 export function matchesDangerPatterns(text: string, csv: string): boolean {
   if (!text) return false;
   const hay = normalizeForRisk(text);
-  return parseRiskPatterns(csv, DEFAULT_DANGER_PATTERNS)
-    .some(p => hay.includes(normalizeForRisk(p)));
+  const pats = normalizedPatterns(csv, DEFAULT_DANGER_PATTERNS);
+  for (let i = 0; i < pats.length; i++) if (hay.includes(pats[i])) return true;
+  return false;
 }

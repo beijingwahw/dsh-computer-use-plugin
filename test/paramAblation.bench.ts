@@ -325,7 +325,6 @@ const ABLATIONS: Ablation[] = [
 
 test('参数消融矩阵：基准全绿 + 每个承重参数至少击穿一个场景', async () => {
   const lines: string[] = [];
-  const header = `变体(${' '.repeat(34)}${SCENES.map(s => s.key).join('  ')}  击穿`;
   lines.push('── 参数消融矩阵（✓=绿 ✗=翻红；判据 = S1改道/S2直扑/S3学习/S4静默/S5开火/S6反证/S7计费带/S8水合/S9核证）──');
   lines.push(`变体${' '.repeat(46)}${SCENES.map(s => `${s.key}${s.name}`).join('  ')}`);
 

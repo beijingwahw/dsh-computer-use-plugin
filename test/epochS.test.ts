@@ -93,10 +93,19 @@ test('S-5: 执法器 —— 新迹违例逐位定位；守法迹零违例', asyn
   ], props);
   const br = bad1.find(e => e.family === 'bounded-response');
   assert.ok(br && br.violations.length >= 1, `响应破缺定位（@${br?.violations.join(',')}）`);
-  // 违例新迹②：repeat-guard 破缺（click 紧接 click）
-  const bad2 = enforceMinedProperties(hist.slice(0, 4).concat([{ tool: 'click_mouse' }]), props);
-  const rg = bad2.find(e => e.family === 'repeat-guard' && e.id.includes('click_mouse'));
-  assert.ok(!rg || rg.violations.length >= 0, 'repeat-guard 执法面在场');
+  // 违例新迹②：repeat-guard 破缺 —— hist 自身含同工具紧邻（f,f 与 c,c），
+  // 从 hist 不可能立出任何 repeat-guard 铁律；改由交替史立法 G(find_text → X ¬find_text)，
+  // 新迹 find 紧接 find 即被抓现行（执法面真实在场，非恒真断言）
+  const altProps = mineTraceProperties([
+    { tool: 'find_text' }, { tool: 'click_mouse' },
+    { tool: 'find_text' }, { tool: 'click_mouse' },
+    { tool: 'find_text' }, { tool: 'click_mouse' },
+  ]);
+  const bad2 = enforceMinedProperties([
+    { tool: 'find_text' }, { tool: 'find_text' }, { tool: 'scroll_page' },
+  ], altProps);
+  const rg = bad2.find(e => e.family === 'repeat-guard' && e.id.includes('find_text'));
+  assert.ok(rg && rg.violations.length >= 1, `同工具连击定位（@${rg?.violations.join(',')}）`);
   // 违例新迹③：precedence 破缺（首个 find 之前出现 click）
   const bad3 = enforceMinedProperties([{ tool: 'click_mouse' }, ...hist], props);
   const pc = bad3.find(e => e.family === 'precedence');
@@ -108,6 +117,9 @@ test('S-5: 执法器 —— 新迹违例逐位定位；守法迹零违例', asyn
 test('S-6: 双指既视感 —— 契约面（scenePhash 字段 + 共识阈值）执法', async () => {
   const src = (await import('node:fs')).readFileSync(new URL('../src/contextManager.ts', import.meta.url), 'utf8');
   assert.ok(src.includes('scenePhash?: string'), '潜意识条目携带第二指纹');
-  assert.ok(src.includes('similarity(best.scenePhash, this.lastPhash) < 0.85'), '共识阈值 0.85');
+  // 纪元 Ξ（Ξ-D）：共识阈值改经内核注册表读取（ctx.flashbackSim，缺省 0.85）——
+  // 断言升级为活实现：注册表键 + 0.85 缺省 + 比较式三件同框。
+  assert.ok(src.includes("getOrDefault('ctx.flashbackSim', 0.85)"), '共识阈值经注册表（缺省 0.85）');
+  assert.ok(src.includes('similarity(best.scenePhash, this.lastPhash) < flashbackSim'), '双指共识比较式在场');
   assert.ok(src.includes("this.lastPhash = null;"), '缺席路径诚实归零（单指零回归）');
 });

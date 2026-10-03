@@ -3,9 +3,10 @@ import { PipelineOrchestratorImpl } from './pipeline.js';
 import { createDefaultIdGenerator } from '../sandbox/types.js';
 import { COGNITION_PLAN_READY_EVENT, onDoctorVerdict } from '../sandbox/events.js';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts.js';
+import { isGlmConfigured } from '../vlm/glmClient.js';
 export { PipelineOrchestratorImpl } from './pipeline.js';
 export { DefaultVisionStation, DefaultDecisionStation, DefaultExecutionStation } from './stations.js';
-export { createStructuredFromUiExtractor, createTraditionalFromOcr } from './visionAdapters.js';
+export { createStructuredFromUiExtractor, createTraditionalFromOcr, createSemanticFromVlm } from './visionAdapters.js';
 export { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './contracts.js';
 export const name = 'orchestration-plugin';
 // 可选依赖 '?' 语法：缺席不阻断加载，对应能力诚实降级
@@ -137,7 +138,8 @@ export async function apply(ctx, config) {
     // system（nut-js 原生）动态引入：沙箱/无屏环境 import 失败 ⇒ 回退源缺席，零污染。
     let structuredSource = ctx.get?.('dsh.vision.structured') ?? null;
     let traditionalSource = ctx.get?.('dsh.vision.traditional') ?? null;
-    const semanticSource = ctx.get?.('dsh.vision.semantic') ?? null;
+    // 纪元 Ω：semantic 源改为 let —— 自铸分支（VLM 云脑）可能补位（宿主源仍优先）
+    let semanticSource = ctx.get?.('dsh.vision.semantic') ?? null;
     // D-6 自铸源记账：回退分支构造的源才是 D-6 属主权可及的（外部源归外部注册方）
     const ownedSources = [];
     if (!structuredSource || !traditionalSource) {
@@ -164,11 +166,34 @@ export async function apply(ctx, config) {
             console.log('[Orchestration] internal vision adapters unavailable (native deps absent) — honest degradation.');
         }
     }
+    // 纪元 Ω（云脑皮层）：L3 语义源自铸一档 —— 宿主未供 'dsh.vision.semantic'
+    // 且云脑可用（插件 config.vlmApiKey 已铸单例，或环境变量已配置）时由
+    // GLM 接地器官补位。「宿主 ctx.get 优先、缺席自铸」立法不变 —— 只加不自夺。
+    if (!semanticSource) {
+        const vlmKeyInConfig = typeof config?.vlmApiKey === 'string'
+            && config.vlmApiKey.trim().length > 0;
+        if (vlmKeyInConfig || isGlmConfigured()) {
+            try {
+                const { createSemanticFromVlm } = await import('./visionAdapters.js');
+                const { system } = await import('../system.js');
+                semanticSource = createSemanticFromVlm({
+                    capture: () => system.captureScreen(),
+                    screenSize: () => system.getScreenSize(),
+                });
+                ownedSources.push(['dsh.vision.semantic', semanticSource]);
+                console.log('[Orchestration] VLM semantic source wired (Ω cloud cortex — L3 grounding).');
+            }
+            catch {
+                console.log('[Orchestration] VLM semantic source unavailable — L3 honest degradation.');
+            }
+        }
+    }
     // L 纪元服务归属法（#6 兑现）：外部源缺席时 D-6 以自带回退源成为
-    // 'dsh.vision.structured' / 'dsh.vision.traditional' 的天然属主 —— 向总线自荐，
-    // 其余消费方（含未来的独立视觉插件）从此有可探测的注册方。只自荐 D-6 自己
-    // 铸造的源；外部源在场 ⇒ 属主权归外部注册方，不覆写（单属主铁律）。
-    // 宿主无 set 面 ⇒ 注册不成立，各消费方保持既有诚实降级（与 D-5/D-7 同律）。
+    // 'dsh.vision.structured' / 'dsh.vision.traditional'（纪元 Ω 起：缺席时
+    // 'dsh.vision.semantic' 亦同）的天然属主 —— 向总线自荐，其余消费方（含未来
+    // 的独立视觉插件）从此有可探测的注册方。只自荐 D-6 自己铸造的源；外部源在场
+    // ⇒ 属主权归外部注册方，不覆写（单属主铁律）。宿主无 set 面 ⇒ 注册不成立，
+    // 各消费方保持既有诚实降级（与 D-5/D-7 同律）。
     const selfRegisteredVision = [];
     for (const [name, source] of ownedSources) {
         try {

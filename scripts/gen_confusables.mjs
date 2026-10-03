@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, 'confusables-source.txt'), 'utf8');
 
-const version = src.match(/^# Version:\s*(.+)$/m)?.[1] ?? 'unknown';
+const version = src.match(/^# Version:\s*(.+)$/m)?.[1]?.trim() ?? 'unknown';
 const date = src.match(/^# Date:\s*(.+)$/m)?.[1]?.trim() ?? 'unknown';
 
 const map = new Map();

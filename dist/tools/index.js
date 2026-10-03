@@ -1,3 +1,4 @@
+import { isGlmConfigured } from '../vlm/glmClient.js';
 import { createTakeScreenshotTool } from './takeScreenshot.js';
 import { createClickMouseTool } from './clickMouse.js';
 import { createTypeTextTool } from './typeText.js';
@@ -23,6 +24,13 @@ import { createWhatIfTool, createSwarmReportTool } from './cognitions.js';
 import { createQualityCheckupTool } from './qualityCheckup.js';
 import { createSwarmDispatchTool } from './swarmDispatch.js';
 import { createShapeEnvironmentTool } from './shapeEnvironment.js';
+import { createAskScreenTool } from './askScreen.js';
+import { createAutonomousRunTool } from './autonomousRun.js';
+import { createAutonomyResumeTool } from './autonomyResume.js';
+import { createVlmPlatformsTool } from './vlmPlatforms.js';
+import { createSwitchVisionModelTool } from './vlmConnect.js';
+import { createVlmWizardTool } from './vlmWizard.js';
+import { createMetricsDashboardTool } from './metricsDashboard.js';
 export function buildAllTools(config) {
     const tools = [
         createTakeScreenshotTool(config),
@@ -55,6 +63,34 @@ export function buildAllTools(config) {
     // 第四轮创新：文字感知（OCR 定位与读取）
     if (config.enableOcr) {
         tools.push(createReadTextTool(config), createFindTextTool(config));
+    }
+    // 纪元 Ω（云脑皮层）：自由视觉问答 —— 仅在 VLM 可用时挂载
+    //（config.vlmApiKey 已铸/环境变量已配置；无 Key 用户不见此工具，行为零变化）
+    if (config.vlmApiKey || isGlmConfigured()) {
+        tools.push(createAskScreenTool(config));
+    }
+    // 纪元 Ψ（万脑归一）：vlm_platforms 平台花名册与体检 —— 挂载谓词与 ask_screen
+    // 同源（vlmApiKey 已铸或任一云脑 env 就绪即挂载）。另起新块：上方 Ω 纪元挂载门
+    // 的原行保持原样（vlm.integration.test.ts 源码正则锁定该立法文本）。
+    if (config.vlmApiKey || isGlmConfigured()) {
+        tools.push(createVlmPlatformsTool(config));
+    }
+    // 纪元 Λ（Λ-3 开箱即亮）：switch_vision_model / vlm_wizard —— 恒注册，不设门
+    //（向导与手动换脑在「无模型」时恰是最需要的：无 Key 用户也要能打开 vlm_wizard
+    // 走浏览器连接向导、能在拿到 Key 后当场 switch；有门反而卡死第 0 步）。另起新块：
+    // 上方 Ω/Ψ 纪元挂载门的原行保持原样（vlm.integration.test.ts 源码正则锁定该立法文本）。
+    tools.push(createSwitchVisionModelTool(config));
+    tools.push(createVlmWizardTool(config));
+    // 纪元 Φ（自主智能环）：autonomous_run 元工具 —— 显式开启才挂载
+    //（识别→判断→宪法→执行→验证→进化全闭环；默认关闭，无感用户行为零变化）
+    if (config.autonomyEnabled) {
+        tools.push(createAutonomousRunTool(config));
+    }
+    // 纪元 Σ（Σ-3 断点续跑）：autonomy_resume 元工具 —— 与 autonomous_run 同门
+    // 挂载（凭 resume_token 续跑中断任务：档案重载 + 判据回放 + 原栈重铸；
+    // 默认关闭，无感用户行为零变化。另起新块：上方 Φ 纪元挂载门原行保持原样）
+    if (config.autonomyEnabled) {
+        tools.push(createAutonomyResumeTool(config));
     }
     // Z 纪元（Z-1 世界行动引擎）：交互性探针 —— 对话文本 ≠ 可点击入口
     if (config.enableInteractivityProbe) {
@@ -93,5 +129,9 @@ export function buildAllTools(config) {
     if (config.checkpointPath) {
         tools.push(createSaveCheckpointTool(config));
     }
+    // 纪元 Σ（Σ-7 遥测仪表盘）：metrics_dashboard —— 四分区文本仪表盘
+    //（工具/云脑/自主/守卫全系统健康透视；纯只读、无配置依赖 ⇒ 恒挂载。另起新块：
+    // 上方 ask_screen 挂载门原行与 autonomy 各块均不动）
+    tools.push(createMetricsDashboardTool());
     return tools;
 }

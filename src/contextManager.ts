@@ -14,6 +14,7 @@
 import { journal } from './journal';
 import { embed, cosine, type SparseVector } from './semanticHash';
 import { hammingDistance, similarity } from './perceptualHash';
+import { kernelRegistry } from './kernel/registry';
 export interface ScreenshotRecord {
   id: number;
   timestamp: number;
@@ -32,6 +33,14 @@ export interface ScreenshotRecord {
    * 首帧/无指纹 ⇒ 缺席（无前馈即无残差 —— 诚实缺席，不伪造基线）。
    */
   surpriseBits?: number;
+  /**
+   * S-6/Q-2：本帧 pHash 频谱指纹（截图入窗时一次铸就，与帧同生命周期）。
+   * Δ-3 修正注记：潜意识条目的 scenePhash 从这里取 —— 旧实现驱逐时误用
+   * lastPhash（驱逐时刻**新入帧**的 pHash），「死者」的遗像里存的是
+   * 「目击者」的指纹：既视感的第二指从根上指错了帧（victim 与新帧的
+   * pHash 几乎必然不同 ⇒ 双指共识几乎必然否决 ⇒ S-6 复核通道形同虚设）。
+   */
+  phash?: string;
 }
 
 /** C-4 潜意识元组：被驱逐记录的有损压缩残响。纯文本 + 硬容量，Token 消耗恒定 */
@@ -168,7 +177,9 @@ class ContextManager {
       sceneHash: record.hash,
       gist: gist.slice(0, this.legacySummaryMaxChars),
       createdAt: Date.now(),
-      scenePhash: this.lastPhash ?? undefined, // S-6：双指纹的第二指（dHash 入库时同步算）
+      // S-6：双指纹的第二指 —— Δ-3：victim 入窗时自铸的 pHash（record.phash），
+      // 绝非驱逐时刻新入帧的 lastPhash（凶案现场的指纹要取自死者，不是目击者）
+      scenePhash: record.phash ?? undefined,
     });
     while (this.subconscious.length > this.subconsciousCapacity) this.subconscious.shift();
   }
@@ -188,8 +199,11 @@ class ContextManager {
     if (best && bestDist <= this.subconsciousMatchDistance) {
       // S-6 双指共识：库存 pHash 在场 ⇒ 频谱域复核（相似度 ≥0.85 才闪）；
       // 任一指纹缺席 ⇒ 单指判定（既有语义，零回归）。
+      // 纪元 Ξ（Ξ-D 生产接线）：复核门读内核注册表 —— ctx.flashbackSim（缺省
+      // 0.85）。未注册 ⇒ getOrDefault 回声字面量，既视感判决逐字节不变。
+      const flashbackSim = kernelRegistry.getOrDefault('ctx.flashbackSim', 0.85);
       if (best.scenePhash && this.lastPhash) {
-        if (similarity(best.scenePhash, this.lastPhash) < 0.85) return '';
+        if (similarity(best.scenePhash, this.lastPhash) < flashbackSim) return '';
       }
       return ` [Flashback: a similar scene appeared before — ${best.gist.slice(0, 120)}]`;
     }
@@ -203,7 +217,8 @@ class ContextManager {
 
   restoreSubconscious(traces: SubconsciousTrace[] | undefined): void {
     if (!Array.isArray(traces)) return;
-    this.subconscious = traces.slice(-this.subconsciousCapacity);
+    // 容量 0 = 潜意识关闭：slice(-0) 会整表回灌（-0 === 0），必须显式清空
+    this.subconscious = this.subconsciousCapacity > 0 ? traces.slice(-this.subconsciousCapacity) : [];
   }
 
   /**
@@ -225,14 +240,19 @@ class ContextManager {
     this.lastPhash = null;
     try {
       const { phash } = await import('./perceptualHash');
-      if (hash) this.lastPhash = await phash(Buffer.from(base64, 'base64'));
+      // 入参方言是 data URL（全部调用方都拼 `data:image/...;base64,` 前缀）。
+      // Buffer.from(x,'base64') 对前缀字符的宽容解码产出腐坏字节，sharp 必抛 ⇒
+      // lastPhash 恒 null、S-6 双指复核沦为死代码 —— 先剥前缀再解码。
+      const bare = base64.replace(/^data:[^;]+;base64,/, '');
+      if (hash) this.lastPhash = await phash(Buffer.from(bare, 'base64'));
     } catch { this.lastPhash = null; }
     const dejaVu = hash ? this.flashback(hash) : '';
     // E-4 预测残差：与前一幅在窗图像的指纹距离（推送前计算 —— 前馈基准）。
     // 页面级跳变 ⇒ surpriseBits 入记录 ⇒ 显著度加成 + 钉扎资格（见 assessSalience）
     const prevHash = this.lastImageRecord()?.hash;
     const surpriseBits = hash && prevHash ? hammingDistance(prevHash, hash) : undefined;
-    this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits });
+    // Δ-3：pHash 与帧同生（入窗即铸）—— 驱逐时潜意识条目取 victim 自己的第二指
+    this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits, phash: this.lastPhash ?? undefined });
 
     // C-4 注意力刷新：显著度评估 + 钉扎决策（驱逐顺序的事实源）
     this.refreshPins();
@@ -251,9 +271,9 @@ class ContextManager {
         ? [...pool].sort((a, b) => (a.salience ?? 0.5) - (b.salience ?? 0.5))[0]
         : null) ?? this.history.find(h => h.base64);
       if (!victim) break; // 无图可逐：谓词已不可能满足（防御：异常巨量文本不在此预算内）
-      // B-6 遗像：驱逐前尽力 OCR 中央区域，降级文本携带画面语义
+      // B-6 遗像：驱逐前尽力读屏中央带，降级文本携带画面语义
       const legacy = this.legacySummary && this.enableOcr
-        ? await this.makeLegacySummary(victim.base64)
+        ? await this.makeLegacySummary()
         : '';
       // 降级话术三要素：时间属性 + 原因 + 行为指引（+ 遗像内容）—— 防模型对已驱逐图产生幻觉或执着
       victim.textSummary =
@@ -275,31 +295,19 @@ class ContextManager {
   }
 
   /**
-   * B-6 遗像摘要：对将驱逐图裁剪中央带（水平居中 60% / 垂直上 60%：标题栏+主内容区）
-   * 放大后 OCR，截取前 N 字符。失败/禁用 ⇒ 空串（优雅回退到墓志铭现状）。
-   * 延迟导入避免启动期加载 OCR worker 与 sharp。
+   * B-6 遗像摘要：读屏中央带（水平居中 60% / 垂直上 60%：标题栏+主内容区），
+   * 截取前 N 字符。失败/禁用 ⇒ 空串（优雅回退到墓志铭现状）。
+   * Δ-4 修正注记：旧实现直连 sharp+tesseract（两者均为 devDeps —— 生产环境
+   * 必挂，遗像特性在生产恒空串，等于不存在）。改走 textReader.readTextAny
+   * （服务端 L2 优先 + 60s 负缓存 + legacy 探针前置 —— 既有降级律全数继承）。
+   * 语义注记：服务端读的是驱逐时刻的**活屏**中央带（victim 像素无服务端
+   * 入口）；victim 至多落后 maxImageCount 帧，中央带形态（标题栏/主内容区）
+   * 通常逐帧延续 —— 用 dev 环境逐像素的精确性换取生产环境的特性存活。
    */
-  private async makeLegacySummary(dataUrl: string): Promise<string> {
+  private async makeLegacySummary(): Promise<string> {
     try {
-      const b64 = dataUrl.split(',')[1];
-      if (!b64) return '';
-      const [{ readText }, sharpMod] = await Promise.all([
-        import('./textReader'),
-        import('sharp'),
-      ]);
-      const sharp = sharpMod.default;
-      const buf = Buffer.from(b64, 'base64');
-      const meta = await sharp(buf).metadata();
-      const W = meta.width ?? 0, H = meta.height ?? 0;
-      if (W < 32 || H < 32) return '';
-      const left = Math.round(W * 0.2);
-      const width = Math.round(W * 0.6);
-      const height = Math.round(H * 0.6);
-      const crop = await sharp(buf)
-        .extract({ left, top: 0, width, height })
-        .resize({ width: 1000 }) // 放大识别：小字准确率关键
-        .toBuffer();
-      const { text } = await readText(crop);
+      const { readTextAny } = await import('./textReader');
+      const { text } = await readTextAny({ x: 0.2, y: 0, width: 0.6, height: 0.6 });
       const flat = (text || '').replace(/\s+/g, ' ').trim();
       return flat ? flat.slice(0, this.legacySummaryMaxChars) : '';
     } catch {
@@ -324,6 +332,8 @@ class ContextManager {
 
   /** 最近 n 张仍在窗口内的图片（旧→新），供差分等下游消费 */
   public recentImages(n: number): Array<{ id: number; base64: string }> {
+    // n ≤ 0 必须返回空：slice(-0) === slice(0) 会整表泄漏（负数更会跳过头部）
+    if (n <= 0) return [];
     return this.history.filter(h => h.base64).slice(-n).map(h => ({ id: h.id, base64: h.base64 }));
   }
 

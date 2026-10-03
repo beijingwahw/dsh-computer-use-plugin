@@ -26,5 +26,5 @@ jobs:
         run: python -m compileall python_service/dsh_physical
       - name: Full test suite (POSIX shm arm live on /dev/shm)
         run: npm test
-      - name: Smoke import (113 modules)
+      - name: Smoke import (all src modules)
         run: npm run smoke

@@ -48,6 +48,7 @@ export interface SharpChainLike {
   png(opts?: any): SharpChainLike;
   jpeg(opts?: any): SharpChainLike;
   grayscale(): SharpChainLike;
+  ensureAlpha(): SharpChainLike;
   raw(): SharpChainLike;
   toBuffer(opts?: any): Promise<Buffer>;
   toBuffer<T>(opts: { resolveWithObject: true } & T): Promise<{ data: Uint8Array | Buffer; info: any }>;

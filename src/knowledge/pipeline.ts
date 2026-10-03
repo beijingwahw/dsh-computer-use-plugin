@@ -191,6 +191,9 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
       // 中途铸造仍跨 run 互污；并发 fork 的同号类型在 merge 时重铸新 id）。
       const sharedModel = this.worldModel; // wire 铸造，跨 run 存活（run 内非空 —— 见顶部守卫）
       const worldModel = sharedModel instanceof InMemoryWorldModel ? sharedModel.fork() : sharedModel;
+      // 合并先行标志：checkpointState（落盘/仪表盘）消费共享模型，必须在 merge
+      // 之后观测 —— finally 侧不再重复合并（merge 重放日志，非幂等）
+      let forkMerged = false;
       try {
       let pendingTransition: { fromTypeId: string; actionKey: string; seq: number; success: boolean } | null = null;
       let escalateL3 = false; // 上轮到达意外 ⇒ 本轮动用贵眼睛（L1/L2 免费看熟悉，L3 付费看意外）
@@ -240,19 +243,23 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
         let scene: ScenePatch[] = [];
         let injection: KnowledgeInjection | null = null;
         if (firstRoundSerial) {
+          const perceiveCtrl = new AbortController();
           scene = await this.withTimeout(
-            deps.vision.perceive(visionEnv),
+            deps.vision.perceive(visionEnv, perceiveCtrl.signal),
             cfg.timeout.perPerception,
             [],
+            perceiveCtrl,
           );
           lastSceneSummary = summarizeScene(scene);
           injection = await this.queryKnowledgeGuarded(intent, lastSceneSummary);
         } else {
+          const perceiveCtrl = new AbortController();
           [scene, injection] = await Promise.all([
             this.withTimeout(
-              deps.vision.perceive(visionEnv),
+              deps.vision.perceive(visionEnv, perceiveCtrl.signal),
               cfg.timeout.perPerception,
               [], // 感知超时 = 空场景（决策下轮 NeedGrounding 诚实暴露）
+              perceiveCtrl,
             ),
             ablation.disableKnowledge
               ? Promise.resolve(null) // 消融：无隐知识模式（检索侧断电）
@@ -299,10 +306,12 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
           payload: decisionCtx,
           tokenBudget: cfg.stationTokenBudgets!.decision,
         };
+        const decideCtrl = new AbortController();
         const output = await this.withTimeout(
-          deps.decision.decide(decisionEnv, feedback),
+          deps.decision.decide(decisionEnv, feedback, decideCtrl.signal),
           cfg.timeout.perStep,
           { reason: `decision step timeout after ${cfg.timeout.perStep}ms`, focus: 'full-scene' } satisfies NeedGrounding,
+          decideCtrl,
         );
 
         // NeedGrounding 路由：桩纪元无 L3 兜底通道 ⇒ 诚实终局（grounding 批准回路是留白）
@@ -401,12 +410,21 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
       terminalReason ||= `no progress possible after ${outcomes.length} outcome(s)`;
       this.settlePending(intent.id); // P0-4 终局冲账：本 intent 的挂账在此结算学习
       const consolidation = this.consolidateKnowledge(intent.id, outcomes.length); // 神经元纪元：run-end 入睡（旁路）
+      // O 纪元（#20）：合并先行 —— checkpointState 的落盘/仪表盘读共享模型，
+      // 旧序（先 checkpoint 后 finally-merge）落盘的是**上一 run 结束时**的世界
+      // 模型，本轮全部观察跨会话丢失（"反遗忘"对 worldModel 永不生效）。
+      if (!forkMerged && worldModel !== sharedModel &&
+          worldModel instanceof InMemoryWorldModel && sharedModel instanceof InMemoryWorldModel) {
+        sharedModel.merge(worldModel);
+        forkMerged = true;
+      }
       this.checkpointState(intent.id, verdict, { roundsTotal, l3Rounds, knowledgeRounds, executions: outcomes.length }, consolidation, startedAt); // 反遗忘 + 仪表盘
       return this.finalReport(intent, verdict, terminalReason, outcomes, knowledgeUsed, startedAt);
       } finally {
         // O 纪元（#20）：run 终合并 —— fork 的操作日志重放回共享模型（双出口共用；
-        // merge 幂等且只收 fork 的账 —— 内部故障路径同样合并已发生的观察）
-        if (worldModel !== sharedModel &&
+        // 异常出口同样合并已发生的观察；正常出口已在 checkpoint 前合并，不重复）
+        if (!forkMerged &&
+            worldModel !== sharedModel &&
             worldModel instanceof InMemoryWorldModel && sharedModel instanceof InMemoryWorldModel) {
           sharedModel.merge(worldModel);
         }
@@ -575,14 +593,19 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
     }
   }
 
-  /** 步超时包裹：越限 ⇒ fallback（杀一刀，不杀流水线）；违约抛错 ⇒ fallback（纵深防御） */
-  private async withTimeout<T>(p: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  /** 步超时包裹：越限 ⇒ fallback + 止损 abort（杀一刀且断其后路 —— 超时的感知/
+   *  决策不再于后台烧 VLM/HTTP 资源；工位不支持消费 signal 时由其内层超时兜底，
+   *  浪费窗口仍有界）；违约抛错 ⇒ fallback（纵深防御） */
+  private async withTimeout<T>(p: Promise<T>, timeoutMs: number, fallback: T, abort?: AbortController): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         p,
         new Promise<T>(resolve => {
-          timer = setTimeout(() => resolve(fallback), timeoutMs);
+          timer = setTimeout(() => {
+            abort?.abort();
+            resolve(fallback);
+          }, timeoutMs);
         }),
       ]);
     } catch {
@@ -671,13 +694,16 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
   }
 
   /** 结构化落盘（Token 纪律：对话流只回句柄；失败降级 'in-memory' 并 warn）。
-   *  文件名带进程内序号（风险加固）：同 intent 同毫秒的并发报告不互相覆盖。 */
+   *  文件名带进程内序号（风险加固）：同 intent 同毫秒的并发报告不互相覆盖。
+   *  intentId 收敛到文件名安全字符（风险加固）：宿主可传任意 id ——
+   *  `../` / 盘符 / 路径分隔符不得逃出 reportDir（路径遍历闸门）。 */
   private persistReport(intentId: string, verdict: string, extra: Record<string, unknown>): string {
     if (!this.reportDir) return 'in-memory';
     try {
       mkdirSync(this.reportDir, { recursive: true });
       this.reportCounter += 1;
-      const full = join(this.reportDir, `knowledge-${intentId}-${Date.now()}-${this.reportCounter}.json`);
+      const safeId = intentId.replace(/[^A-Za-z0-9._-]+/g, '_');
+      const full = join(this.reportDir, `knowledge-${safeId}-${Date.now()}-${this.reportCounter}.json`);
       writeFileSync(full, JSON.stringify({ intentId, verdict, ...extra }, null, 2), 'utf8');
       return full;
     } catch (e: unknown) {

@@ -157,8 +157,8 @@ export const MINE_MIN_SUPPORT = 3;
  * 性质挖掘器（纯函数、确定性）：三族时序模式的自动铸造 ——
  *   bounded-response ：A 后（到迹末前的首次）B 出现 ≥3 次且从未落空 ⇒
  *                      立 G(A → F≤k B)（k = 历史最大间隔 —— 有界响应的数据定标）。
- *   precedence       ：有序对 (A→B) 配对 ≥3 次且 B 从未紧邻抢在 A 前 ⇒
- *                      立 G(¬B U A)（抢跑零例才立法）。
+ *   precedence       ：有序对 (A→B) 配对 ≥3 次且 B 既从未紧邻抢在 A 前、也从未
+ *                      出现在首个 A 之前 ⇒ 立 G(¬B U A)（抢跑零例才立法）。
  *   repeat-guard     ：工具 T 有 ≥3 次自我紧邻机会且从未紧接自身 ⇒
  *                      立 G(T → X ¬T)（同签名连击零例）。
  * 立法门槛：support ≥ MINE_MIN_SUPPORT 且零反例 —— 挖掘只收铁律，弱模式
@@ -172,6 +172,10 @@ export function mineTraceProperties(entries: readonly TraceEntry[]): MinedProper
 
   // ── 工具对统计：A 之后首次 B（有界响应的响应语义）+ B 紧邻抢跑机会 ──
   const pairStats = new Map<string, { count: number; maxGap: number; preceded: number }>();
+  // 机会面：A 的出现位中「其后还有条目」者（末位 A 是开放迹 —— 无后继即无机会、
+  // 不构成反例）。每个有机会的 A 的首个非 A 后继不是 B ⇒ A→B 的落空反例。
+  const chancesOf = new Map<string, number>();
+  for (let i = 0; i + 1 < n; i++) chancesOf.set(entries[i].tool, (chancesOf.get(entries[i].tool) ?? 0) + 1);
   for (let i = 0; i < n; i++) {
     const a = entries[i].tool;
     for (let j = i + 1; j < n; j++) {
@@ -191,9 +195,15 @@ export function mineTraceProperties(entries: readonly TraceEntry[]): MinedProper
     const st = pairStats.get(`${a}→${b}`);
     if (st) st.preceded += 1;
   }
+  // 各工具的首现位（precedence 反例面的定位基准 —— 执法器按「首个 A 前出现 B」裁决）
+  const firstIdxOf = new Map<string, number>();
+  for (let i = 0; i < n; i++) if (!firstIdxOf.has(entries[i].tool)) firstIdxOf.set(entries[i].tool, i);
   for (const [key, st] of pairStats) {
     const [a, b] = key.split('→');
-    if (st.count >= MINE_MIN_SUPPORT) {
+    // 落空封口：count 只数「首个非 A 后继恰为 B」的 A —— 有机会的 A 里凡有
+    // 落到别处（或无后继）者，G(A → F≤k B) 在本迹已有反例，violations:[] 的
+    // 承诺失真，如实不立法（"从未落空"在此执行）。
+    if (st.count >= MINE_MIN_SUPPORT && st.count === (chancesOf.get(a) ?? 0)) {
       out.push({
         id: `mined-response[${key}]≤${st.maxGap}`,
         formula: `G(${a} → F≤${st.maxGap} ${b})`,
@@ -203,11 +213,16 @@ export function mineTraceProperties(entries: readonly TraceEntry[]): MinedProper
         confidence: 1,
         family: 'bounded-response',
       });
-      if (st.preceded === 0) {
+      // 抢跑反例：首个 A 之前出现过的 B —— 只看紧邻会漏掉非紧邻抢跑，立出在
+      // 本迹即已违例的「铁律」（violations:[] 的承诺失真）。两面粉零才立法。
+      const firstA = firstIdxOf.get(a) ?? n;
+      let precededBeforeFirstA = 0;
+      for (let i = 0; i < firstA; i++) if (entries[i].tool === b) precededBeforeFirstA++;
+      if (st.preceded === 0 && precededBeforeFirstA === 0) {
         out.push({
           id: `mined-precedence[${b}¬≪${a}]`,
           formula: `G(¬${b} U ${a})`,
-          description: `Mined precedence: ${b} has never appeared immediately before ${a} — ${st.count} paired supports, 0 precedences.`,
+          description: `Mined precedence: ${b} has never appeared immediately before or before the first ${a} — ${st.count} paired supports, 0 precedences.`,
           violations: [],
           support: st.count,
           confidence: 1,
@@ -275,6 +290,7 @@ export function enforceMinedProperties(
         const k = Number(kStr);
         for (let i = 0; i < tools.length; i++) {
           if (tools[i] !== a) continue;
+          if (i === tools.length - 1) continue; // 末位 A：响应窗口越出迹末（与挖掘的机会面同律 —— 开放迹不判）
           let ok = false;
           for (let j = i + 1; j <= Math.min(i + k, tools.length - 1); j++) {
             if (tools[j] === b) { ok = true; break; }

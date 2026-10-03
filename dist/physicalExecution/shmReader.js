@@ -27,11 +27,11 @@ const STREAMING_THRESHOLD = 1 * 1024 * 1024; // 1MB
 /** 流式读块大小（64KB —— V8 ArrayBuffer 池单次扩展单元的友好倍数） */
 const STREAM_CHUNK = 64 * 1024;
 /** FD 池条目 TTL（与 Python 端 shm TTL 对齐） */
-const FD_CACHE_TTL_MS = 60000;
+const FD_CACHE_TTL_MS = 60_000;
 const _fdCache = new Map();
 /** GC ticker：定期清理过期 FD（懒 + 主动双 GC） */
 let _gcTimer = null;
-const GC_INTERVAL_MS = 30000;
+const GC_INTERVAL_MS = 30_000;
 function startFdGc() {
     if (_gcTimer)
         return;

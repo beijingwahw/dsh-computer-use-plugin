@@ -129,7 +129,8 @@ with tempfile.TemporaryDirectory() as td:
     key_ok = h.name in shm_mod._active_handles  # 注册键 == handle.name（旧实现键=短名恒 miss）
     gc.collect()  # 旧实现：weakref 在此触发 munmap/unlink —— 现在 handle 必须 still alive
     alive_after_gc = os.path.exists(h.name)
-    data = open(h.name, 'rb').read()
+    with open(h.name, 'rb') as f:  # 显式关闭：句柄不泄漏到后续证据段
+        data = f.read()
     ok('V3b 注册表键 == ShmHandle.name（DELETE 端点按名释放可命中）', key_ok, f'name={h.name}')
     ok('V3c GC 后文件仍存活（无 weakref 过早释放）', alive_after_gc)
     ok('V3d 数据完整（10240 字节逐位一致）', data == payload, f'{len(data)}B')
@@ -164,13 +165,14 @@ ok('S2c 反斜杠先行（旧实现的顺序错误形态永不复现：先引号
 
 # S3：AuthResult 携带 exp（nonce 防重放不再手工双解）
 from dsh_physical import auth as auth_mod  # noqa: E402
-key = auth_mod.ensure_key(os.path.join(tempfile.mkdtemp(), 'k.key'))
-tok = auth_mod.mint_token(key, 4242, auth_mod.ALL_CAPS, 60)
-res = auth_mod.parse_token(key, tok)
-ok('S3 parse_token 单次解析携带 exp/caps/pid（nonce 上界直取）',
-   res.ok and res.pid == 4242 and res.exp > 0 and len(res.caps) == len(auth_mod.ALL_CAPS),
-   f'exp={res.exp}')
-bad = auth_mod.parse_token(key, tok + 'x')
+with tempfile.TemporaryDirectory() as keydir:
+    key = auth_mod.ensure_key(os.path.join(keydir, 'k.key'))
+    tok = auth_mod.mint_token(key, 4242, auth_mod.ALL_CAPS, 60)
+    res = auth_mod.parse_token(key, tok)
+    ok('S3 parse_token 单次解析携带 exp/caps/pid（nonce 上界直取）',
+       res.ok and res.pid == 4242 and res.exp > 0 and len(res.caps) == len(auth_mod.ALL_CAPS),
+       f'exp={res.exp}')
+    bad = auth_mod.parse_token(key, tok + 'x')
 ok('S3b 篡改签名拒绝', not bad.ok)
 
 print(f'[section] 致命级 14/14 + 严重级 {PASS - 14}/ {PASS - 14} —— 继续中等级…')

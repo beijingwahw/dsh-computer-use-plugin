@@ -181,7 +181,11 @@ export class D7PhysicalHostPort implements HostExecutePort {
    * 坐标翻译：Python 端像素 rect → 归一化（÷ 屏幕尺寸，尺寸来自 health 单次缓存）。
    * 异常诚实：任何故障 ⇒ fault 补丁（形状与 capability 源统一），绝不抛错毒化流水线。
    */
-  async perceive(req: PerceptionRequest): Promise<ScenePatch[]> {
+  async perceive(req: PerceptionRequest, signal?: AbortSignal): Promise<ScenePatch[]> {
+    if (this.disposed) {
+      // dispose 后不再懒复活：perceive 缺此闸会把已关停的 Python 服务重新 spawn
+      return faultPatches(req.grid, 'D7PhysicalHostPort already disposed');
+    }
     try {
       await this._ensureInitialized();
       if (!this.screenSize) await this._syncScreenSize();
@@ -189,7 +193,9 @@ export class D7PhysicalHostPort implements HostExecutePort {
       if (!this.screenSize) {
         return faultPatches(req.grid, 'screen size unavailable (health screen probe failed)');
       }
-      const r = await this.adapter.getUiTree({ funnelCeiling: req.forceL3 ? 'L3' : 'L2' });
+      // 止损信号直通 getUiTree fetch（流水线感知步超时 ⇒ 立即断流，
+      // 不再等 15s 内层超时自然到账 —— 感知是热路径，浪费窗口按步计）
+      const r = await this.adapter.getUiTree({ funnelCeiling: req.forceL3 ? 'L3' : 'L2', signal });
       if (!r.ok) {
         return faultPatches(req.grid, `getUiTree failed (${r.error.kind}): ${r.error.detail}`);
       }
@@ -293,6 +299,12 @@ export class D7PhysicalHostPort implements HostExecutePort {
         `PhysicalServiceManager.start failed (${start.error?.kind}): ${start.error?.detail}`,
       );
     }
+    // dispose 与 init 并发竞态：dispose 可能在 await 期间已执行 —— 不再把
+    // 适配器/路由铸到已关停的端口上（进程由 manager 侧 dispose 清场）
+    if (this.disposed) {
+      await this.mgr.dispose();
+      throw new Error('D7PhysicalHostPort disposed during initialization');
+    }
 
     // 2. 构造 adapter。
     //    J 纪元修正：覆盖项放前面、连接事实放后面 —— 旧实现把
@@ -312,13 +324,17 @@ export class D7PhysicalHostPort implements HostExecutePort {
       await this.mgr.dispose();
       throw new Error(`adapter.init failed (${init.error.kind}): ${init.error.detail}`);
     }
+    if (this.disposed) {
+      await this.mgr.dispose();
+      throw new Error('D7PhysicalHostPort disposed during initialization');
+    }
     this.adapter = adapter;
 
     // 3. 构造 router
     this.router = new PhysicalActionRouterImpl(adapter, this._capability);
 
     // 4. (可选) 启动期探活 + 同步 capability 与屏幕尺寸（perceive 端口的归一化基准）
-    if (this.opts.syncCapabilityOnStartup !== false) {
+    if (this.opts.syncCapabilityOnStartup !== false && !this.disposed) {
       try {
         const health = await adapter.health();
         if (health.ok) {

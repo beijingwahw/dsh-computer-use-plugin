@@ -302,11 +302,9 @@ class WindowManager:
     async def _switch_via_hotkey(self, keyword: str) -> dict:
         """Hotkey 降级：无法精确切到指定窗口，但能切到下一个。"""
         # 注意：此路径不真正匹配 keyword，仅触发切换快捷键
-        # 调用方应理解为「切换到下一个窗口」而非「切到指定窗口」
-        from .input import InputController  # 局部 import 避免循环
-
-        # 此处不直接调用 InputController（避免与 routes 层耦合）；
-        # 由 routes 层在收到 method='hotkey_only' 时自行调用 press_hotkey
+        # 调用方应理解为「切换到下一个窗口」而非「切到指定窗口」；
+        # 不直接调 InputController（避免与 routes 层耦合）—— 由 routes 层在
+        # 收到 method='hotkey_only' 时自行调用 press_hotkey。
         return {
             "method": "hotkey_only",
             "matched": None,  # 无法精确匹配

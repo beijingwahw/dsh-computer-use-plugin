@@ -14,6 +14,7 @@
 import { journal } from './journal.js';
 import { embed, cosine } from './semanticHash.js';
 import { hammingDistance, similarity } from './perceptualHash.js';
+import { kernelRegistry } from './kernel/registry.js';
 /** base64 字符数 → 近似 KB（data URL 前缀开销可忽略，预算用途足够精确） */
 function approxKb(b64) {
     return b64.length / 1024;
@@ -84,7 +85,7 @@ class ContextManager {
             relevance = Math.max(0.2, cosine(embed(record.textSummary), this.taskQueryCache.vec));
         }
         // 时间衰减：半衰期 5 分钟 —— 「刚看过」的记忆天然更鲜活
-        const ageMin = (now - record.timestamp) / 60000;
+        const ageMin = (now - record.timestamp) / 60_000;
         const recency = Math.exp(-ageMin / 5);
         const base = Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
         // E-4 预测残差加成：页面级跳变帧（≥24/64 位）+0.45（封顶 1）。基线帧
@@ -141,7 +142,9 @@ class ContextManager {
             sceneHash: record.hash,
             gist: gist.slice(0, this.legacySummaryMaxChars),
             createdAt: Date.now(),
-            scenePhash: this.lastPhash ?? undefined, // S-6：双指纹的第二指（dHash 入库时同步算）
+            // S-6：双指纹的第二指 —— Δ-3：victim 入窗时自铸的 pHash（record.phash），
+            // 绝非驱逐时刻新入帧的 lastPhash（凶案现场的指纹要取自死者，不是目击者）
+            scenePhash: record.phash ?? undefined,
         });
         while (this.subconscious.length > this.subconsciousCapacity)
             this.subconscious.shift();
@@ -165,8 +168,11 @@ class ContextManager {
         if (best && bestDist <= this.subconsciousMatchDistance) {
             // S-6 双指共识：库存 pHash 在场 ⇒ 频谱域复核（相似度 ≥0.85 才闪）；
             // 任一指纹缺席 ⇒ 单指判定（既有语义，零回归）。
+            // 纪元 Ξ（Ξ-D 生产接线）：复核门读内核注册表 —— ctx.flashbackSim（缺省
+            // 0.85）。未注册 ⇒ getOrDefault 回声字面量，既视感判决逐字节不变。
+            const flashbackSim = kernelRegistry.getOrDefault('ctx.flashbackSim', 0.85);
             if (best.scenePhash && this.lastPhash) {
-                if (similarity(best.scenePhash, this.lastPhash) < 0.85)
+                if (similarity(best.scenePhash, this.lastPhash) < flashbackSim)
                     return '';
             }
             return ` [Flashback: a similar scene appeared before — ${best.gist.slice(0, 120)}]`;
@@ -211,7 +217,8 @@ class ContextManager {
         // 页面级跳变 ⇒ surpriseBits 入记录 ⇒ 显著度加成 + 钉扎资格（见 assessSalience）
         const prevHash = this.lastImageRecord()?.hash;
         const surpriseBits = hash && prevHash ? hammingDistance(prevHash, hash) : undefined;
-        this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits });
+        // Δ-3：pHash 与帧同生（入窗即铸）—— 驱逐时潜意识条目取 victim 自己的第二指
+        this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits, phash: this.lastPhash ?? undefined });
         // C-4 注意力刷新：显著度评估 + 钉扎决策（驱逐顺序的事实源）
         this.refreshPins();
         // 不变量恢复式驱逐（B-7 双谓词）：反复问「图片数或体积还超标吗」。
@@ -228,9 +235,9 @@ class ContextManager {
                 : null) ?? this.history.find(h => h.base64);
             if (!victim)
                 break; // 无图可逐：谓词已不可能满足（防御：异常巨量文本不在此预算内）
-            // B-6 遗像：驱逐前尽力 OCR 中央区域，降级文本携带画面语义
+            // B-6 遗像：驱逐前尽力读屏中央带，降级文本携带画面语义
             const legacy = this.legacySummary && this.enableOcr
-                ? await this.makeLegacySummary(victim.base64)
+                ? await this.makeLegacySummary()
                 : '';
             // 降级话术三要素：时间属性 + 原因 + 行为指引（+ 遗像内容）—— 防模型对已驱逐图产生幻觉或执着
             victim.textSummary =
@@ -250,33 +257,19 @@ class ContextManager {
         };
     }
     /**
-     * B-6 遗像摘要：对将驱逐图裁剪中央带（水平居中 60% / 垂直上 60%：标题栏+主内容区）
-     * 放大后 OCR，截取前 N 字符。失败/禁用 ⇒ 空串（优雅回退到墓志铭现状）。
-     * 延迟导入避免启动期加载 OCR worker 与 sharp。
+     * B-6 遗像摘要：读屏中央带（水平居中 60% / 垂直上 60%：标题栏+主内容区），
+     * 截取前 N 字符。失败/禁用 ⇒ 空串（优雅回退到墓志铭现状）。
+     * Δ-4 修正注记：旧实现直连 sharp+tesseract（两者均为 devDeps —— 生产环境
+     * 必挂，遗像特性在生产恒空串，等于不存在）。改走 textReader.readTextAny
+     * （服务端 L2 优先 + 60s 负缓存 + legacy 探针前置 —— 既有降级律全数继承）。
+     * 语义注记：服务端读的是驱逐时刻的**活屏**中央带（victim 像素无服务端
+     * 入口）；victim 至多落后 maxImageCount 帧，中央带形态（标题栏/主内容区）
+     * 通常逐帧延续 —— 用 dev 环境逐像素的精确性换取生产环境的特性存活。
      */
-    async makeLegacySummary(dataUrl) {
+    async makeLegacySummary() {
         try {
-            const b64 = dataUrl.split(',')[1];
-            if (!b64)
-                return '';
-            const [{ readText }, sharpMod] = await Promise.all([
-                import('./textReader.js'),
-                import('sharp'),
-            ]);
-            const sharp = sharpMod.default;
-            const buf = Buffer.from(b64, 'base64');
-            const meta = await sharp(buf).metadata();
-            const W = meta.width ?? 0, H = meta.height ?? 0;
-            if (W < 32 || H < 32)
-                return '';
-            const left = Math.round(W * 0.2);
-            const width = Math.round(W * 0.6);
-            const height = Math.round(H * 0.6);
-            const crop = await sharp(buf)
-                .extract({ left, top: 0, width, height })
-                .resize({ width: 1000 }) // 放大识别：小字准确率关键
-                .toBuffer();
-            const { text } = await readText(crop);
+            const { readTextAny } = await import('./textReader.js');
+            const { text } = await readTextAny({ x: 0.2, y: 0, width: 0.6, height: 0.6 });
             const flat = (text || '').replace(/\s+/g, ' ').trim();
             return flat ? flat.slice(0, this.legacySummaryMaxChars) : '';
         }

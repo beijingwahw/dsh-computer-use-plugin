@@ -51,7 +51,7 @@ async function startOnPort(port) {
         keyPath: defaultKeyPath(),
         mmapDir: defaultMmapDir(),
         screenshotTransport: 'mmap-file',
-        startupTimeoutMs: 20000,
+        startupTimeoutMs: 20_000,
     });
     const res = await manager.start();
     if (!res.ok) {
@@ -59,7 +59,7 @@ async function startOnPort(port) {
     }
     const adapter = createPhysicalExecution({
         baseUrl: res.baseUrl,
-        timeoutMs: 15000,
+        timeoutMs: 15_000,
         keyPath: res.keyPath,
     });
     unwrap(await adapter.init(), 'adapter.init');
@@ -76,7 +76,7 @@ async function startOnPort(port) {
 async function adoptExisting(port) {
     const adapter = createPhysicalExecution({
         baseUrl: `http://127.0.0.1:${port}/v1`,
-        timeoutMs: 15000,
+        timeoutMs: 15_000,
         keyPath: defaultKeyPath(),
     });
     unwrap(await adapter.init(), 'adapter.init(adopt)');
@@ -145,6 +145,8 @@ export async function captureProcessed(opts = {}) {
         overlay.crosshair = opts.crosshair;
     if (opts.boxes?.length)
         overlay.boxes = opts.boxes;
+    // Σ-5：display 透传需 impl 的扩展参数面（contracts 的接口签名未含 display ——
+    // 产权铁律下不改 contracts.ts，桥接类型断言到 impl）
     const meta = unwrap(await a.takeScreenshot({
         format: opts.format ?? 'jpeg',
         quality: opts.quality,
@@ -158,6 +160,8 @@ export async function captureProcessed(opts = {}) {
         keepFrame: opts.keepFrame,
         metaOnly: opts.metaOnly,
         wantSalience: opts.wantSalience,
+        // Σ-5：undefined ⇒ JSON 序列化丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
+        display: opts.display,
     }), 'take_screenshot');
     const unchanged = !!meta.unchanged;
     if (unchanged || opts.metaOnly) {
@@ -168,6 +172,7 @@ export async function captureProcessed(opts = {}) {
             unchanged, frameId: meta.frame_id ?? null,
             transport: meta.transport,
             salience: meta.salience ?? null,
+            display: meta.display ?? null,
         };
     }
     // 读取图像字节：readShm 统一处理 base64（内联）与 mmap-file（零拷贝文件）
@@ -188,6 +193,7 @@ export async function captureProcessed(opts = {}) {
         frameId: meta.frame_id ?? null,
         transport: meta.transport,
         salience: meta.salience ?? null,
+        display: meta.display ?? null,
     };
 }
 // ─── 纯净截屏（无叠加层）：语义核对 OCR / 记忆预验等 ───
@@ -320,5 +326,12 @@ export function _reset_forTests() {
     state.manager = null;
     state.health = null;
     state.screen = null;
+    state.displays = null;
+}
+/** Σ-5 测试面：假 adapter 直入 state（免 spawn —— CaptureOptions 透传的纯逻辑测试）。
+ *  传 null 等效 _reset_forTests 的 adapter 清除（不 dispose manager —— 测试自管）。 */
+export function _setAdapterForTests(a) {
+    state.starting = null;
+    state.adapter = a;
     state.displays = null;
 }

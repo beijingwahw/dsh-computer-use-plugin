@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import sys
 import time
 from typing import Any, Literal
@@ -18,7 +20,7 @@ from .auth import ALL_CAPS
 from .config import AppConfig
 from .errors import ErrorKind, PhysicalError, safe_call, success
 from .input import InputController
-from .screen import ScreenCapture
+from .screen import ScreenCapture, list_displays
 from .ui_tree import UIFunnel
 from .window import WindowManager
 
@@ -97,6 +99,10 @@ class ScreenshotRequest(BaseModel):
     keep_frame: bool = False             # 干净帧入环（frame_stats/frame_diff 用）
     meta_only: bool = False              # 只取指纹/帧缓存，不编码不传图（轮询用）
     want_salience: bool = False          # 块级梯度熵图（Y-1 中央凹 / Y-2 金字塔）
+    # Σ-5 多屏感知：显示器索引（/v1/displays 清单序，0 起）。None = 主屏 = 现状
+    # （兼容铁律）。选定后 region/overlay 归一化基准 = 所选显示器矩形；
+    # 非 Windows 平台请求 ⇒ 服务端诚实降级主屏并在响应附 note。
+    display: int | None = None
 
 
 class FrameStatsRequest(BaseModel):
@@ -162,11 +168,19 @@ def _get(name: str) -> Any:
 
 
 @router.get("/health")
-async def health() -> dict:
+async def health(nonce: str | None = None) -> dict:
     """健康检查 —— 返回服务能力声明。
 
     无需认证（``allow_no_token_endpoints``）；用于 Node 端启动期探活。
+
+    纪元 Σ：nonce 质询应答式身份证明 —— ``nonce`` query 参数在场且非空时，
+    用共享密钥对其做 HMAC-SHA256 回签（``data['proof']``）。Node 端验签即证
+    应答者持有本回合密钥 —— 占坑者无密钥即现形（根治 Windows Python 启动器
+    re-exec 形态下「spawn pid ≠ 上报 pid」被误判 port_squatted 的盲区）。
+    回签不泄密钥（HMAC 单向），/health 仍免鉴权（nonce 本身就是挑战）。
+    老版 Node 端不发 nonce ⇒ 无 proof 字段，走既有 pid 判定（向后兼容）。
     """
+    import os
     import sys
     import platform
 
@@ -185,8 +199,13 @@ async def health() -> dict:
     except PhysicalError as e:
         screen_info = {"error": e.detail}
 
-    return success({
+    data = {
         "status": "ok",
+        # 纪元 Δ：进程身份证明 —— Node 端探活从「2xx 即收」升级为包体校验，
+        # 用本 pid 判定应答者确为 spawn 的子进程（端口占坑者给不出吻合 pid）。
+        # 老版本 Node 端忽略此字段，向后兼容。Σ 纪元：启动器 re-exec 形态下
+        # 此 pid 会漂移 —— 由上方 nonce 回签兜底（密钥持有即自己人）。
+        "pid": os.getpid(),
         "version": "0.4.0",
         "platform": sys.platform,
         "python": platform.python_version(),
@@ -208,7 +227,20 @@ async def health() -> dict:
             "pid_attestation": config.auth.enable_pid_attestation and sys.platform == "linux",
             "capability_token": True,
         },
-    })
+    }
+
+    # 纪元 Σ：质询应答 —— 密钥缺席 / 任何异常 ⇒ 无 proof（Node 端退回 pid
+    # 判定）；health 绝不抛（异常诚实第二条）。
+    if nonce:
+        try:
+            from .server import _app_state  # 运行期延迟导入：server 顶层导入 routes，模块级互导成环
+            key = _app_state.get("key")
+            if isinstance(key, (bytes, bytearray)):
+                data["proof"] = hmac.new(bytes(key), nonce.encode("utf-8"), hashlib.sha256).hexdigest()
+        except Exception:  # noqa: BLE001
+            pass
+
+    return success(data)
 
 
 # ─── 动作端点（safe_call 包裹）───
@@ -218,40 +250,35 @@ async def health() -> dict:
 @safe_call
 async def click_mouse(req: ClickRequest) -> dict:
     ctrl: InputController = _get("input")
-    ctrl.set_dry_run(req.dry_run)
-    return await ctrl.click(req.x, req.y, req.button)
+    return await ctrl.click(req.x, req.y, req.button, dry_run=req.dry_run)
 
 
 @router.post("/type_text")
 @safe_call
 async def type_text(req: TypeRequest) -> dict:
     ctrl: InputController = _get("input")
-    ctrl.set_dry_run(req.dry_run)
-    return await ctrl.type_text(req.text, req.clear_first)
+    return await ctrl.type_text(req.text, req.clear_first, dry_run=req.dry_run)
 
 
 @router.post("/scroll_page")
 @safe_call
 async def scroll_page(req: ScrollRequest) -> dict:
     ctrl: InputController = _get("input")
-    ctrl.set_dry_run(req.dry_run)
-    return await ctrl.scroll(req.direction, req.amount)
+    return await ctrl.scroll(req.direction, req.amount, dry_run=req.dry_run)
 
 
 @router.post("/press_hotkey")
 @safe_call
 async def press_hotkey(req: HotkeyRequest) -> dict:
     ctrl: InputController = _get("input")
-    ctrl.set_dry_run(req.dry_run)
-    return await ctrl.press_hotkey(req.keys)
+    return await ctrl.press_hotkey(req.keys, dry_run=req.dry_run)
 
 
 @router.post("/drag_mouse")
 @safe_call
 async def drag_mouse(req: DragRequest) -> dict:
     ctrl: InputController = _get("input")
-    ctrl.set_dry_run(req.dry_run)
-    return await ctrl.drag(req.start, req.end)
+    return await ctrl.drag(req.start, req.end, dry_run=req.dry_run)
 
 
 @router.post("/move_mouse")
@@ -264,8 +291,7 @@ async def move_mouse(req: MoveRequest) -> dict:
     零破坏语义 —— 复用 click 路径总有一天会带上按钮参数穿进来。
     """
     ctrl: InputController = _get("input")
-    ctrl.set_dry_run(req.dry_run)
-    return await ctrl.move(req.x, req.y, duration_ms=req.duration_ms)
+    return await ctrl.move(req.x, req.y, duration_ms=req.duration_ms, dry_run=req.dry_run)
 
 
 @router.post("/take_screenshot")
@@ -284,12 +310,15 @@ async def take_screenshot(req: ScreenshotRequest) -> dict:
         want_hashes=req.want_hashes, want_region_hash=req.want_region_hash,
         gate=req.gate, keep_frame=req.keep_frame, meta_only=req.meta_only,
         want_salience=req.want_salience,
+        display=req.display,
     )
     if handle is None:
+        # captured_at 单位与 ShmHandle 对齐（unix 毫秒 —— 旧实现误用秒级 time.time()，
+        # 同字段在 gate/meta_only 路径与 handle 路径间单位漂移）
         return success({**extras, "transport": "none", "name": "", "size": 0,
                         "shape": [0, 0, 0], "dtype": "", "stride": 0,
                         "format": "", "width": 0, "height": 0,
-                        "captured_at": time.time(), "image_base64": ""})
+                        "captured_at": int(time.time() * 1000), "image_base64": ""})
     return {
         "transport": handle.transport,
         "name": handle.name,
@@ -421,49 +450,12 @@ async def hit_test(req: HitTestRequest) -> dict:
 async def displays() -> dict:
     """显示器清单（全屏虚拟坐标系）—— 多屏感知与边界守卫的数据源。
 
+    枚举逻辑在 ``screen.list_displays``（Σ-5 抽取的共享函数 ——
+    take_screenshot 的 ``display`` 索引裁剪出自同一枚举 ⇒ 索引语义一致）。
     Windows：Win32 EnumDisplayMonitors；其余平台诚实降级为主屏单条。
     """
-    import platform
-
-    result: list[dict] = []
-    if platform.system() == "Windows":
-        def _enum() -> list[dict]:
-            import ctypes
-            import ctypes.wintypes as wt
-
-            user32 = ctypes.windll.user32
-            monitors: list[dict] = []
-            MonitorEnumProc = ctypes.WINFUNCTYPE(
-                ctypes.c_int, wt.HMONITOR, wt.HDC, ctypes.POINTER(wt.RECT), ctypes.c_void_p,
-            )
-
-            def _cb(hmon, _hdc, rect, _lparam):
-                info = wt.MONITORINFO()
-                info.cbSize = ctypes.sizeof(wt.MONITORINFO)
-                if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
-                    r = info.rcMonitor
-                    monitors.append({
-                        "name": f"Monitor@{r.left},{r.top}",
-                        "x": int(r.left), "y": int(r.top),
-                        "width": int(r.right - r.left), "height": int(r.bottom - r.top),
-                        "primary": bool(info.dwFlags & 1),
-                    })
-                return 1
-
-            user32.EnumDisplayMonitors(None, None, MonitorEnumProc(_cb), 0)
-            return monitors
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _enum)
-
-    if not result:
-        screen_ctrl: ScreenCapture = _get("screen")
-        size = await screen_ctrl.get_screen_size()
-        result = [{
-            "name": "Primary", "x": 0, "y": 0,
-            "width": int(size["width"]), "height": int(size["height"]),
-            "primary": True,
-        }]
+    screen_ctrl: ScreenCapture = _get("screen")
+    result = await list_displays(screen_ctrl)
     return {"displays": result}
 
 

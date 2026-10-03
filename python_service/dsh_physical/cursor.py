@@ -25,14 +25,15 @@ _STANDARD_CURSORS: dict[int, str] = {
     32513: "ibeam",         # IDC_IBEAM —— 正文文本的判决性信号
     32649: "hand",          # IDC_HAND —— 可点击的判决性信号
     32514: "wait",          # IDC_WAIT
-    32651: "busy",          # IDC_APPSTARTING
-    32644: "resize",        # IDC_SIZEALL
-    32645: "resize",        # IDC_SIZENWSE
-    32646: "resize",        # IDC_SIZENESW
-    32647: "resize",        # IDC_SIZENS
-    32648: "resize",        # IDC_SIZEWE
-    32650: "unavailable",   # IDC_NO（拖拽禁区）
+    32650: "busy",          # IDC_APPSTARTING
+    32646: "resize",        # IDC_SIZEALL
+    32645: "resize",        # IDC_SIZENS
+    32644: "resize",        # IDC_SIZEWE
+    32642: "resize",        # IDC_SIZENWSE
+    32643: "resize",        # IDC_SIZENESW
+    32648: "unavailable",   # IDC_NO（拖拽禁区）
     32515: "cross",         # IDC_CROSS
+    # 32651 = IDC_HELP：无对应语义词表，落 "custom" 如实上报
 }
 
 _CURSOR_SHOWING = 0x00000001

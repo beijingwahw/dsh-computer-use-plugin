@@ -110,8 +110,11 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
       return { ok: true, value: undefined };
     }
     try {
-      const key = this.state.keyPromise ?? (this.state.keyPromise = this.loadKey());
-      this.state.key = await key;
+      // 与 loadKey 同律：await 期间 reset()/二次 configure 可能换掉 state ——
+      // 只写回快照，绝不把旧配置的密钥写进新 state（或写进 null 抛 TypeError）
+      const state = this.state;
+      const key = state.keyPromise ?? (state.keyPromise = this.loadKey());
+      state.key = await key;
       return { ok: true, value: undefined };
     } catch (e: any) {
       return {
@@ -147,6 +150,13 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
         // key 加载失败：继续探活但 buildAuthHeadersSync 会返回空 token
         // Python 端会拒绝并返回 unauthorized —— 这是诚实降级
       }
+    }
+    // await 期间 reset() 可能已拆除 state —— 与 call() 同律诚实降级
+    if (!this.state) {
+      return {
+        ok: false,
+        error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+      };
     }
 
     // 健康检查不强制 Cap Token（Python 端 allow_no_token_endpoints 含 /v1/health）
@@ -245,6 +255,9 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     keepFrame?: boolean;
     metaOnly?: boolean;
     wantSalience?: boolean;
+    /** Σ-5 多屏感知：显示器索引（0 起，/v1/displays 清单序）。缺省=主屏=现状；
+     *  选定后 region/overlay 归一化基准 = 所选显示器矩形（服务端裁剪） */
+    display?: number;
   }): Promise<Result<ScreenshotResult, PhysicalError>> {
     return this.call('/take_screenshot', {
       format: args?.format ?? 'png',
@@ -259,6 +272,8 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
       keep_frame: args?.keepFrame ?? false,
       meta_only: args?.metaOnly ?? false,
       want_salience: args?.wantSalience ?? false,
+      // Σ-5：undefined ⇒ JSON.stringify 丢弃键 ⇒ 请求字节与现状等同（兼容铁律）
+      display: args?.display,
     });
   }
 
@@ -294,6 +309,13 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     }
     if (this.state.config.enableAuth !== false && !this.state.key) {
       await this.init();
+    }
+    // await 期间 reset() 可能已拆除 state —— 与 call() 同律诚实降级
+    if (!this.state) {
+      return {
+        ok: false,
+        error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+      };
     }
     const result = await microFetch<T>(this.state.httpClientConfig, path, { method: 'GET' });
     if (!result.ok) {
@@ -379,12 +401,14 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     source?: 'auto' | 'tree' | 'ocr' | 'vlm';
     region?: { x: number; y: number; width: number; height: number };
     funnelCeiling?: 'L1' | 'L2' | 'L3';
+    /** 外部止损信号（流水线感知步超时 abort）—— 与内部超时组合断流 */
+    signal?: AbortSignal;
   }): Promise<Result<UiTreeResult, PhysicalError>> {
     return this.call('/get_ui_tree', {
       source: args?.source ?? 'auto',
       region: args?.region,
       funnel_ceiling: args?.funnelCeiling ?? 'L3',
-    });
+    }, args?.signal);
   }
 
   async switchWindow(args: { keyword: string }): Promise<Result<SwitchWindowResult, PhysicalError>> {
@@ -436,6 +460,7 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
   private async call<T>(
     path: string,
     body: unknown,
+    signal?: AbortSignal,
   ): Promise<Result<T, PhysicalError>> {
     if (!this.state) {
       return {
@@ -452,10 +477,18 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
         // 这样调用方能看到准确的 unauthorized 错误而非 internal_error
       }
     }
+    // await 期间 reset() 可能已拆除 state —— 运行层永不抛错，按未配置诚实降级
+    if (!this.state) {
+      return {
+        ok: false,
+        error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: 'adapter not configured' },
+      };
+    }
 
     const result = await microFetch<T>(this.state.httpClientConfig, path, {
       method: 'POST',
       body,
+      ...(signal ? { signal } : {}),
     });
     if (!result.ok) {
       return { ok: false, error: result.error };

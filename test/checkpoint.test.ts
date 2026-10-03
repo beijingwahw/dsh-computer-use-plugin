@@ -13,6 +13,7 @@ import { telemetry } from '../src/telemetry.ts';
 import { journal } from '../src/journal.ts';
 
 let dir: string;
+const dirs: string[] = [];
 beforeEach(() => {
   uiMemory.reset();
   failureMemory.reset();
@@ -20,6 +21,7 @@ beforeEach(() => {
   telemetry.reset();
   journal.reset();
   dir = mkdtempSync(path.join(tmpdir(), 'ckpt-'));
+  dirs.push(dir); // 每用例一个目录 —— 退出时须逐个回收（只留最后一个 = 泄漏）
 });
 
 test('全认知态快照 → 清空 → 恢复：五子系统无损往返', async () => {
@@ -72,5 +74,5 @@ test('版本不匹配的旧档：拒绝恢复并报告原因', async () => {
   assert.ok(r.report[0].includes('version mismatch'));
 });
 
-// 清理临时目录（测试自洁 —— 世界级标准：测试不留垃圾）
-process.on('exit', () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } });
+// 清理全部临时目录（测试自洁 —— 世界级标准：测试不留垃圾）
+process.on('exit', () => { for (const d of dirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } } });

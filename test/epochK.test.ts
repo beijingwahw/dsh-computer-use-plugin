@@ -1,9 +1,10 @@
 // test/epochK.test.ts
 // K 纪元（留白兑现）：代码诚实声明的留白 —— 逐一落成并锁死。
 // 虚拟屏模拟器 / WindowsAdapter / Actor 双通道 / 贝叶斯会诊 / SSD / 同形字 / 可播种 RNG。
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
+import { stopBackend } from '../src/physicalBackend.ts';
 
 import { VirtualScreen } from '../src/sandbox/virtualScreen.ts';
 import { SandboxEngineImpl } from '../src/sandbox/engine.ts';
@@ -32,6 +33,13 @@ function engine(): { eng: SandboxEngineImpl; cleanup: () => void } {
 }
 
 beforeEach(() => { sandboxLog.reset(); });
+
+// Actor/验证链会懒拉起 D-5 物理服务（本地有 python 即真实 spawn）。测试进程无
+// 卸载钩子 —— 不关停则子进程占住事件循环，node --test 永不退出（CI 上 python
+// 缺席时快速失败不触发，故只在开发者本机显形）
+after(async () => {
+  await stopBackend();
+});
 
 // ─── K-1 虚拟屏模拟器：排练验证层的第一块真证据 ───
 

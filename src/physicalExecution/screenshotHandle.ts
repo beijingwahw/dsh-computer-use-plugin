@@ -101,6 +101,8 @@ export class ScreenshotHandle implements ScreenshotHandleLike {
     const buf = await this.read();
     this._released = true;
     _finalizer.unregister(this);
+    // 所有权已转移：句柄不再持有 Buffer（与 release 同律 —— 让 V8 GC 回收）
+    this._buffer = null;
     // 释放 Python 端 shm + 驱逐本地 FD 缓存
     if (this._meta.transport !== 'base64' && this._meta.name) {
       await this._adapter.releaseShm(this._meta.name).catch(() => { /* GC 兜底 */ });

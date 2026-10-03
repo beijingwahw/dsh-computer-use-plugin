@@ -71,10 +71,10 @@ export function createScrollPageTool(config) {
                         direction,
                         amount,
                         closed_loop: {
-                            content_shift_rows: est.shift,
-                            residual: est.residual,
-                            effective: verdict.effective,
-                            direction_consistent: verdict.directionConsistent,
+                            content_shift_rows: est.shift, // >0 = 内容下移（物理事实）
+                            residual: est.residual, // 平移假设成立度（越低越可信）
+                            effective: verdict.effective, // 内容真的动了吗
+                            direction_consistent: verdict.directionConsistent, // 位移与请求方向一致吗
                             at_boundary: verdict.atBoundary, // 到达滚动边界了吗
                         },
                     },

@@ -125,6 +125,7 @@ test('ScreenshotHandle.read: Lazy Buffer 缓存（多次调返回同一引用）
     assert.equal(adapter.releaseCallCount, 0);
   } finally {
     await teardown(proc);
+    rmSync(mmapDir, { recursive: true, force: true });
   }
 });
 
@@ -146,6 +147,7 @@ test('ScreenshotHandle.stream: 分块产出，总和等于 size', async () => {
     assert.equal(chunks[0][0], 0x89);
   } finally {
     await teardown(proc);
+    rmSync(mmapDir, { recursive: true, force: true });
   }
 });
 
@@ -175,6 +177,7 @@ test('ScreenshotHandle.transfer: 拿走 Buffer + handle 失效 + adapter.release
     assert.deepEqual(adapter.releasedNames, [meta.name]);
   } finally {
     await teardown(proc);
+    rmSync(mmapDir, { recursive: true, force: true });
   }
 });
 
@@ -200,6 +203,7 @@ test('ScreenshotHandle.release: 幂等，多次调用安全', async () => {
     assert.equal(adapter.releaseCallCount, 1);
   } finally {
     await teardown(proc);
+    rmSync(mmapDir, { recursive: true, force: true });
   }
 });
 
@@ -220,6 +224,7 @@ test('ScreenshotHandle: base64 模式不调 adapter.releaseShm（无外部资源
     assert.equal(adapter.releaseCallCount, 0);
   } finally {
     await teardown(proc);
+    rmSync(mmapDir, { recursive: true, force: true });
   }
 });
 

@@ -9,6 +9,8 @@ import { captureBefore, settleAndVerify, sleep } from '../actionVerifier';
 import { normalizeHash, similarity } from '../perceptualHash';
 import { quantum } from '../quantumSense';
 import { focusTracker } from '../focusTracker';
+import { matchesDangerPatterns } from '../riskGate';
+import { approval } from '../approval';
 
 // ─── Y-4 运输验证判决（纯函数 —— 测试的确定性事实源）───
 //
@@ -54,17 +56,68 @@ export function createDragMouseTool(config: Config) {
       startY: { type: 'number', required: true, description: 'Start Y coordinate (0.0 to 1.0).' },
       endX: { type: 'number', required: true, description: 'End X coordinate (0.0 to 1.0).' },
       endY: { type: 'number', required: true, description: 'End Y coordinate (0.0 to 1.0).' },
+      // Δ 纪元（安全外围#6）：拖拽安检的可判定语义面 —— 描述**目的地**（拖到哪）。
+      // 可选通道（拖滑块/调窗口无危险语义，不设 click 式硬前置）。
+      target_description: {
+        type: 'string',
+        description: 'What you are dragging and WHERE you drop it (e.g., "report.doc onto the 删除/回收站 zone"). ' +
+          'Feeds the danger/approval gate: a drag into a delete/send/pay zone is as irreversible as the click ' +
+          'that triggers it — supply approval_token for such targets.',
+      },
+      approval_token: {
+        type: 'string',
+        description: 'One-shot token from request_approval. Required for irreversible drag destinations ' +
+          '(delete/recycle bin/send/pay...).',
+      },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const { startX, startY, endX, endY } = args;
+      const { startX, startY, endX, endY, target_description, approval_token } = args;
 
-      if (startX < 0 || startX > 1 || startY < 0 || startY > 1 ||
+      // NaN 卫兵：NaN 与任何比较皆为 false，会穿过四重 bounds 检查直达
+      // Math.round(NaN * size) —— 物理层收到 NaN 像素
+      if (!Number.isFinite(startX) || !Number.isFinite(startY) ||
+          !Number.isFinite(endX) || !Number.isFinite(endY) ||
+          startX < 0 || startX > 1 || startY < 0 || startY > 1 ||
           endX < 0 || endX > 1 || endY < 0 || endY > 1) {
         return `[Error]: Invalid drag coordinates. All four values must be between 0.0 and 1.0.`;
+      }
+
+      // ── Δ 纪元（安全外围#6）：拖拽安检 —— 旧实现的零安检盲区 ──
+      // 「拖进回收站/删除区」与「点击删除按钮」同属不可逆操作，但 drag 既无
+      // target_description 也不查危险词 —— 审批闸门对整个 drag 动作面失明。
+      // 语义对齐 clickMouse 的闸门形态（判定事实源同律：riskGate 的
+      // matchesDangerPatterns + approval.validate；阻断路径顺手 sweep 过期令牌；
+      // 拒绝归因 token 在场 'token-not-granted-or-expired' / 缺席
+      // 'irreversible-action'）。与 click 臂的两点有意差异：描述是**可选**通道
+      // （无危险语义的拖拽 —— 滑块/窗口 —— 不设 undescribed 硬前置）；消费走
+      // 派发即焚（一次性令牌律；验收式消费是 click 的 V 纪元机制，drag 的运输
+      // 验证证据形状不同，不在此冒进复刻）。四坐标的 bounds 校验已在上方存在
+      // （另有 boundsGuard 前置），不重复。
+      const dangerous = config.enableApprovalGate
+        && !!target_description
+        && matchesDangerPatterns(target_description, config.dangerPatterns);
+      if (dangerous && !(approval_token && approval.validate(approval_token))) {
+        approval.sweep(); // 顺手清理过期令牌（与 click 闸门同律）
+        return JSON.stringify({
+          status: 'ACTION_REQUIRED',
+          state_anchor: {
+            target: target_description ?? '(undescribed drag)',
+            danger_signal: 'target_description',
+            reason: approval_token ? 'token-not-granted-or-expired' : 'irreversible-action',
+            normalized: { start: { x: startX, y: startY }, end: { x: endX, y: endY } },
+            note: approval_token
+              ? 'The token exists but the user has not granted it yet (or it expired).'
+              : 'This drag destination looks irreversible (delete/recycle bin/send/pay...).',
+          },
+          next_step: 'PAUSE: this drag needs explicit user approval. Call request_approval with a clear ' +
+            'description (what is being dragged and where it lands), relay the message, wait for consent, ' +
+            'call grant_approval(token, true), then re-invoke drag_mouse with the returned approval_token. ' +
+            'Never proceed without consent.',
+        }, null, 2);
       }
 
       try {
@@ -81,6 +134,10 @@ export function createDragMouseTool(config: Config) {
 
         await system.dragMouse(startPixel, endPixel);
         focusTracker.set(endX, endY);
+        // Δ#6 一次性令牌律：危险拖拽的物理派发已落地（世界可能已发生不可逆变化）
+        // ⇒ 派发即消费（与 click 的验证关闭方言同律）。异常路径不烧令牌（B-3 语义：
+        // 抛异常的回合在下方 catch 返回，令牌保留供同授权内重试）。
+        if (dangerous && approval_token) approval.consume(approval_token);
 
         let effect = null;
         if (before) {
@@ -137,6 +194,9 @@ export function createDragMouseTool(config: Config) {
                 ...(transport.copyLike ? { semantics: 'copy-like (content now at BOTH source and destination)' } : {}),
               }
               : undefined,
+            // Δ#6 安检透明化：本次拖拽是否经审批令牌放行（危险目的地上的一发令牌
+            // 已随派发消费）
+            approval_gate: dangerous ? { described: true, token_consumed_on_dispatch: true } : undefined,
           },
           next_step: transport && !transport.transported && effect?.detected
             ? 'PIXELS CHANGED BUT NO TRANSPORT: something moved, yet the content you grabbed is NOT at the destination — ' +

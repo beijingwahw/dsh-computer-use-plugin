@@ -7,7 +7,7 @@ import { system } from '../system';
 import { captureBefore, settleAndVerify, type CombinedEffect } from '../actionVerifier';
 import { focusTracker } from '../focusTracker';
 import { semanticConfirm, type SemanticConfirm } from '../textReader';
-import { matchesRiskPatterns, matchesDangerPatterns } from '../riskGate';
+import { matchesRiskPatterns } from '../riskGate';
 import { approval } from '../approval';
 import { uiMemory } from '../uiMemory';
 import { regionDhash, similarity } from '../perceptualHash';
@@ -16,6 +16,7 @@ import { quantum } from '../quantumSense';
 import { probePoints, gateTextClick } from '../interactivityProbe';
 import { extractUrls } from '../urlSense';
 import { toolOk, toolErr } from '../toolResult';
+import { assertActionAllowed } from './actionGate';
 
 export function createClickMouseTool(config: Config) {
   return defineTool({
@@ -91,29 +92,36 @@ export function createClickMouseTool(config: Config) {
         );
       }
 
-      // ── 不可逆操作闸门（第六轮 + B-3 两阶段 + J 纪元授予门）：危险目标必须持
-      // **已授予**的有效令牌（grant_approval 落点 approval.grant —— "从未 grant"
-      // 与 "grant=true" 不再等价）。
+      // ── 不可逆操作闸门（第六轮 + B-3 两阶段 + J 纪元授予门 + N 纪元硬前置）──
+      // 危险目标必须持**已授予**的有效令牌（grant_approval 落点 approval.grant ——
+      // "从未 grant" 与 "grant=true" 不再等价）。
       // J 纪元升级（盲区收窄）：expected_text 作为**第二危险信号** —— 模型即使
       // 不填 target_description，声明"预期出现『发送/支付』字样"（expected_text
       // 本就是模型对该按钮的自述）同样触发闸门。旧的 `!!target_description`
       // 前置条件使"沉默不填描述"成为绕过通道；现在绕过需要同时沉默两条
       // 独立信号通道。
+      // Δ 纪元（审计#1）：判定抽取至 actionGate.assertActionAllowed —— 工具层与
+      // 重放层（replayOne）共用同一事实源；此处语义与原工具内实现逐条等价
+      // （危险信号计算 / 拒绝归因 / sweep 副作用 / undescribed-click 硬前置）。
       // 阶段一 validate：只查不烧 —— 点击若抛异常，令牌仍可用于重试；
       // 阶段二 consume 在动作成功返回前调用（见下方 finally 前的成功路径）。
-      const dangerSignal =
-        (target_description ? matchesDangerPatterns(target_description, config.dangerPatterns) : false) ||
-        (expected_text ? matchesDangerPatterns(expected_text, config.dangerPatterns) : false);
-      const dangerous = config.enableApprovalGate && dangerSignal;
-      if (dangerous && !(approval_token && approval.validate(approval_token))) {
-        approval.sweep();
+      const gate = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config);
+      const dangerous = gate.dangerous;
+      if (!gate.allowed) {
+        if (gate.reason === 'undescribed-click') {
+          return JSON.stringify({
+            status: 'ACTION_REQUIRED',
+            state_anchor: { reason: 'undescribed-click', note: 'approval gate cannot judge an undescribed target' },
+            next_step: 'Re-invoke click_mouse with target_description (what you are clicking) or expected_text ' +
+              '(text you expect to appear) — the approval gate requires one description channel to judge irreversibility.',
+          }, null, 2);
+        }
         return JSON.stringify({
           status: 'ACTION_REQUIRED',
           state_anchor: {
             target: target_description ?? expected_text ?? '(undescribed target)',
-            danger_signal: target_description && matchesDangerPatterns(target_description, config.dangerPatterns)
-              ? 'target_description' : 'expected_text',
-            reason: approval_token ? 'token-not-granted-or-expired' : 'irreversible-action',
+            danger_signal: gate.dangerSignalChannel,
+            reason: gate.reason,
             note: approval_token
               ? 'The token exists but the user has not granted it yet (or it expired).'
               : 'This target looks irreversible (send/delete/pay/submit...).',
@@ -124,17 +132,10 @@ export function createClickMouseTool(config: Config) {
             'Never proceed without consent.',
         }, null, 2);
       }
-      // N 纪元（盲区根除）：闸门开启时描述是硬前置 —— 两条信号通道全沉默的点击
-      // 不再放行（旧版仅透明化 blind-spot）。合规零成本：补一句描述重发即过。
-      if (config.enableApprovalGate && !target_description && !expected_text) {
-        return JSON.stringify({
-          status: 'ACTION_REQUIRED',
-          state_anchor: { reason: 'undescribed-click', note: 'approval gate cannot judge an undescribed target' },
-          next_step: 'Re-invoke click_mouse with target_description (what you are clicking) or expected_text ' +
-            '(text you expect to appear) — the approval gate requires one description channel to judge irreversibility.',
-        }, null, 2);
-      }
       const gateCoverage = config.enableApprovalGate ? 'described' : 'gate-disabled';
+      // Δ 纪元（审计#2）：本回合是否已持有 beginAttempt 的派发预留（catch 路径
+      // 需据此结算 —— 见下方异常分支）
+      let attemptReserved = false;
       try {
         const size = await system.getScreenSize();
         const px = Math.round(x * size.width);
@@ -228,6 +229,34 @@ export function createClickMouseTool(config: Config) {
         const before = verify
           ? await captureBefore({ x, y }, config.regionVerifyRadius, !!expectation)
           : null;
+
+        // ── Δ 纪元（审计#2·双花窗口封堵）：派发预留 ──
+        // validate（只查不烧）与验收式消费（consume/attemptFailed，见下方）之间
+        // 隔着多个 await —— 并发两次同令牌调用都能过 validate、都派发物理点击。
+        // beginAttempt 在物理派发前原子预留一次尝试（attempts +1 且同令牌同时
+        // 只允许一个在途回合），与本行到 system.clickMouse 之间零 await ——
+        // 并发的第二回合在落到物理世界之前即被拒（恰一次派发）。
+        // 计数时序：预留 +1 → 验收通过 consume（焚毁，计数随行）/ 验收失败
+        // attemptFailed（释放预留，不再重复 ++）—— 单次点击全链路 attempts 恰 +1；
+        // 预算耗尽在派发前焚毁（旧实现第 maxAttempts+1 次点击仍会落到物理世界）。
+        if (dangerous && approval_token) {
+          if (!approval.beginAttempt(approval_token)) {
+            approval.sweep();
+            return JSON.stringify({
+              status: 'ACTION_REQUIRED',
+              state_anchor: {
+                target: target_description ?? expected_text ?? '(undescribed target)',
+                approval_gate: 'attempt-reservation-denied',
+                reason: 'attempt-in-flight-or-budget-exhausted',
+                note: 'The token is valid, but another attempt under it is still in flight, or its retry budget is exhausted.',
+              },
+              next_step: 'Do NOT re-invoke click_mouse concurrently with the same token — wait for the in-flight ' +
+                'attempt to settle. If the retry budget is exhausted, call request_approval again and explain to ' +
+                'the user why the action keeps failing.',
+            }, null, 2);
+          }
+          attemptReserved = true;
+        }
 
         await system.clickMouse(px, py, button);
 
@@ -403,6 +432,9 @@ export function createClickMouseTool(config: Config) {
 
       } catch (error: any) {
         // B-3 注：异常路径不烧审批令牌（validate 只查不烧；consume 仅在成功 return 前调用）
+        // Δ 纪元（审计#2）：已预留的尝试在此结算（attemptFailed 只释放预留、不重复
+        // 计数）—— 令牌保留、TTL 续期，B-3 的「异常后同令牌重试」语义原样保持。
+        if (attemptReserved && approval_token) approval.attemptFailed(approval_token, 'dispatch-exception');
         return toolErr(
           `Mouse ${button} click at (${x}, ${y}) failed.`,
           error.message,

@@ -5,6 +5,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { doctor, DOCTOR_RULES, ensureDoctorConfigured } from '../qualityDoctor.js';
 import { telemetry } from '../telemetry.js';
+import { toolErr } from '../toolResult.js';
 export function createQualityCheckupTool(config) {
     return defineTool({
         name: 'quality_checkup',
@@ -47,84 +48,97 @@ export function createQualityCheckupTool(config) {
         },
         async execute(args) {
             const t0 = Date.now();
-            const cfgErr = await ensureDoctorConfigured(config);
-            if (cfgErr) {
+            // Δ 纪元（安全外围#5）：全工具面唯一无兜底的 execute —— diagnose/heal 直扫
+            // 文件系统与规则引擎，任何异常（IO/规则缺陷/记忆损坏）都会裸抛炸穿工具
+            // 管线。包 try：异常降级为 toolErr 结构化锚点（action 名保留，模型可换轻
+            // 动作自愈），失败计入遥测。
+            try {
+                const cfgErr = await ensureDoctorConfigured(config);
+                if (cfgErr) {
+                    telemetry.observe('quality_checkup', 'FAILED', Date.now() - t0);
+                    return JSON.stringify({ status: 'FAILED', reason: cfgErr });
+                }
+                if (args.action === 'diagnose') {
+                    const files = args.files?.split(',').map((s) => s.trim()).filter(Boolean);
+                    const report = await doctor.diagnose(files && files.length > 0
+                        ? { files, includeChainAudit: args.include_chain_audit !== false }
+                        : { includeChainAudit: args.include_chain_audit !== false });
+                    telemetry.observe('quality_checkup', report.findings.some(f => f.severity === 'critical') ? 'UNKNOWN' : 'SUCCESS', Date.now() - t0);
+                    const sev = (s) => report.findings.filter(f => f.severity === s).length;
+                    // Token 纪律：Top-3 一行式发现；全量证据在磁盘报告
+                    const top3 = report.findings.slice(0, 3)
+                        .map(f => `${f.severity} ${f.ruleId} ${f.location.file}:${f.location.line} — ${f.evidence}`)
+                        .join('\n  ');
+                    return JSON.stringify({
+                        status: 'SUCCESS',
+                        score: report.score,
+                        genesis_verdict: report.genesisVerdict,
+                        findings_total: report.findings.length,
+                        severity: { critical: sev('critical'), major: sev('major'), minor: sev('minor'), info: sev('info') },
+                        by_category: report.byCategory,
+                        incremental: report.incremental,
+                        trend: report.trend,
+                        warnings: report.warnings,
+                        top_findings: report.findings.length > 0 ? `\n  ${top3}` : ' (clean)',
+                        full_report: doctor.reportPath(),
+                    }, null, 2);
+                }
+                if (args.action === 'heal') {
+                    const report = await doctor.diagnose();
+                    const result = await doctor.heal(report, {
+                        maxRisk: args.max_risk === 'mechanical' ? 'mechanical' : 'none',
+                        authorized: args.authorize === true,
+                        dryRun: args.dry_run !== false,
+                    });
+                    telemetry.observe('quality_checkup', 'SUCCESS', Date.now() - t0);
+                    return JSON.stringify({
+                        status: 'SUCCESS',
+                        applied: result.applied.length,
+                        proposed_only: result.proposed.length,
+                        rejected: result.rejected,
+                        note: result.proposed.length > 0
+                            ? 'Proposals are NOT applied. Structural surgery stays human-authorized.'
+                            : undefined,
+                        full_report: doctor.reportPath(),
+                    }, null, 2);
+                }
+                if (args.action === 'lessons') {
+                    telemetry.observe('quality_checkup', 'SUCCESS', Date.now() - t0);
+                    const m = doctor.memory();
+                    return JSON.stringify({
+                        status: 'SUCCESS',
+                        total_diagnoses: m.totalDiagnoses,
+                        total_fixes_applied: m.totalFixesApplied,
+                        last_baseline: m.lastReport,
+                        lessons: m.lessons.map(l => `${l.ruleId} ×${l.occurrences} (first ${new Date(l.firstSeen).toISOString().slice(0, 10)}): ${l.note}`),
+                    }, null, 2);
+                }
+                if (args.action === 'self_audit') {
+                    telemetry.observe('quality_checkup', 'SUCCESS', Date.now() - t0);
+                    const audit = doctor.auditSelf();
+                    return JSON.stringify({
+                        status: 'SUCCESS',
+                        covered_laws: audit.coveredLaws,
+                        missing_laws: audit.missingLaws,
+                        rule_count: audit.ruleCount,
+                        config_valid: audit.configValid,
+                        config_errors: audit.configErrors,
+                        registry: DOCTOR_RULES.map(r => `${r.id} [${r.severity}/${r.category}]`),
+                    }, null, 2);
+                }
                 telemetry.observe('quality_checkup', 'FAILED', Date.now() - t0);
-                return JSON.stringify({ status: 'FAILED', reason: cfgErr });
-            }
-            if (args.action === 'diagnose') {
-                const files = args.files?.split(',').map((s) => s.trim()).filter(Boolean);
-                const report = await doctor.diagnose(files && files.length > 0
-                    ? { files, includeChainAudit: args.include_chain_audit !== false }
-                    : { includeChainAudit: args.include_chain_audit !== false });
-                telemetry.observe('quality_checkup', report.findings.some(f => f.severity === 'critical') ? 'UNKNOWN' : 'SUCCESS', Date.now() - t0);
-                const sev = (s) => report.findings.filter(f => f.severity === s).length;
-                // Token 纪律：Top-3 一行式发现；全量证据在磁盘报告
-                const top3 = report.findings.slice(0, 3)
-                    .map(f => `${f.severity} ${f.ruleId} ${f.location.file}:${f.location.line} — ${f.evidence}`)
-                    .join('\n  ');
                 return JSON.stringify({
-                    status: 'SUCCESS',
-                    score: report.score,
-                    genesis_verdict: report.genesisVerdict,
-                    findings_total: report.findings.length,
-                    severity: { critical: sev('critical'), major: sev('major'), minor: sev('minor'), info: sev('info') },
-                    by_category: report.byCategory,
-                    incremental: report.incremental,
-                    trend: report.trend,
-                    warnings: report.warnings,
-                    top_findings: report.findings.length > 0 ? `\n  ${top3}` : ' (clean)',
-                    full_report: doctor.reportPath(),
-                }, null, 2);
-            }
-            if (args.action === 'heal') {
-                const report = await doctor.diagnose();
-                const result = await doctor.heal(report, {
-                    maxRisk: args.max_risk === 'mechanical' ? 'mechanical' : 'none',
-                    authorized: args.authorize === true,
-                    dryRun: args.dry_run !== false,
+                    status: 'FAILED',
+                    reason: `unknown action "${args.action}" — use diagnose | heal | lessons | self_audit`,
                 });
-                telemetry.observe('quality_checkup', 'SUCCESS', Date.now() - t0);
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    applied: result.applied.length,
-                    proposed_only: result.proposed.length,
-                    rejected: result.rejected,
-                    note: result.proposed.length > 0
-                        ? 'Proposals are NOT applied. Structural surgery stays human-authorized.'
-                        : undefined,
-                    full_report: doctor.reportPath(),
-                }, null, 2);
             }
-            if (args.action === 'lessons') {
-                telemetry.observe('quality_checkup', 'SUCCESS', Date.now() - t0);
-                const m = doctor.memory();
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    total_diagnoses: m.totalDiagnoses,
-                    total_fixes_applied: m.totalFixesApplied,
-                    last_baseline: m.lastReport,
-                    lessons: m.lessons.map(l => `${l.ruleId} ×${l.occurrences} (first ${new Date(l.firstSeen).toISOString().slice(0, 10)}): ${l.note}`),
-                }, null, 2);
+            catch (error) {
+                // 结构化兜底：绝不裸抛（四件套齐全，action 名保留 —— 模型知道哪次出诊炸了）
+                telemetry.observe('quality_checkup', 'FAILED', Date.now() - t0);
+                return toolErr(`quality_checkup "${args?.action ?? 'unknown'}" crashed during execution.`, error?.message ?? String(error), 'The doctor hit an internal error (not a fault in your invocation). ' +
+                    'Retry with a lighter action (lessons | self_audit), or narrow diagnose with the files parameter. ' +
+                    'If it keeps crashing, omit files for a full-scan retry and report the error above.');
             }
-            if (args.action === 'self_audit') {
-                telemetry.observe('quality_checkup', 'SUCCESS', Date.now() - t0);
-                const audit = doctor.auditSelf();
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    covered_laws: audit.coveredLaws,
-                    missing_laws: audit.missingLaws,
-                    rule_count: audit.ruleCount,
-                    config_valid: audit.configValid,
-                    config_errors: audit.configErrors,
-                    registry: DOCTOR_RULES.map(r => `${r.id} [${r.severity}/${r.category}]`),
-                }, null, 2);
-            }
-            telemetry.observe('quality_checkup', 'FAILED', Date.now() - t0);
-            return JSON.stringify({
-                status: 'FAILED',
-                reason: `unknown action "${args.action}" — use diagnose | heal | lessons | self_audit`,
-            });
         },
     });
 }

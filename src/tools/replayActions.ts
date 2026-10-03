@@ -27,6 +27,8 @@ export function isDeadStep(hashBefore: string | null, hashAfter: string | null, 
 import type { JournalEntry } from '../journal';
 import { sleep } from '../actionVerifier';
 import { toolOk, toolErr, toolActionRequired } from '../toolResult';
+import { assertActionAllowed, SAFETY_GATE_BLOCK, type ActionGateConfig } from './actionGate';
+import { approval } from '../approval';
 
 export function createReplayActionsTool(config: Config) {
   return defineTool({
@@ -63,9 +65,16 @@ export function createReplayActionsTool(config: Config) {
       const all = journal.list();
       // J 纪元修正：to_step 补下界钳制 —— 旧实现只有上界 min(len-1)，
       // to_step=-5 时 slice(0, -4) 静默选中「除最后 4 条外的全部」并重放，
-      // 与钳制 from 的初衷自相矛盾。
-      const from = Math.max(0, args.from_step ?? 0);
-      const to = Math.max(from, Math.min(all.length - 1, args.to_step ?? all.length - 1));
+      // 与钳制 from 的初衷自相矛盾。NaN 防御：Math.max(0, NaN)=NaN，slice 视
+      // NaN 为 0 —— 非有限数一律按缺省记，绝不让坏下标静默扩大重放范围。
+      const fromStep = typeof args.from_step === 'number' && Number.isFinite(args.from_step)
+        ? args.from_step
+        : 0;
+      const toStep = typeof args.to_step === 'number' && Number.isFinite(args.to_step)
+        ? args.to_step
+        : all.length - 1;
+      const from = Math.max(0, fromStep);
+      const to = Math.max(from, Math.min(all.length - 1, toStep));
       const steps = all.slice(from, to + 1);
 
       if (steps.length === 0) {
@@ -85,6 +94,7 @@ export function createReplayActionsTool(config: Config) {
 
       const log: string[] = [];
       let halted: { index: number; tool: string } | null = null;
+      let haltGate: 'dead-step' | 'safety-gate' | 'step-failure' = 'dead-step';
       const gated = config.verifyActions && !config.dryRun;
       for (let i = 0; i < steps.length; i++) {
         const entry = steps[i];
@@ -93,13 +103,32 @@ export function createReplayActionsTool(config: Config) {
         const before = gated && isActionStep
           ? await backend.captureProcessed({ metaOnly: true, wantHashes: true })
           : null;
-        const line = await replayOne(entry);
+        const line = await replayOne(entry, config);
         log.push(`#${entry.ts} ${entry.tool}: ${line}`);
         await sleep(150); // 步间微歇，给 UI 响应时间
+        // Δ 纪元（审计#1）：安全闸门拦截 ⇒ fail-fast 中止 —— 宏的后续步骤建立在
+        // 被拦截的不可逆步骤之上，继续只会制造半途而废的世界状态（与 Y-6 死步
+        // 即停同律：诚实中止并报告分叉点）。
+        if (line.includes(SAFETY_GATE_BLOCK)) {
+          halted = { index: i, tool: entry.tool };
+          haltGate = 'safety-gate';
+          log.push(`  [GATE] step ${i} 重放被安全闸门拦截 — replay halted (dangerous/gated step was NOT executed)`);
+          break;
+        }
+        // 派发失败即停：FAILED 步 = 物理动作根本没执行（system 层异常）—— 比
+        // 死步（执行了但无效）更强的事实，后续步骤的前提同样已崩塌，继续只会
+        // 制造连锁错误（与 Y-6 死步即停 / Δ 纪元闸门即停同律）
+        if (line.startsWith('FAILED:')) {
+          halted = { index: i, tool: entry.tool };
+          haltGate = 'step-failure';
+          log.push(`  [GATE] step ${i} dispatch FAILED — replay halted (the step did NOT execute)`);
+          break;
+        }
         if (before?.dhash) {
           const after = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
           if (isDeadStep(before.dhash, after.dhash ?? null)) {
             halted = { index: i, tool: entry.tool };
+            haltGate = 'dead-step';
             log.push(`  [GATE] step ${i} produced NO screen change — replay halted (the UI has diverged from the recorded scene)`);
             break;
           }
@@ -114,11 +143,23 @@ export function createReplayActionsTool(config: Config) {
             total_steps: steps.length,
             diverged_at_step: halted.index,
             diverged_tool: halted.tool,
-            gate: 'per-step scene hash (dHash dead-step detection)',
+            gate: haltGate === 'safety-gate'
+              ? 'pre-dispatch safety gate (approval/risk) — 重放被安全闸门拦截'
+              : haltGate === 'step-failure'
+                ? 'step dispatch failure (system-layer exception) — 该步未执行即失败'
+                : 'per-step scene hash (dHash dead-step detection)',
           },
           execution_log: log.join('\n'),
-          next_step: 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
-            'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
+          next_step: haltGate === 'safety-gate'
+            ? 'REPLAY HALTED: a step was BLOCKED by the safety gate (irreversible target without a valid approval ' +
+              'token, or gated input) and was NOT executed. Re-run that step live via click_mouse/type_text with ' +
+              'proper user consent (request_approval → grant_approval), then continue the remaining steps manually.'
+            : haltGate === 'step-failure'
+              ? 'REPLAY HALTED: a step FAILED to dispatch (system-layer exception — the action did NOT execute; ' +
+                'see execution_log for the error). take_screenshot to inspect the current state, re-run the failed ' +
+                'step live, then continue the remaining steps.'
+              : 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
+              'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
         }, null, 2);
       }
       return toolOk(
@@ -130,10 +171,34 @@ export function createReplayActionsTool(config: Config) {
   });
 }
 
-/** 单条日志/技能步骤 → 系统层调用。依赖运行时缓存的工具（click_element）显式跳过。 */
-export async function replayOne(entry: { tool: string; args?: Record<string, any> }): Promise<string> {
+/** 单条日志/技能步骤 → 系统层调用。依赖运行时缓存的工具（click_element）显式跳过。
+ *  Δ 纪元（审计#1）：重放不再豁免工具层闸门 —— click_mouse/type_text 步前置
+ *  assertActionAllowed（与 clickMouse/typeText 工具同一事实源）：危险词命中且
+ *  步骤无有效审批令牌、或凭据/超长输入 ⇒ 该步返回结构化失败（FAILED 形态，
+ *  不派发物理动作）；replay_actions 循环据此 fail-fast 中止，run_skill 据此
+ *  计失败步。config 由调用方透传（缺省 = 与 Config 缺省同值的保守闸门）。 */
+export async function replayOne(
+  entry: { tool: string; args?: Record<string, any> },
+  config?: Partial<ActionGateConfig>,
+): Promise<string> {
   const a = entry.args ?? {};
   try {
+    if (entry.tool === 'click_mouse' || entry.tool === 'type_text') {
+      const gate = assertActionAllowed(entry.tool, a, config);
+      if (!gate.allowed) {
+        return `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (${gate.reason}) — replayed journal/skill steps ` +
+          'pass through the SAME approval/risk gates as live tool calls; re-run this step live via the real tool ' +
+          'with a valid approval_token (or user-entered credentials for sensitive input).';
+      }
+      // 带有效令牌的危险重放步：派发前预留尝试预算（审计#2 同律 —— 重放不经
+      // clickMouse 的验收链路，预算即预算）；在途/耗尽 ⇒ 拦截，不派发。
+      if (entry.tool === 'click_mouse' && gate.dangerous && a.approval_token) {
+        if (!approval.beginAttempt(String(a.approval_token))) {
+          return `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (attempt-in-flight-or-budget-exhausted) — ` +
+            "the approval token's retry budget is exhausted or another attempt is still in flight.";
+        }
+      }
+    }
     switch (entry.tool) {
       case 'click_mouse': {
         // 尺寸只取一次：两次独立异步读在分辨率切换间隙会用不同比例映射 x/y

@@ -32,9 +32,11 @@ export async function computeDiffRegions(
   const W = DIFF_WIDTH;
   const H = Math.max(1, Math.round(W * (afterMeta.height! / afterMeta.width!)));
 
+  // ensureAlpha：像素差循环按 4 通道步长索引（i=(y*W+x)*4）—— RGB 输入
+  //（JPEG/无 alpha 的 PNG）的 raw 缓冲只有 3 通道，通道会整体错位静默毒化判决
   const [a, b] = await Promise.all([
-    sharp(beforeBuf).resize(W, H, { fit: 'fill' }).raw().toBuffer(),
-    sharp(afterBuf).resize(W, H, { fit: 'fill' }).raw().toBuffer(),
+    sharp(beforeBuf).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
+    sharp(afterBuf).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
   ]);
 
   // 分块变化图：像素级变化累积到块级，天然过滤零星噪点

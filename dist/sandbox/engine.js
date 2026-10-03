@@ -24,7 +24,7 @@ const DEFAULT_MIN_RELIABILITY = 0.5;
 /** 场景同屏门限（对齐 skillLibrary.match 场景加成门限 0.9 —— 算法结构常量） */
 const DEFAULT_SCENE_SIMILARITY = 0.9;
 /** 重放令牌 TTL（对齐宿主 approval 的 120s 方言） */
-const REPLAY_TOKEN_TTL_MS = 120000;
+const REPLAY_TOKEN_TTL_MS = 120_000;
 /** 判决缓存容量上限（无界 Map = 缓慢泄漏 —— 对齐 orchestration/index boundedSet 先例） */
 const VERDICT_CACHE_MAX = 256;
 /** 重放令牌容量上限（铸造时驱逐最旧未决令牌 —— 过期未确认的令牌不许无界滞留） */

@@ -28,8 +28,8 @@ const QUERY_PREVIEW_MAX_CHARS = 80;
  *  主消费端；置 false 让渡（如意图路由协议改由 D-6 消费的部署拓扑）。 */
 const DEFAULT_CONFIG = {
     regionGrid: DEFAULT_REGION_GRID,
-    timeout: { overall: 120000, perStep: 30000, perPerception: 10000 },
-    retryPolicy: { maxRetries: 3, backoffMs: 500, maxBackoffMs: 5000 },
+    timeout: { overall: 120_000, perStep: 30_000, perPerception: 10_000 },
+    retryPolicy: { maxRetries: 3, backoffMs: 500, maxBackoffMs: 5_000 },
     knowledgeTimeout: 50,
     knowledgeMaxResults: 5,
     knowledgeMaxChars: 300,

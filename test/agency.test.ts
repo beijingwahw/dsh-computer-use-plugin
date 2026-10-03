@@ -264,7 +264,10 @@ test('D-2: restoreUndoLog 防御性恢复 —— 坏条目跳过，令牌序列�
 });
 
 test('D-2: applyPreset —— 预设链解析与伪步骤拒绝', async () => {
-  await shaper.initialize();
+  // K 纪元同律（见上「shaper 单例」注）：真机 Windows 的 initialize 探测出真实
+  // PowerShell 能力后，raise/maximize 会真的操作宿主开着的窗口，且「全部诚实
+  // 拒绝」断言随机器窗口状态翻车 —— 空能力形态经 NullAdapter 注入锁死。
+  shaper.setAdapterForTest(new NullAdapter());
   const results = await shaper.applyPreset('raise,maximize,bogus_step', 'Chrome');
   assert.equal(results.length, 3);
   assert.ok(results.every(r => !r.ok), '沙箱空能力：全部诚实拒绝');

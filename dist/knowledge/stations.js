@@ -73,7 +73,7 @@ export function ocrWordsToClickCandidates(words) {
         .filter(w => classifyWordShape(w) !== 'content-like')
         .map(w => ({
         role: 'text',
-        name: w.text.slice(0, 20),
+        name: w.text.slice(0, 20), // D-3 LABEL_MAX 先例
         rect: {
             x: w.bbox_normalized.x0, y: w.bbox_normalized.y0,
             width: w.bbox_normalized.x1 - w.bbox_normalized.x0,

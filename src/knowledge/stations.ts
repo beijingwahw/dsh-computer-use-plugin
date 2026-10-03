@@ -28,11 +28,12 @@ import {
 export interface SceneSourcePort {
   /** 源标识（审计用；探测侧可缺席 —— name 缺席不构成端口非法） */
   readonly name?: string;
-  perceive(req: PerceptionRequest): Promise<ScenePatch[]>;
+  perceive(req: PerceptionRequest, signal?: AbortSignal): Promise<ScenePatch[]>;
 }
 
-/** 决策工位的大模型通道（planner ChatFn 方言：注入而非绑定） */
-export type DecisionChatFn = (prompt: string) => Promise<string>;
+/** 决策工位的大模型通道（planner ChatFn 方言：注入而非绑定）。
+ *  可选止损信号：流水线决策步超时 abort —— 消费与否由通道实现自决。 */
+export type DecisionChatFn = (prompt: string, signal?: AbortSignal) => Promise<string>;
 
 /** 宿主执行端口：AtomicAction → 执行回执（action 由工位内联回显，端口不重复携带） */
 export interface HostExecutePort {
@@ -215,13 +216,13 @@ export class StubVisionStation implements VisionStation {
     this.opts = opts;
   }
 
-  async perceive(env: AttentionEnvelope<'vision', PerceptionRequest>): Promise<ScenePatch[]> {
+  async perceive(env: AttentionEnvelope<'vision', PerceptionRequest>, signal?: AbortSignal): Promise<ScenePatch[]> {
     const req = env.payload;
     if (!this.opts.source) {
       return faultPatches(req.grid, 'no scene source wired (stub era — honest degradation)');
     }
     try {
-      const patches = await this.opts.source.perceive(req);
+      const patches = await this.opts.source.perceive(req, signal);
       return Array.isArray(patches) ? patches : [];
     } catch (e: unknown) {
       // 端口契约违约（抛错）⇒ fault 补丁归因，绝不毒化流水线
@@ -271,13 +272,14 @@ export class StubDecisionStation implements DecisionStation {
   async decide(
     env: AttentionEnvelope<'decision', DecisionContext>,
     retryCtx?: FailureFeedback,
+    signal?: AbortSignal,
   ): Promise<AtomicAction | NeedGrounding> {
     if (!this.opts.chat) {
       return { reason: 'no decision channel wired (stub era — honest degradation)', focus: 'full-scene' };
     }
     let raw: string;
     try {
-      raw = await this.opts.chat(this.buildPrompt(env.payload, retryCtx));
+      raw = await this.opts.chat(this.buildPrompt(env.payload, retryCtx), signal);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       return { reason: `decision channel fault: ${msg}`, focus: 'full-scene' };
@@ -394,8 +396,9 @@ export class ReflexiveDecisionStation implements DecisionStation {
   async decide(
     env: AttentionEnvelope<'decision', DecisionContext>,
     retryCtx?: FailureFeedback,
+    signal?: AbortSignal,
   ): Promise<AtomicAction | NeedGrounding> {
-    if (this.llm) return this.llm.decide(env, retryCtx);
+    if (this.llm) return this.llm.decide(env, retryCtx, signal);
     const ctx = env.payload;
     // 压制评估（Tier 0）与本能弧（Tier 1）并行计算 —— 探针需要被压制的弧
     const suppression = this.assessSuppression(ctx);

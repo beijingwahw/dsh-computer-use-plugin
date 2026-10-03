@@ -3,6 +3,7 @@
 //   Actor 状态协议([SUCCESS]/[FAILED]) + fail-fast 短路 + 完整执行轨迹汇总。
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。
 import { planTasks, topoSortSubTasks, type SubTask, type ChatFn } from './planner';
+import { kernelRegistry } from './kernel/registry';
 
 export type { ChatFn } from './planner';
 
@@ -65,8 +66,13 @@ const channelEma = { agents: 0.5, skill: 0.5 };
 const EMA_ALPHA = 0.15;
 
 function hedgeUpdate(channel: 'agents' | 'skill', success: boolean): void {
+  // 纪元 Ξ（Ξ-D 生产接线）：EMA 平滑系数读内核注册表 —— orch.emaAlpha（缺省
+  // 0.15，区间 0.01..0.9）。min 护栏 Math.max(0.01,…) 防 0（α=0 会冻结学习）
+  // 与 1（α=1 退化成逐次覆写，失去滑动语义）—— 区间外的病值就地夹正；
+  // 未注册 ⇒ getOrDefault 回声字面量，仲裁行为逐字节不变；每次更新单次读取。
+  const alpha = Math.min(0.9, Math.max(0.01, kernelRegistry.getOrDefault('orch.emaAlpha', EMA_ALPHA)));
   const r = success ? 1 : 0;
-  channelEma[channel] = channelEma[channel] + EMA_ALPHA * (r - channelEma[channel]);
+  channelEma[channel] = channelEma[channel] + alpha * (r - channelEma[channel]);
 }
 
 export function actorChannelWeights(): { agents: number; skill: number } {
@@ -97,8 +103,13 @@ export function createActor(deps: ActorDeps = {}) {
     // 毫无文本/语义关联的技能（如 53 步的记事本宏顶替"关闭窗口"子任务）也
     // 能入列并整体重放。score 是 skillLibrary.match 的综合匹配分（文本相似
     // 为主 + 可靠度加成），低于 0.45 视为不相关 —— 可靠不等于相关。
+    // 纪元 Ξ（Ξ-D 生产接线）：双门槛读内核注册表 —— orch.skillReliability
+    //（可靠度门，缺省 0.5）/ orch.skillScore（相关度门，缺省 0.45）。未注册 ⇒
+    // getOrDefault 回声字面量，探测判决逐字节不变；每次任务单次读取。
+    const skillReliabilityGate = kernelRegistry.getOrDefault('orch.skillReliability', 0.5);
+    const skillScoreGate = kernelRegistry.getOrDefault('orch.skillScore', 0.45);
     const skillViable = (m: { reliability: number; score?: number; steps: Array<unknown> }) =>
-      m.reliability > 0.5 && (m.score ?? 1) > 0.45 && m.steps.length > 0;
+      m.reliability > skillReliabilityGate && (m.score ?? 1) > skillScoreGate && m.steps.length > 0;
     const skillMatch = deps.matchSkill?.(task) ?? [];
     const bestSkill = skillMatch.find(skillViable);
     const bothViable = !!agentsRun && !!bestSkill;
@@ -116,7 +127,9 @@ export function createActor(deps: ActorDeps = {}) {
 
     // ② 技能重放回退 / S-3 Hedge 接管：可靠度 > 0.5 的最佳匹配
     //（Laplace 0/0=0.5 不入场 —— 需真实验证背书）
-    const best = bestSkill ?? (deps.matchSkill?.(task) ?? []).find(skillViable);
+    // bestSkill 即上面 find 的产物：确定性匹配下重调 matchSkill 只会得到同一
+    // 结果并白付一次全库嵌入重算 —— 直接复用
+    const best = bestSkill;
     if (best) {
       let failed = 0;
       for (const step of best.steps) {
@@ -160,13 +173,34 @@ export async function runOrchestrator(
 
   const results: string[] = [];
 
+  // ── Σ-4 计划自愈（Epoch Σ：全军升维）──
+  // 法则：子任务失败不再立即 fail-fast —— 若 chat 在场且尚未自愈过
+  // （闭包守卫 replannedOnce：一次性 —— 防重规划风暴/失败循环无限烧钱），
+  // 带失败上下文调 planTasks 重规划一次；得到非空且无环的新计划 ⇒
+  // topoSortSubTasks 后**整体替换剩余未执行队列**（已执行子任务的 results
+  // 轨迹保留；新计划 id 从既有最大 id 续编 —— LLM 重规划倾向从 1 重编号，
+  // 不重编会与已执行轨迹的 Task #id 撞号），并在失败轨迹后追加 [Replan]
+  // 审计行。自愈成功时该失败行的 [FAILED]/[TIMEOUT] 标记改写为 [RECOVERED]
+  // （失败事实文本原样留痕 —— 报告是终局语义：任务已被新计划接管，不携带
+  // 未解决的失败信号；下游消费者以 includes('[FAILED]') 判定任务终局）。
+  // 自愈不可能（无 chat / 已用过一次 / 空计划 / 拓扑有环 / 再次失败）⇒
+  // 原 fail-fast 语义一字不变（warn + break）。预算检查不因自愈豁免：
+  // 重排队列仍受同一 timeBudget / 同一起点时钟约束。
+  let replannedOnce = false;
+  // Σ-4：固定 for-of 序列 → 可重铸队列（无自愈路径下遍历语义与旧循环严格一致）
+  const queue: SubTask[] = [...orderedSubTasks];
+  let idCounter = Math.max(0, ...orderedSubTasks.map(t => t.id));
+
   // 2. 循环执行子任务
-  for (const task of orderedSubTasks) {
+  for (let qi = 0; qi < queue.length; qi++) {
+    const task = queue[qi];
     // 预算感知：在子任务边界检查时钟 —— 长任务的优雅降级，而非无限烧钱
+    //（Σ-4：跳过数按当前队列计 —— 零重规划路径下与旧式 subTasks.length -
+    // results.length 严格等值：检查点前每轮恰推入一行任务轨迹）
     if (timeBudgetMs && Date.now() - startAt > timeBudgetMs) {
       const elapsed = Math.round((Date.now() - startAt) / 1000);
       results.push(`[TIMEOUT] Time budget of ${Math.round(timeBudgetMs / 1000)}s exhausted after ${elapsed}s. ` +
-        `${subTasks.length - results.length} task(s) skipped.`);
+        `${queue.length - qi} task(s) skipped.`);
       console.warn(`[Orchestrator] Time budget exhausted. Aborting with partial results.`);
       break;
     }
@@ -178,7 +212,30 @@ export async function runOrchestrator(
     results.push(`Task #${task.id} (${task.action}): ${result}`);
 
     // 4. fail-fast 容错：后续步骤建立在失败步骤的前提上，中止是最理性的选择
+    //    （Σ-4：中止前先给一次带失败上下文的重规划机会 —— 见上方法则）
     if (result.includes('[FAILED]') || result.includes('[TIMEOUT]')) {
+      if (chat && !replannedOnce) {
+        replannedOnce = true; // 闭包守卫先记账：自愈机会只有一次（含失败的自愈尝试）
+        const replanPrompt = userPrompt
+          + '\n以下子任务已失败，请重新规划剩余步骤避开失败路径：\n'
+          + task.action
+          + '\n失败结果：' + result.slice(0, 500);
+        const replanned = await planTasks(replanPrompt, chat);
+        const reTopo = replanned.length > 0 ? topoSortSubTasks(replanned) : null;
+        if (reTopo && !reTopo.cycle) {
+          const remaining = reTopo.order.map(t => ({ ...t, id: ++idCounter }));
+          queue.length = qi + 1; // 替换剩余未执行队列 —— 新计划从头执行
+          queue.push(...remaining);
+          results[results.length - 1] = results[results.length - 1]
+            .replace('[FAILED]', '[RECOVERED]')
+            .replace('[TIMEOUT]', '[RECOVERED]');
+          results.push(`[Replan] 子任务失败，已重规划（剩余 ${remaining.length} 步）`);
+          console.warn(`[Orchestrator] Task #${task.id} failed. Replanned once (${remaining.length} step(s) ahead).`);
+          continue;
+        }
+        // 重规划失败（空计划 / 拓扑有环）⇒ 落回原 fail-fast（诚实）
+        console.warn(`[Orchestrator] Replan unavailable (empty or cyclic plan). Aborting plan.`);
+      }
       console.warn(`[Orchestrator] Task #${task.id} failed. Aborting plan.`);
       break;
     }

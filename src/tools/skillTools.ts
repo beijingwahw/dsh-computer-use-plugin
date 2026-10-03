@@ -225,7 +225,8 @@ export function createRunSkillTool(config: Config) {
       const log: string[] = [];
       let failed = 0;
       for (const step of skill.steps) {
-        const line = await replayOne(step);
+        // Δ 纪元（审计#1）：重放步与 live 工具同闸门 —— 危险步无有效令牌即失败
+        const line = await replayOne(step, config);
         if (line.startsWith('FAILED') || line.startsWith('SKIPPED')) failed++;
         log.push(`  ${step.tool}: ${line}`);
         await sleep(150);

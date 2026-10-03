@@ -7,7 +7,7 @@
 //   loadCheckpoint   —— 版本校验 + 逐子系统恢复；单字段损坏不拖垮整档（防御性恢复）
 // 接线：启动时自动恢复（checkpointPath 配置时）+ 卸载时自动保存 + save_checkpoint 手动档。
 // 价值：崩溃/重启后，Agent 的「肌肉记忆」原地满血 —— 会话可中断，认知不回零。
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs';
 import path from 'path';
 import { uiMemory } from './uiMemory';
 import { probeMemory } from './probeMemory';
@@ -113,7 +113,15 @@ export function saveCheckpoint(filePath: string): { ok: boolean; steps?: number;
   const tmp = filePath + '.tmp';
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileSync(tmp, JSON.stringify(cp), 'utf8');
+    // fsync 落盘后再换名：rename 可先于数据块持久化 —— 崩溃后可能读到空/截断档
+    //（与 journal.ts 磁盘写的崩溃一致性同律：页缓存不算落盘）
+    const fd = openSync(tmp, 'w');
+    try {
+      writeSync(fd, Buffer.from(JSON.stringify(cp), 'utf8'));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, filePath); // 原子换名
     return { ok: true, steps: cp.journal.entries.length };
   } catch (e: any) {

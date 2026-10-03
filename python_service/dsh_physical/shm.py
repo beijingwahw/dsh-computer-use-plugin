@@ -87,7 +87,10 @@ def _release_handle(name: str) -> None:
     if mmap_obj is not None:
         try:
             mmap_obj.close()
-        except OSError:
+        except (OSError, BufferError):
+            # BufferError：仍有导出缓冲视图 —— 无法立即解除映射，
+            # 进程退出兜底；不得炸穿“永不抛错”契约（否则 cleanup_all
+            # 中断，后续 handle 全部泄漏）
             pass
     # 再 shm_unlink（POSIX）或删文件（mmap-file）
     transport = info.get("transport", "shm")

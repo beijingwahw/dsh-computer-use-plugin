@@ -595,7 +595,7 @@ class Shaper implements EnvironmentShaper {
       });
       return { ok: true, token, matchedTitle: recipe.matchedTitle };
     } catch (e: any) {
-      return { ok: false, reason: e.message };
+      return { ok: false, reason: e?.message ?? String(e) }; // 非 Error 抛出也必有原因
     }
   }
 
@@ -629,8 +629,9 @@ class Shaper implements EnvironmentShaper {
         rec.undoneAt = Date.now();
         results.push({ token: rec.token, ok: true });
       } catch (e: any) {
-        rec.undoFailureReason = e.message;
-        results.push({ token: rec.token, ok: false, reason: e.message });
+        const reason = e?.message ?? String(e);
+        rec.undoFailureReason = reason;
+        results.push({ token: rec.token, ok: false, reason });
         // 部分复原优于中止：失败记录后继续弹栈
       }
     }
@@ -646,7 +647,14 @@ class Shaper implements EnvironmentShaper {
     // 防御性恢复：结构非法条目跳过；只认领未复原条目的复原义务
     this.undoLog = records.filter(r =>
       r && typeof r.token === 'string' && r.recipe && typeof r.recipe.kind === 'string');
-    this.tokenSeq = this.undoLog.length; // 后续发号不撞已存在令牌
+    // 后续发号不撞已存在令牌：按令牌最大数字后缀计（length 在条目被过滤/
+    // 令牌不连续时会复用旧号 —— undo-N 撞号会毒化审计对账）
+    let maxSeq = 0;
+    for (const r of this.undoLog) {
+      const m = /^undo-(\d+)$/.exec(r.token);
+      if (m) maxSeq = Math.max(maxSeq, Number.parseInt(m[1], 10));
+    }
+    this.tokenSeq = maxSeq;
   }
 
   undoDepth(): number {
