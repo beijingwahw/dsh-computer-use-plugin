@@ -1,4 +1,5 @@
 // src/vlm/grounding.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：视觉接地引擎 —— 坐标几何/校准/预算门控/验证共守同一接地不变量（roundtrip 精度契约），分区将增加跨文件耦合面。
 // 纪元 Ω（Ω-4 视觉接地）：GLM-5.3-Flash 云脑皮层的元素接地器官 —— 截图进、
 // 可点击元素（像素坐标 + 语义标签）出，本地启发元素源之外的云脑直读路径。
 // 本模块是云输出的**规整与执法层**：VLM 回话是方言（bbox 可能是 4 元数组、
@@ -15,6 +16,13 @@
 // 中心偏差 >8px 且 OCR 文字一致 ⇒ 取复核值，文字冲突 ⇒ 保守取原值并降置信。
 // 预算封顶（每任务 8 次）防雪崩；复核 VLM 端口缺席/失败一律放行原值，绝不抛、
 // 绝不阻塞（闸门评估本身零网络、零 sharp —— 未接线时行为逐字节不变）。
+// W6R-A4（预算作用域化）：任务级预算账本按 verifyTaskId 键控（Map + LRU 封顶
+// 64 槽防泄漏）—— 并发任务互不吃预算；缺省不传 taskId 时共用模块缺省账本，
+// 与历史模块级计数行为逐字节一致（既有调用方与测试零改动）。
+// W8-A6（VLM 架构债 · 依赖倒置最小形态）：本模块的云端依赖面自 GlmClient
+// 具体类降为 StructuredVisionPort 窄端口（configured + chatJson）—— 多供应商
+// （备选池/合议庭/复核第二意见脑）可直入，GlmClient 结构天然满足（传入处
+// 零改动）；不改变任何运行时行为（现网仍传 GlmClient 实例）。
 import { getGlmClient, isGlmConfigured } from './glmClient.js';
 import { encodeForVlmMeta, mapBboxEncodedToOriginal, mapInsetToOriginal } from './codec.js';
 import { buildGroundingSystemPrompt, buildGroundingUserPrompt } from './som.js';
@@ -129,12 +137,52 @@ export function nmsElements(elements, iouThreshold) {
     }
     return kept.map(r => r.el);
 }
-// ─── W1-8（P3 置信度门控级联注视）：Zoom 复核闸 —— 预算 / 裁剪 / 交叉验证 ───
-/** W1-8：任务级复核预算计数（模块级 —— 跨 groundElements 调用累计；测试/宿主隔离用重置口） */
-let verifyBudgetUsed = 0;
-/** W1-8：复核预算清零 —— 新任务开始时由宿主调用（防上一任务的用量雪崩进下一任务） */
-export function resetVerifyGateBudget() {
-    verifyBudgetUsed = 0;
+/**
+ * W6R-A4：任务预算账本表（taskId → 账本）。LRU 语义：命中即重插刷新位置
+ * （插入序 = 最近使用序），容量封顶 VERIFY_BUDGET_LEDGER_CAP —— 超限时逐出
+ * 最久未用的账本（防 Map 无界泄漏；被逐出的任务若复活则从 0 重新起账，
+ * 宁可多给复核机会，不可内存漏账）。
+ */
+const taskBudgetLedgers = new Map();
+/** W6R-A4：账本表容量封顶 —— 防御式上限（真实并发任务数远低于此；溢出即 LRU 逐出） */
+const VERIFY_BUDGET_LEDGER_CAP = 64;
+/** W6R-A4：缺省账本 —— 不传 taskId 的既有调用方共用（历史模块级计数的等价物） */
+let defaultBudgetLedger = { used: 0 };
+/**
+ * W6R-A4：取（或建）任务的预算账本 —— LRU 刷新 + 容量封顶逐出。
+ * taskId 脏值（空串/非字符串）安静回落缺省账本（零行为变化律）。
+ */
+function getVerifyBudgetLedger(taskId) {
+    if (typeof taskId !== 'string' || taskId === '')
+        return defaultBudgetLedger;
+    const hit = taskBudgetLedgers.get(taskId);
+    if (hit) {
+        // LRU 刷新：删了重插，让插入序保持「最近使用在后」
+        taskBudgetLedgers.delete(taskId);
+        taskBudgetLedgers.set(taskId, hit);
+        return hit;
+    }
+    if (taskBudgetLedgers.size >= VERIFY_BUDGET_LEDGER_CAP) {
+        const oldest = taskBudgetLedgers.keys().next().value;
+        if (oldest !== undefined)
+            taskBudgetLedgers.delete(oldest);
+    }
+    const fresh = { used: 0 };
+    taskBudgetLedgers.set(taskId, fresh);
+    return fresh;
+}
+/**
+ * W1-8：复核预算清零 —— 新任务开始时由宿主调用（防上一任务的用量雪崩进下一任务）。
+ * W6R-A4 作用域化：带 taskId ⇒ 只清该任务的账本（并发任务互不干扰）；
+ * 不带（历史签名）⇒ 清缺省账本 + 全部任务账本（既有调用方语义保持）。
+ */
+export function resetVerifyGateBudget(taskId) {
+    if (typeof taskId === 'string' && taskId !== '') {
+        taskBudgetLedgers.delete(taskId); // 下次触达重建为 0
+        return;
+    }
+    defaultBudgetLedger = { used: 0 };
+    taskBudgetLedgers.clear();
 }
 /**
  * W1-8：Zoom 裁剪的 sharp 解析器 —— 生产恒 _legacyDeps.getSharp（懒加载纪律
@@ -225,7 +273,9 @@ async function cropUpscaleRoi(buffer, roi, factor) {
  * vlmOcr 交叉验证 → 按偏差/文字一致性裁决。设计铁律：
  *   · 绝不抛：每元素体 try/catch 兜底，异常 ⇒ gate-error 放行原值；
  *   · 预算封顶：任务级 VERIFY_BUDGET_MAX 与调用级 callBudget 双闸，超限
- *     放行原值并记 budgetExhausted（degraded 记账 —— 防雪崩）；
+ *     放行原值并记 budgetExhausted（degraded 记账 —— 防雪崩）。任务级账本
+ *     按 ctx.ledger 作用域化（W6R-A4：verifyTaskId 键控 —— 并发任务互不
+ *     侵占；缺省共用模块缺省账本，历史行为不变）；
  *   · 降级安全：端口缺席/裁剪不可用/复核 grounding 或 OCR 失败 ⇒ 一律放行
  *     原值（预算只在真实下发复核 grounding 时消耗）；
  *   · 保守裁决：文字冲突 ⇒ 原值保留 + 置信折半 + 冲突证据入事件；偏差 ≤8px
@@ -234,7 +284,7 @@ async function cropUpscaleRoi(buffer, roi, factor) {
  * 元素 id/label/role 恒不改动（下游「点 3 号」引用锚点稳定）。
  */
 async function runVerifyGate(ctx) {
-    const report = { budgetUsed: verifyBudgetUsed, budgetMax: VERIFY_BUDGET_MAX, events: [] };
+    const report = { budgetUsed: ctx.ledger.used, budgetMax: VERIFY_BUDGET_MAX, events: [] };
     let callUsed = 0;
     // buffer 系 ⇄ 输出系换算（源图宽高恒 ≥1 —— encodeForVlmMeta 契约；病值兜底 1:1）
     const sx = ctx.srcW >= 1 ? ctx.outW / ctx.srcW : 1;
@@ -265,7 +315,7 @@ async function runVerifyGate(ctx) {
             continue;
         }
         // ── 预算封顶：任务级/调用级双闸 ⇒ 放行原值 + degraded 记账（防雪崩）──
-        if (verifyBudgetUsed >= VERIFY_BUDGET_MAX || callUsed >= ctx.callBudget) {
+        if (ctx.ledger.used >= VERIFY_BUDGET_MAX || callUsed >= ctx.callBudget) {
             ev.outcome = 'budget-exhausted';
             report.budgetExhausted = true;
             continue;
@@ -279,9 +329,9 @@ async function runVerifyGate(ctx) {
                 continue;
             }
             // 预算在此记账：真实下发复核 grounding 的时刻（裁剪失败不计 —— 未耗云脑）
-            verifyBudgetUsed += 1;
+            ctx.ledger.used += 1;
             callUsed += 1;
-            report.budgetUsed = verifyBudgetUsed;
+            report.budgetUsed = ctx.ledger.used;
             // ── 重跑 grounding（复核端口；verifyGate:false 斩断自递归）──
             const re = await groundElements(roiBuf, {
                 client: ctx.verifyClient,
@@ -543,6 +593,7 @@ export async function groundElements(buffer, opts) {
                 srcW,
                 srcH,
                 verifyClient: opts?.verifyClient,
+                ledger: getVerifyBudgetLedger(opts?.verifyTaskId),
                 callBudget: typeof rawCallBudget === 'number' && Number.isFinite(rawCallBudget) && rawCallBudget >= 0
                     ? Math.floor(rawCallBudget)
                     : Number.POSITIVE_INFINITY,

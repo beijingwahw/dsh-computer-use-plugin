@@ -1,4 +1,5 @@
 // src/knowledge/pipeline.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：D-7 知识管线编排器 —— 感知/决策/执行三工位的单文件主权（信封铸造权/失败路由/时间治理收口于此），拆分违背四大主权收口设计。
 // D-7 隐知识增强流水线编排器 —— PipelineOrchestrator 桩实现（契约见 contracts.ts §13）。
 // 四大主权（全部收口于本文件）：
 //   1. 信封铸造权：五工位信封的唯一构造者（注意力隔离的物理执法点 —— 工位只见信封内物）

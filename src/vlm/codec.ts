@@ -1,4 +1,5 @@
 // src/vlm/codec.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：视觉编码器 —— 编码/中央凹/预算账本/质量闸门/注视路由围绕同一 Token 经济学（预算与画质互为约束），5 纪元 40+ 测试锁定其数值面；1420 行中过半是逐键注释的算法证据，强拆将拆散闸门与账本的耦合不变量。
 // 纪元 Ω（Ω-2）：GLM-5.3-Flash 云脑皮层 —— VLM 图像编码 / 任务级配额 / 视觉 Token 估算。
 // 纪元 Γ（注视经济）：坐标反算基准（mapEncodedToOriginal / encodeForVlmMeta）+
 // 中央凹加权编码（foveatedEncoding：中央原生、外围低清 —— 单位 VLM token 的
@@ -43,6 +44,8 @@ import { kernelRegistry } from '../kernel/registry';
 const DEFAULT_MAX_DIMENSION = 1568;
 /** JPEG 默认质量（80：UI 文字边缘清晰且体积可控） */
 const DEFAULT_QUALITY = 80;
+/** W6-2（doctor smell.magic-number 清偿）：JPEG 质量合法上界（1–100 域的 100），数值逐位不变 */
+const QUALITY_CEILING = 100;
 /** 任务级默认配额：200 张 / 512MB（云脑单任务的视觉预算上限） */
 const DEFAULT_MAX_IMAGES = 200;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
@@ -890,8 +893,9 @@ export async function encodeForVlmMeta(
 // 绝不抛、脏输入诚实降级）：
 //   · 源图 → 归一化 → 源图：恒等往返（整数坐标除乘同基数，浮点残差被
 //     round 吸收 —— 往返 0px 的数学根据）；
-//   · 源图 → 编码 → 源图：逐边 ≤1px（两段 round 的取整残差上界 —— 与
-//     mapEncodedToOriginal 的同款诚实边界）。
+//   · 源图 → 编码 → 源图：逐边 ≤ max(1, ⌈源边/编码边⌉)+1（构造性上界：编码系
+//     最小 1px 粒度与画幅钳制（窄补丁塌缩为 1px）映射回源图系的误差封顶；W7
+//     审计改正——原声明「逐边 ≤1px」在纵横比失配/强降采样时不成立）。
 
 /** W3-3：源图像素系整数矩形 —— 补丁/条带的几何载体（左上原点，半开区间约定） */
 export interface PatchRect {
@@ -1129,6 +1133,11 @@ export async function encodePatchForVlm(
 
 // ─── W1-9（C4 预算弹性调度）：requote 建议档 + 防抖 ───
 
+/** W7:原始入参的安全描述（Symbol 等不可字符串化值不抛,诚实标注类型——绝不抛纪律) */
+function describeRawInput(x: unknown): string {
+  try { return String(x); } catch { return `<${typeof x}:unstringifiable>`; }
+}
+
 /** W1-9：requote 建议档位 —— original（原档）| economy（quality 钳 60）| deep（再钳 maxDim 1024） */
 export type VlmTier = 'original' | 'economy' | 'deep';
 
@@ -1300,7 +1309,7 @@ export class VlmBudget {
   }): VlmRequote {
     // 基线档体检：脏值回声 codec 缺省（q80/d1568）
     const rawQ = opts?.current?.quality;
-    const curQ = typeof rawQ === 'number' && Number.isFinite(rawQ) && rawQ >= 1 && rawQ <= 100
+    const curQ = typeof rawQ === 'number' && Number.isFinite(rawQ) && rawQ >= 1 && rawQ <= QUALITY_CEILING
       ? Math.round(rawQ)
       : DEFAULT_QUALITY;
     const rawD = opts?.current?.maxDimension;
@@ -1344,7 +1353,7 @@ export class VlmBudget {
     let reason: string;
     if (!stepsOk) {
       rawTier = 'original';
-      reason = `W1-9 requote: remainingSteps 不可用(${String(remainingSteps)})—— 维持生效档`;
+      reason = `W1-9 requote: remainingSteps 不可用(${describeRawInput(remainingSteps)})—— 维持生效档`;
     } else if (perStepBytes >= estO) {
       rawTier = 'original';
       reason = `W1-9 requote: 配额充裕 —— 每步可花 ${Math.round(perStepBytes)}B ≥ 原档单帧估计 ${Math.round(estO)}B`;

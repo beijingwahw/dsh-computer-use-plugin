@@ -1,4 +1,5 @@
 // src/tools/clickMouse.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：click_mouse 工具面 —— 审批域/公证取证/接地新鲜度/验收消费在同一点击链路上线性串联（W 系列安全层逐环叠加），拆分即拆安全链。
 // 世界级升级：三坐标换算锚点 + dHash 效果验证（盲点检测）+ 置信度自报 +
 // 验证生效自动写入 UI 记忆。模型第一次能「感知自己是否点中了」。
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -618,8 +619,14 @@ export function createClickMouseTool(config) {
                 // 坐标来自接地时刻的截图；审批人机往返分钟级，屏幕可能已相变。派发前
                 // 抓一帧低清快图（经注入端口）与接地指纹比对：漂移 ⇒ 阻断本次派发
                 // （结构化「需重新截图定位」，供上层重感知；令牌未烧 —— 阻断在预留/派发
-                // 之前）。端口缺席/失败 ⇒ degraded 放行（fail-open 论证见 popupDetector
-                // 探针法条：叠加防御故障不下沉为危险动作面的可用性故障，降级随锚点观测）。
+                // 之前）。
+                // W6R（fail-open ⇒ fail-closed 收口）：本探针保护的恰是「需要审批令牌的
+                // 动作」（dangerous 分级、走 beginAttempt/consume 的路径）—— 探针缺席或
+                // 失败时降级放行等于把叠加防御的故障变成不可逆动作面的默认态。新法：
+                // degraded（端口缺席 / 取帧失败 / 指纹缺席）⇒ 拒绝派发，错误信息指明
+                // 原因与三条出路（重试 / 开探针 / 显式逃生门 allowUnverifiedDangerous）。
+                // drifted（主动漂移证据）不受逃生门豁免 —— 那是阳性危险发现，不是证据
+                // 缺席。非令牌动作不进入本块（叠加防御只挂危险令牌面，旧行为不变）。
                 if (dangerous && approval_token && !config.dryRun) {
                     const fresh = await probeGroundingFreshness();
                     freshnessStamp = fresh;
@@ -645,6 +652,66 @@ export function createClickMouseTool(config) {
                                 'attempt was spent).',
                         }, null, 2);
                     }
+                    if (fresh.verdict === 'degraded' && config.allowUnverifiedDangerous !== true) {
+                        // W6R fail-closed：探针缺席/失败 ⇒ 拒绝派发（令牌未烧 —— 阻断在预留之前）
+                        void journal.appendMarker({
+                            kind: 'GUARD_BLOCKED',
+                            guard: 'freshness-probe',
+                            reason: `probe-unavailable: ${fresh.note ?? 'unknown'}`,
+                        }).catch(() => { });
+                        return JSON.stringify({
+                            status: 'ACTION_REQUIRED',
+                            state_anchor: {
+                                target: target_description ?? expected_text ?? '(undescribed target)',
+                                freshness_probe: fresh,
+                                reason: 'freshness-probe-unavailable',
+                                note: 'This irreversible (approval-token) action MUST be freshness-checked before ' +
+                                    'dispatch, but the grounding-freshness probe is absent or failed ' +
+                                    `(${fresh.note ?? 'unknown cause'}) — dispatch is refused (fail-closed), NOT silently degraded.`,
+                            },
+                            next_step: 'FRESHNESS PROBE UNAVAILABLE — the pre-dispatch grounding check could not run. ' +
+                                'Ways out: (1) RETRY after taking a fresh screenshot (take_screenshot establishes the ' +
+                                'grounding fingerprint the probe compares against); (2) ensure the physical service is ' +
+                                'alive and the probe port is wired (production wires it by default; offline/dry-run ' +
+                                'environments do not); (3) deployment-level explicit escape hatch: set ' +
+                                'allowUnverifiedDangerous=true (accepts unverified dangerous dispatch). ' +
+                                'The approval token is still valid (blocked before dispatch — no attempt was spent).',
+                        }, null, 2);
+                    }
+                }
+                // ── W6R（验证总开关旁路收口）：dangerous 令牌动作的效果验证不可被
+                //    verifyActions 整体关闭（双重显式逃生门） ──
+                // 旧缺陷：verifyActions=false ⇒ dangerous+token 走 unverified-dispatch-
+                // consumed（令牌派发即焚）—— 整个效果验证体系（V 纪元验收式消费的依据）
+                // 被一个 Token 经济开关静默旁路。新法：
+                //   · verifyActions=false 且 allowUnverifiedDangerous !== true ⇒ 派发前
+                //     拒绝并指明出路（本块）。dry-run 豁免：无物理世界可验，令牌消费仅
+                //     是模拟账面；
+                //   · verifyActions=false 且 allowUnverifiedDangerous === true ⇒ 旧方言
+                //     保持（部署两把钥匙同时显式插入：既关验证又显式接受未验证危险派发）；
+                //   · verifyActions=true（缺省）⇒ 零变化。
+                // 非 dangerous 分级维持 verifyActions 原语义（benign 动作的验证仍是可关
+                // 的 Token 经济开关 —— 本块只挂在 dangerous && approval_token 面上）。
+                if (dangerous && approval_token && !config.dryRun
+                    && config.verifyActions !== true && config.allowUnverifiedDangerous !== true) {
+                    return JSON.stringify({
+                        status: 'ACTION_REQUIRED',
+                        state_anchor: {
+                            target: target_description ?? expected_text ?? '(undescribed target)',
+                            approval_gate: gateCoverage,
+                            reason: 'effect-verification-required',
+                            note: 'Effect verification is the acceptance basis for approval-token (irreversible) ' +
+                                'actions: the token is only consumed on a VERIFIED world effect. verifyActions=false ' +
+                                'alone can no longer bypass that (the legacy bypass silently consumed the token on ' +
+                                'dispatch, defeating the whole acceptance system).',
+                        },
+                        next_step: 'EFFECT VERIFICATION REQUIRED for this approval-token action, but verifyActions=false. ' +
+                            'Ways out: (1) re-enable verifyActions=true (recommended — dangerous actions then verify ' +
+                            'before/after and the token is consumed only on a verified effect); (2) deployment-level ' +
+                            'explicit escape hatch: ALSO set allowUnverifiedDangerous=true (two explicit keys — accepts ' +
+                            'legacy unverified-dispatch-consumed dialect for dangerous actions). ' +
+                            'No physical dispatch happened and the approval token is still valid.',
+                    }, null, 2);
                 }
                 // ── Δ 纪元（审计#2·双花窗口封堵）：派发预留 ──
                 // validate（只查不烧）与验收式消费（consume/attemptFailed，见下方）之间
@@ -736,7 +803,10 @@ export function createClickMouseTool(config) {
                 // ── 阶段二（B-3 + V 纪元·验收式消费）：令牌只在验收通过时焚毁 ──
                 // 验收判定 —— 世界说「成了」才算成了：
                 //   验证关闭/dry-run（effect=null）⇒ 无法验收，退回派发即消费（保守：
-                //     不能把「无法验收」当成「没生效」而放行无限制重试）；
+                //     不能把「无法验收」当成「没生效」而放行无限制重试）。W6R 收口后该
+                //     分支仅剩两条合法入口：dry-run（无物理世界可验）或双重显式逃生门
+                //     （verifyActions=false 且 allowUnverifiedDangerous=true）—— 仅
+                //     verifyActions=false 已在派发前被拒（effect-verification-required）；
                 //   effect.detected=false ⇒ 点击未生效（点空/落错窗口）—— 世界没有发生
                 //     不可逆变化，用户的同意未被消耗，令牌保留供同一授权内自动重试；
                 //   intentBetrayed / semantic mismatch ⇒ 世界变了但不是预期的 —— 同样
@@ -747,11 +817,12 @@ export function createClickMouseTool(config) {
                 if (dangerous && approval_token) {
                     const semanticMismatched = !!(semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed);
                     if (!effect) {
-                        // 验证通道关闭：无从验收，维持旧方言（派发即消费，用后即焚）
+                        // 验证通道关闭（dry-run 或双重逃生门）：无从验收，维持旧方言（派发即消费，用后即焚）
                         approval.consume(approval_token);
                         acceptance = {
                             verdict: 'unverified-dispatch-consumed',
-                            detail: 'Effect verification unavailable (verifyActions off / dry-run); token consumed on dispatch.',
+                            detail: 'Effect verification unavailable (dry-run, or verifyActions=false + ' +
+                                'allowUnverifiedDangerous=true escape hatch); token consumed on dispatch.',
                         };
                     }
                     else if (!effect.detected) {
@@ -825,8 +896,10 @@ export function createClickMouseTool(config) {
                         // 维持「目标=描述」；uncertain/缺席 ⇒ 键不入场（缺席审判零行为，
                         // 输出与法院关闭时同路）
                         refute: refuteStamp || undefined,
-                        // W2-2（S3）：接地新鲜度探针判决（dangerous 路径在场；degraded 是
-                        // fail-open 的诚实观测面 —— 叠加防御缺席要让模型/遥测看得见）
+                        // W2-2（S3）：接地新鲜度探针判决（dangerous 令牌路径在场）。W6R 后
+                        // degraded 只在逃生门（allowUnverifiedDangerous=true）下才能到达成功
+                        // 路径 —— 缺席即拒绝（fail-closed），这里的 degraded 是逃生门下的
+                        // 诚实观测面（模型/遥测仍看得见防御缺席）
                         freshness: freshnessStamp || undefined,
                         // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
                         reversibility_lane: laneAnchorOf(laneGate),

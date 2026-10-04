@@ -7,6 +7,9 @@
 // fuseWithPixelEvidence 再把云判决与 L1/L2 像素证据做纯函数双脑融合（一致加成 /
 // 分歧降级），供仲裁层消费。铁律：具名导出、零新增依赖、绝不抛异常 —— 一切失败以
 // { ok:false, degraded:true, error } 表达，云脑缺席不致命，调用方降级回本地栈。
+// W8-A6（VLM 架构债 · 依赖倒置最小形态）：云端依赖面自 GlmClient 具体类降为
+// StructuredVisionPort 窄端口（configured + chatJson）—— 多供应商（备选池/
+// 合议庭脑）可直入；GlmClient 结构天然满足（传入处零改动），运行时行为不变。
 import { getGlmClient, isGlmConfigured, } from './glmClient.js';
 import { encodeForVlm } from './codec.js';
 import { buildVerdictPrompt } from './som.js';

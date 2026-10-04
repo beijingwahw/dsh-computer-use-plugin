@@ -12,7 +12,10 @@ import { resolveMacroChain } from '../macroExecutor.js';
 import { sharedMacroRehearsalGate, MACRO_REHEARSAL_GATE } from '../sandbox/macroRehearsal.js';
 import { failureMemory } from '../failureMemory.js';
 import { journal } from '../journal.js';
-import { replayOne } from './replayActions.js';
+import { replayOne, replayStepExecuted } from './replayActions.js';
+// D-G5（W8-C1 收口 · run_skill 公证）：技能重放的轨迹见证铸证面（replay_actions
+// 同款接线 —— 步指纹 + 三态结局 + 整体成败入 notary 锚；公证缺席诚实降级）。
+import { anchorReplayTrajectory, replayStepFingerprint, } from '../notary/index.js';
 import * as backend from '../physicalBackend.js';
 import { normalizeHash, similarity } from '../perceptualHash.js';
 // W5-0（A/B 接线）：排练场景的记忆元素面 + 技能联邦本地命中记账
@@ -380,15 +383,43 @@ export function createRunSkillTool(config) {
             }
             const log = [];
             let failed = 0;
-            for (const step of resolved.steps) {
+            // D-G5（W8-C1 收口 · run_skill 公证）：轨迹见证采集 —— 步指纹序列 + 三态
+            // 结局（replay_actions 循环同款接线），重放完成时铸入 notary 锚。
+            const witnessSteps = [];
+            for (const [i, step] of resolved.steps.entries()) {
                 // Δ 纪元（审计#1）：重放步与 live 工具同闸门 —— 危险步无有效令牌即失败
                 const line = await replayOne(step, config);
                 if (line.startsWith('FAILED') || line.startsWith('SKIPPED'))
                     failed++;
                 log.push(`  ${step.tool}: ${line}`);
+                witnessSteps.push({
+                    index: i,
+                    tool: step.tool,
+                    fingerprint: replayStepFingerprint(step),
+                    executed: replayStepExecuted(line),
+                });
                 await sleep(150);
             }
             const success = failed === 0;
+            // D-G5（W8-C1 收口 · run_skill 公证）：技能重放完成 ⇒ 轨迹摘要（步指纹序列
+            // + 三态结局 + 整体成败）铸入 notary 锚，走 anchorReplayTrajectory 便捷面
+            //（replay_actions 同款通道；source='run_skill' 区分证据源 —— 源缺席不猜的
+            // primitives 立法自此补上第二源）。success 映射 run_skill 自身成败语义
+            //（failed===0）；halt 恒 null：本工具循环恒走完（失败步只计数不中止 ——
+            // 与 replay_actions 的三路 fail-fast 中止不同源），见证如实携 null，
+            // 绝不伪造中止事实。公证缺席（宿主未装配 notary）/铸锚失败 ⇒ 降级标注
+            //（status:'degraded' + reason）—— 公证是旁路仪式，绝不阻断重放、
+            // 绝不伪造 anchored。
+            const skillNotarization = await anchorReplayTrajectory({
+                kind: 'replay-trajectory',
+                version: 1,
+                source: 'run_skill',
+                replayedSteps: witnessSteps.filter(s => s.executed === true).length,
+                totalSteps: resolved.steps.length,
+                success,
+                halt: null,
+                steps: witnessSteps,
+            });
             // ── Y-7 后置条件验收：终态指纹 vs 离场指纹 ──
             let post = { verified: false, similarity: null, reason: 'hash-unavailable' };
             try {
@@ -424,6 +455,9 @@ export function createRunSkillTool(config) {
                             ? 'final scene matches the exit fingerprint recorded at skill-creation time'
                             : 'reliability NOT credited — the final scene diverges from the recorded exit state (UI may have changed, or the macro ran in a different context)',
                     },
+                    // D-G5（W8-C1）：重放公证事实字段（anchored 带锚哈希/时间背书源；
+                    // degraded 带降级归因 —— 公证缺席诚实申报，绝不伪造）
+                    notarization: skillNotarization,
                 },
                 macro_trace: macroGateTrace(resolved, gateVerdict),
                 execution_log: log.join('\n'),

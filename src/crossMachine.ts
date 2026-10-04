@@ -34,11 +34,12 @@
 //   放行；transport 故障 ⇒ 'transport'（poll 即重试，deadline 内不放弃）。
 //   运行层永不抛异常（federation 同律：跨机是旁路协同，不是主路债主）。
 //
-// 分层：纯逻辑核心（createBarrierCore，可注入时钟/容量/TTL，双实现口径的
-// TS 权威源）+ 传输方言（BarrierTransport）+ 客户端等待循环
+// 分层：纯逻辑核心（createBarrierCore，可注入时钟/容量/TTL，分布式 barrier
+// 的唯一权威源）+ 传输方言（BarrierTransport）+ 客户端等待循环
 // （arriveAndWaitBarrier）+ HTTP 客户端壳（makeHttpBarrierTransport /
-// createBarrierClient）。scripts/federation-server.mjs 是核心的等价 JS 移植
-// （.mjs 不能 import TS），漂移由 test/w5cross.test.ts 的端到端等价断言把守。
+// createBarrierClient）。scripts/federation-server.mjs 经 dist 构建产物直连
+// 本核心（W8-A7 单源化：JS 手工移植已退役 —— dist 是纯 ESM，.mjs 原生可
+// import）；src↔dist 构建滞后由 test/w5cross.test.ts 的端到端逐字段对账把守。
 
 // ─── 立法常量（算法形状字面量 —— 非旋钮）───
 
@@ -73,55 +74,13 @@ export const BARRIER_FETCH_TIMEOUT_MS = 5_000;
  *  声明走文本约定 + 注入覆写双通道；n 钳 [1, BARRIER_MAX_PARTICIPANTS]） */
 export const BARRIER_STEP_RE = /barrier:([A-Za-z0-9._-]{1,64})#(\d{1,3})/;
 
-// ─── 传输方言（纯逻辑核心与 HTTP 壳共用；测试注内存桩 = 零网络确定性）───
+// W6-2（doctor smell.over-engineering 清偿）：传输方言（纯类型面）已分区提取至 crossMachine.dialect.ts
+// （行为零变化；立法常量按「立法在源」测试锁定留守本文件）；导入面不变 —— export * 再分发。
+import type { BarrierView, BarrierViewReason, BarrierRequest, BarrierTransport } from './crossMachine.dialect';
+export * from './crossMachine.dialect';
 
-/** W5-3：barrier 操作种类（allocate=阶段一抵达；commit=阶段二确认；status=只读） */
-export type BarrierOp = 'allocate' | 'commit' | 'status';
 
-/** W5-3：领域拒绝原因（诚实失败词表 —— 客户端按 reason 决策，绝不猜） */
-export type BarrierViewReason =
-  | 'bad-request'      // 形状/值域非法（状态不动）
-  | 'unknown-barrier'  // name 无在役 generation（且序号不落后 ⇒ 非重放）
-  | 'stale-seq'        // 旧 generation 重放（序号防重放的执法面）
-  | 'unknown-seq'      // 超前序号（臆造/错位包）
-  | 'count-conflict'   // 与在役 generation 的 expected 不符（两个半 barrier 永不合并）
-  | 'not-a-participant'// commit 者不在名册（无票可确认）
-  | 'not-released'     // 放行前的 commit（两阶段纪律：确认只能跟在放行后）
-  | 'missed-release';  // 放行后的迟到加入（脑裂守卫：不能悄悄混入已放行的轮次）
-
-/** W5-3：barrier 视图（中继端对 generation 的完整诚实面；ok:false ⇒ reason 在场） */
-export interface BarrierView {
-  ok: boolean;
-  reason?: BarrierViewReason;
-  name?: string;
-  /** generation 序号（防重放锚） */
-  seq?: number;
-  phase?: 'collecting' | 'committed';
-  /** 名册规模 N（创建时钉死） */
-  expected?: number;
-  /** 已抵达名册（字典序 —— 确定性输出） */
-  arrived?: string[];
-  /** 已确认名册（阶段二进度） */
-  acked?: string[];
-  /** 放行时刻（epoch ms；collecting ⇒ null） */
-  releasedAt?: number | null;
-  /** 仅 commit 响应：本次确认是否使 generation 退休（全 N 已确认） */
-  retired?: boolean;
-}
-
-/** W5-3：barrier 传输面（真 HTTP / 内存桩皆可注入 —— 测试零网络） */
-export type BarrierTransport = (req: BarrierRequest) => Promise<BarrierView>;
-
-/** W5-3：barrier 请求（op 决定必填字段：allocate 需要 n；commit 需要 seq） */
-export interface BarrierRequest {
-  op: BarrierOp;
-  name: string;
-  peer: string;
-  n?: number;
-  seq?: number;
-}
-
-// ─── 纯逻辑核心（TS 权威源；federation-server.mjs 的 JS 移植追随此处）───
+// ─── 纯逻辑核心（唯一权威源；federation-server.mjs 经 dist 直连消费）───
 
 /** W5-3：核心选项（时钟/容量/TTL 全可注入 —— 确定性测试的完整缝） */
 export interface BarrierCoreOptions {
@@ -158,9 +117,10 @@ function intOr(x: number | undefined, dflt: number, min: number, max: number): n
 }
 
 /**
- * W5-3：创建 barrier 纯核心（状态机、同步、绝不抛）。双实现口径的 TS 权威源
- * —— scripts/federation-server.mjs 的 barrierApplyJS 是本函数语义的逐分支
- * JS 移植（等价性由 test/w5cross.test.ts 的脚本序列逐字段断言把守）。
+ * W5-3：创建 barrier 纯核心（状态机、同步、绝不抛）。分布式 barrier 的唯一
+ * 权威源 —— scripts/federation-server.mjs 经 dist 构建产物直连消费本函数
+ * （W8-A7 单源化：等价 JS 手工移植已退役）；test/w5cross.test.ts 的脚本
+ * 序列逐字段对账在场，把守面 = src↔dist 构建滞后（dist 过期即闸红）。
  */
 export function createBarrierCore(opts?: BarrierCoreOptions): BarrierCore {
   const now = typeof opts?.now === 'function' ? opts.now : Date.now;
@@ -255,7 +215,8 @@ export function createBarrierCore(opts?: BarrierCoreOptions): BarrierCore {
       let g = live.get(name);
       if (g && g.phase === 'committed' && g.acked.size >= g.expected) {
         // 防御臂：满确认却仍驻留（理论不可达 —— 退休在最后一次 ack 原地完成；
-        // JS/TS 双实现漂移时这层兜底保证 allocate 不会误入已完结轮次）
+        // 旧 JS/TS 双实现时代的漂移兜底，W8-A7 单源化后动因消失但防御式
+        // 纪律留驻 —— 这层兜底保证 allocate 不会误入已完结轮次）
         entomb(name, g.seq);
         live.delete(name);
         g = undefined;

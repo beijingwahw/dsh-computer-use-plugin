@@ -31,7 +31,7 @@ import {
 } from '../src/guards/canaryGuard.ts';
 import { costPriorOfCall } from '../src/autonomy/uncertainty.ts';
 import { kernelRegistry } from '../src/kernel/registry.ts';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { telemetry } from '../src/telemetry.ts';
 import { focusTracker } from '../src/focusTracker.ts';
 import { updatePopupState } from '../src/guards/popupGuard.ts';
@@ -137,6 +137,16 @@ beforeEach(() => {
   updatePopupState(false);
 });
 
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手） */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function grantOob(token: string): boolean {
+  const hit = oobSink.find(d => d.token === token);
+  return approval.grantDetailed(token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok;
+}
+
 // ─── 1. 纯函数：代价先验 / 幂等词汇表 ───
 
 test('W2-7①: costPriorOfCall —— 声明档优先、后果断言次之、缺省 medium', () => {
@@ -208,8 +218,9 @@ test('W2-7②: 让位分支逐个判定（非动作工具 / 低危 / 非幂等�
 
 test('W2-7②: 已授予令牌让位（人已裁决）；未授予令牌不让位', () => {
   relaxHighProceed();
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('pre-test');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   const t = classifyCanaryTrigger('click_mouse', { ...HIGH_RISK_CLICK, approval_token: pa.token }, { dangerPatterns: CFG.dangerPatterns });
   assert.equal((t as any).why, 'approval-present');
   // 未授予的令牌（request 后未 grant）不构成让位 —— 照常试演
@@ -473,11 +484,12 @@ test('W2-7⑤: destructive 豁免直审批 —— 危险词/显式分层不试�
 
 test('W2-7⑤: 已授予令牌的调用 ⇒ 金丝雀让位（人已裁决，不再打扰）', async () => {
   relaxHighProceed();
+  armOob(); // W6R：授予须带外码
   const ctx = fakeCtx();
   const fp = fakePorts();
   registerCanaryGuard(ctx, CFG, fp.ports);
   const pa = approval.request('user consented');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   const out = await drivePre(ctx, exec('click_mouse', { ...HIGH_RISK_CLICK, approval_token: pa.token }));
   assert.equal(out.kind, 'accept');
   assert.equal(fp.calls.click, 0);
@@ -513,6 +525,55 @@ test('W2-7⑤: 事件环有界（16 条环形淘汰）+ resetCanaryGuard 归零'
 });
 
 // ─── 6. 生产端口：零孵化纪律 ───
+
+// ─── 5b. W6R 收口：令牌路径（审批域活口）探针缺席/失败 ⇒ fail-closed ───
+
+test('W6R: 携带审批令牌的调用 + 探针缺席 ⇒ fail-closed 拦截（出路指明；非令牌调用不受扰）', async () => {
+  relaxHighProceed();
+  const ctx = fakeCtx();
+  registerCanaryGuard(ctx, CFG); // 不注入端口 ⇒ 生产端口 ⇒ healthSnapshot 缺席 ⇒ unavailable
+  // 悬置令牌（request 未 grant）：既不构成 approval-present 让位、也不命中危险词
+  // —— 这是「携带审批令牌且进入试演」的唯一活口（W6R 注释法条）
+  const pa = approval.request('expand options under token protocol');
+
+  const out = await drivePre(ctx, exec('click_mouse', { ...HIGH_RISK_CLICK, approval_token: pa.token }));
+  assert.equal(out.kind, 'deny', '令牌路径探针缺席 ⇒ 拦截（fail-closed，不再降级放行）');
+  assert.match(out.reason, /\[Canary\]/);
+  assert.match(out.reason, /fail-closed/);
+  assert.match(out.reason, /allowUnverifiedDangerous=true/, '出路三：显式逃生门');
+  assert.match(out.reason, /重试|①/, '出路一：重试');
+  const ev = recentCanaryEvents()[0];
+  assert.equal(ev.action, 'blocked', '事件环记 blocked（fail-closed 拦截）');
+  assert.ok(ev.why.includes('fail-closed'));
+  assert.ok(ev.degradedNotes!.length > 0, '探针缺席注记随行（证据链）');
+  assert.ok(telemetry.snapshot().counters.some(c => c.counter === 'canary:blocked' && c.hits === 1));
+
+  // 对照组（非令牌）：同一探针缺席 ⇒ 仍降级放行（旧行为不变，避免大面积误杀）
+  const benign = await drivePre(ctx, exec('click_mouse', HIGH_RISK_CLICK));
+  assert.equal(benign.kind, 'accept', '非令牌动作探针缺席 ⇒ 降级放行（旧行为）');
+  assert.equal(recentCanaryEvents()[0].action, 'degraded');
+});
+
+test('W6R: 逃生门 allowUnverifiedDangerous=true ⇒ 令牌路径探针缺席恢复降级放行；dry-run 豁免同律', async () => {
+  relaxHighProceed();
+  // 逃生门开：令牌路径探针缺席 ⇒ 恢复 degraded 放行（部署显式接受未验证危险派发）
+  const ctxEsc = fakeCtx();
+  registerCanaryGuard(ctxEsc, { ...CFG, allowUnverifiedDangerous: true } as unknown as Config);
+  const pa = approval.request('escape hatch armed');
+  const out = await drivePre(ctxEsc, exec('click_mouse', { ...HIGH_RISK_CLICK, approval_token: pa.token }));
+  assert.equal(out.kind, 'accept', '逃生门 ⇒ 降级放行（旧 fail-open 方言）');
+  const ev = recentCanaryEvents()[0];
+  assert.equal(ev.action, 'degraded');
+  assert.ok(!ev.why.includes('fail-closed'));
+
+  // dry-run 豁免：无物理世界可探，令牌路径也不因探针缺席被拦（防模拟误杀）
+  const ctxDry = fakeCtx();
+  registerCanaryGuard(ctxDry, { ...CFG, dryRun: true } as unknown as Config);
+  const pb = approval.request('dry-run token');
+  const outDry = await drivePre(ctxDry, exec('click_mouse', { ...HIGH_RISK_CLICK, approval_token: pb.token }));
+  assert.equal(outDry.kind, 'accept', 'dry-run ⇒ 不拦截（探针拒绝派发属设计，非故障）');
+  assert.equal(recentCanaryEvents()[0].action, 'degraded');
+});
 
 test('W2-7⑥: productionCanaryPorts —— 后端不在场 ⇒ 派发拒绝 + 帧通道缺席（零孵化）', async () => {
   const ports = productionCanaryPorts(CFG);

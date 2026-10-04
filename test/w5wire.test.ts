@@ -241,16 +241,32 @@ test('W5-C②: 三路执法 —— reversible 快道放行 / compensable 托管�
   assert.equal(escrow.lane.lane, 'escrow');
   assert.ok(typeof escrow.escrowPlanId === 'string' && escrow.escrowPlanId !== '', '预案 id 随行（补偿在途的审计锚点）');
   assert.equal(escrow.blocked, null, '预案铸成 ⇒ 放行');
-  // 策略表外的 compensable 语义（text-input 不在 escrow 策略表）⇒ fail-closed 拒绝：
-  // 「没有可铸造的补偿路径 = 人类亲办或扩表」是 W3-1/W4-3 的立法方向，不是缺陷
-  const noStrategy = await gateByReversibility(cfg, {
+  // W6-3 扩表后更新：text-input 已增补补偿路径（Ctrl+Z）⇒ 托管道铸成放行。
+  // 原断言「策略表外的 compensable 语义（text-input）⇒ no-strategy fail-closed」
+  // 编码的缺口已由 W6-3 策略表增补修复 —— riskGate 判 compensable 而策略表无键
+  // 的自相矛盾不再存在；fail-closed 执法面由下方 manual-only 覆盖臂继续执法
+  // （no-strategy 与 manual-only 是「没有可铸造的补偿路径 = 人类亲办或扩表」
+  // 同一立法的两臂；mint 层的 no-strategy 面由 w3escrow S1-2a 未知语义执法）。
+  const textInput = await gateByReversibility(cfg, {
     tool: 'type_text', approvalToken: 'APR-W5-C3', enforceEscrow: true,
   });
+  assert.equal(textInput.applied, true);
+  assert.equal(textInput.verdict.semantics, 'text-input');
+  assert.ok(typeof textInput.escrowPlanId === 'string' && textInput.escrowPlanId !== '', 'text-input 预案铸成（W6-3 增补 Ctrl+Z 补偿路径）');
+  assert.equal(textInput.blocked, null, '策略表命中 ⇒ 放行（fail-closed 只对无策略/manual-only 生效）');
+  // fail-closed 执法面仍在：注入扩展把 navigation 覆盖为 manual-only ⇒ 铸造被拒
+  //（gate 层经自然词表已无法产生 no-strategy —— 全部 builtin compensable 键
+  //  扩表后都有策略，以注入覆盖臂执法同一条 fail-closed 路径）
+  reversalEscrow.arm({ strategies: [{ kind: 'manual-only', semantics: 'navigation', reason: 'deployment override: back-navigation compensation disabled — the HUMAN must perform this personally' }] });
+  const noStrategy = await gateByReversibility(cfg, {
+    tool: 'open_url', approvalToken: 'APR-W5-C3b', enforceEscrow: true,
+  });
   assert.equal(noStrategy.applied, true);
-  assert.ok(noStrategy.blocked !== null, '无策略的 compensable 执法路径 fail-closed');
+  assert.ok(noStrategy.blocked !== null, 'manual-only 覆盖的 compensable 执法路径 fail-closed');
   const nsBody = JSON.parse(noStrategy.blocked!) as { state_anchor: { reason: string; reversibility: { mint_failure: string } } };
   assert.equal(nsBody.state_anchor.reason, 'reversibility-escrow-unavailable');
-  assert.equal(nsBody.state_anchor.reversibility.mint_failure, 'no-strategy');
+  assert.equal(nsBody.state_anchor.reversibility.mint_failure, 'manual-only');
+  reversalEscrow.arm({ strategies: [] }); // 撤销注入覆盖（恢复内置表 —— 用例内隔离）
   // 非执法路径（enforceEscrow 缺省 false）：只注记不铸造（无结算语义的铸造 = 泄漏面）
   const noteOnly = await gateByReversibility(cfg, { tool: 'type_text' });
   assert.equal(noteOnly.applied, true);

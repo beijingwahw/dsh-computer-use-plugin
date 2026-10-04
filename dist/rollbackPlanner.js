@@ -1,36 +1,3 @@
-// src/rollbackPlanner.ts
-// W4-3（R3 有界回滚 + 分支重规划）：世界级 CUA 的回滚纪律 —— 不是「再点
-// 一次撤销」的赌博，而是一段可审计的复合计划：
-//
-//   ① 定位最后验证良好态 —— journal 回放 + LTLf 性质（只读消费 ltlf.ts）：
-//      「已验证良好」= status SUCCESS 且 effect_detected !== false（判据核过/
-//      动作验证过的步）。最近的良好步是回滚的锚点：其后的步才是待回滚债务。
-//   ② 复合回滚计划 —— 模态逆映射表（type→全选退格、toggle→再点、scroll→
-//      反向、shaper 操作→UndoRecipe 走 undoLog；其余模态如实申报 no-inverse，
-//      绝不伪造逆动作）。计划有界（步数预算，与 W3-6 重放预算同量级的半额
-//      原则）；超支 ⇒ 截断到最新的预算内步骤 + exceeded 诚实标记（复原验证
-//      兜底 —— 不完整回滚骗不过指纹比对）。
-//   ③ 破坏性逆动作过 approval 闸 —— type 的全选退格会清掉整个字段（不只
-//      本次输入），这类「救一个毁一片」的逆动作绝不静默执行：每步派发前过
-//      注入的审批端口，拒绝 ⇒ 立即停在安全态 + 诚实报告（绝不绕闸）。
-//   ④ 复原验证 —— 回滚后场景指纹比对（容差内 = 与 W3-1 托管验证同律的
-//      dHash similarity ≥ 0.9）。不复原 ⇒ 诚实报告并停在安全态（不再注入
-//      替代分支 —— 从未复原的世界重规划是在流沙上盖楼）。
-//   ⑤ 替代分支注入 —— 复原确认后，经 counterfactual/W3-6 岔路偏置风格
-//      （preferredActionKeys 注入缝 —— 只读消费 branchCards.withSteerBias）
-//      注入替代决策；分支重规划有总预算（ReplanBudgetController，超支诚实
-//      终止 —— 重规划是第二尝试，不继承原任务全额预算）。
-//
-// 架构：纯函数核心（定位/逆映射/计划铸造/复原判定 —— 全离线可测）+ 注入
-// 端口（执行/感知/审批/偏置全注入 —— 编排面不含任何物理世界触点）。
-// 防御式绝不抛：一切公开面（纯函数与编排器）脏输入/端口故障一律收敛为
-// 诚实返回值（no-good-state / internal-error / 保守缺省），绝不抛给调用方。
-//
-// 只读消费面：ltlf.ts（ltlF/violationsOf/reactTraceProperties）、
-// perceptualHash.similarity、branchCards.withSteerBias（W3-6 偏置风格）、
-// autonomy/counterfactual 的 ScoringContext 类型 —— 均为类型或纯函数依赖，
-// 零写触点。
-import { ltlF, violationsOf, reactTraceProperties } from './ltlf.js';
 import { similarity } from './perceptualHash.js';
 import { withSteerBias } from './branchCards.js';
 // ─── 常量（值即边界） ───
@@ -46,7 +13,7 @@ export const RESTORATION_TOLERANCE = 0.9;
 /** 轨迹步数上限（防御：脏调用方塞巨数组不得拖垮定位 —— 有界计算）。 */
 const TRACE_HARD_CAP = 10_000;
 /** 防御净化：脏步收敛（tool 非字符串 ⇒ 整步弃置 —— 不把噪声当轨迹） */
-function sanitizeTrace(steps) {
+export function sanitizeTrace(steps) {
     const out = [];
     if (!Array.isArray(steps))
         return out;
@@ -64,151 +31,10 @@ function sanitizeTrace(steps) {
     }
     return out;
 }
-// ─── ① 良好态定位（纯函数 —— LTLf 只读消费） ───
-/** 良好步判据：判据核过（status SUCCESS）且动作验证过（effect_detected === true）。
- *  未验证（undefined）不算良好 —— 「已验证良好」的字面义（验证过 ≠ 没失败），
- *  宁缺毋滥：回滚锚点必须是「世界被确认处于预期态」的时刻。 */
-export function isVerifiedGood(step) {
-    return step.status === 'SUCCESS' && step.effect_detected === true;
-}
-/**
- * 定位最后验证良好态（纯函数）：journal 回放 + LTLf 性质。
- *   · ltlF(good, n) 断言良好步存在性（不存在 ⇒ index:null —— 「没有良好态
- *     可退」是诚实结论，不是错误）；
- *   · 反向扫描取**最近**的良好步（回滚锚点越近，债务越少）；
- *   · violationsOf(¬good) 给出非良好位清单（规模入审计面）；
- *   · reactTraceProperties 顺带产出 ReAct 判决书（blind-start / 观察饥饿 /
- *     盲区连击 —— 回滚报告的审计附页）。绝不抛。
- */
-export function locateLastVerifiedGood(steps) {
-    const clean = sanitizeTrace(steps);
-    const n = clean.length;
-    const good = (i) => isVerifiedGood(clean[i]);
-    const audit = reactTraceProperties(clean.map(s => ({
-        tool: s.tool,
-        observed: true, // 定位面无观察信息 ⇒ 不冒充盲启动（观察审计归 journal 侧）
-        effect: s.effect_detected,
-    })));
-    const nonGood = violationsOf((i) => !good(i), n).length;
-    if (!ltlF(good, n)) {
-        return { index: null, fingerprint: null, traceAudit: audit, nonGoodPositions: nonGood };
-    }
-    for (let i = n - 1; i >= 0; i--) {
-        if (good(i)) {
-            return { index: i, fingerprint: clean[i].fingerprint ?? null, traceAudit: audit, nonGoodPositions: nonGood };
-        }
-    }
-    return { index: null, fingerprint: null, traceAudit: audit, nonGoodPositions: nonGood }; // 防御式不可达
-}
-/** toggle 判别：显式标记或目标描述命中开关语义（checkbox/toggle/开关/复选） */
-function isToggleClick(args) {
-    if (args.toggle === true || args.is_toggle === true || args.isToggle === true)
-        return true;
-    const desc = args.target_description ?? args.targetDescription;
-    return typeof desc === 'string' && /toggle|checkbox|switch|开关|复选/i.test(desc);
-}
-function finiteNum(v) {
-    return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
-}
-/** 模态逆映射（纯函数）：一步 → 其逆动作描述。无逆模态 ⇒ no-inverse 如实申报。 */
-export function inverseForStep(step) {
-    const tool = typeof step.tool === 'string' ? step.tool : '';
-    const args = (step.args && typeof step.args === 'object' && !Array.isArray(step.args)
-        ? step.args : {});
-    const origin = { tool, ...(Object.keys(args).length > 0 ? { args } : {}) };
-    if (tool === 'type_text') {
-        return {
-            origin, modality: 'select-all-backspace', destructive: true,
-            payload: {
-                label: 'select-all + backspace to clear the typed text',
-                keys: [['ctrl', 'a'], ['backspace']],
-            },
-        };
-    }
-    if (tool === 'click_mouse' || tool === 'click_element') {
-        if (isToggleClick(args)) {
-            const x = finiteNum(args.x);
-            const y = finiteNum(args.y);
-            return {
-                origin, modality: 're-click-toggle', destructive: false,
-                payload: {
-                    label: 're-click the toggle to flip it back (exact inverse)',
-                    ...(x !== undefined ? { x } : {}), ...(y !== undefined ? { y } : {}),
-                },
-            };
-        }
-        return {
-            origin, modality: 'no-inverse', destructive: false,
-            payload: { label: `generic "${tool}" has no automatic inverse — flagged for manual compensation` },
-        };
-    }
-    if (tool === 'scroll_page') {
-        const dy = finiteNum(args.dy) ?? finiteNum(args.amount);
-        const dx = finiteNum(args.dx);
-        return {
-            origin, modality: 'reverse-scroll', destructive: false,
-            payload: {
-                label: 'scroll the opposite amount (exact inverse)',
-                ...(dy !== undefined ? { dy: -dy } : {}), ...(dx !== undefined ? { dx: -dx } : {}),
-            },
-        };
-    }
-    if (tool === 'shaper' || tool === 'shape_environment') {
-        const token = typeof args.undoToken === 'string' ? args.undoToken : undefined;
-        return {
-            origin, modality: 'shaper-undo', destructive: false,
-            payload: {
-                label: token
-                    ? `restore shaper change via undoLog record "${token}"`
-                    : 'restore shaper changes via undoLog (full LIFO fallback)',
-                ...(token !== undefined ? { undoToken: token } : {}),
-            },
-        };
-    }
-    return {
-        origin, modality: 'no-inverse', destructive: false,
-        payload: { label: `"${tool}" has no registered inverse modality` },
-    };
-}
-/** 铸造复合回滚计划（纯函数）：良好态之后的每步 → 逆映射 → LIFO 排序 →
- *  预算执法（可执行逆步 > maxSteps ⇒ 截断保最新 + exceeded 标记）。绝不抛。 */
-export function buildRollbackPlan(steps, checkpointIndex, opts = {}) {
-    const clean = sanitizeTrace(steps);
-    const maxSteps = typeof opts.maxRollbackSteps === 'number' && Number.isFinite(opts.maxRollbackSteps)
-        ? Math.max(1, Math.floor(opts.maxRollbackSteps)) : ROLLBACK_BUDGET_STEPS;
-    const cpFp = (typeof opts.fingerprint === 'string' && opts.fingerprint !== ''
-        ? opts.fingerprint : clean[checkpointIndex]?.fingerprint) ?? null;
-    const debt = clean.slice(Math.max(0, Math.floor(checkpointIndex) + 1));
-    const inverses = debt.map(inverseForStep);
-    const lifo = [...inverses].reverse(); // 后做的先还原
-    const executable = lifo.filter(s => s.modality !== 'no-inverse');
-    const requiredSteps = executable.length;
-    let finalSteps = lifo;
-    let exceeded = false;
-    if (requiredSteps > maxSteps) {
-        // 截断保最新（LIFO 序的前 maxSteps 个可执行步 + 其间的 no-inverse 审计步）
-        exceeded = true;
-        const kept = [];
-        let count = 0;
-        for (const s of lifo) {
-            if (s.modality !== 'no-inverse') {
-                if (count >= maxSteps)
-                    continue;
-                count++;
-            }
-            kept.push(s);
-        }
-        finalSteps = kept;
-    }
-    return {
-        checkpointIndex: Math.max(0, Math.floor(checkpointIndex)),
-        checkpointFingerprint: cpFp,
-        steps: finalSteps,
-        destructiveSteps: finalSteps.filter(s => s.destructive),
-        noInverseTools: [...new Set(finalSteps.filter(s => s.modality === 'no-inverse').map(s => s.origin.tool))],
-        budget: { maxSteps, requiredSteps, exceeded },
-    };
-}
+// W6-2（doctor smell.over-engineering 清偿）：①良好态定位/②模态逆映射/③计划铸造（纯函数）
+// 已分区提取至 rollbackPlanner.plan.ts（行为零变化）；导入面不变 —— 再分发。
+export { isVerifiedGood, locateLastVerifiedGood, inverseForStep, buildRollbackPlan } from './rollbackPlanner.plan.js';
+import { isVerifiedGood, locateLastVerifiedGood, buildRollbackPlan } from './rollbackPlanner.plan.js';
 /** 复原验证（纯函数）：当前指纹 vs 良好态指纹，容差内即复原。
  *  任一侧缺席 ⇒ unverified（无通道 ≠ 复原 —— 诚实降级，与 escrow 同律）。 */
 export function verifyRestoration(current, checkpoint, tolerance = RESTORATION_TOLERANCE) {

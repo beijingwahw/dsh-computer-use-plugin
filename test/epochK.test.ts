@@ -137,16 +137,27 @@ test('K-1f: VirtualScreen 纯语义 —— page-level 期望诚实 null；畸形
 
 // ─── K-2 WindowsAdapter：预留槽落成（注入纪律）───
 
+/**
+ * W6R-A8：假 exec 扮演 powershell 的解码半边 —— -EncodedCommand 载荷
+ * （UTF-16LE base64）解码回脚本原文，后续断言照旧面向脚本语义。
+ */
+function decodePsArgs(args: string[]): string {
+  const last = String(args[args.length - 1] ?? '');
+  return args.includes('-EncodedCommand')
+    ? Buffer.from(last, 'base64').toString('utf16le')
+    : last;
+}
+
 function fakePS(hooks?: { onCmd?: (args: string[]) => void; geo?: string }) {
-  const calls: string[][] = [];
+  const calls: string[] = []; // 每次调用的解码后 PS 脚本（W6R-A8：EncodedCommand 通道）
   return {
     calls,
     adapter: new WindowsAdapter({
       probe: () => true,
       exec: async (_cmd, args) => {
-        calls.push(args);
+        const script = decodePsArgs(args);
+        calls.push(script);
         hooks?.onCmd?.(args);
-        const script = args[args.length - 1];
         if (script.includes('MainWindowHandle')) return { stdout: '4242\n' };
         if (script.includes('GetWindowRect')) return { stdout: hooks?.geo ?? '10,20,800,600,0\n' };
         return { stdout: 'True\n' };
@@ -164,7 +175,7 @@ test('K-2a: 能力探测 —— PowerShell 在场 ⇒ 窗口四动作；set_cont
 test('K-2b: raise_window 发出 PS 命令且标题注入面闭合（单引号加倍）', async () => {
   const { adapter, calls } = fakePS();
   await adapter.apply({ kind: 'raise_window', titleHint: "O'Brien" });
-  const script = calls.flatMap(c => c).join(' ');
+  const script = calls.join(' ');
   assert.ok(script.includes(`'*' + 'O''Brien' + '*'`), 'PS 字面量转义闭合注入面');
   assert.ok(script.includes('SetForegroundWindow'), 'P/Invoke 置前');
 });
@@ -174,7 +185,7 @@ test('K-2c: move_window 捕获几何快照；undo 按 SetWindowPos 精确归位'
   const recipe = await adapter.apply({ kind: 'move_window', titleHint: 'app', x: 100, y: 200 });
   assert.deepEqual(recipe.before, { x: 10, y: 20, width: 800, height: 600, maximized: false });
   await adapter.undo(recipe);
-  const all = calls.flatMap(c => c).join(' ');
+  const all = calls.join(' ');
   assert.ok(all.includes('SetWindowPos'), 'undo 走 P/Invoke 归位');
 });
 
@@ -401,7 +412,9 @@ test('M-1: set_contrast 落成 —— SPI 官方 API + undo 还原 flags', async
   assert.ok(caps.has('set_contrast'), '能力申报（L 纪元落成）');
   const scripts: string[] = [];
   const a = new WindowsAdapter({ probe: () => true, exec: async (_c, args) => {
-    scripts.push(args[args.length - 1]);
+    // W6R-A8：-EncodedCommand 载荷解码回脚本原文（假 exec 扮演 powershell 解码半边）
+    const last = String(args[args.length - 1]);
+    scripts.push(args.includes('-EncodedCommand') ? Buffer.from(last, 'base64').toString('utf16le') : last);
     return { stdout: '4\n' }; // GET 返回 flags=4（HCF_ON 位清除 —— 翻转可观测）
   } });
   const recipe = await a.apply({ kind: 'set_contrast' });

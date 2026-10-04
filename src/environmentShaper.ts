@@ -1,4 +1,5 @@
 // src/environmentShaper.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：环境整形器 —— Windows/Linux 双适配器 + undo 账本同生命周期（genesis.premature-impl 的 AdapterDeps 注入纪律锚定本文件），拆分将稀释平台对称性。
 // D-2 环境重塑：Agent 从「环境的适应者」变为「工作台的造物主」——
 // 但造物主的第一美德是复原：改变世界的权力与复原世界的义务严格对称。
 //
@@ -260,11 +261,27 @@ export class LinuxAdapter implements SystemAdapter {
 // P/Invoke 声明置于模块级常量 —— 类体零直接进程调用（genesis.premature-impl
 // 规则已同步演化为「注入纪律」守卫：实现合法，裸调用违法）。
 const PS_EXE = 'powershell';
-const PS_FLAGS = ['-NoProfile', '-NonInteractive', '-Command'];
+// W6R-A8 shell 启动面加固：-Command → -EncodedCommand。旧通道把整段 PS
+// 脚本当命令行参数拼接 —— psLiteral 虽闭合了单引号注入面，但只要 titleHint
+// 未来扩到屏幕 OCR 等外部来源，任何转义遗漏都是 RCE 面。EncodedCommand 的
+// 载荷是脚本整体的 base64（UTF-16LE），命令行上不存在任何 PS 语法解析点：
+// 注入面在传输层被消除，而非依赖转义的正确性。
+const PS_FLAGS = ['-NoProfile', '-NonInteractive', '-EncodedCommand'];
 
-/** PS 单引号字面量转义（单引号加倍）—— 标题关键词的注入面闭合 */
+/** PS 单引号字面量转义（单引号加倍）—— 脚本内数据的第一道闸（纵深防御保留：
+ *  EncodedCommand 已消除命令行注入面，此函数保证脚本内 -like 匹配语义正确） */
 function psLiteral(s: string): string {
   return `'${String(s).replace(/'/g, "''")}'`;
+}
+
+/**
+ * W6R-A8：PS 脚本 → -EncodedCommand 载荷（UTF-16LE → base64）。
+ * 纯函数、零外部状态、永不抛（Buffer 编码对任意 JS 字符串恒成功）。
+ * 解码由 powershell 原生完成（-EncodedCommand 的契约即 UTF-16LE base64）；
+ * 单测锁「解码回原文一致」—— 脚本里的引号/反引号/$()/; 是数据不是语法。
+ */
+export function psEncodeCommand(script: string): string {
+  return Buffer.from(String(script), 'utf16le').toString('base64');
 }
 
 /** 默认探针（win32）：where 定位可执行文件 */
@@ -316,6 +333,16 @@ export class WindowsAdapter implements SystemAdapter {
     this.execFn = deps.exec ?? exec;
   }
 
+  /**
+   * W6R-A8：PS 执行统一通道 —— 脚本整体经 psEncodeCommand 编码后挂
+   * -EncodedCommand。命令行上只有一个 base64 串：titleHint 等外部输入
+   * 无论携带引号/反引号/$()/分号，都以编码字节原样到达 PS，不参与任何
+   * 命令行语法解析（拼接注入面在传输层消除）。类体仍零裸进程调用。
+   */
+  private async runPs(script: string): Promise<{ stdout: string }> {
+    return this.execFn(PS_EXE, [...PS_FLAGS, psEncodeCommand(script)]);
+  }
+
   /** 能力探测：PowerShell 在场 ⇒ 窗口四动作；set_contrast 诚实缺席
    *  （注册表 + SPI_SETHIGHCONTRAST 往返不可靠 —— 留白如实申报，绝不虚报） */
   async capabilities(): Promise<ReadonlySet<ShaperActionKind>> {
@@ -335,7 +362,7 @@ export class WindowsAdapter implements SystemAdapter {
   /** 读高对比度 flags（SPI_GETHIGHCONTRAST=0x42；读操作 —— 真机验证安全） */
   private async getHighContrastFlags(): Promise<number | null> {
     try {
-      const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, `${HC_DECL}; [Win.U32HC]::GetHC()`]);
+      const { stdout } = await this.runPs(`${HC_DECL}; [Win.U32HC]::GetHC()`);
       const f = Number.parseInt(stdout.trim(), 10);
       return Number.isFinite(f) ? f : null;
     } catch {
@@ -347,7 +374,7 @@ export class WindowsAdapter implements SystemAdapter {
   private async hwndOf(hint: string): Promise<{ hwnd: number; title: string }> {
     // Y6：一次往返同时取句柄与标题 —— 标题是 focus_handoff 取证的原料
     const script = `$p = Get-Process | Where-Object { $_.MainWindowTitle -like '*' + ${psLiteral(hint)} + '*' } | Select-Object -First 1; if ($p) { "$($p.MainWindowHandle)||$($p.MainWindowTitle)" } else { '0||' }`;
-    const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, script]);
+    const { stdout } = await this.runPs(script);
     const [h, t] = stdout.trim().split('||');
     const hwnd = Number.parseInt(h ?? '', 10);
     if (Number.isFinite(hwnd) && hwnd > 0) return { hwnd, title: (t ?? '').trim() };
@@ -355,7 +382,7 @@ export class WindowsAdapter implements SystemAdapter {
   }
 
   private async activate(hwnd: number): Promise<void> {
-    await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hwnd}) | Out-Null`]);
+    await this.runPs(`${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hwnd}) | Out-Null`);
   }
 
   async apply(action: ShaperAction): Promise<UndoRecipe> {
@@ -375,7 +402,7 @@ export class WindowsAdapter implements SystemAdapter {
       case 'maximize_window': {
         const before = await this.getWindowGeometry(hint);
         await this.activate(hit.hwnd);
-        await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hit.hwnd}, 3) | Out-Null`]); // SW_MAXIMIZE
+        await this.runPs(`${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hit.hwnd}, 3) | Out-Null`); // SW_MAXIMIZE
         return { kind: 'maximize_window', titleHint: hint, before: before ?? undefined, matchedTitle: hit.title };
       }
       case 'move_window': {
@@ -385,8 +412,8 @@ export class WindowsAdapter implements SystemAdapter {
         const before = await this.getWindowGeometry(hint);
         await this.activate(hit.hwnd);
         // SWP_NOSIZE(0x1) | SWP_NOZORDER(0x4)：只移不改尺寸/层级
-        await this.execFn(PS_EXE, [...PS_FLAGS,
-          `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hit.hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`]);
+        await this.runPs(
+          `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hit.hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`);
         return { kind: 'move_window', titleHint: hint, before: before ?? undefined, matchedTitle: hit.title };
       }
       case 'set_zoom': {
@@ -404,7 +431,7 @@ export class WindowsAdapter implements SystemAdapter {
         // SET/undo 的往返正确性由注入式测试锁命令形状 + 用户首次使用时观察。
         const before = await this.getHighContrastFlags();
         const flags = (before === null ? 0 : before) | 0x1; // HCF_HIGHCONTRASTON
-        await this.execFn(PS_EXE, [...PS_FLAGS, setHighContrastPs(String(flags))]);
+        await this.runPs(setHighContrastPs(String(flags)));
         return { kind: 'set_contrast', before: { theme: before === null ? 'unknown' : String(before) }, level: undefined } as UndoRecipe;
       }
     }
@@ -421,15 +448,15 @@ export class WindowsAdapter implements SystemAdapter {
         const b = recipe.before;
         await this.activate(hwnd);
         if (typeof b?.x === 'number' && typeof b.y === 'number') {
-          await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, ${b.maximized ? 3 : 1}) | Out-Null`]);
+          await this.runPs(`${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, ${b.maximized ? 3 : 1}) | Out-Null`);
           const w = typeof b.width === 'number' && b.width > 0 ? Math.round(b.width) : 0;
           const h = typeof b.height === 'number' && b.height > 0 ? Math.round(b.height) : 0;
           const flags = w > 0 && h > 0 ? 0x4 : 0x4 | 0x1; // 有尺寸快照 ⇒ 精确归位；否则 SWP_NOSIZE
-          await this.execFn(PS_EXE, [...PS_FLAGS,
-            `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]::Zero, ${Math.round(b.x)}, ${Math.round(b.y)}, ${w}, ${h}, ${flags}) | Out-Null`]);
+          await this.runPs(
+            `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]::Zero, ${Math.round(b.x)}, ${Math.round(b.y)}, ${w}, ${h}, ${flags}) | Out-Null`);
         } else {
           // 无几何快照：止步于还原窗口态（与 LinuxAdapter 的诚实降级同律）
-          await this.execFn(PS_EXE, [...PS_FLAGS, `${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, 1) | Out-Null`]);
+          await this.runPs(`${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, 1) | Out-Null`);
         }
         return;
       }
@@ -443,7 +470,7 @@ export class WindowsAdapter implements SystemAdapter {
         // （奇数 flags）的机器，& ~0x1 会错关用户自己的设置；未知 ⇒ 0（保守）。
         const orig = Number.parseInt(recipe.before?.theme ?? '0', 10);
         const flags = Number.isFinite(orig) ? orig : 0;
-        await this.execFn(PS_EXE, [...PS_FLAGS, setHighContrastPs(String(flags))]);
+        await this.runPs(setHighContrastPs(String(flags)));
         return;
       }
     }
@@ -454,7 +481,7 @@ export class WindowsAdapter implements SystemAdapter {
       const { hwnd } = await this.hwndOf(titleHint);
       if (hwnd === 0) return null;
       const script = `${USER32_DECL}; $r = New-Object Win.U32+RECT; [Win.U32]::GetWindowRect([IntPtr]${hwnd}, [ref]$r) | Out-Null; $z = [Win.U32]::IsZoomed([IntPtr]${hwnd}); Write-Output ($($r.L.ToString()) + ',' + $($r.T.ToString()) + ',' + ($r.R - $r.L).ToString() + ',' + ($r.B - $r.T).ToString() + ',' + [int]$z)`;
-      const { stdout } = await this.execFn(PS_EXE, [...PS_FLAGS, script]);
+      const { stdout } = await this.runPs(script);
       const [x, y, w, h, z] = stdout.trim().split(',').map(Number);
       if (![x, y, w, h].every(Number.isFinite)) return null;
       return { x, y, width: w, height: h, maximized: z === 1 };

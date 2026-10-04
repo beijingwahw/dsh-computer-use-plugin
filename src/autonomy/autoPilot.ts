@@ -1,4 +1,7 @@
 // src/autonomy/autoPilot.ts
+// W6-1 结构性保留登记（smell.over-engineering）：driveLoop 是单一近 800 行的
+// Φ-4 闭环状态机（十段闸门/旁路/记账以环内闭包状态就地织成，其 JSDoc 即流程法），
+// 拆分须重构闭包状态与步序语义 —— 属逻辑重构，违反「行为零变化」红线，登记保留。
 // 纪元 Φ（Φ-4 核心闭环驱动器）：识别 → 判断 → 宪法 → 执行 → 验证 → 进化 的自主智能环主脉。
 // 本文件只做"环"：世界感子（Φ-2）、策略引擎（Φ-3）、目标机（Φ-1）、宪法（Φ-8）全部经
 // AutonomyDeps 注入 —— 时间（now）与睡眠（sleep）同样注入，离线测试零真钟零真睡。
@@ -40,15 +43,9 @@ import type { ScoringContext } from './counterfactual';
 //（goalKeywords/triedActionKeys 的单一事实源，不复制分词逻辑）。
 import { extractGoalKeywords } from './policyEngine';
 import { actionSignature } from './counterfactual';
-// W4-0（B 接线）：活意图漂移会话（W3-5 交付 API —— createSteerSession 绑定
-// 目标机与屏幕指纹源，会话铸造在 driveLoop 环内完成（goal 由调用方铸））。
-// W5-5（缝3）：SteerBiasStepper 类型随行 —— 换支重放偏置的步进面端口。
-import {
-  createSteerSession,
-  type SteerChoice,
-  type SteerSession,
-  type SteerBiasStepper,
-} from '../tools/steerTools';
+// W8-B4（判据证伪能力）：终局判据独立评估器官（否定判据 + fuzzy 容错 + OCR 缺席
+// 诚实降级 —— 三态判决纪律；⑧′ 处消费）。autonomy 包内模块，零回路。
+import { buildCriteriaPairs, evaluateCriteria } from './criteriaEval';
 // 纪元 Ε：预言端口与注记/动作键方言（路径显式指到桶文件 —— 目录导入在 Node
 // strip 装载器是 ERR_UNSUPPORTED_DIR_IMPORT，纪元 Ι 同律）。
 import {
@@ -205,13 +202,101 @@ export interface BranchLedgerWirePort {
   generateCard(failure: { phase: unknown; reason?: unknown; now?: () => number }): BranchCard | null;
 }
 
+// ─── W8-B4（tools↔autonomy 破环）：steer 会话结构端口 + 晚绑定注册器 ───
+// 本文件不再 import 具名的 steer 会话实现（tools 桶）—— 会话真身（漂移检查/
+// 出题/应答结算/换支重放）在 tools 侧铸造，经 bindSteerSessionFactory 注册器
+// 喂入本环（装配方向：tools → autonomy 单向；autonomy 对 tools 零 import）。
+// 以下端口类型是**结构镜像**（structural port）：只声明闭环与工具转发面实际
+// 消费的字段；真身在 tools 侧实现，bindSteerSessionFactory 的注入点即类型
+// 相容性的执法点（结构不满足 ⇒ 装配期编译失败）。
+
+/** W8-B4：steer 出题载荷的结构面（driveLoop 只读 drift/reason/amendment.to） */
+export interface PilotSteerChoice {
+  /** 触发本题主因：融合分 + 趋势 */
+  drift: { score: number; trend: string };
+  /** 一句中文出题理由 */
+  reason: string;
+  /** B 选项（改判据）的修正载荷 —— 升级题面回显用 */
+  amendment: { to: string };
+}
+
+/** W8-B4：换支重放偏置步进面的结构面（③¼ withSteerBias 消费 + 收尾记账） */
+export interface PilotSteerBiasStepper {
+  /** 扣一步重放预算并返回本步偏置键（超支/已完成/故障 ⇒ null） */
+  step(): { preferredActionKeys: string[] } | null;
+  /** 预算执法的透明读数（审计面） */
+  state(): { status: string; stepsUsed: number; budgetSteps: number };
+  /** 重放成功收尾 */
+  complete(): void;
+}
+
+/**
+ * W8-B4：在役 steer 会话的结构面 —— driveLoop 铸造/出题/持卡消费的最小面 +
+ * 工具转发与续跑脊梁（经 activeSteerSession）消费的扩展面（answer/pending/
+ * drainAmendments/branchCard —— 结构兼容真身，防御式可选）。
+ */
+export interface PilotSteerSession {
+  /** 漂移检查 + 按需出题（纯节律入口，绝不抛） */
+  maybeCheckAndAsk(stepIndex: number | null, entropy?: number | null): PilotSteerChoice | null;
+  /** 当前待答题目（无则 null） */
+  pending(): { drift: { score: number }; answer_format: string } | null;
+  /** 应答结算：单字符解析（容错）⇒ A 放行 / B 写回判据 / C 记终止阻塞；垃圾重问 */
+  answer(raw: unknown): {
+    status: string;
+    choice?: string;
+    applied?: boolean;
+    hint?: string;
+    amendment?: { to: string };
+    restart?: { kind: string };
+    /** W5-5（缝3）：换支成功时的重放指引（偏置载荷 —— 重入脊梁消费） */
+    branch?: { bias: { preferredActionKeys: string[] } };
+  };
+  /** W5-5（缝1，可选面）：取走全部未消费的修订判据（一次性移交） */
+  drainAmendments?(): Array<{ goalText: string; amendment: { criterion_index: number; to: string } }>;
+  /** W5-5（缝3，可选面）：持有岔路卡（driveLoop 铸卡后注入） */
+  holdBranchCard?(card: unknown): void;
+  /** W5-5（缝3，可选面）：当前持有的岔路卡（无 ⇒ null） */
+  branchCard?(): unknown | null;
+  /** W5-5（缝3，可选面）：取走在役换支重放的偏置步进面（一次性移交） */
+  takeBranchBias?(): PilotSteerBiasStepper | null;
+}
+
+/**
+ * W8-B4：steer 会话工厂端口 —— driveLoop 环起铸造会话的唯一通道。
+ * 参数面与真身工厂的会话依赖（goal + screenText 指纹源 + 可选覆盖）同构。
+ */
+export type PilotSteerSessionFactory = (deps: {
+  goal: GoalStateMachine;
+  screenText?: () => string | null;
+  diagnosisNote?: () => string | null;
+  driftThreshold?: number;
+  throttleSteps?: number;
+}) => PilotSteerSession;
+
+/**
+ * W8-B4：晚绑定注册器（破环装配面）—— 组合根在装载 tools 侧会话实现时喂入。
+ * 未注册即点亮 steer 端口 ⇒ 会话缺席（漂移检查整段零执行 —— 与端口缺席同降级，
+ * 绝不炸环绝不伪造会话）；重复注册以后注册者为准，null 可注销（测试隔离缝）。
+ */
+const w8SteerFactory: { factory: PilotSteerSessionFactory | null } = { factory: null };
+
+/** W8-B4：注册/注销 steer 会话工厂（tools 侧装配点调用；线程化单注册位） */
+export function bindSteerSessionFactory(factory: PilotSteerSessionFactory | null): void {
+  w8SteerFactory.factory = typeof factory === 'function' ? factory : null;
+}
+
+/** W8-B4：当前注册的 steer 会话工厂只读出口（缺省 null —— 审计/测试观察面） */
+export function boundSteerSessionFactory(): PilotSteerSessionFactory | null {
+  return w8SteerFactory.factory;
+}
+
 /** W4-0（B）：在役 steer 会话（driveLoop 铸、跨环存续至下一环替换 —— 出题升级后
  *  用户的单字符应答经 steer_choice/steer_answer 工具对**同一会话**结算，环终清账
  *  会把「升级提问」变成死信；持有者只暴露只读出口，绝不炸） */
-const w4ActiveSteer: { session: SteerSession | null } = { session: null };
+const w4ActiveSteer: { session: PilotSteerSession | null } = { session: null };
 
 /** W4-0（B）：当前/最近一次 steer 会话（无 ⇒ null；工具转发面消费） */
-export function activeSteerSession(): SteerSession | null {
+export function activeSteerSession(): PilotSteerSession | null {
   return w4ActiveSteer.session;
 }
 
@@ -330,11 +415,12 @@ export interface AutonomyDeps {
    *  （meta 与 W4-0 接线时逐字节同路 —— 零回归红律）。 */
   branchAnchor?: () => { journalLength: number; chainTip: string } | null;
   /** W5-5（缝3）：steer(k) 换支偏置端口 —— runPilotLoop 从在役 steer 会话取走
-   *  的换支重放步进面：在场时 ③¼ 岔路账评分上下文经 withSteerBias 铸入
-   *  preferredActionKeys（改选偏置只改选择不改预测），每步决策既定即 step()
+   *  的换支重放步进面（W8-B4 破环后为结构端口 PilotSteerBiasStepper —— 真身
+   *  由会话铸造侧实现，结构兼容）：在场时 ③¼ 岔路账评分上下文经 withSteerBias
+   *  铸入 preferredActionKeys（改选偏置只改选择不改预测），每步决策既定即 step()
    *  扣重放预算（超支 ⇒ null 无偏置原路继续 —— 诚实终止）。缺席 ⇒ 逐字节
    *  旧路径（零回归红律）。 */
-  steerBias?: SteerBiasStepper;
+  steerBias?: PilotSteerBiasStepper;
   /** 每步入轨迹后的观察者回调（回调自身异常被吞掉，绝不炸环） */
   onStep?: (step: StepRecord) => void;
   /** 注入睡眠（wait 动作沉降用；缺省真睡 setTimeout） */
@@ -614,6 +700,9 @@ function syntheticDeclareAction(stage: string): PolicyAction {
  *  ⑦ execute(action) —— 异常或缺 outcome ⇒ error 步收敛；正常则 StepRecord 入轨迹
  *     （effectiveRiskTier = 宪法判决分层盖章，垃圾判决值视为缺席）；
  *  ⑧ criteriaEvidence 逐条 goal.recordCriterion（回填异常吞掉）；
+ *  ⑧′ W8-B4 判据证伪面：以最近完整感知的 OCR 语料独立复核**否定判据**（mustNotAppear:/
+ *     不得出现： 前缀）—— 命中禁词（精确∪fuzzy）⇒ violated（failed 终局）、语料在场
+ *     未命中 ⇒ met、OCR 缺席 ⇒ 零证据（诚实降级，否定判据不自动为真）；
  *  ⑨ goal.tick() → goal.evaluate()：achieved/failed/aborted/blocked 任一终局相即熔断；
  *  ⑩ 每步入轨迹即触发 onStep（回调异常吞掉）。
  * 任何依赖异常都不炸环；所有时间取注入时钟。
@@ -637,6 +726,9 @@ async function driveLoop(
   let spec: GoalSpec = { goal: '', successCriteria: [] };
   try { spec = deps.goal.spec; } catch { /* 防御：spec 读取失败绝不炸环 */ }
   const criteriaTotal = Array.isArray(spec.successCriteria) ? spec.successCriteria.length : 0;
+  // W8-B4（判据证伪面）：判据对（原文 + 原始下标锚定 —— 非法条目剔除但不下标平移，
+  // 与 execute 侧判据对铸造同律）。⑧′ 独立评估的物料；空判据账 ⇒ ⑧′ 整段零执行。
+  const w8CriteriaPairs = buildCriteriaPairs(spec.successCriteria);
   // maxSteps 同律防御（与 goalState 构造器「非法 ⇒ 降级 24」一致）：stub 依赖给出
   // NaN/0/非数会把 stepCap 变 NaN（保险丝永不熔断 ⇒ 挂死）或 0（秒中止）
   const specMaxSteps = typeof spec.maxSteps === 'number' && Number.isFinite(spec.maxSteps) && spec.maxSteps >= 1
@@ -899,14 +991,16 @@ async function driveLoop(
 
   // W4-0（B 接线）：活意图漂移会话铸造 —— 仅 steer 端口点亮时（goal 在环内才出生，
   // 铸造点只能在 driveLoop）。指纹源 = 最近完整感知快照的 textDigest + sceneLabel
-  // 拼接（steerTools 的既定方言）；会话铸造防御式（goal 垃圾 ⇒ 永不出题的空转
+  // 拼接（会话实现侧的既定方言）；会话铸造防御式（goal 垃圾 ⇒ 永不出题的空转
   // 会话）。会话登记进模块持有者（跨环存续到下一环替换 —— 出题升级后用户的
   // 单字符应答经 steer_answer 对同一会话结算，环终清账会把升级提问变成死信）。
-  let w4SteerSession: SteerSession | null = null;
-  if (w4Steer !== null) {
+  // W8-B4（破环）：会话工厂经晚绑定注册器喂入（tools 侧装配时注册）；未注册 ⇒
+  // 会话缺席（漂移检查整段零执行 —— 与端口缺席同降级，绝不炸环绝不伪造会话）。
+  let w4SteerSession: PilotSteerSession | null = null;
+  if (w4Steer !== null && w8SteerFactory.factory !== null) {
     try {
       const conf = w4Steer;
-      w4SteerSession = createSteerSession({
+      w4SteerSession = w8SteerFactory.factory({
         goal: deps.goal,
         screenText: (): string | null => {
           const s = lastFullSnapshot;
@@ -1056,7 +1150,7 @@ async function driveLoop(
     //     不执行不 tick，题面进总汇报供模型转述，应答经 steer_answer 单字符结算）。
     //     未超阈 / 节流中 / 指纹缺席 / 会话故障 ⇒ null 原路径继续（零回归红律）。
     if (w4SteerSession !== null) {
-      let w4Question: SteerChoice | null = null;
+      let w4Question: PilotSteerChoice | null = null;
       try {
         w4Question = w4SteerSession.maybeCheckAndAsk(stepsTaken, w4LastEntropy);
       } catch {
@@ -1326,6 +1420,32 @@ async function driveLoop(
         if (evidence === null || typeof evidence !== 'object') continue;
         if (typeof evidence.index !== 'number') continue;
         if (evidence.status !== 'met' && evidence.status !== 'violated') continue;
+        try { deps.goal.recordCriterion(evidence.index, evidence.status); } catch { /* 回填异常吞掉 */ }
+        criteriaStatus.set(evidence.index, evidence.status);
+      }
+    }
+
+    // ⑧′ W8-B4（判据证伪面）：以最近完整感知快照的 OCR 语料（textDigest —— 本轮
+    //     环顶感知的产物，即当前世界最新全文观察）对**否定判据**独立复核：
+    //     ① 否定判据（'mustNotAppear:' / '不得出现：' 前缀）命中禁词（精确 ∪
+    //        fuzzy ⌈m/6⌉ 容错）⇒ violated —— goalState 判定律第 1 条：任一
+    //        violated ⇒ failed 终局（证伪面本体）；
+    //     ② 语料在场且未命中禁词 ⇒ met（否定判据由此可凑齐全 met 终局）；
+    //     ③ OCR 语料缺席/不可读 ⇒ 零证据（否定判据绝不因「看不见」自动为真 ——
+    //        三态判决纪律：保持 unverified，靠步数保险丝收）。
+    //     极性分工（行为零变化红线）：肯定判据的 met 通道归 execute 侧判据抽查
+    //     （runtime 既定管辖，本环不越权 —— 短判据的 fuzzy 近邻误命中如「关门/
+    //     开门」距离 1 会翻转既有终局语义）；criteriaEval 器官层肯定面同样具备
+    //     fuzzy 容错（单测执法），供执行侧拆分落地后整体采用。
+    if (w8CriteriaPairs.length > 0) {
+      const w8Corpus =
+        lastFullSnapshot !== null && typeof lastFullSnapshot === 'object' &&
+        typeof lastFullSnapshot.textDigest === 'string'
+          ? lastFullSnapshot.textDigest
+          : null;
+      const w8Eval = evaluateCriteria(w8CriteriaPairs, w8Corpus);
+      for (const evidence of w8Eval.evidence) {
+        if (evidence.polarity !== 'must-not-appear') continue; // 肯定面归 execute 通道
         try { deps.goal.recordCriterion(evidence.index, evidence.status); } catch { /* 回填异常吞掉 */ }
         criteriaStatus.set(evidence.index, evidence.status);
       }

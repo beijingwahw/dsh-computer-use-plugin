@@ -14,7 +14,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve as pathResolve } from 'node:path';
@@ -142,6 +142,9 @@ if (svc) {
     return {
       'Content-Type': 'application/json',
       'X-Cap-Token': mintToken(keyBytes, process.pid, ALL_CAPS, 60),
+      // W6-R-A3 nonce 强制：X-Request-Id 是单次性防重放头 —— 服务端缺头即 401、
+      // 同 nonce 重放即 401。每请求新鲜 randomUUID（本函数每请求各调一次 ⇒ 天然新鲜）。
+      'X-Request-Id': randomUUID(),
     };
   }
 
@@ -280,9 +283,11 @@ if (svc) {
     assert.equal(h.json.data.hardware.audio.available, p.available, '缓存值与端点回执一致');
   });
 
-  maybeE2E('W5-1②e: auth 对新端点生效 —— 无 token ⇒ unauthorized 信封（HTTP 200）', async () => {
+  maybeE2E('W5-1②e: auth 对新端点生效 —— 无 token ⇒ 401 + unauthorized 信封', async () => {
     const r = await fetch(`${svc!.baseUrl}/audio_events`, { signal: AbortSignal.timeout(5000) });
-    assert.equal(r.status, 200, 'auth 拒绝也走 200+failure 信封方言');
+    // W6-R-A3 错误码修正：认证失败是安全层判决（非业务层）⇒ HTTP 401；
+    // 错误信封 JSON 结构不变（{status:'failure', error:{kind, detail}}）。
+    assert.equal(r.status, 401, 'auth 拒绝走 401 + failure 信封方言（安全层判决非业务层）');
     const body: any = await r.json();
     assert.equal(body.status, 'failure');
     assert.equal(body.error.kind, 'unauthorized', `无 token ⇒ unauthorized（实际 ${body.error?.kind}）`);

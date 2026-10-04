@@ -27,107 +27,18 @@ import { deterministicReplay } from '../sandbox/engine';
 import { sandboxLog, type SandboxLog } from '../sandbox/log';
 import type { SandboxAction } from '../sandbox/types';
 
-// ─── 锚记录（可序列化数据面 —— 跨进程/跨会话可独立复核） ───
-
-/** 时间背书：rfc3161（第三方回执）或 local（本地时钟，诚实降级） */
-export interface AnchorTimestamp {
-  source: 'rfc3161' | 'local';
-  /** 铸锚时刻（本地钟；RFC 3161 的权威时刻在 token 的 genTime 里 —— 留存原样） */
-  anchoredAt: number;
-  /** TimeStampToken 原始 DER 字节（base64；仅 rfc3161 源在场 —— 离线导出/复核物证） */
-  token?: string;
-  /** 回执核验标志：imprint+nonce 均已对上（仅 rfc3161 源为 true；绝不虚标） */
-  imprintVerified?: boolean;
-  /** 请求 nonce（base64，CSPRNG 16 字节、正号位已保证） */
-  nonce: string;
-  /** 降级注记（如「rfc3161 失败原因 —— 本地回退，非第三方背书」；诚实留痕） */
-  note?: string;
-}
-
-/** 一枚行为公证锚（字段集即宣誓域 —— hash 覆盖除自身外的全部字段） */
-export interface AnchorRecord {
-  seq: number;
-  chainTip: string;
-  mmrRoot: string | null;
-  timestamp: AnchorTimestamp;
-  /** 首锚为 null 哨兵（canonical 序列化保 null —— 与缺键可区分，链语义明确） */
-  prevAnchorHash: string | null;
-  hash: string;
-}
-
-/** 公证章：green=已验 / red=发现不一致（篡改或损坏）/ n/a=诚实降级（无法核验，
- *  绝不虚绿）/ n/a(legacy)=旧格式记录在场但取证字段缺席（Χ 纪元重放章专用 ——
- *  无屏指纹的旧排练行不可重放，诚实标注而非误红） */
-export interface BadgeStatus {
-  status: 'green' | 'red' | 'n/a' | 'n/a(legacy)';
-  detail: string;
-}
-
-/** 四绿章核验报告（quality_checkup notarize 动作的四章面） */
-export interface NotaryReport {
-  ok: boolean;
-  badges: {
-    'chain-integrity': BadgeStatus;
-    'mmr-membership': BadgeStatus;
-    'timestamp-anchor': BadgeStatus;
-    'replay-consistency': BadgeStatus;
-  };
-  anchors: number;
-  lastAnchor: {
-    seq: number; chainTip: string; mmrRoot: string | null; source: 'rfc3161' | 'local';
-    anchoredAt: number; imprintVerified: boolean | null; hash: string; prevAnchorHash: string | null;
-  } | null;
-}
-
-// ─── 密码学原语复刻（journal.ts 模块私有 —— 复刻非复制实现，先例：sandbox/log.ts） ───
-// 前缀重走（章③）必须逐字节复算 journal 的链哈希：canonical 键排序 + 过滤
-// undefined 值（journal 的哈希域语义：值为 undefined 的自有键与缺键同域）。
-// 若两者漂移，重走必然误报断链 —— 此处的逐字节一致是公证有效性的前提。
-
-/** 稳定序列化：键排序 + undefined 值过滤（与 journal.canonical 同律） */
-function canonical(obj: any): string {
-  if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
-  if (Array.isArray(obj)) return '[' + obj.map(canonical).join(',') + ']';
-  return '{' + Object.keys(obj).sort()
-    .filter(k => obj[k] !== undefined)
-    .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
-}
-
-function sha256Hex(s: string): string {
-  return createHash('sha256').update(s, 'utf8').digest('hex');
-}
-
-/** journal 条目的链式哈希（与 journal.chainHash 逐字节一致 —— 前缀重走的原语） */
-function journalChainHash(prev: string, entry: JournalEntry): string {
-  const domain: Record<string, unknown> = { ...entry };
-  delete domain.hash; // 哈希域不含自身
-  return sha256Hex(prev + canonical(domain));
-}
-
-/** 锚记录哈希：sha256(canonical(记录去掉自身 hash)) —— 锚自链的链式指纹 */
-function anchorHash(record: Omit<AnchorRecord, 'hash'>): string {
-  return sha256Hex(canonical(record));
-}
-
-/** 异常归因为安全字符串（绝不二次抛出 —— pilotStore 同律） */
-function errText(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  try {
-    const text = String(err);
-    return text === '' ? '未知异常' : text;
-  } catch {
-    return '未知异常';
-  }
-}
-
-/** 记录防御性深拷贝（记录恒为 JSON 安全数据 —— JSON 往返即深拷贝） */
-function copyRecord<T>(rec: T): T {
-  try {
-    return JSON.parse(JSON.stringify(rec)) as T;
-  } catch {
-    return rec;
-  }
-}
+// W6-2（doctor smell.over-engineering 清偿）：锚记录+密码学原语 → primitives、重放一致性 → replay（行为零变化）；导入面不变。
+// D-G5（W8 第 2 批）：回放轨迹见证 → replayWitness（数据面在 primitives 同册）。
+import { attestReplayConsistency } from './replay';
+import type { AnchorRecord, AnchorTimestamp, NotaryReport, BadgeStatus, ReplayTrajectoryWitness } from './primitives';
+export { attestReplayConsistency, type ReplayConsistencyOptions } from './replay';
+export { canonical, sha256Hex, journalChainHash, anchorHash, errText, copyRecord, type AnchorRecord, type AnchorTimestamp, type BadgeStatus, type NotaryReport, type ReplayStepOutcome, type ReplayStepWitness, type ReplayTrajectoryWitness } from './primitives';
+export {
+  replayStepFingerprint, anchorReplayTrajectoryOn,
+  type NotaryTarget, type ReplayAnchorOptions, type ReplayAnchorResult,
+} from './replayWitness';
+import { canonical, sha256Hex, journalChainHash, anchorHash, errText, copyRecord } from './primitives';
+import { anchorReplayTrajectoryOn, type ReplayAnchorOptions, type ReplayAnchorResult } from './replayWitness';
 
 // ─── 账本面（journal 公开面的最小契约 —— 默认绑真 journal 单例，测试可注入假账本） ───
 
@@ -150,97 +61,6 @@ const journalLedger: NotarizableLedger = {
   mmrProof: (index) => journal.mmrProof(index),
 };
 
-// ─── Χ 纪元（沙箱重放证词）：第四章 replay-consistency 的执法体 ───
-// Π 在此章诚实 n/a 并留言「沙箱段重放证词留给后续」—— 本纪元兑现该承诺：
-// 沙箱排练链是确定性世界（virtualScreen：命中测试/输入缓冲/滚动/esc 关弹窗），
-// 同动作链重入必同屏 —— 重放因此**可执法**：链上在册的屏指纹序列 vs 重演重算
-// 序列逐位一致 ⇒ green「重放一致」（agent 行为的复现性证明）。
-// 威胁模型补位：无密钥哈希链只证「未被无痕篡改」，不证「内容为真」—— 攻击者
-// 持整链重写权（改内容后重算全部哈希）可保章①绿。重放章补的就是这个缺口：
-// 内容必须仍与确定性世界重演的产物逐位一致，否则 red —— 链完整而史不可复现。
-
-/** 重放章注入面：沙箱账本可注入（缺省自动发现沙箱单例 —— 注入优先） */
-export interface ReplayConsistencyOptions {
-  sandboxLedger?: SandboxLog;
-}
-
-/**
- * 重放一致性章（独立可调；永不抛 —— 内部异常吞为红章，绝不炸调用方）：
- *   沙箱段在场且带屏指纹 ⇒ 逐段 deterministicReplay 重演比对（逐位）；
- *   无沙箱段 ⇒ n/a（真机 journal 段不可复现 —— 理由在场，诚实）；
- *   旧格式无指纹 ⇒ n/a(legacy)；
- *   分歧 ⇒ red（注记首个分歧步）。
- */
-export function attestReplayConsistency(opts: ReplayConsistencyOptions = {}): BadgeStatus {
-  try {
-    const ledger = opts.sandboxLedger ?? sandboxLog; // 注入优先，缺省沙箱单例
-    const entries = ledger.list();
-    const isRehearsal = (kind: string) => kind === 'rehearsal-begin' || kind === 'rehearsal-step';
-    if (!entries.some(e => isRehearsal(e.kind))) {
-      return {
-        status: 'n/a',
-        detail: 'no sandbox rehearsal segment on the sandbox ledger — real-machine journal '
-          + 'segments stay honestly unattested (world non-determinism: screens/timings); '
-          + 'nothing replayable in scope',
-      };
-    }
-    const newFormat = entries.some(e => isRehearsal(e.kind) && e.data?.fpFormat !== undefined);
-    const segments = ledger.exportRehearsalSegments();
-    if (segments.length === 0) {
-      if (!newFormat) {
-        return {
-          status: 'n/a(legacy)',
-          detail: `sandbox ledger holds ${entries.length} pre-Χ entr${entries.length === 1 ? 'y' : 'ies'} `
-            + 'with rehearsal records but no screen fingerprints (legacy format) — bit-level '
-            + 'replay attestation requires Χ-format records; honest n/a(legacy), not a false green',
-        };
-      }
-      return {
-        status: 'n/a',
-        detail: 'rehearsal records present but no reconstructable replay segment '
-          + '(virtual scene absent from the records, or segment head evicted by capacity) — honest n/a',
-      };
-    }
-
-    let totalSteps = 0;
-    let firstDivergence: string | null = null;
-    for (const seg of segments) {
-      const actions = seg.steps.map(s => s.action as SandboxAction);
-      const r = deterministicReplay(actions, { scene: seg.scene });
-      if (r.fingerprints.length !== seg.steps.length) {
-        firstDivergence ??= `segment ${seg.chainId}: replay produced ${r.fingerprints.length} `
-          + `fingerprint(s) for ${seg.steps.length} recorded step(s)`;
-        continue;
-      }
-      for (let i = 0; i < seg.steps.length; i++) {
-        if (r.fingerprints[i] !== seg.steps[i].fingerprint) {
-          firstDivergence ??= `segment ${seg.chainId}: FIRST DIVERGENCE at step ${i} `
-            + `(chain index ${seg.steps[i].index}) — recorded ${seg.steps[i].fingerprint.slice(0, 12)}… `
-            + `vs replayed ${r.fingerprints[i].slice(0, 12)}…`;
-          break;
-        }
-      }
-      totalSteps += seg.steps.length;
-    }
-    if (firstDivergence) {
-      return {
-        status: 'red',
-        detail: `${firstDivergence}; attested ${segments.length} segment(s) / ${totalSteps} step(s) — `
-          + 'history NOT reproducible: the chain may verify intact yet its content diverges '
-          + 'from what the deterministic world produces',
-      };
-    }
-    return {
-      status: 'green',
-      detail: `replayed ${segments.length} sandbox segment(s) / ${totalSteps} step(s) — every post-step `
-        + 'screen fingerprint recomputed by re-entering the virtual screen matches the ledger '
-        + 'bit-for-bit (deterministic world reproduces the history); real-machine journal segments '
-        + 'remain honestly outside replay scope',
-    };
-  } catch (e) {
-    return { status: 'red', detail: `replay attestation crashed: ${errText(e)}` };
-  }
-}
 
 // ─── anchorOnce 的注入面（now/fetch/crypto 全注入 —— 确定性测试） ───
 
@@ -257,6 +77,11 @@ export interface AnchorOptions {
   timeoutMs?: number;
   /** 注入账本面（缺省真 journal 单例） */
   ledger?: NotarizableLedger;
+  /**
+   * 可选过程证据载荷（D-G5 回放见证）：在场 ⇒ 进锚记录（anchorHash 覆盖）与
+   * 时间戳摘要域（RFC 3161 imprint 绑定）；缺席 ⇒ 两域逐字节旧形态。
+   */
+  witness?: ReplayTrajectoryWitness;
 }
 
 /** 铸 nonce：CSPRNG 16 字节；首字节 MSB 清零 + 置低位（DER INTEGER 正号位且无前导零剥除歧义） */
@@ -270,10 +95,20 @@ function toB64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }
 
-/** 锚载荷摘要（sha256 原始 32 字节）：时间戳背书所绑定的「账本状态」指纹 */
-function anchorPayloadDigest(a: { seq: number; chainTip: string; mmrRoot: string | null; prevAnchorHash: string | null }): Uint8Array {
+/**
+ * 锚载荷摘要（sha256 原始 32 字节）：时间戳背书所绑定的「账本状态」指纹。
+ * D-G5：witness 在场 ⇒ 一并入摘要域（第三方回执连同回放见证一起绑定）；
+ * 缺席 ⇒ canonical 过滤 undefined —— 摘要与旧形态逐字节一致（向后兼容）。
+ */
+function anchorPayloadDigest(a: {
+  seq: number; chainTip: string; mmrRoot: string | null; prevAnchorHash: string | null;
+  witness?: ReplayTrajectoryWitness;
+}): Uint8Array {
   return createHash('sha256')
-    .update(canonical({ seq: a.seq, chainTip: a.chainTip, mmrRoot: a.mmrRoot, prevAnchorHash: a.prevAnchorHash }), 'utf8')
+    .update(canonical({
+      seq: a.seq, chainTip: a.chainTip, mmrRoot: a.mmrRoot,
+      prevAnchorHash: a.prevAnchorHash, witness: a.witness,
+    }), 'utf8')
     .digest();
 }
 
@@ -303,6 +138,13 @@ class Notary {
 
   /** 内存锚链长度 */
   get anchorCount(): number { return this.anchors.length; }
+
+  /**
+   * 宿主装配状态（D-G5 公证缺席判据）：configure 是否发生过（显式接线或
+   * ensureConfigured 兜底均计）。未装配 ⇒ 重放铸证等便捷面诚实降级 ——
+   * 公证纪律由宿主开闸，缺省零行为。
+   */
+  isConfigured(): boolean { return this.configuredOnce; }
 
   /**
    * 装配：endpoint/tracePath。tracePath 变更（或首配）⇒ 重放 JSONL 铸回内存锚链
@@ -364,7 +206,9 @@ class Notary {
       const mmrRoot = ledger.mmrRoot();
       const prevAnchorHash = this.anchors.at(-1)?.hash ?? null; // 首锚 null 哨兵
       const nonce = mintNonce(random);
-      const digest = anchorPayloadDigest({ seq, chainTip, mmrRoot, prevAnchorHash });
+      // D-G5：TSA 请求摘要与锚载荷同域 —— witness 在场 ⇒ 第三方回执连回放
+      // 见证一起绑定（canonical 过滤 undefined ⇒ 无见证锚的摘要逐字节旧形态）
+      const digest = anchorPayloadDigest({ seq, chainTip, mmrRoot, prevAnchorHash, witness: opts.witness });
       const endpoint = (opts.endpoint !== undefined ? opts.endpoint : this.endpoint).trim();
 
       let timestamp: AnchorTimestamp;
@@ -390,7 +234,12 @@ class Notary {
         }
       }
 
-      const seed = { seq, chainTip, mmrRoot, timestamp, prevAnchorHash };
+      const seed: Omit<AnchorRecord, 'hash'> = {
+        seq, chainTip, mmrRoot, timestamp, prevAnchorHash,
+        // D-G5：见证在场 ⇒ 入哈希域（anchorHash 覆盖全部字段 —— 防篡改同律）；
+        // 缺席 ⇒ 键不落（canonical 语义下 undefined 与缺键同域 —— 旧锚逐字节不变）
+        ...(opts.witness !== undefined ? { witness: opts.witness } : {}),
+      };
       const record: AnchorRecord = { ...seed, hash: anchorHash(seed) };
       this.anchors.push(record);
       this.appendAnchor(record);
@@ -682,4 +531,16 @@ export function notaryAutoAnchorIfConfigured(config: {
   } catch {
     /* 绝不炸宿主 */
   }
+}
+
+/**
+ * 把回放轨迹见证铸进 notary 单例锚（D-G5 便捷面，绑定单例 —— 永不抛）：
+ * 未装配 ⇒ 诚实降级（reason 申报公证缺席）；endpoint 空 = 本地时间锚零网络
+ * （既有纪律保持）。结构性注入测试走 anchorReplayTrajectoryOn（假件执法缝）。
+ */
+export async function anchorReplayTrajectory(
+  witness: ReplayTrajectoryWitness,
+  opts: ReplayAnchorOptions = {},
+): Promise<ReplayAnchorResult> {
+  return anchorReplayTrajectoryOn(notary, witness, opts);
 }

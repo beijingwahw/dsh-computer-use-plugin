@@ -31,7 +31,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  approval, resetApproval, escrowBlockOf,
+  approval, resetApproval, escrowBlockOf, setConfirmCodeChannel, type ConfirmCodeDelivery,
 } from '../src/approval.ts';
 import {
   reversalEscrow, createEscrowFileStorage, builtinCompensationSemantics,
@@ -105,10 +105,14 @@ function armStandard(o: { walFile?: string | null; withInterrupt?: boolean; stra
   });
 }
 
-/** 铸造一枚已授予令牌（Y-10 桶每用例复位 ⇒ 无需带外码/限流面） */
+/** 铸造一枚已授予令牌（Y-10 桶每用例复位 ⇒ 无需限流面）。
+ *  W6R fail-closed：无码 grant 已废除 —— 授予须带外码；本助手内联武装
+ *  采集 sink（生产中人类读码的视角）并携码授予。 */
 function grantedToken(description = 'click 删除 to remove report.docx'): string {
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
   const pa = approval.request(description, { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
-  const g = approval.grantDetailed(pa.token, true);
+  const g = approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode });
   assert.equal(g.ok, true, JSON.stringify(g));
   return pa.token;
 }

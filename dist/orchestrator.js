@@ -1,4 +1,5 @@
 // src/orchestrator.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：D-2 编排器 —— ReAct 主循环/工具派发/上下文预算/恢复阶梯是单一认知循环的不可分相位，文件内分区注释即边界。
 // Planner-Actor 编排引擎。原版即干净可用，核心协议原样保留：
 //   Actor 状态协议([SUCCESS]/[FAILED]) + fail-fast 短路 + 完整执行轨迹汇总。
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。

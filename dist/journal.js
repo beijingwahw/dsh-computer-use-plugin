@@ -20,8 +20,10 @@ export const ACTION_TOOLS = [
     // AA-1：跳转可重放（同 URL 再跳）—— 审计与技能归纳覆盖世界跳转
     'open_url',
 ];
-/** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'） */
-const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE']);
+/** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'）。
+ *  W6-4：AGENT_NOTE 入白名单（黑板行经 appendMarker 入链）；ACTION_TOOLS
+ *  不动 —— 白名单隔离是单向的：能入链 ≠ 能重放。 */
+const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE', 'AGENT_NOTE']);
 const GENESIS = 'GENESIS';
 /** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提） */
 function canonical(obj) {

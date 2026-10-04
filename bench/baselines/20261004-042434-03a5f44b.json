@@ -1,0 +1,285 @@
+{
+  "schema": "bench-baseline/1",
+  "createdAt": "2026-10-03T20:24:34.438Z",
+  "environment": {
+    "node": "22.14.0",
+    "platform": "win32-x64",
+    "command": "node --experimental-strip-types --test --import ./test/register.mjs test/w5*.bench.ts",
+    "cwd": "C:\\2\\dsh-computer-use-plugin"
+  },
+  "summary": {
+    "tests": 7,
+    "pass": 7,
+    "fail": 0,
+    "durationMs": 866.9435
+  },
+  "tests": [
+    {
+      "name": "W5-6/C2: 级联路由 —— 混合负载省钱命中率与节省率（台账对账 + 闭式互证）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 3.9278,
+      "metrics": {
+        "级联路由节省率.N": {
+          "value": 20,
+          "unit": "plain"
+        },
+        "队列.eligible": {
+          "value": 15,
+          "unit": "plain"
+        },
+        "队列.cheapHit": {
+          "value": 12,
+          "unit": "plain"
+        },
+        "队列.escalated": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "队列.高危直行": {
+          "value": 5,
+          "unit": "plain"
+        },
+        "命中率.hitRate": {
+          "value": 0.8,
+          "unit": "plain"
+        },
+        "花费.spent": {
+          "value": 6.75,
+          "unit": "plain"
+        },
+        "花费.baseline": {
+          "value": 15,
+          "unit": "plain"
+        },
+        "净节省.saved": {
+          "value": 8.25,
+          "unit": "plain"
+        },
+        "净节省.savingsRate": {
+          "value": 0.55,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "W5-6/C2b: 反事实对照 —— 同负载全主力直行的花费（级联价值的经济下界）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 0.2378,
+      "metrics": {}
+    },
+    {
+      "name": "W5-6/C1: 免看门控 —— N 步无影响循环的重型感知跳过率（声明 >15–30%，实测缺省 50%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 4.0342,
+      "metrics": {
+        "免看门控跳过率.N": {
+          "value": 12,
+          "unit": "plain"
+        },
+        "缺省(上限1).perceive": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "缺省(上限1).probe": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "缺省(上限1).skipRate": {
+          "value": 0.5,
+          "unit": "percent"
+        },
+        "上限3.perceive": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "上限3.probe": {
+          "value": 9,
+          "unit": "plain"
+        },
+        "上限3.skipRate": {
+          "value": 0.75,
+          "unit": "percent"
+        },
+        "总闸关(对照).perceive": {
+          "value": 12,
+          "unit": "plain"
+        },
+        "总闸关(对照).probe": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "总闸关(对照).skipRate": {
+          "value": 0,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "W5-6/P2C3: 增量编码 —— K 帧混合负载的补丁/关键帧比与 token 当量缩减（声明 >30%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 493.9067,
+      "metrics": {
+        "当量.K": {
+          "value": 18,
+          "unit": "plain"
+        },
+        "分诊.keyframe": {
+          "value": 4,
+          "unit": "plain"
+        },
+        "分诊.patch": {
+          "value": 10,
+          "unit": "plain"
+        },
+        "分诊.scroll": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "分诊.silent": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "缩减率": {
+          "value": 0.746,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "W5-6/A1: 宏重放 —— 同一任务字面量的决策调用缩减（声明 ≥30%，实测 ~71%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 11.0637,
+      "metrics": {
+        "逐步臂.decide": {
+          "value": 7,
+          "unit": "plain"
+        },
+        "逐步臂.perceive": {
+          "value": 7,
+          "unit": "plain"
+        },
+        "逐步臂.exec": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "逐步臂.clicks": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "逐步臂.types": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "逐步臂.截屏": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "宏臂.decide": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "宏臂.perceive": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "宏臂.exec": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "宏臂.clicks": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "宏臂.types": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "宏臂.截屏": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "宏臂.抽查": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "决策调用缩减": {
+          "value": 0.7140000000000001,
+          "unit": "percent"
+        },
+        "感知调用缩减": {
+          "value": 0.7140000000000001,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "W5-6/A2: ROI 三证 vs 全屏 dhash —— 开销不劣化 + 噪声判决在岗（守护「不倒贴」）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 10.5787,
+      "metrics": {
+        "dhash.M": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.截屏": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.JS全帧哈希": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.尺寸": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.OCR": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "ROI臂.截屏": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "ROI臂.JS全帧哈希": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "ROI臂.meta采样": {
+          "value": 18,
+          "unit": "plain"
+        },
+        "字节当量缩减": {
+          "value": 0.5,
+          "unit": "percent"
+        },
+        "调用次数比": {
+          "value": 1.2,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "W5-6/A5: 稳态门 —— 两帧即稳世界的等待当量相对固定等待缩减（声明 ≥40%，实测 50%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 8.6367,
+      "metrics": {
+        "稳态门等待当量.M": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "缩减率": {
+          "value": 0.5,
+          "unit": "percent"
+        }
+      }
+    }
+  ]
+}

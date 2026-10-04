@@ -12,7 +12,9 @@
 // S3 铁律：
 //   · 危险 click 派发前（beginAttempt 之前）探针比对接地指纹与当前快图；
 //   · 漂移 ⇒ 阻断 + 「需重新截图定位」结构化结果（令牌未烧、零物理派发）；
-//   · 端口缺席/失败 ⇒ degraded 放行（fail-open + 观测注记）；
+//   · W6R 收口：端口缺席/失败 ⇒ degraded ⇒ 危险令牌动作**拒绝派发**
+//     （fail-closed；出路 = 重试/开探针/逃生门 allowUnverifiedDangerous=true，
+//     逃生门下才恢复 fail-open + 观测注记的旧方言）；
 //   · 非危险路径探针不入场（叠加防御只挂在危险面上）。
 // W1-2 铁律：
 //   · 三工具在闸门判定**之前**消费 applyAmendment patch —— 批注修正后的
@@ -27,7 +29,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config.ts';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { journal } from '../src/journal.ts';
 import { system } from '../src/system.ts';
 import { setAccessibilityProvider } from '../src/uiExtractor.ts';
@@ -91,7 +93,10 @@ function makeFakeCtx() {
   return { ctx, pre };
 }
 
-/** 工具级配置：验证/探针/公证/法院全关（聚焦 S3/W1-2 执法，不碰 D-5 后端） */
+/** 工具级配置：验证/探针/公证/法院全关（聚焦 S3/W1-2 执法，不碰 D-5 后端）。
+ *  W6R：verifyActions=false 已不再单独构成危险令牌旁路 —— 本册聚焦 S3/W1-2，
+ *  显式插入逃生门（两把钥匙齐备）保持「派发即消费」旧方言；探针 fail-closed
+ *  新语义见 S3-4（显式关掉逃生门复现执法态）。 */
 const toolCfg = {
   enableApprovalGate: true,
   dangerPatterns: 'send,发送,delete,删除,pay,支付',
@@ -105,6 +110,7 @@ const toolCfg = {
   ocrLang: 'eng',
   dryRun: false,
   verifyActions: false,
+  allowUnverifiedDangerous: true,
   intentVerify: false,
   autoRemember: false,
   adaptiveSettle: false,
@@ -122,12 +128,15 @@ async function runJson(tool: unknown, args: unknown): Promise<any> {
   return JSON.parse(await (tool as Executable).execute(args));
 }
 
-/** 已授予（无码降级）的危险动作令牌 */
+/** 已授予的危险动作令牌（W6R fail-closed：授予须带外码 —— 内联武装采集 sink，
+ *  正是生产中人类读码交回的视角；无码 grant 已废除） */
 function grantedToken(description: string, note?: string): string {
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
   const pa = approval.request(description);
   const r = note !== undefined
-    ? approval.grantDetailed(pa.token, true, { note })
-    : approval.grantDetailed(pa.token, true);
+    ? approval.grantDetailed(pa.token, true, { note, confirmCode: sink[0]?.confirmCode })
+    : approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode });
   assert.equal(r.ok, true, '令牌授予成功（测试前置）');
   return pa.token;
 }
@@ -291,6 +300,159 @@ test('S4-6: enableJournal=false 是配置态非故障 —— skipped 注记 + �
   assert.ok(r.hash, '提交返回链哈希');
 });
 
+// ─── S4 扩面（W6R-A9）：漏网变更工具补齐 —— 覆盖面修复的执法测试 ───
+
+test('S4-7: W6R-A9 补齐的 12 件变更工具全覆盖 —— 派发位之前审计行已入哈希链', async () => {
+  const { ctx, pre } = makeFakeCtx();
+  registerAuditGuard(ctx as never);
+  const PASSTHROUGH = { passthrough: true };
+
+  // 名单依据（src/tools/index.ts 注册面 × README 工具表盘点，证据见 auditGuard 注释）：
+  //  · 物理动作面：switch_tab/switch_window（真实键击/前台切换）、open_url（OS 壳层
+  //    跳转）、replay_actions/run_skill（宏重放 = 一串物理动作）、shape_environment
+  //    （窗口整形/缩放/对比度）；
+  //  · 绕过宿主管线的动作批次：autonomous_run/autonomy_resume（环内 PolicyAction 经
+  //    runtime.createExecute 直驱 system 键鼠，不经本守卫 —— 入口审计是唯一 WAL）；
+  //  · 文件写入族：save_skill（技能库落盘）、save_checkpoint（快照写盘）、
+  //    switch_vision_model（连接档案持久化 + 热换脑）、vlm_wizard（system.openUrl
+  //    打开浏览器窗口）。
+  const newlyCovered = [
+    'switch_tab', 'switch_window', 'open_url', 'replay_actions', 'run_skill',
+    'shape_environment', 'autonomous_run', 'autonomy_resume',
+    'save_skill', 'save_checkpoint', 'switch_vision_model', 'vlm_wizard',
+  ];
+  for (const tool of newlyCovered) {
+    let auditMarkersAtDispatch = -1;
+    const out = await withSilencedWarn(() => pre[0](
+      { name: tool, arguments: { goal: 'x', url: 'https://example.com', action: 'apply' } },
+      async () => {
+        auditMarkersAtDispatch = journal.list(false)
+          .filter(e => e.tool === 'AUDIT_PRE' && e.args?.tool === tool).length;
+        return PASSTHROUGH;
+      },
+    ));
+    assert.deepEqual(out, PASSTHROUGH, `${tool} 提交成功 ⇒ 放行`);
+    assert.equal(auditMarkersAtDispatch, 1, `${tool}: 派发位执行时 AUDIT_PRE 已在链上（先行性）`);
+  }
+
+  // 边界不入列（有理由的缺席，不是漏网）：
+  //  · dismiss_popup —— 零副作用元工具（只返回重分析指令字符串）
+  //  · probe_interactivity / zoom_inspect —— 观察探针（悬停实验是探针自身语义）
+  //  · swarm_dispatch —— 控制面记账（物理 IO 走常规动作工具，逐次被审计）
+  //  · remember_ui —— 会话内存笔记本（无磁盘持久化）
+  for (const observer of ['dismiss_popup', 'probe_interactivity', 'zoom_inspect', 'swarm_dispatch', 'remember_ui']) {
+    await pre[0]({ name: observer, arguments: {} }, async () => PASSTHROUGH);
+    assert.equal(
+      journal.list(false).some(e => e.tool === 'AUDIT_PRE' && e.args?.tool === observer),
+      false,
+      `${observer} 不产生先行审计行（观察/控制面）`,
+    );
+  }
+
+  const v = journal.verify();
+  assert.equal(v.ok, true, `哈希链完整（len=${v.length}，新增 12 件全入链）`);
+});
+
+test('S4-8: 新增覆盖面同等 fail-closed —— switch_window 审计提交失败 ⇒ 拒派', async () => {
+  const { ctx, pre } = makeFakeCtx();
+  registerAuditGuard(ctx as never);
+  const original = journal.appendPreDispatch;
+  (journal as any).appendPreDispatch = () => ({ ok: false, error: 'E_DISK_FULL' });
+  try {
+    let nextCalled = false;
+    const out = await withSilencedWarn(() => pre[0](
+      { name: 'switch_window', arguments: { titleKeyword: 'Chrome' } },
+      async () => { nextCalled = true; return { dispatched: true }; },
+    )) as { kind: string; reason: string };
+    assert.equal(nextCalled, false, '新增面的派发位从未执行（短路）');
+    assert.equal(out.kind, 'deny', '结构化 deny（方言 JSON）');
+    const deny = JSON.parse(out.reason);
+    assert.equal(deny.state_anchor.audit_gate, 'fail-closed');
+    assert.equal(deny.state_anchor.tool, 'switch_window');
+    assert.equal(deny.state_anchor.reason, 'pre-dispatch-audit-commit-failed');
+  } finally {
+    journal.appendPreDispatch = original;
+  }
+});
+
+// ─── S4 子动作精化（D-D12）：shape_environment 按参数子动作分流 ───
+// 名单计数不变（18 —— sec.audit-wal-floor 下限不松动），分流只发生在派发位：
+// 只读子动作（capabilities/undo_log）不进提交通道，变更子动作（apply/restore）
+// 与未知 action（不可证明只读 ⇒ 当作变更）照旧先行入链。
+
+test('S4-9: shape_environment 子动作分流 —— 只读无 AUDIT_PRE、变更有、fail-closed 保持', async () => {
+  const { ctx, pre } = makeFakeCtx();
+  registerAuditGuard(ctx as never);
+  const PASSTHROUGH = { passthrough: true };
+  const auditCount = () =>
+    journal.list(false).filter(e => e.tool === 'AUDIT_PRE' && e.args?.tool === 'shape_environment').length;
+
+  // 只读子动作：capabilities（能力申报）/ undo_log（账本视图）—— 纯查询，
+  // 不派发审计 WAL 行（D-D12 前被过度审计：调用即入链）
+  for (const action of ['capabilities', 'undo_log']) {
+    const out = await withSilencedWarn(() => pre[0](
+      { name: 'shape_environment', arguments: { action } },
+      async () => PASSTHROUGH,
+    ));
+    assert.deepEqual(out, PASSTHROUGH, `只读子动作 ${action} 放行`);
+    assert.equal(auditCount(), 0, `${action} 不产生先行审计行（无世界变更意图）`);
+  }
+
+  // 变更子动作：apply（五 kind 全整形）与 restore（复原 = 再整形）—— 先行入链
+  const mutatingArgs = [
+    { action: 'apply', kind: 'raise_window', title_hint: 'Chrome' },
+    { action: 'apply', kind: 'set_zoom', level: 125 },
+    { action: 'restore' },
+  ];
+  for (const args of mutatingArgs) {
+    const before = auditCount();
+    const out = await withSilencedWarn(() => pre[0](
+      { name: 'shape_environment', arguments: args },
+      async () => PASSTHROUGH,
+    ));
+    assert.deepEqual(out, PASSTHROUGH, `${args.action} 提交成功 ⇒ 放行`);
+    assert.equal(auditCount(), before + 1, `${args.action} 变更子动作 ⇒ AUDIT_PRE 先行入链`);
+  }
+
+  // fail-closed 闭集：未知/缺席 action 不可证明只读 ⇒ 当作变更审计
+  for (const args of [{ action: 'apply-typo' }, {}, null]) {
+    const before = auditCount();
+    await withSilencedWarn(() => pre[0](
+      { name: 'shape_environment', arguments: args },
+      async () => PASSTHROUGH,
+    ));
+    assert.equal(auditCount(), before + 1, `未知/缺席 action（${JSON.stringify(args)}）仍审计`);
+  }
+
+  // 提交通道全坏时的分流语义：只读照常放行（不经通道 = 免故障牵连）；
+  // 变更子动作提交失败 ⇒ 短路拒派（fail-closed 语义在新分流面上原样保持）
+  const original = journal.appendPreDispatch;
+  (journal as any).appendPreDispatch = () => ({ ok: false, error: 'E_DISK_FULL' });
+  try {
+    const outRo = await withSilencedWarn(() => pre[0](
+      { name: 'shape_environment', arguments: { action: 'capabilities' } },
+      async () => PASSTHROUGH,
+    ));
+    assert.deepEqual(outRo, PASSTHROUGH, '只读子动作不经提交通道 ⇒ 通道故障不影响');
+
+    let nextCalled = false;
+    const out = await withSilencedWarn(() => pre[0](
+      { name: 'shape_environment', arguments: { action: 'apply', kind: 'set_contrast' } },
+      async () => { nextCalled = true; return { dispatched: true }; },
+    )) as { kind: string; reason: string };
+    assert.equal(nextCalled, false, '变更子动作提交失败 ⇒ 派发位从未执行（短路）');
+    assert.equal(out.kind, 'deny', '结构化 deny');
+    const deny = JSON.parse(out.reason);
+    assert.equal(deny.state_anchor.audit_gate, 'fail-closed');
+    assert.equal(deny.state_anchor.tool, 'shape_environment');
+    assert.equal(deny.state_anchor.reason, 'pre-dispatch-audit-commit-failed');
+  } finally {
+    journal.appendPreDispatch = original;
+  }
+
+  assert.equal(journal.verify().ok, true, '哈希链完整（分流不破坏防篡改承诺）');
+});
+
 // ─── S3：接地新鲜度探针 ───
 
 /** 64 位位串，翻转前 n 位 —— 相似度 = 1 - n/64 */
@@ -360,18 +522,36 @@ test('S3-3: 不漂移 ⇒ 放行派发（fresh 判决透明化）', async () => 
   assert.equal(out.state_anchor.freshness.similarity_pct, 100);
 });
 
-test('S3-4: 探针缺席 ⇒ degraded 放行（fail-open + 观测注记）；非危险路径探针不入场', async () => {
+test('S3-4: 探针缺席 ⇒ 危险令牌派发被拒（W6R fail-closed + 观测注记）；逃生门 ⇒ 恢复 degraded 放行；非危险路径探针不入场', async () => {
   resetFreshnessProbe(); // 端口缺席（默认态）
-  const tool = createClickMouseTool(toolCfg);
+  // 执法态（逃生门关闭）：fail-closed —— 叠加防御缺席不再放行不可逆动作
+  const strictTool = createClickMouseTool({ ...toolCfg, allowUnverifiedDangerous: false });
   const token = grantedToken('点击发送按钮发出邮件');
-  const out = await runJson(tool, { x: 0.5, y: 0.5, target_description: '发送按钮', approval_token: token });
-  assert.equal(out.status, 'SUCCESS', 'fail-open：叠加防御缺席不瘫痪危险动作面');
+  const out = await runJson(strictTool, { x: 0.5, y: 0.5, target_description: '发送按钮', approval_token: token });
+  assert.equal(out.status, 'ACTION_REQUIRED', 'W6R：探针缺席 ⇒ 拒绝派发（fail-closed）');
+  assert.equal(out.state_anchor.reason, 'freshness-probe-unavailable');
+  assert.equal(out.state_anchor.freshness_probe.note, 'probe-port-absent', '缺席原因如实随锚点');
+  assert.match(out.next_step, /allowUnverifiedDangerous=true/, '出路：显式逃生门');
+  assert.equal(clicks.length, 0, '物理点击零派发');
+  assert.equal(approval.validate(token), true, '令牌未烧（阻断在预留之前）');
+  assert.equal(approval.status(token).attempts, 0, '未占用尝试预算');
+  assert.ok(
+    journal.list(false).some(e => e.tool === 'GUARD_BLOCKED' && e.args?.guard === 'freshness-probe'
+      && String(e.args?.reason).includes('probe-unavailable')),
+    'fail-closed 拦截以 GUARD 方言入防篡改链',
+  );
+
+  // 逃生门（allowUnverifiedDangerous=true）：恢复旧 fail-open 方言（降级不静默）
+  const escapeTool = createClickMouseTool(toolCfg);
+  const relaxed = await runJson(escapeTool, { x: 0.5, y: 0.5, target_description: '发送按钮', approval_token: token });
+  assert.equal(relaxed.status, 'SUCCESS', '逃生门 ⇒ 探针缺席降级放行（旧行为）');
   assert.equal(clicks.length, 1);
-  assert.equal(out.state_anchor.freshness.verdict, 'degraded', '降级不静默 —— 锚点观测');
-  assert.equal(out.state_anchor.freshness.note, 'probe-port-absent');
+  assert.equal(relaxed.state_anchor.freshness.verdict, 'degraded', '降级不静默 —— 锚点观测');
+  assert.equal(relaxed.state_anchor.freshness.note, 'probe-port-absent');
+  assert.equal(approval.validate(token), false, '逃生门下维持派发即消费旧方言（用后即焚）');
 
   // 非危险点击（无令牌）：探针完全不入场（键缺席 —— 叠加防御只挂危险面）
-  const plain = await runJson(tool, { x: 0.3, y: 0.3, target_description: '菜单按钮' });
+  const plain = await runJson(escapeTool, { x: 0.3, y: 0.3, target_description: '菜单按钮' });
   assert.equal(plain.status, 'SUCCESS');
   assert.equal(plain.state_anchor.freshness, undefined, '非危险路径零探针开销');
 });

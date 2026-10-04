@@ -12,9 +12,10 @@ import assert from 'node:assert/strict';
 import type { Config } from '../src/config.ts';
 import { stopBackend } from '../src/physicalBackend.ts';
 import { system } from '../src/system.ts';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { journal } from '../src/journal.ts';
 import { skillLibrary } from '../src/skillLibrary.ts';
+import { setFreshnessPort, resetFreshnessProbe } from '../src/popupDetector.ts';
 import { createClickMouseTool } from '../src/tools/clickMouse.ts';
 import { createTypeTextTool } from '../src/tools/typeText.ts';
 import { createReplayActionsTool, replayOne } from '../src/tools/replayActions.ts';
@@ -46,6 +47,17 @@ beforeEach(() => {
   installFakeSystem();
 });
 
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手）。
+ *  armOob 在每次 request 前调用（码在铸造时刻投递）；多令牌按 token 对号。 */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function grantOob(token: string): boolean {
+  const hit = oobSink.find(d => d.token === token);
+  return approval.grantDetailed(token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok;
+}
+
 afterEach(() => {
   system.getScreenSize = originals.getScreenSize;
   system.clickMouse = originals.clickMouse;
@@ -59,7 +71,10 @@ after(async () => {
   await stopBackend();
 });
 
-/** click 工具测试配置：验证/探针/OCR 全关（聚焦闸门与预留时序，不碰 D-5 后端） */
+/** click 工具测试配置：验证/探针/OCR 全关（聚焦闸门与预留时序，不碰 D-5 后端）。
+ *  W6R：verifyActions=false 已不再单独构成「危险令牌派发即消费」的旁路 —— 本册
+ *  聚焦双花窗口/计数时序，显式插入逃生门（allowUnverifiedDangerous=true 两把
+ *  钥匙齐备）以保持旧方言；双钥匙执法的新回归见文末 W6R 组。 */
 const clickCfg = {
   enableApprovalGate: true,
   dangerPatterns: 'send,发送,delete,删除,pay,支付',
@@ -68,6 +83,7 @@ const clickCfg = {
   maxTextLength: 1000,
   focusMaxAgeMs: 60_000,
   verifyActions: false,
+  allowUnverifiedDangerous: true,
   dryRun: false,
   enableInteractivityProbe: false,
   intentVerify: false,
@@ -180,8 +196,9 @@ test('Δ-2: 无危险词/非敏感步重放照常执行（回归）', async () =
 
 test('Δ-3: 并发双 click 同令牌恰一次派发（双花窗口闭合）', async () => {
   const tool = createClickMouseTool(clickCfg);
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 发送 to submit the report');
-  assert.equal(approval.grant(pa.token, true), true);
+  assert.equal(grantOob(pa.token), true);
 
   // 同步路障：两个 execute 都已通过 validate（只查不烧）、都在等待屏幕尺寸 ——
   // 精确复刻审计#2 的窗口（validate 与派发之间的多个 await）
@@ -216,8 +233,9 @@ test('Δ-3: 并发双 click 同令牌恰一次派发（双花窗口闭合）', a
 // ─── ④ 审计#2：令牌耗尽路径的 attempts 计数语义 ───
 
 test('Δ-4a: 计数时序 —— beginAttempt 预留 + attemptFailed 结算，单次点击 attempts 恰 +1', () => {
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 支付', { maxAttempts: 2, ttlMs: 60_000 });
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   // 第 1 次点击：预留 +1 → 验收失败结算（不再 ++）
   assert.equal(approval.beginAttempt(pa.token), true);
   assert.equal(approval.status(pa.token).attempts, 1, '派发预留即计数');
@@ -239,8 +257,9 @@ test('Δ-4a: 计数时序 —— beginAttempt 预留 + attemptFailed 结算，�
 
 test('Δ-4b: 工具面在途预留拒绝 + 结算后同令牌重试（B-3 异常重试语义保持）', async () => {
   const tool = createClickMouseTool(clickCfg);
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 发送');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   // 另一回合已持在途预留：本回合在派发前被拒（不双花）
   assert.equal(approval.beginAttempt(pa.token), true);
   const denied = await runJson(tool, { x: 0.5, y: 0.5, target_description: '发送', approval_token: pa.token });
@@ -307,4 +326,62 @@ test('Δ-6: type_text 闸门等价 —— 敏感文本拦截不回显 / 超长�
   const ok = await runJson(tool, { text: 'hello world' });
   assert.equal(ok.status, 'SUCCESS');
   assert.equal(typed, 1);
+});
+
+// ─── ⑤ W6R（安全收口）：验证总开关旁路 + 探针 fail-open 的双重逃生门执法 ───
+
+test('W6R-A: verifyActions=false 单独关闭 ⇒ 危险令牌派发被拒（双钥匙：还须 allowUnverifiedDangerous=true）', async () => {
+  // 新鲜度探针 fresh（越过探针 fail-closed，聚焦验证旁路执法本身）
+  setFreshnessPort({ groundingHash: () => 'a'.repeat(64), captureCurrentHash: async () => 'a'.repeat(64) });
+  try {
+    const tool = createClickMouseTool({ ...clickCfg, allowUnverifiedDangerous: false });
+    armOob(); // W6R：授予须带外码
+    const pa = approval.request('click 发送');
+    assert.equal(grantOob(pa.token), true);
+    const out = await runJson(tool, { x: 0.5, y: 0.5, target_description: '发送', approval_token: pa.token });
+    assert.equal(out.status, 'ACTION_REQUIRED', '验证不可用 ⇒ 拒绝派发（不再静默走派发即焚）');
+    assert.equal(out.state_anchor.reason, 'effect-verification-required');
+    assert.match(out.next_step, /verifyActions=true/, '出路一：重开验证');
+    assert.match(out.next_step, /allowUnverifiedDangerous=true/, '出路二：显式逃生门');
+    assert.equal(clicks, 0, '物理零派发');
+    assert.equal(approval.validate(pa.token), true, '令牌未烧（阻断在预留之前）');
+    assert.equal(approval.status(pa.token).attempts, 0);
+    // 非 dangerous 动作不受双钥匙约束：verifyActions=false 的原语义（benign 验证可关）保持
+    const benign = await runJson(tool, { x: 0.3, y: 0.3, target_description: '菜单按钮' });
+    assert.equal(benign.status, 'SUCCESS', 'benign 动作照常派发（无误杀）');
+    assert.equal(benign.state_anchor.effect, 'verification-off', '非令牌动作维持 verifyActions 原语义');
+    assert.equal(clicks, 1);
+  } finally {
+    resetFreshnessProbe();
+  }
+});
+
+test('W6R-B: 新鲜度探针缺席 ⇒ 危险令牌派发被拒（fail-closed）；逃生门 ⇒ 恢复旧方言 + degraded 观测', async () => {
+  resetFreshnessProbe(); // 端口缺席（默认态：组合根接线前/离线测试）
+  const tool = createClickMouseTool({ ...clickCfg, allowUnverifiedDangerous: false });
+  armOob();
+  const pa = approval.request('click 支付');
+  assert.equal(grantOob(pa.token), true);
+  const out = await runJson(tool, { x: 0.5, y: 0.5, target_description: '支付', approval_token: pa.token });
+  assert.equal(out.status, 'ACTION_REQUIRED', '探针缺席 ⇒ 拒绝派发（fail-closed，不再降级放行）');
+  assert.equal(out.state_anchor.reason, 'freshness-probe-unavailable');
+  assert.equal(out.state_anchor.freshness_probe.note, 'probe-port-absent', '缺席原因如实随锚点');
+  assert.match(out.next_step, /RETRY/, '出路一：重试（先 take_screenshot 铸接地指纹）');
+  assert.match(out.next_step, /allowUnverifiedDangerous=true/, '出路三：显式逃生门');
+  assert.equal(clicks, 0, '物理零派发');
+  assert.equal(approval.validate(pa.token), true, '令牌未烧');
+  assert.ok(
+    journal.list(false).some(e => e.tool === 'GUARD_BLOCKED' && e.args?.guard === 'freshness-probe'
+      && String(e.args?.reason).includes('probe-unavailable')),
+    'fail-closed 拦截以 GUARD 方言入防篡改链',
+  );
+
+  // 逃生门（两把钥匙齐备）：探针缺席恢复 degraded 放行 + 验证旁路旧方言（派发即消费）
+  const escaped = createClickMouseTool(clickCfg); // allowUnverifiedDangerous: true
+  const ok = await runJson(escaped, { x: 0.5, y: 0.5, target_description: '支付', approval_token: pa.token });
+  assert.equal(ok.status, 'SUCCESS', '逃生门 ⇒ 探针缺席降级放行（旧行为）');
+  assert.equal(clicks, 1);
+  assert.equal(ok.state_anchor.freshness.verdict, 'degraded', '降级不静默 —— 锚点观测');
+  assert.equal(ok.state_anchor.acceptance.verdict, 'unverified-dispatch-consumed', '旧方言：派发即消费');
+  assert.equal(approval.validate(pa.token), false, '用后即焚');
 });

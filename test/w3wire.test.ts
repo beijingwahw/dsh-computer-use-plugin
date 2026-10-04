@@ -9,7 +9,11 @@
 //   ④ cascade 导出面 + configureVlm 铸造（tiers 入池 / 双钥激活 / 缺省阈值下
 //      保守静态因子 ⇒ 弃权零网络 / 空配置摘除幂等）；
 //   ⑤ resetVerifyGateBudget 边界挂点（groundElements 复核预算跨调用累积 →
-//      runPilotLoop 跑环边界清零 → 下一调用从 0 重新计）。
+//      runPilotLoop 跑环边界作用域清零 `pilot:<token>` → 本任务键从 0 重新计、
+//      他任务键与缺省账本不动 —— W6R-B2 预算按任务隔离的接线断言）+ W8-B2
+//      消费面终态（runtime 缺省接地经 RuntimeDeps.verifyTaskId 落任务键账本、
+//      orchestration L3 适配器经 sessionId 供给铸 `session:<id>` 键与宿主回合
+//      边界同键闭环 —— 缺省账本自此零消费面续账）。
 // 全离线确定性：假截屏（sharp 现场生成真 PNG）、假 GLM client、monkey-patch 键鼠、
 // 注入时钟零真睡。参考 w2wire 注入风格。
 import { test, before, after } from 'node:test';
@@ -36,10 +40,11 @@ import {
   VlmCascade, triageDanger, withinBboxValidator, schemaValidator, ocrTextValidator,
   CASCADE_TRIAGE_WEIGHTS, CASCADE_DANGER_MAX,
 } from '../src/vlm/index.ts';
-// ⑤ 跑环边界挂点（autonomous_run / autonomy_resume 共用脊梁）
+// ⑤ 跑环边界挂点（autonomous_run / autonomy_resume 共用脊梁）+ W8-B2 消费面终态
 import { runPilotLoop } from '../src/tools/autonomousRun.ts';
-import { GoalStateMachine, PilotStore } from '../src/autonomy/index.ts';
+import { GoalStateMachine, PilotStore, createPerceive } from '../src/autonomy/index.ts';
 import type { RuntimeDeps } from '../src/autonomy/index.ts';
+import { createSemanticFromVlm } from '../src/orchestration/visionAdapters.ts';
 
 // ─── 假件工坊 ───
 
@@ -286,16 +291,17 @@ test('W3-C③: configureVlm 铸造 —— tiers 入池/双钥激活/缺省阈值
 
 // ─── W3-B②：resetVerifyGateBudget 边界挂点（runPilotLoop 跑环边界） ───
 
-test('W3-B②: 跑环边界清零 —— 复核预算跨调用累积 → runPilotLoop 后从 0 重新计', async () => {
+test('W3-B②: 跑环边界作用域清零 —— 本任务键 `pilot:<token>` 从 0 重新计，他任务键与缺省账不动', async () => {
   const png = await makePng(200, 150);
   // 低置信（0.5 < 0.6）单元素 ⇒ 每次主定位触发一次 Zoom 复核（预算 +1）
   const fake = fakeGlmClient({
     groundingValue: () => ({ elements: [{ id: 'x', label: '低置信按钮', role: 'button', bbox: [20, 20, 90, 80], confidence: 0.5 }] }),
     ocrValue: () => ({ words: [{ text: '低置信按钮', confidence: 0.9, bbox: [20, 20, 90, 80] }] }),
   });
-  const budgetOf = async (): Promise<number> => {
+  const budgetOf = async (taskId?: string): Promise<number> => {
     const r = await groundElements(png, {
       client: fake.client, verifyClient: fake.client, width: 200, height: 150,
+      ...(taskId ? { verifyTaskId: taskId } : {}),
     });
     assert.ok(r.verifyGate, '闸开 ⇒ 复核报告在场');
     return r.verifyGate!.budgetUsed;
@@ -307,10 +313,12 @@ test('W3-B②: 跑环边界清零 —— 复核预算跨调用累积 → runPilo
   assert.equal(await budgetOf(), 2, '同任务二次调用 ⇒ 累积到 2（边界清零前的共享行为）');
 
   // 跑环边界：runPilotLoop 起点 resetVerifyGateBudget（autonomous_run 与
-  // autonomy_resume 共用脊梁 ⇒ 双工具同律）。环内 grounding 用高置信元素
-  //（0.95 > 0.6、短边 60 ≥ 24、密度 1 ≤ 5）⇒ 环内零复核消耗。
+  // autonomy_resume 共用脊梁 ⇒ 双工具同律）。W8-B2 终态：环内 grounding 走
+  // 低置信元素（0.5 < 0.6 ⇒ 每次 perceive 的云脑接地触发一次复核），且 deps
+  // 注入 verifyTaskId: `pilot:<token>` ⇒ 环内消费落任务键账本（消费面自缺省
+  // 账本迁移的活体证据）；use/reset 同键闭环由下方三联断言钉死。
   const fakeRun = fakeGlmClient({
-    groundingValue: () => ({ elements: [{ id: 'x', label: '稳按钮', role: 'button', bbox: [20, 20, 90, 80], confidence: 0.95 }] }),
+    groundingValue: () => ({ elements: [{ id: 'x', label: '稳按钮', role: 'button', bbox: [20, 20, 90, 80], confidence: 0.5 }] }),
     ocrValue: () => ({ words: [] }),
   });
   const deps: RuntimeDeps = {
@@ -326,6 +334,10 @@ test('W3-B②: 跑环边界清零 —— 复核预算跨调用累积 → runPilo
   const nowFn = deps.now ?? (() => Date.now());
   const store = new PilotStore();
   const token = store.begin(spec, nowFn());
+  // W8-B2 终态接线：任务键注入位就位 —— 环内 perceive 的缺省云脑接地面
+  //（makeDefaultGroundVlm）自此把复核预算记到 `pilot:<token>` 账本（与
+  // runPilotLoop 起点的 resetVerifyGateBudget(`pilot:<token>`) 同键闭环）。
+  deps.verifyTaskId = `pilot:${token}`;
   const goalMachine = new GoalStateMachine(spec, nowFn);
   const restore = patchSystem({
     getScreenSize: async () => ({ width: 200, height: 150 }),
@@ -335,6 +347,10 @@ test('W3-B②: 跑环边界清零 —— 复核预算跨调用累积 → runPilo
     pressHotkey: async () => { /* 测试键鼠哑面 */ },
   });
   let report = '';
+  // W6R-B2 接线断言素材：作用域账本预铸 —— 本轮 token 键与他任务键各记 1 次
+  // 复核（低置信元素 ⇒ 每调用 +1）。跑环边界的清零语义由下方三联断言钉死。
+  assert.equal(await budgetOf(`pilot:${token}`), 1, '本轮 token 键预算 1（边界前预铸）');
+  assert.equal(await budgetOf('pilot:other'), 1, '他任务键预算 1（边界前预铸）');
   try {
     report = await runPilotLoop({
       toolName: 'autonomous_run', config: makeConfig(), deps, spec, goalMachine, store, token,
@@ -344,6 +360,94 @@ test('W3-B②: 跑环边界清零 —— 复核预算跨调用累积 → runPilo
   }
   assert.equal(typeof report, 'string', '跑环返回锚点字符串（脊梁完整走通）');
 
-  // 边界清零的行为证据：跑环后下一次主定位从 0 重新计（若无清零则应为 3）
-  assert.equal(await budgetOf(), 1, '跑环边界 ⇒ 预算清零后从 1 重新计');
+  // 边界清零的行为证据（W6R-B2 作用域化 + W8-B2 消费面迁移后的终态钉义）：
+  //  · 本轮 token 键：runPilotLoop 起点 resetVerifyGateBudget(`pilot:<token>`)
+  //    定点清零（预铸的 1 被抹）⇒ 环内低置信 grounding 的 N 次复核（N ≥ 1）
+  //    自 0 重新记到本键 + 本探针 1 ⇒ 读数 ≥ 2 —— 环内消费真落任务键账本；
+  //  · 他任务键：本轮边界不触碰 ⇒ 继续累积（1 → 2）—— 并发任务互不侵占；
+  //  · 缺省账本：终态语义（W8-B2 消费面迁移后不再走缺省账本）—— 环内零贡献，
+  //    读数恰为「预铸 2 + 本探针 1」= 3（迁移前环内 N 次消费会落在此处 ⇒ ≥ 4）。
+  const taskProbe = await budgetOf(`pilot:${token}`);
+  assert.ok(taskProbe >= 2, `本轮 token 键 ⇒ 边界清零后环内消费重新计入（≥2，实际 ${taskProbe}）`);
+  assert.equal(await budgetOf('pilot:other'), 2, '他任务键不被本轮边界清零（隔离不侵占）');
+  assert.equal(await budgetOf(), 3, '缺省账本零环内贡献（终态：runtime 消费面已迁移任务键）');
+});
+
+// ─── W8-B2：verifyGate 预算消费面终态接线（两真实消费方迁移的闭环断言） ───
+
+test('W8-B2①: runtime 缺省接地键控 —— RuntimeDeps.verifyTaskId ⇒ 复核预算落任务键账本；缺席 ⇒ 缺省账本（零漂移）', async () => {
+  const png = await makePng(200, 150);
+  const fake = fakeGlmClient({
+    groundingValue: () => ({ elements: [{ id: 'x', label: '低置信按钮', role: 'button', bbox: [20, 20, 90, 80], confidence: 0.5 }] }),
+    ocrValue: () => ({ words: [{ text: '低置信按钮', confidence: 0.9, bbox: [20, 20, 90, 80] }] }),
+  });
+  const budgetOf = async (taskId?: string): Promise<number> => {
+    const r = await groundElements(png, {
+      client: fake.client, verifyClient: fake.client, width: 200, height: 150,
+      ...(taskId ? { verifyTaskId: taskId } : {}),
+    });
+    assert.ok(r.verifyGate, '闸开 ⇒ 复核报告在场');
+    return r.verifyGate!.budgetUsed;
+  };
+  const mkDeps = (verifyTaskId?: string): RuntimeDeps => ({
+    capture: async () => png,
+    readWords: async () => [],
+    dhashOf: async () => null, // 指纹缺席 ⇒ 场景语义缓存跳过（隔离观察面）
+    client: fake.client,
+    ...(verifyTaskId !== undefined ? { verifyTaskId } : {}),
+  });
+
+  // 键控路径：perceive 的缺省云脑接地（makeDefaultGroundVlm）带键 ⇒ 消费落任务键
+  resetVerifyGateBudget();
+  await createPerceive(mkDeps('pilot:w8b2-rt'))();
+  assert.equal(await budgetOf('pilot:w8b2-rt'), 2, '任务键读数 = perceive 消费 1 + 探针 1（use 键 = 注入键）');
+  assert.equal(await budgetOf(), 1, '缺省账本零贡献（消费面已迁移 —— 探针自身 1）');
+
+  // 回归锁：不注入 verifyTaskId（历史调用面）⇒ 缺省账本续账，行为逐字节不变
+  await createPerceive(mkDeps())();
+  assert.equal(await budgetOf(), 3, '无键 perceive ⇒ 缺省账本 +1（① 探针 1 + perceive 1 + 本探针 1 = 3 —— 零漂移）');
+});
+
+test('W8-B2②: visionAdapters L3 会话键控 —— sessionId 供给铸 `session:<id>` 与宿主回合边界同键闭环；缺席/故障 ⇒ 缺省账本', async () => {
+  const png = await makePng(200, 150);
+  const FULL_REGION = { id: 'g0x0', x: 0, y: 0, width: 1, height: 1 };
+  const fake = fakeGlmClient({
+    groundingValue: () => ({ elements: [{ id: 'x', label: '低置信按钮', role: 'button', bbox: [20, 20, 90, 80], confidence: 0.5 }] }),
+    ocrValue: () => ({ words: [{ text: '低置信按钮', confidence: 0.9, bbox: [20, 20, 90, 80] }] }),
+  });
+  const budgetOf = async (taskId?: string): Promise<number> => {
+    const r = await groundElements(png, {
+      client: fake.client, verifyClient: fake.client, width: 200, height: 150,
+      ...(taskId ? { verifyTaskId: taskId } : {}),
+    });
+    assert.ok(r.verifyGate, '闸开 ⇒ 复核报告在场');
+    return r.verifyGate!.budgetUsed;
+  };
+  const mkSrc = (sessionId?: () => string | undefined) => createSemanticFromVlm({
+    capture: async () => png,
+    screenSize: async () => ({ width: 200, height: 150 }),
+    client: fake.client,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  });
+
+  // ① 供给在场 ⇒ ground 铸 `session:sess-42` 键（use 键与 reset 键同源同形）
+  resetVerifyGateBudget();
+  await mkSrc(() => 'sess-42').ground(FULL_REGION, '找按钮');
+  assert.equal(await budgetOf('session:sess-42'), 2, '会话键读数 = ground 消费 1 + 探针 1（键形 = 宿主 index.ts:508 同律）');
+  assert.equal(await budgetOf(), 1, '缺省账本零贡献（L3 消费面已迁移）');
+
+  // ② use/reset 闭环：宿主回合边界 resetVerifyGateBudget(`session:<id>`) 定点清零
+  //    ⇒ 下一次 ground 自 1 重新计（同键 use/reset 的一致性证据）
+  resetVerifyGateBudget('session:sess-42');
+  await mkSrc(() => 'sess-42').ground(FULL_REGION, '找按钮');
+  assert.equal(await budgetOf('session:sess-42'), 2, '回合边界清零后 ⇒ ground 重新自 1 计（+ 探针 1）');
+  assert.equal(await budgetOf('session:other'), 1, '他会话键不被本边界清零（探针自身 1 —— 隔离不侵占）');
+
+  // ③ 回归锁：供给缺席（历史调用面）⇒ 缺省账本续账，行为逐字节不变
+  await mkSrc().ground(FULL_REGION, '找按钮');
+  assert.equal(await budgetOf(), 3, '无供给 ground ⇒ 缺省账本 +1（① 探针 1 + ground 1 + 本探针 1 = 3 —— 零漂移）');
+
+  // ④ 防御式：供给抛错 ⇒ 诚实回落缺省账本（供给故障绝不毒化 ground 主管线）
+  await mkSrc(() => { throw new Error('session source exploded'); }).ground(FULL_REGION, '找按钮');
+  assert.equal(await budgetOf(), 5, '供给故障 ⇒ 键缺席走缺省账本（③ 后 3 + 故障 ground 1 + 本探针 1 = 5）');
 });

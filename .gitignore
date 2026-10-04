@@ -6,6 +6,8 @@ node_modules/
 # 运行时产物（doctor CLI 自检输出），不入库
 doctor-memory.json
 doctor-report.json
+# reversalEscrow 的 WAL 运行时工件（内含审批令牌），不入库
+with-interrupt
 # Python 构建/缓存产物
 __pycache__/
 *.egg-info/

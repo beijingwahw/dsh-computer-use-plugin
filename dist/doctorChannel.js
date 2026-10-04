@@ -69,51 +69,66 @@ export function toSandboxDoctorView(doc) {
 //
 // 威胁模型：审批协议的旧软肋是「同意」与「人」之间只隔着模型的转述 —— 被注入
 // 的模型可以谎称"用户同意了"。S2 给同意加一道带外人证：request_approval 铸造
-// 6 位确认码，码只经**模型上下文不可见**的通道投给人类（控制台 / 宿主事件总
-// 线的弹窗、toast、推送），grant_approval 必须携带人类读码后交回的码。
+// 6 位确认码，码只经**模型上下文不可见**的通道投给人类（宿主事件总线的弹窗、
+// toast、推送），grant_approval 必须携带人类读码后交回的码。
 // 挂点选择（实读裁定）：本文件是插件唯一既有的「宿主侧通知通道」事实源
-// （D-4 判决回执即走宿主 console + ctx.emit），S2 的带外面复用同一主权 ——
-// 通道缺席（未武装 / 投递故障）时 approval 侧自动降级旧式无码 grant 并记
-// degraded，现有宿主流零破坏。本段一切路径永不 throw。
+// （D-4 判决回执即走宿主 console + ctx.emit），S2 的带外面复用同一主权。
+// W6R 安全修复（两律）：
+//   1. 明文码只走事件总线（宿主进程内总线，不在模型上下文里）—— 控制台输出
+//      一律脱敏（"确认码已投递(6位)"）：宿主可能把控制台日志回传进模型上下文，
+//      明文码进 console/log 即等于对模型可见，「码对模型不可见」的承诺失效；
+//   2. 事件总线缺席/投递失败 ⇒ 通道投递失败 ⇒ approval 侧记 degraded 且
+//      grantDetailed 拒绝（fail-closed，见 approval.ts W6R 段）—— 不再降级为
+//      无码 grant（旧 fail-open 让屏幕注入文本可驱动自批不可逆操作）。
+// 本段一切路径永不 throw。
 /** W1-2（S2）：确认码带外事件（宿主 UI 的挂点 —— 弹窗/toast/推送）。
- *  载荷含明文码：事件总线是宿主进程内总线，不在模型上下文里。 */
+ *  载荷含明文码：事件总线是宿主进程内总线，不在模型上下文里。
+ *  W6R：这是**唯一**携带明文码的通道 —— console/log/遥测一律脱敏。 */
 export const APPROVAL_CONFIRM_CODE_EVENT = 'approval/confirm-code';
 /**
- * W1-2（S2）：武装带外人证通道（幂等；组合根调用一次）。投递面双通道，
- * 均对模型上下文不可见（out-of-band 的安全本质）：
- *   1. 宿主进程控制台 —— 永远在场的人证面；
- *   2. cordis 事件总线 approval/confirm-code（ctx 可选）—— 宿主 UI 挂点。
- * 任一通道成功即视为已投递（返回 true ⇒ 审批进入带码模式）；
- * 武装失败 ⇒ 通道缺席 ⇒ approval 侧降级（防御式：本函数绝不抛）。
+ * W1-2（S2）：武装带外人证通道（幂等；组合根调用一次）。
+ * W6R 安全修复后的投递语义：
+ *   · **唯一携码通道**是 cordis 事件总线 approval/confirm-code（ctx.emit）——
+ *     宿主 UI 在此挂弹窗/toast/推送；emit 成功 ⇒ 已投递（审批进入带码模式）。
+ *   · 控制台只打**脱敏**回执（"确认码已投递(6位)"，不含码本身）：宿主可能把
+ *     控制台日志回传进模型上下文，任何路径都不得把明文码写进 console/log/遥测。
+ *   · ctx 缺席 / 无 emit / emit 抛出 ⇒ 投递失败 ⇒ approval 侧记 degraded 且
+ *     grant 拒绝（fail-closed：无带外人证即无同意，用户须经宿主 UI 操作）。
+ * 防御式：本函数绝不抛。
  */
 export function armOutOfBandConfirmChannel(ctx) {
     try {
         setConfirmCodeChannel((d) => {
             const ttl = Math.max(0, Math.round((d.expiresAt - Date.now()) / 1000));
-            let consoleOk = false;
+            // 脱敏控制台回执（旁路）：只透出「已投递」事实与对号信息（token/时效），
+            // 绝不含明文码 —— 码属于人类，console 可能被宿主回传进模型上下文。
             try {
-                // 主通道：控制台。刻意声明「绝无必要转述给模型」—— 码属于人类。
-                console.log(`[Approval OOB] "${d.description}" — user confirm code: ${d.confirmCode} ` +
-                    `(token ${d.token}, expires in ${ttl}s). This code is for the HUMAN ONLY — ` +
-                    'it must never be relayed into the model conversation.');
-                consoleOk = true;
+                console.log(`[Approval OOB] "${d.description}" — 确认码已投递(6位)，经宿主事件总线 ` +
+                    `${APPROVAL_CONFIRM_CODE_EVENT}（token ${d.token}，${ttl}s 内有效）。` +
+                    '码仅供人类：不得转述进模型对话，不得写入任何日志/遥测。');
             }
-            catch { /* 控制台故障 ⇒ 副通道仍可投递 */ }
+            catch { /* 脱敏回执是旁路 —— 控制台故障不影响投递裁决 */ }
+            // 主通道（唯一携码面）：宿主事件总线。缺席/故障 ⇒ false ⇒ fail-closed。
             try {
-                ctx
-                    ?.emit?.(APPROVAL_CONFIRM_CODE_EVENT, {
+                const emit = ctx
+                    ?.emit;
+                if (typeof emit !== 'function')
+                    return false; // 无总线 = 通道缺席（fail-closed）
+                emit(APPROVAL_CONFIRM_CODE_EVENT, {
                     token: d.token,
                     description: d.description,
                     confirmCode: d.confirmCode,
                     expiresAt: d.expiresAt,
                 });
+                return true;
             }
-            catch { /* 事件总线故障：主通道已投 ⇒ 不算投递失败 */ }
-            return consoleOk;
+            catch {
+                return false; // 总线故障 = 投递失败（fail-closed；铸造主流程绝不炸）
+            }
         });
     }
     catch {
-        /* 装配失败 ⇒ 通道缺席 ⇒ approval 侧自动降级（武装永不抛） */
+        /* 装配失败 ⇒ 通道缺席 ⇒ approval 侧 fail-closed（武装永不抛） */
     }
 }
 export function wireDoctorVerdictChannel(ctx, config) {

@@ -35,7 +35,9 @@ export type PreExecuteHandler = (
 export type PostExecuteHandler = (
   call: ToolCall,
   result: any,
-  next: (value: any) => any,
+  // W6-3：value 可选 —— 与 PreExecuteHandler.next 同律（无参放行是合法用法，
+  // 宿主收 undefined = 诚实缺省；旧签名 (value: any) 把无参调用误标为类型错误）
+  next: (value?: any) => any,
 ) => Promise<any> | any;
 
 /** rc.6 ToolExecution → 旧 ToolCall 形状（arguments 已是解析对象；防御字符串） */
@@ -97,9 +99,15 @@ export function onToolPre(ctx: Context, handler: PreExecuteHandler): void {
 }
 
 export function onToolPost(ctx: Context, handler: PostExecuteHandler): void {
-  (ctx as any).on('tools/post-execute', async (exec: any, result: any, next: () => Promise<any>) => {
+  (ctx as any).on('tools/post-execute', async (exec: any, result: any, next: (value?: any) => Promise<any>) => {
     const call = normalizeExec(exec);
-    const out = await handler(call, extractResultValue(result), () => next());
+    // W6-3：透传 next 实参。旧包装 `() => next()` 丢弃守卫递给 next 的改写值
+    // （circuitBreaker 第 1/2 败的 appendHint 递进提示经 next(改写值) 回传宿主，
+    // 实参被丢 ⇒ 改写值永不可达 —— w2recovery 接线节注登记的遗留）。透传后：
+    // 守卫 next(v) ⇒ 宿主 next(v)；守卫无参 next() ⇒ 宿主收 undefined
+    // （诚实缺省，零伪造）。pre 包装维持原样：现有 pre 守卫全部无参调用 next
+    // （bounds/popup/audit/canary/repeatAction 遍历验证），不构成实害，最小变更。
+    const out = await handler(call, extractResultValue(result), (value?: any) => next(value));
     return toPostDecision(out);
   });
 }

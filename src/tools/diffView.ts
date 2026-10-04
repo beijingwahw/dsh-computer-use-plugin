@@ -14,6 +14,7 @@ import {
   computeDiffRegions, renderDiffOverlay, classifyPersistence, noteDiffObserved,
   spatialDisplacement, type DiffRegion,
 } from '../visualDiff';
+import { toolOkNoAction } from '../toolResult';
 
 function decodeDataUrl(base64: string): Buffer {
   return Buffer.from(base64.split(',')[1] ?? base64, 'base64');
@@ -92,15 +93,15 @@ export function createDiffViewTool() {
           : `server frames #${serverFrames![0]} -> #${serverFrames![1]}`;
 
         if (identical || regions.length === 0) {
-          return JSON.stringify({
-            status: 'SUCCESS',
-            state_anchor: {
+          // W8/B-4：回执走工厂（toolOkNoAction —— 历史无 action 形状，逐字节同构）
+          return toolOkNoAction(
+            {
               compared: comparedNote,
               changed_fraction_pct: changedPct,
               regions: 0,
             },
-            next_step: 'The two screenshots are pixel-identical. The intervening action had NO visual effect.',
-          }, null, 2);
+            'The two screenshots are pixel-identical. The intervening action had NO visual effect.',
+          );
         }
 
         // 差分图：最新截图 + 红框标注，入窗成为新的观察基准
@@ -124,9 +125,9 @@ export function createDiffViewTool() {
           `- Δ${r.index}${persistence.get(r.index) === 'persistent' ? ' [persistent]' : ''}: bbox=(${r.bbox_normalized.x0.toFixed(2)},${r.bbox_normalized.y0.toFixed(2)})-(${r.bbox_normalized.x1.toFixed(2)},${r.bbox_normalized.y1.toFixed(2)}) center=(${r.center.x.toFixed(3)}, ${r.center.y.toFixed(3)}) size=${r.tiles_changed}`,
         );
 
-        return JSON.stringify({
-          status: 'SUCCESS',
-          state_anchor: {
+        return toolOkNoAction(
+          {
+            // undefined 时 JSON.stringify 略去该键（无标注图 ⇒ 不入窗 ⇒ 锚点缺席，与旧形状同律）
             diff_screenshot: currentId ?? undefined,
             compared: comparedNote,
             changed_fraction_pct: changedPct,
@@ -146,15 +147,15 @@ export function createDiffViewTool() {
             } : {}),
             region_list: regionLines,
           },
-          next_step: 'Red dashed boxes in the diff screenshot mark every changed region (numbered by size). ' +
-            (persistentCount > 0
-              ? `${persistentCount} region(s) marked [persistent] have recurred across recent diffs — treat them as STRUCTURAL changes (likely the real effect of your action); ` +
-                'unmarked regions are likely transient noise (caret blink, animation). '
-              : 'No region has persisted across diffs — all changes may be transient noise; verify with take_screenshot before concluding. ') +
-            (displacement && displacement.w1 >= 0.35
-              ? 'Spatial displacement is LARGE: the change occurred away from where you acted — check whether it is an intended side-effect before trusting it. ' : '') +
-            'Δ centers are click-ready coordinates.',
-        }, null, 2);
+          'Red dashed boxes in the diff screenshot mark every changed region (numbered by size). ' +
+          (persistentCount > 0
+            ? `${persistentCount} region(s) marked [persistent] have recurred across recent diffs — treat them as STRUCTURAL changes (likely the real effect of your action); ` +
+              'unmarked regions are likely transient noise (caret blink, animation). '
+            : 'No region has persisted across diffs — all changes may be transient noise; verify with take_screenshot before concluding. ') +
+          (displacement && displacement.w1 >= 0.35
+            ? 'Spatial displacement is LARGE: the change occurred away from where you acted — check whether it is an intended side-effect before trusting it. ' : '') +
+          'Δ centers are click-ready coordinates.',
+        );
       } catch (error: any) {
         return `[Error]: Diff failed: ${error.message}`;
       }

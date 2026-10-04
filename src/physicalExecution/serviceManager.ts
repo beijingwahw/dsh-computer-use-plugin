@@ -17,7 +17,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { resolvePythonBin } from './pythonBin.js';
@@ -63,7 +63,10 @@ function createTempKey(): { keyPath: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-physical-key-'));
   const keyPath = join(dir, 'cap.key');
   const key = randomBytes(32).toString('hex');
-  writeFileSync(keyPath, key, 'utf-8');
+  // mode 0600：仅属主可读写（POSIX 生效；Windows 上无害忽略）。与 Python 端
+  // auth.ensure_key 的 O_CREAT 0600、capToken.ensureKey 的 writeFile {mode:0o600}
+  // 同一收口纪律 —— HMAC 密钥是三层纵深认证的信任根，落盘权限不得停留在 umask 缺省
+  writeFileSync(keyPath, key, { encoding: 'utf-8', mode: 0o600 });
   const cleanup = () => {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
   };
@@ -178,7 +181,12 @@ async function probeHealth(
       // 老服务无 nonce 参数 ⇒ 忽略之，走 pid 路径（向后兼容）。
       const nonce = key ? randomBytes(16).toString('hex') : null;
       const url = nonce ? `${baseUrl}/health?nonce=${nonce}` : `${baseUrl}/health`;
-      const resp = await fetch(url, { signal });
+      // 防重放配套：健康探活也带 X-Request-Id（/v1/health 虽在免鉴权白名单，
+      // 但统一请求入口纪律 = 所有请求都带；未来 nonce 校验扩到任何端点也不破）
+      const resp = await fetch(url, {
+        signal,
+        headers: { 'X-Request-Id': randomUUID() },
+      });
       if (resp.ok) {
         // Δ 纪元：包体校验 —— 2xx 只证明「端口有人应答」，不证明应答者是本
         // manager spawn 的子进程。Σ 纪元升级：nonce 回签验签（密钥持有 =
@@ -319,11 +327,19 @@ export class PhysicalServiceManager {
     const pythonRoot = this.opts.pythonServiceRoot ?? defaultPythonRoot();
 
     // 4. spawn
+    // 认证降级修复：不再强制 DSH_PHYSICAL_PID_ATTESTATION=false。旧代码在 spawn
+    // 时一刀切关闭 PID 证明 ⇒ TCP 模式下无 peer_pid，三层纵深认证实际只剩单因素
+    // HMAC。现在把开关还给 Python 端按传输能力/平台自行决定（config.py 缺省 =
+    // sys.platform=='linux'：Linux 上启用 /proc 存在性证明与 UDS SO_PEERCRED
+    // peer_pid 逐位比对；Windows TCP 无此层，由 Python 端诚实降级）。
+    // 安全性论证：token.pid 本端铸的是 process.pid（真实连接进程）⇒ UDS+Linux
+    // 的 peer_pid 逐位比对天然吻合；Linux TCP 的 /proc/<pid>/exe 存在性校验也
+    // 通过（Node 进程活着）。若调用方确需关闭（如多进程共享一服务的诊断场景），
+    // 经 opts.env 显式传入 DSH_PHYSICAL_PID_ATTESTATION=false 即可。
     const env: Record<string, string> = {
       ...process.env,
       DSH_PHYSICAL_TRANSPORT: 'tcp',
       DSH_PHYSICAL_TCP_PORT: String(port),
-      DSH_PHYSICAL_PID_ATTESTATION: 'false',
       DSH_PHYSICAL_KEY_PATH: this._keyPath,
       DSH_PHYSICAL_SHOT_TRANSPORT: transport,
       DSH_PHYSICAL_MMAP_DIR: this._mmapDir,

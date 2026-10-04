@@ -368,4 +368,8 @@ test('Ω-1: extractGlmJson —— 围栏/杂文/字符串内括号/无 JSON 的�
   assert.deepEqual(glm.extractGlmJson('```json\n[{"x":1},{"x":2}]\n```'), [{ x: 1 }, { x: 2 }]);
   assert.equal(glm.extractGlmJson('完全不是 JSON'), undefined);
   assert.equal(glm.extractGlmJson('{"unclosed": 1'), undefined, '不平衡 ⇒ 失败');
+  // W6R-A4（工具去重）：统一 internalUtils.extractBalancedJson 的不抛铁律 ——
+  // 脏值（null/undefined/非字符串）安静返回 undefined（原实现此处会抛 TypeError）
+  assert.equal(glm.extractGlmJson(null as unknown as string), undefined, '脏值安静返回 undefined（不抛铁律）');
+  assert.equal(glm.extractGlmJson(undefined as unknown as string), undefined);
 });

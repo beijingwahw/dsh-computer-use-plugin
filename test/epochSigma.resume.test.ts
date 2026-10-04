@@ -85,7 +85,13 @@ async function runTool(tool: ToolLike, args: unknown): Promise<any> {
   return JSON.parse(String(await tool.execute(args, undefined)));
 }
 
-// ─── 脚本化假世界：前半 pngA（开门标记在场）/ 后半 pngB（关门标记在场） ───
+// ─── 脚本化假世界：前半 pngA（开门标牌在场）/ 后半 pngB（关门标牌在场） ───
+// W9-1（D-G9 收口适配）：世界标签由「开门标记/关门标记」改为「开门标牌/关门标牌」
+// —— 判据「开门标记」对「关门标记」编辑距离 1 ≤ ⌈4/6⌉，runtime 换用
+// evaluateCriteria 肯定面 fuzzy 后旧夹具即误命中 met（D-G9 立法意图），「前半
+// 双判据缺一 ⇒ 步保险丝中止」的夹具前提被翻转。加区分字后：本世界距 1 仍命中
+//（fuzzy 立法面照常取证）、异世界距 2 > 容差严格不命中（严格例保留），且与
+// 元素「开门标牌/关门标牌」的 2-gram 候选动态（判据匹配点击）完整保真。
 
 const W = 512;
 const H = 384;
@@ -93,14 +99,15 @@ const pngA = await gradientPng(W, H, false); // 横渐变 —— 前半世界
 const pngB = await gradientPng(W, H, true);  // 纵渐变 —— 后半世界
 
 const wordsA = [
-  { label: '开门标记', bbox: { x0: 100, y0: 100, x1: 200, y1: 140 }, confidence: 0.9 },
+  { label: '开门标牌', bbox: { x0: 100, y0: 100, x1: 200, y1: 140 }, confidence: 0.9 },
   { label: '任务界面', bbox: { x0: 300, y0: 300, x1: 420, y1: 340 }, confidence: 0.8 },
 ];
 const wordsB = [
-  { label: '关门标记', bbox: { x0: 60, y0: 200, x1: 180, y1: 240 }, confidence: 0.95 },
+  { label: '关门标牌', bbox: { x0: 60, y0: 200, x1: 180, y1: 240 }, confidence: 0.95 },
   { label: '任务界面', bbox: { x0: 300, y0: 300, x1: 420, y1: 340 }, confidence: 0.8 },
 ];
-// 判据回放的取证前提：后半世界 OCR 永不含「开门标记」—— 续跑的 achieved 只能来自回放
+// 判据回放的取证前提：后半世界 OCR 永不含「开门标记」（W9-1：关门标牌与开门
+// 标记编辑距离 2 > ⌈4/6⌉ —— fuzzy 亦不命中）—— 续跑的 achieved 只能来自回放
 assert.ok(!wordsB.some(w => w.label.includes('开门标记')), '后半世界不得含开门标记（回放取证前提）');
 
 /** 第一半世界的物理键鼠：全 no-op（屏幕由 capture 脚本控制，物理点击不改变世界） */
@@ -134,6 +141,10 @@ test('Σ-3①: maxSteps=3 前半世界步保险丝中止 ⇒ FAILED 携 resume_t
     };
 
     const tool = createAutonomousRunTool(makeConfig(), deps);
+    // W9-1（D-G9 收口适配）：判据保持「开门标记/关门标记」不变，世界标签已改
+    // 「开门标牌」—— 判据「关门标记」对「开门标牌 任务界面」编辑距离 2 >
+    // ⌈4/6⌉=1，fuzzy 严格不命中（严格例保留）；判据「开门标记」对「开门标牌」
+    // 距 1 ≤ 1 ⇒ fuzzy 命中 met（D-G9 立法面照常取证）。
     const out = await runTool(tool, {
       goal: '开关门流程演示',
       success_criteria: ['开门标记', '关门标记'],
@@ -163,13 +174,13 @@ test('Σ-3①: maxSteps=3 前半世界步保险丝中止 ⇒ FAILED 携 resume_t
     assert.equal(rec!.goal.maxSteps, 3);
     assert.equal(rec!.trajectory.length, 3, '轨迹摘要逐步入档');
     assert.ok(
-      rec!.trajectory.every(s => s.kind === 'click' && s.label === '开门标记'),
-      '前半世界三步全为点击「开门标记」（判据匹配候选的确定性选择）',
+      rec!.trajectory.every(s => s.kind === 'click' && s.label === '开门标牌'),
+      '前半世界三步全为点击「开门标牌」（判据匹配候选的确定性选择）',
     );
     const open = rec!.criteriaStatus.find(c => c.criterion === '开门标记');
     const close = rec!.criteriaStatus.find(c => c.criterion === '关门标记');
-    assert.equal(open?.status, 'met', '开门标记 已核得');
-    assert.equal(close?.status, 'unverified', '关门标记 未核（留给续跑）');
+    assert.equal(open?.status, 'met', '开门标记 已核得（对「开门标牌」fuzzy 距 1 ≤ ⌈4/6⌉）');
+    assert.equal(close?.status, 'unverified', '关门标记 未核（对「开门标牌」距 2 > 容差 —— 严格例，留给续跑）');
   } finally {
     restoreSystem();
     restoreEnv(savedEnv);
@@ -179,7 +190,7 @@ test('Σ-3①: maxSteps=3 前半世界步保险丝中止 ⇒ FAILED 携 resume_t
 
 // ─── Σ-3② autonomy_resume 续跑 ⇒ 后半达成；已 met 判据不重核 ───
 
-test('Σ-3②: 续跑后半世界（含关门标记、永不含开门标记）⇒ achieved —— 判据回放 + 原档案累计', async () => {
+test('Σ-3②: 续跑后半世界（含关门标牌、开门标记 fuzzy 严格不命中）⇒ achieved —— 判据回放 + 原档案累计', async () => {
   const savedEnv = snapshotEnv();
   const restoreSystem = patchInertSystem();
   try {
@@ -204,8 +215,9 @@ test('Σ-3②: 续跑后半世界（含关门标记、永不含开门标记）�
 
     // 档案续用原 token：状态翻 done，步账累计，轨迹不断血脉。
     // W2-0（接线修律）：后半 2 步即达成 —— 焦点短路步携带零成本判据核对
-    //（declare 同律：感知快照 textDigest 子串匹配），「关门标记」在第 2 步的
-    // 短路免截屏路径即核得，快于旧「第 3 次点击抽查」一拍（旧断言 6 = 3+3）。
+    //（declare 同律：W9-1 起感知快照 textDigest 走 evaluateCriteria 单一器官），
+    //「关门标记」对「关门标牌」fuzzy 距 1 ≤ ⌈4/6⌉，在第 2 步的短路免截屏路径
+    // 即核得，快于旧「第 3 次点击抽查」一拍（旧断言 6 = 3+3）。
     const rec = pilotStoreFor(makeConfig()).load(tokenA);
     assert.ok(rec);
     assert.equal(rec!.status, 'done');
@@ -213,11 +225,11 @@ test('Σ-3②: 续跑后半世界（含关门标记、永不含开门标记）�
     assert.equal(rec!.steps, 5, '断点前后同档累计：3 + 2（短路步免费判据提前一拍）');
     assert.equal(rec!.trajectory.length, 5);
     assert.ok(
-      rec!.trajectory.slice(0, 3).every(s => s.label === '开门标记'),
+      rec!.trajectory.slice(0, 3).every(s => s.label === '开门标牌'),
       '前半轨迹原样保留（断点前步账不动）',
     );
     assert.ok(
-      rec!.trajectory.slice(3).every(s => s.label === '关门标记'),
+      rec!.trajectory.slice(3).every(s => s.label === '关门标牌'),
       '后半续跑轨迹追加（判据匹配转向唯一未核的关门标记）',
     );
     assert.ok(rec!.criteriaStatus.every(c => c.status === 'met'), '判据账合并：回放的 met + 续跑新核的 met');

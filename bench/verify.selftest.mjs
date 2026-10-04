@@ -95,8 +95,12 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
     { kind: 'registryValue', hive: 'HKCU', key: 'Software\\W2Present', value: 'Counter', equals: '42' },
     { kind: 'registryKey', hive: 'HKCU', key: 'Software\\W2Absent', exists: false }, // 断言缺席
     { kind: 'envVar', name: 'W2PATH', contains: 'windows' },   // 大小写不敏感包含
+    { kind: 'windowCount', titleRegex: '记事本|Notepad', equals: 1 }, // W8-B7:mock 两窗中记事本域恰 1
+    { kind: 'windowCount', titleRegex: '.', gte: 1, lte: 3 },          // W8-B7:gte+lte 组合区间(实测 2)
   ] }, mock);
-  ok(truthy.pass === true && truthy.counts.pass === 8, `A3 mock 真例 8 谓词全 pass(得 ${JSON.stringify(truthy.counts)})`);
+  ok(truthy.pass === true && truthy.counts.pass === 10, `A3 mock 真例 10 谓词全 pass(得 ${JSON.stringify(truthy.counts)})`);
+  eq(truthy.checks[8].status, 'pass', 'A3 windowCount equals 真例(记事本域=1)');
+  eq(truthy.checks[9].status, 'pass', 'A3 windowCount gte+lte 区间真例(全窗 2 ∈ [1,3])');
 
   const falsy = await evaluateVerify({ checks: [
     { kind: 'processRunning', name: 'mspaint.exe' },
@@ -107,8 +111,12 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
     { kind: 'registryValue', hive: 'HKCU', key: 'Software\\W2Present', value: 'Counter', equals: '999' },
     { kind: 'registryValue', hive: 'HKCU', key: 'Software\\W2Absent', value: 'Whatever' },
     { kind: 'envVar', name: 'W2_MISSING', contains: 'x' },
+    { kind: 'windowCount', titleRegex: 'Chrome', equals: 0 },  // W8-B7:实测 1,equals=0 假
+    { kind: 'windowCount', titleRegex: '记事本', gte: 2 },      // W8-B7:实测 1,gte=2 假
   ] }, mock);
-  ok(falsy.pass === false && falsy.counts.fail === 8, `A3 mock 假例 8 谓词全 fail(得 ${JSON.stringify(falsy.counts)})`);
+  ok(falsy.pass === false && falsy.counts.fail === 10, `A3 mock 假例 10 谓词全 fail(得 ${JSON.stringify(falsy.counts)})`);
+  eq(falsy.checks[8].status, 'fail', 'A3 windowCount equals 假例(Chrome 域=1≠0)');
+  eq(falsy.checks[9].status, 'fail', 'A3 windowCount gte 假例(记事本域 1<2)');
 }
 
 // ─── A4. mock world 未覆盖方法 ⇒ 通道错误(fail/error 严格分离) ───
@@ -151,8 +159,17 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   ok(validateVerifyBlock({ checks: [{ kind: 'telepathyExists' }] }).errors.some((e) => e.includes('未登记')), 'B2 未登记 kind 拒绝(resultContract 同律:不瞎猜)');
   ok(validateVerifyBlock({ checks: [{ kind: 'windowExists', titleRegex: '(' }] }).ok === false, 'B2 非法正则拒绝');
   ok(validateVerifyBlock({ checks: [{ kind: 'fileExists', path: 'x' }] , mode: 'sometimes' }).ok === false, 'B2 非法 mode 拒绝');
+  // W8-B7:windowCount 结构合法性(fail-fast 双保险:suite 声明错在跑前暴露)
+  ok(validateVerifyBlock({ checks: [{ kind: 'windowCount', titleRegex: '记事本', equals: 1 }] }).ok === true, 'B2 windowCount 合法块通过');
+  ok(validateVerifyBlock({ checks: [{ kind: 'windowCount', equals: 0 }] }).errors.some((e) => e.includes('titleRegex')), 'B2 windowCount 缺 titleRegex 拒绝(顶层总数含系统窗口,恒噪声)');
+  ok(validateVerifyBlock({ checks: [{ kind: 'windowCount', titleRegex: 'x' }] }).errors.some((e) => e.includes('比较子')), 'B2 windowCount 缺 equals/gte/lte 拒绝');
+  ok(validateVerifyBlock({ checks: [{ kind: 'windowCount', titleRegex: 'x', equals: -1 }] }).ok === false, 'B2 windowCount 负数拒绝');
+  ok(validateVerifyBlock({ checks: [{ kind: 'windowCount', titleRegex: 'x', gte: 1.5 }] }).ok === false, 'B2 windowCount 非整数拒绝');
+  ok(validateVerifyBlock({ checks: [{ kind: 'windowCount', titleRegex: '(', lte: 2 }] }).ok === false, 'B2 windowCount 非法正则拒绝');
   const runtime = await evaluateCheck({ kind: 'telepathyExists' }, createMockWorld());
   eq(runtime.status, 'error', 'B2 运行期未登记 kind ⇒ error(双防线)');
+  const wcErr = await evaluateCheck({ kind: 'windowCount', titleRegex: 'x', equals: 0 }, createMockWorld());
+  eq(wcErr.status, 'error', 'B2 windowCount 通道坏(listWindowTitles 未提供)⇒ error 非 fail(与 A4 同律)');
 }
 
 // ─── C1. SPRT 边界公式与 popupDetector 同式 ───

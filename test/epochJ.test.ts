@@ -17,7 +17,7 @@ after(async () => {
   await stopBackend();
 });
 
-import { approval } from '../src/approval.ts';
+import { approval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { similarity } from '../src/perceptualHash.ts';
 import { skillLibrary } from '../src/skillLibrary.ts';
 import { swarm } from '../src/swarm.ts';
@@ -71,13 +71,22 @@ test('J-1a: 请求 ≠ 同意 —— 未 grant 的令牌 validate/consume 双拒
 });
 
 test('J-1b: grant(true) 激活；grant(false) 等价作废；伪令牌 grant 拒绝', () => {
-  const pa = approval.request('delete record');
-  assert.equal(approval.grant(pa.token, true), true);
-  assert.equal(approval.validate(pa.token), true);
-  const pb = approval.request('format disk');
-  assert.equal(approval.grant(pb.token, false), true);
-  assert.equal(approval.validate(pb.token), false, 'grant=false 立即作废');
-  assert.equal(approval.grant('APR-FAKE', true), false, '伪令牌无法被授予');
+  // W6R fail-closed：带外确认码通道缺席 ⇒ 无码 grant 已废除 —— 授予路径须
+  // 武装带外 sink 并携码（正是生产中人类读码交回的视角）。
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
+  try {
+    const pa = approval.request('delete record');
+    assert.equal(approval.grant(pa.token, true), false, 'W6R：无码 grant 拒绝（fail-closed）');
+    assert.equal(approval.grantDetailed(pa.token, true, { confirmCode: sink[0].confirmCode }).ok, true, '携带外码授予');
+    assert.equal(approval.validate(pa.token), true);
+    const pb = approval.request('format disk');
+    assert.equal(approval.grant(pb.token, false), true);
+    assert.equal(approval.validate(pb.token), false, 'grant=false 立即作废');
+    assert.equal(approval.grant('APR-FAKE', true), false, '伪令牌无法被授予');
+  } finally {
+    setConfirmCodeChannel(null); // 卸载：不污染同文件后续用例的通道面
+  }
 });
 
 // ─── J-2 swarm 增量游标：重复 crystalize 不再重复计数 ───

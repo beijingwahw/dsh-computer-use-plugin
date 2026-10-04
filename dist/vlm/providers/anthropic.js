@@ -162,7 +162,7 @@ export function createAnthropicProvider(config = {}) {
             if (!doFetch) {
                 return finish({
                     ok: false, text: '',
-                    error: sanitizeError('fetch is not available (Node >= 18 required)', providerId),
+                    error: sanitizeError('fetch is not available (Node >= 18 required)', providerId), // doctor-exempt: 文案字符串，非阈值比较（W6-2）
                 });
             }
             // 请求头：x-api-key 鉴权（非 Bearer）+ 协议版本；extraHeaders 同名覆盖缺省
@@ -278,6 +278,12 @@ export function createAnthropicProvider(config = {}) {
         id: providerId,
         protocol: 'anthropic',
         model,
+        // W8-A6（D-G3）baseUrl 回填（D-A6 遗留闭账）：装配期定格的服务基址只读
+        // 暴露 —— 配置自报（cfg.baseUrl > env ANTHROPIC_BASE_URL）> 平台预设缺省
+        // （cfg.defaultBaseUrl —— glmClient.castDelegate 传预设处）> 官方云。与实际
+        // 拨号端点同一常量（`${baseUrl}/v1/messages`），尾斜杠已归一；消费面回退
+        // registry.effectiveBaseUrl，展示面必经 maskBaseUrl（types.ts 宪法）。
+        baseUrl,
         configured,
         chat,
         chatJson,

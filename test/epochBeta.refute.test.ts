@@ -14,7 +14,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Config } from '../src/config.ts';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { journal } from '../src/journal.ts';
 import { system } from '../src/system.ts';
 import { createClickMouseTool } from '../src/tools/clickMouse.ts';
@@ -101,7 +101,24 @@ function attachFace(brains: RefuteBrain[], primaryId = 'glm'): void {
   attachRefuteFace({ primaryId, brains });
 }
 
-/** 工具级配置：验证/探针/公证全关（聚焦法院执法），反驳法院开 */
+// ─── 事件循环保活（DEBTS D-G1 悬挂收口债）───
+// 挂死脑用例的在途等待，其结算依赖产品硬止损竞速的 unref 定时器
+// （src/vlm/refute.ts withHardCap —— unref 是有意设计：不阻生产宿主进程退出；
+// 宿主进程恒有 stdio/服务器句柄在场，unref 定时器照常触发）。但裸 node:test
+// 子进程里无其他 ref'd 句柄 ⇒ 事件循环先行排干 ⇒ 根测试收割在途用例
+// （cancelledByParent："Promise resolution is still pending but the event
+//  loop has already resolved"），其后排队用例连带未跑。测试侧对策：等待期间
+// 持一枚 ref'd 保活定时器、finally 收口 —— 若产品真挂死，保活到期后循环照常
+// 排干、收割照常发生（防御不失守，只是给诚实的硬止损超时留出活窗）。
+/** 持一枚 ref'd 保活定时器；返回收口函数（clearTimeout —— 调用方必须在 finally 里执行） */
+function keepEventLoopAlive(ms: number): () => void {
+  const t = setTimeout(() => { /* 保活哨：正常路径等不到这里触发 */ }, ms);
+  return () => clearTimeout(t);
+}
+
+/** 工具级配置：验证/探针/公证全关（聚焦法院执法），反驳法院开。
+ *  W6R：verifyActions=false 已不再单独构成危险令牌旁路 —— 本册聚焦法院执法，
+ *  显式插入逃生门（两把钥匙齐备）保持「派发即消费」旧方言。 */
 const toolCfg = {
   enableApprovalGate: true,
   dangerPatterns: 'send,发送,delete,删除,pay,支付',
@@ -116,6 +133,7 @@ const toolCfg = {
   ocrLang: 'eng',
   dryRun: false,
   verifyActions: false,
+  allowUnverifiedDangerous: true,
   intentVerify: false,
   autoRemember: false,
   adaptiveSettle: false,
@@ -134,10 +152,13 @@ async function runJson(tool: unknown, args: unknown): Promise<any> {
   return JSON.parse(out);
 }
 
-/** 铸一枚已授予的令牌（危险点击的通行证） */
+/** 铸一枚已授予的令牌（危险点击的通行证）。
+ *  W6R fail-closed：授予须带外码 —— 内联武装采集 sink（人类读码的视角）。 */
 function grantedToken(desc = '点击发送按钮提交表单'): string {
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
   const pa = approval.request(desc);
-  assert.equal(approval.grant(pa.token, true), true, '令牌授予成功');
+  assert.equal(approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode }).ok, true, '令牌授予成功');
   return pa.token;
 }
 
@@ -240,18 +261,26 @@ test('Β-3c: 超时（挂死脑 + 硬止损）⇒ uncertain 不拦、诚实归�
   _overrideRefuteTimeoutForTest(60);
   const hanging = fakeBrain('gemini', { hang: true });
   attachFace([hanging]);
-  const c = await runJson(tool, { x: 0.6, y: 0.6, target_description: '发送按钮', approval_token: grantedToken() });
-  assert.equal(c.status, 'SUCCESS', '超时 ⇒ 缺席审判不拦');
-  assert.equal(c.state_anchor.refute, undefined);
-  assert.equal(refuteStats().uncertain, statsC.uncertain + 1, '超时收敛 uncertain 记账');
-  assert.equal(clicks, 1);
-  // 直调取证：超时归因注记
-  const tv = await askRefutation({ imageBase64: 'QUJD', description: '发送按钮' });
-  assert.equal(tv.verdict, 'uncertain');
-  assert.match(tv.note ?? '', /timeout/, '诚实归因到超时');
-  _overrideRefuteTimeoutForTest(null);
-  const s = refuteStats();
-  assert.equal(s.cases, statsC.cases + 2, '工具级一案 + 直调一案');
+  // 收口债 D-G1：挂死脑下唯一在途宏任务是产品硬止损的 unref 定时器（工具级 +
+  // 直调两段各 60+500ms ≈ 1.2s）—— 持保活定时器防裸测试进程事件循环先行排干
+  // （保活宽放 2s；finally 收口，断言失败也不残留句柄）。
+  const releaseLoop = keepEventLoopAlive(2_000);
+  try {
+    const c = await runJson(tool, { x: 0.6, y: 0.6, target_description: '发送按钮', approval_token: grantedToken() });
+    assert.equal(c.status, 'SUCCESS', '超时 ⇒ 缺席审判不拦');
+    assert.equal(c.state_anchor.refute, undefined);
+    assert.equal(refuteStats().uncertain, statsC.uncertain + 1, '超时收敛 uncertain 记账');
+    assert.equal(clicks, 1);
+    // 直调取证：超时归因注记
+    const tv = await askRefutation({ imageBase64: 'QUJD', description: '发送按钮' });
+    assert.equal(tv.verdict, 'uncertain');
+    assert.match(tv.note ?? '', /timeout/, '诚实归因到超时');
+    _overrideRefuteTimeoutForTest(null);
+    const s = refuteStats();
+    assert.equal(s.cases, statsC.cases + 2, '工具级一案 + 直调一案');
+  } finally {
+    releaseLoop();
+  }
 });
 
 // ─── Β-4 同源剔除（诚实）───

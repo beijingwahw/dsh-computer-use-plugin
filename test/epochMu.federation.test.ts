@@ -15,15 +15,28 @@
 //        endpoint 脱敏）；tools/index.ts 挂载门源码取证（两臂条件 + 既有块未动）。
 //   Μ-5 信任账：applied 后记一次 regressed ⇒ trust 减半（1/2），下次掺入折减
 //        （quota 5→2）；再记 ⇒ 1/3；status 动作可见信任账+上次同步；垃圾入账不抛。
+//   Μ-6 工具面 robust 投产（D-B6/W6R-A5）：sync 动作缺省走 Μ2 拜占庭鲁棒臂
+//        （本地逐格中位数 + 检疫票折算端点信任 ⇒ 同轮配额折减）；显式
+//        robust:false 回退 Μ 旧行为（结果形状无 robust 字段）。
+//   Μ-7 信任持久化往返（W6-4 缝包 + W7-0 生产接线）：file store 原子落盘 →
+//        跨进程模拟（resetFederationRuntime）→ loadFederationTrust 恢复 →
+//        信任/配额续账；生产接线（src/index.ts 的 load/arm/flush）源码取证。
+//   Μ-8 客户端 HMAC 签名头（W6R-A5）：env 缺省零头；DSH_FEDERATION_TOKEN
+//        在场 ⇒ federationSync 自动附 x-dsh-fed-* 双头（与权威实现逐字段
+//        一致）；authToken 显式注入优先；null 显式禁用。
 // 全程离线（fetch 全假件/零调用）、rng/时钟全注入、确定性；生产单例 try/finally 复位。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createHmac } from 'node:crypto';
 
 import {
   KernelRegistry,
   EvidenceLedger,
   kernelRegistry,
+  evidenceLedger,
   resetKernelRuntime,
 } from '../src/kernel/registry.ts';
 import {
@@ -37,6 +50,15 @@ import {
   federationTrustReport,
   resetFederationRuntime,
   lastFederationSync,
+  createFederationTrustFileStore,
+  loadFederationTrust,
+  armFederationTrustPersistence,
+  flushFederationTrust,
+  federationTrustPersistenceStatus,
+  federationAuthHeaders,
+  FEDERATION_AUTH_ENV,
+  FEDERATION_AUTH_TIMESTAMP_HEADER,
+  FEDERATION_AUTH_SIGNATURE_HEADER,
   DIGEST_BINS,
   type FederationFetch,
 } from '../src/federation/index.ts';
@@ -487,6 +509,179 @@ test('Μ-5: applied 后记一次 regressed ⇒ trust 减半且下次掺入折减
 function federationReportHas(sourceId: string): boolean {
   return federationTrustReport().some(r => r.sourceId === sourceId);
 }
+
+// ─── Μ-6：工具面 robust 投产（D-B6/W6R-A5）── sync 缺省走 Μ2 拜占庭鲁棒臂 ───
+
+test('Μ-6: 工具 sync 缺省 robust（中位数聚合+检疫票折端点信任）；显式 robust:false 回退 Μ 旧行为', async () => {
+  resetFederationRuntime();
+  resetKernelRuntime();
+  const savedFetch = globalThis.fetch;
+  try {
+    const EP = 'https://agg.example/fed';
+    const K = 'fed.tool';
+    // 全局账本播种 10 条（工具面用生产单例 evidenceLedger 铸摘要 + 掺入；闸① 需本地有证据）
+    for (let i = 0; i < 10; i++) {
+      evidenceLedger.record({ key: K, success: i % 2 === 0, margin: 0.1 * i - 0.5, ts: i });
+    }
+    // 假 fetch（替换全局 fetch —— vlm.integration 同法）：回毒源+诚实源+诚实源
+    const poison = { v: 1 as const, mintedAt: 10, epsilon: 1, keys: [{ key: K, n: 1000, bins: bigBins(1000) }] };
+    const honest = (): typeof poison => ({ v: 1, mintedAt: 20, epsilon: 1, keys: [{ key: K, n: 50, bins: bigBins(50) }] });
+    const captured: { body: string } = { body: '' };
+    globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+      captured.body = init.body;
+      return { json: async () => ({ digests: [poison, honest(), honest()] }) };
+    }) as unknown as typeof fetch;
+
+    // (a) sync 缺省 ⇒ robust:true（D-B6 投产落点）：本地+3 远端 = 4 源偶中位
+    const tool = createFederationSyncTool(fedConfig({ kernelEvolutionEnabled: true, federationEndpoint: EP }));
+    const out = await runTool(tool, { action: 'sync' });
+    assert.equal(out.status, 'SUCCESS', 'sync 成功');
+    assert.equal(out.state_anchor.network, 'fired', '网络臂已发');
+    assert.equal(captured.body, JSON.stringify(out.state_anchor.digest), '上行载荷 = 本地摘要');
+    const rb = out.state_anchor.robust as { method: string; mergedFrom: number; quarantined: Record<string, number> };
+    assert.equal(rb.method, 'median', '缺省走鲁棒中位数（生产默认不再是预合并求和）');
+    assert.equal(rb.mergedFrom, 4, 'mergedFrom = 本地 + 3 远端');
+    assert.equal(rb.quarantined['remote-0'], 16, '毒远端 16 票');
+    assert.equal(rb.quarantined['remote-1'], undefined, '诚实远端零票');
+    assert.equal(out.state_anchor.applied.trust, 0.25, '检疫票折算端点信任 ⇒ 同轮按 1/4 折减');
+    assert.equal(out.state_anchor.applied.applied, 1, 'quota = floor(floor(0.5×10) × 0.25) = 1');
+    assert.ok(Math.abs(federationTrustOf(EP) - 0.25) < 1e-12, '端点信任账 1/4（先检疫后掺入）');
+    assert.equal(evidenceLedger.stats(K).n, 11, '全局账本 10 → 11');
+
+    // (b) 显式 robust:false ⇒ 回退 Μ 旧行为：预合并 digest 单件直接掺入、结果无 robust 字段
+    const EP2 = 'https://legacy.example/fed';
+    const K2 = 'fed.tool.legacy';
+    for (let i = 0; i < 10; i++) evidenceLedger.record({ key: K2, success: true, margin: 0.2, ts: i });
+    const legacyDigest = { v: 1 as const, mintedAt: 5, epsilon: 1, keys: [{ key: K2, n: 500, bins: bigBins(50) }] };
+    globalThis.fetch = (async () => ({ json: async () => ({ digest: legacyDigest }) })) as unknown as typeof fetch;
+    const tool2 = createFederationSyncTool(fedConfig({ kernelEvolutionEnabled: true, federationEndpoint: EP2 }));
+    const out2 = await runTool(tool2, { action: 'sync', robust: false });
+    assert.equal(out2.status, 'SUCCESS', 'legacy 回退成功');
+    assert.equal(out2.state_anchor.applied.applied, 5, 'legacy：floor(0.5×10)=5（Μ 旧语义）');
+    assert.equal(out2.state_anchor.robust, undefined, 'legacy 结果形状无 robust 字段（Μ 旧行为逐字节）');
+
+    // (c) 源码取证（Φ-V 同法）：工具面 robust 缺省投产在源（防回归锁）
+    const src = readFileSync(new URL('../src/tools/federationTools.ts', import.meta.url), 'utf8');
+    assert.match(src, /robust = robustRaw === false \? false : true/, 'robust 消毒：仅显式 false 才回退（缺省 robust）');
+    assert.match(src, /maxRemoteShare: config\.federationMaxRemoteShare,\s*robust,/, 'federationSync 调用实传 robust');
+  } finally {
+    globalThis.fetch = savedFetch;
+    resetFederationRuntime();
+    resetKernelRuntime();
+  }
+});
+
+// ─── Μ-7：信任持久化往返（W6-4 缝包）+ 生产接线取证（W7-0 已闭合 —— 防回归锁） ───
+
+test('Μ-7: 信任账文件往返 —— 记账→原子落盘→跨进程归零→恢复续账→配额执法；生产接线在源', () => {
+  resetFederationRuntime();
+  const dir = mkdtempSync(path.join(tmpdir(), 'fed-trust-roundtrip-'));
+  try {
+    const file = path.join(dir, 'federation-trust.json');
+    const store = createFederationTrustFileStore(file);
+
+    // (a) 记账 + 武装 + 冲刷（原子写：无 .tmp 残留）
+    recordFederationTrust('peer-x', { applied: 7 });
+    recordFederationTrust('peer-x', { regressed: 2 });
+    assert.equal(armFederationTrustPersistence(store, { flushEvery: 1 }), true, '武装成功');
+    assert.equal(federationTrustPersistenceStatus().armed, true, '状态面 armed=true');
+    const flushed = flushFederationTrust();
+    assert.equal(flushed.ok, true, '落盘 ok');
+    assert.equal(flushed.written, 1, '写入 1 条账');
+    assert.ok(!existsSync(file + '.tmp'), '原子写无 tmp 残留（tmp+fsync+rename）');
+    assert.ok(existsSync(file), '档在场');
+
+    // (b) 跨进程模拟：内存归零（旧世界的信任账在进程退出时蒸发 —— 持久化的立意）
+    resetFederationRuntime();
+    assert.equal(federationTrustOf('peer-x'), 1, '未恢复前初见全信（跨进程信任归零的旧病）');
+
+    // (c) 恢复：loadFederationTrust 防御读档 ⇒ 信任续账（1/(1+2)=1/3）
+    const restored = loadFederationTrust(store);
+    assert.equal(restored.restored, 1, '恢复 1 条');
+    assert.equal(federationTrustOf('peer-x'), 1 / 3, '恢复后 trust = 1/3（信任跨进程存活）');
+    const rec = federationTrustReport().find(r => r.sourceId === 'peer-x')!;
+    assert.ok(rec, '报告在场');
+    assert.equal(rec.applied, 7, 'applied 续账');
+    assert.equal(rec.regressed, 2, 'regressed 续账');
+
+    // (d) 恢复的账在掺入闸执法（regressed=2 ⇒ 配额 5→1）
+    const ledger = new EvidenceLedger();
+    for (let i = 0; i < 10; i++) ledger.record({ key: 'fed.persist', success: true, margin: 0.2, ts: i });
+    const merged = { v: 1 as const, mintedAt: 1, epsilon: 1, keys: [{ key: 'fed.persist', n: 99, bins: bigBins() }] };
+    const rep = applyFederatedEvidence(ledger, merged, { maxRemoteShare: 0.5, sourceId: 'peer-x', now: () => 1 });
+    assert.equal(rep.trust, 1 / 3, '掺入走恢复账的信任');
+    assert.equal(rep.applied, 1, 'quota = floor(5 × 1/3) = 1 —— 恢复的账有牙齿');
+
+    // (e) 生产接线取证（W7-0 在 src/index.ts 的生命周期接线 —— 锁进测试防回归）：
+    //     启动恢复 + 武装在初始化，卸载冲账在生命周期收尾
+    const entry = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+    assert.match(entry, /loadFederationTrust\(trustStore\)/, '启动时防御恢复接线在源');
+    assert.match(entry, /armFederationTrustPersistence\(trustStore\)/, '启动时武装原子落盘接线在源');
+    assert.match(entry, /flushFederationTrust\(\)/, '卸载时最后冲账接线在源');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    resetFederationRuntime();
+  }
+});
+
+// ─── Μ-8：客户端 HMAC 签名头（W6R-A5）── federationSync 的 env 缺省/显式注入面 ───
+
+test('Μ-8: env 缺省零签名头；DSH_FEDERATION_TOKEN 在场自动附双头；authToken 注入优先；null 显式禁用', async () => {
+  resetFederationRuntime();
+  const prevEnv = process.env[FEDERATION_AUTH_ENV];
+  try {
+    const EP = 'https://auth.example/fed';
+    let capturedHeaders: Record<string, string> | null = null;
+    let capturedBody = '';
+    const fake = (async (_u: string, init: { headers: Record<string, string>; body: string }) => {
+      capturedHeaders = init.headers;
+      capturedBody = init.body;
+      return { json: async () => ({}) };
+    }) as unknown as FederationFetch;
+
+    // (a) env 缺省 ⇒ 零签名头（open 客户端不惊扰 open 服务端 —— 零配置语义）
+    delete process.env[FEDERATION_AUTH_ENV];
+    const r0 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), now: () => 1 });
+    await r0.settled;
+    assert.equal(capturedHeaders![FEDERATION_AUTH_TIMESTAMP_HEADER], undefined, 'env 缺省 ⇒ 无时间戳头');
+    assert.equal(capturedHeaders![FEDERATION_AUTH_SIGNATURE_HEADER], undefined, 'env 缺省 ⇒ 无签名头');
+    assert.equal(capturedHeaders!['content-type'], 'application/json', 'JSON 头照常');
+
+    // (b) env 设置 ⇒ 自动读 env 附双头（与权威实现 federationAuthHeaders 逐字段一致）
+    process.env[FEDERATION_AUTH_ENV] = 'env-secret';
+    const r1 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), now: () => 2 });
+    await r1.settled;
+    assert.deepEqual(
+      capturedHeaders,
+      { 'content-type': 'application/json', ...federationAuthHeaders(capturedBody, 'env-secret', 2) },
+      'env 模式双头与权威实现一致（ts=注入时钟、签名覆盖正文）',
+    );
+
+    // (c) authToken 显式注入 ⇒ 优先于 env
+    const r2 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), authToken: 'injected-secret', now: () => 3 });
+    await r2.settled;
+    assert.equal(capturedHeaders![FEDERATION_AUTH_TIMESTAMP_HEADER], '3', '注入面：ts = 3');
+    assert.equal(
+      capturedHeaders![FEDERATION_AUTH_SIGNATURE_HEADER],
+      createHmac('sha256', 'injected-secret').update(`3.${capturedBody}`).digest('hex'),
+      '注入面：签名 = 权威公式重算一致',
+    );
+
+    // (d) authToken:null ⇒ 显式禁用（env 在场也不签 —— 测试/诊断缝）
+    const r3 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), authToken: null, now: () => 4 });
+    await r3.settled;
+    assert.equal(capturedHeaders![FEDERATION_AUTH_SIGNATURE_HEADER], undefined, 'null ⇒ 显式不签');
+    assert.equal(capturedHeaders!['content-type'], 'application/json', 'JSON 头仍常');
+
+    // (e) 密钥卫生：签名头是派生量 —— 密钥原文绝不进任何头值
+    assert.ok(!JSON.stringify(capturedHeaders).includes('env-secret'), 'env 密钥不入头');
+    assert.ok(!JSON.stringify(capturedHeaders).includes('injected-secret'), '注入密钥不入头');
+  } finally {
+    if (prevEnv === undefined) delete process.env[FEDERATION_AUTH_ENV];
+    else process.env[FEDERATION_AUTH_ENV] = prevEnv;
+    resetFederationRuntime();
+  }
+});
 
 // ─── 附：KernelRegistry/EvidenceLedger 增量导出的既有语义零回归（纯增量立法的旁证） ───
 

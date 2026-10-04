@@ -7,8 +7,9 @@
 //   · CSPRNG 铸造（6 位十进制、zerosafe、拒绝采样无偏）；
 //   · 恒定时间比较 —— 错码拒绝不泄露哪一位错（不同错码的失败输出逐字节同形）；
 //   · 错误码区分「码错误」与「令牌无效」；错码尝试封顶焚毁（防暴力枚举）；
-//   · 兼容降级：带外通道缺席/投递失败 ⇒ 旧式无码 grant + degraded 标记
-//     （默认路径 —— 现有宿主流与既有测试零破坏）。
+//   · W6R fail-closed：带外通道缺席/投递失败 ⇒ 令牌记 degraded 且 grant 一律
+//     拒绝（reason='confirm-channel-absent'）—— 旧「无码降级 grant」是
+//     fail-open（屏幕注入文本可驱动 request→grant→click 全链自批），已废除。
 // H1 批注铁律：
 //   · grant 可携 note ⇒ 结构化 amendment patch 铸入 PendingApproval
 //     （目标描述差异 + 动作形状修正），执行侧读取 API 可消费；
@@ -122,29 +123,39 @@ test('S2-3: 错码封顶 —— 达到上限焚毁令牌（防暴力枚举），
     { ok: false, reason: 'invalid-token' }, '焚毁后真码也无效（错误码=令牌无效，非码错误）');
 });
 
-test('S2-4: 无码降级是默认 —— 通道缺席 ⇒ 旧式 grant 原样工作 + degraded 诚实标记', () => {
-  // 不武装任何通道（beforeEach 的 resetApproval 已卸载）—— 这是既有宿主/测试的默认面
+test('S2-4: W6R fail-closed —— 通道缺席 ⇒ degraded 标记 + grant 一律拒绝（无码同意已废除）', () => {
+  // 不武装任何通道（beforeEach 的 resetApproval 已卸载）—— 通道缺席是事实面
   const pa = approval.request('send email to Bob');
-  assert.equal(pa.confirmCodeHash, undefined, '无码');
-  assert.equal(pa.degraded, true, '降级标记在场');
-  assert.equal(approval.grant(pa.token, true), true, '旧式无码 grant 原样成功');
+  assert.equal(pa.confirmCodeHash, undefined, '无码（投递未发生）');
+  assert.equal(pa.degraded, true, '降级标记在场（诚实簿记）');
+  // 安全核心：grant 双面（布尔旧签名与详细通道）都必须拒绝 —— fail-closed
+  assert.equal(approval.grant(pa.token, true), false, '旧布尔 grant 拒绝（无码同意已废除）');
+  assert.deepEqual(approval.grantDetailed(pa.token, true), { ok: false, reason: 'confirm-channel-absent' });
+  assert.equal(approval.validate(pa.token), false, '不可授予 ⇒ 不可过闸门');
   const st = approval.status(pa.token);
   assert.equal(st.confirmCodeRequired, false);
   assert.equal(st.degraded, true, 'status 透明化：降级');
-  assert.equal(approval.consume(pa.token), true);
+  assert.equal(approval.consume(pa.token), false, '不可授予 ⇒ 不可消费');
+  // 携码也无法救回 degraded 令牌（人证缺席期间的「同意」无法追认）
+  const pb = approval.request('send email to Carol');
+  assert.deepEqual(approval.grantDetailed(pb.token, true, { confirmCode: '123456' }),
+    { ok: false, reason: 'confirm-channel-absent' }, '携码也拒绝（degraded 令牌无码可校验）');
+  // 拒绝路径（grant=false）不需要人证 —— 任何时刻喊停都合法（保守方向）
+  assert.equal(approval.grant(pb.token, false), true, '否决恒可行（拒绝不烧人证）');
 });
 
-test('S2-5: 带外通道故障（返回 false / 抛出）⇒ 诚实降级，绝不炸铸造', () => {
+test('S2-5: W6R fail-closed —— 带外通道故障（返回 false / 抛出）⇒ 拒绝，绝不炸铸造', () => {
   setConfirmCodeChannel(() => false); // 显式投递失败
   const pa = approval.request('pay the bill');
   assert.equal(pa.confirmCodeHash, undefined, '投递失败 ⇒ 无码');
   assert.equal(pa.degraded, true);
-  assert.equal(approval.grant(pa.token, true), true, '降级回旧式无码 grant');
+  assert.equal(approval.grant(pa.token, true), false, '投递失败 ⇒ grant 拒绝（fail-closed）');
+  assert.deepEqual(approval.grantDetailed(pa.token, true), { ok: false, reason: 'confirm-channel-absent' });
 
   setConfirmCodeChannel(() => { throw new Error('notification daemon exploded'); });
   const pb = approval.request('pay again');
   assert.equal(pb.degraded, true, 'sink 抛出 ⇒ 通道缺席语义（铸造主流程不炸）');
-  assert.equal(approval.grant(pb.token, true), true);
+  assert.equal(approval.grant(pb.token, true), false, 'sink 抛出 ⇒ grant 同样拒绝');
 });
 
 test('S2-6: 码不泄露给模型 —— 工具结果文本与模型可见数据结构中绝无码', async () => {
@@ -193,16 +204,20 @@ test('S2-7: 错误码区分 —— 「码错误」≠「令牌无效」；工具
   const r2 = approval.grantDetailed('APR-NEVER-MINTED', true, { confirmCode: '123456' });
   assert.notEqual(r1.ok ? '' : r1.reason, r2.ok ? '' : r2.reason, '两类失败成因可区分');
 
-  // 工具面：通道缺席（默认）⇒ 旧方言原样（既有宿主流零破坏）
-  resetApproval(); // 卸载通道 ⇒ 恢复默认降级面
+  // 工具面：通道缺席（默认）⇒ W6R fail-closed：诚实标记通道缺席 + grant 拒绝
+  // （旧方言的「无码 GRANTED」是 fail-open，已废除）
+  resetApproval(); // 卸载通道 ⇒ 恢复通道缺席的默认面
   const cfg = { enableApprovalGate: true, enableDemonstrations: false } as unknown as Config;
   const reqTool = createRequestApprovalTool(cfg);
   const grantTool = createGrantApprovalTool(cfg);
   const reqOut = JSON.parse(await exec(reqTool)({ description: 'send the report' }));
-  assert.equal(reqOut.state_anchor.confirm_code_required, false, '降级：无码要求');
-  assert.equal(reqOut.state_anchor.confirm_channel, 'legacy-degraded');
+  assert.equal(reqOut.state_anchor.confirm_code_required, false, '通道缺席：无码要求');
+  assert.equal(reqOut.state_anchor.confirm_channel, 'out-of-band-absent', '通道缺席诚实标记');
+  assert.match(reqOut.next_step, /宿主 UI/, '指引：请用户通过宿主 UI 操作');
   const g = JSON.parse(await exec(grantTool)({ token: reqOut.state_anchor.token, grant: true }));
-  assert.equal(g.status, 'GRANTED', '无码 grant 原样成功（严格向后兼容）');
+  assert.equal(g.status, 'FAILED', '通道缺席 ⇒ grant 拒绝（fail-closed，无码同意已废除）');
+  assert.equal(g.state_anchor.reason, 'confirm-channel-absent');
+  assert.match(g.next_step, /带外确认通道缺席，无法完成人工确认，请用户通过宿主 UI 操作/);
 
   // 伪令牌 ⇒ invalid-token 方言（非码错误）
   const gFake = JSON.parse(await exec(grantTool)({ token: 'APR-FAKE', grant: true, confirm_code: '123456' }));
@@ -210,7 +225,7 @@ test('S2-7: 错误码区分 —— 「码错误」≠「令牌无效」；工具
   assert.equal(gFake.state_anchor.reason, 'invalid-token');
 });
 
-test('S2-8: doctorChannel 挂点 —— 控制台 + 事件总线双通道投递；组合根接线顺带武装', () => {
+test('S2-8: W6R doctorChannel 挂点 —— 明文码只走事件总线；console 脱敏；无总线 ⇒ fail-closed', () => {
   // 采集型假 ctx（事件总线面）
   const events: Array<{ event: string; payload: unknown }> = [];
   const fakeCtx = {
@@ -231,19 +246,27 @@ test('S2-8: doctorChannel 挂点 —— 控制台 + 事件总线双通道投递�
     console.log = origLog;
   }
   assert.ok(pa, '接线与铸造绝不抛');
-  assert.equal(pa.confirmCodeHash !== undefined, true, '组合根接线后 ⇒ 带码审批（生产默认）');
+  assert.equal(pa.confirmCodeHash !== undefined, true, '组合根接线后 ⇒ 带码审批（事件总线投递成功）');
 
-  // 主通道：控制台有人类可读回执（含码 —— 带外面本来就属于人类）
+  // W6R 铁律①：控制台回执**脱敏** —— 绝不含明文码（宿主可能把 console 日志
+  // 回传进模型上下文，明文码进 console = 对模型可见）
   const consoleHit = lines.find(l => l.includes('[Approval OOB]'));
   assert.ok(consoleHit, '控制台带外回执在场');
-  assert.ok(events.some(e => e.event === APPROVAL_CONFIRM_CODE_EVENT), '事件总线副通道在场');
   const busPayload = events.find(e => e.event === APPROVAL_CONFIRM_CODE_EVENT)!.payload as {
     confirmCode: string; token: string;
   };
-  assert.match(busPayload.confirmCode, /^[0-9]{6}$/, '总线载荷携带 6 位码');
+  assert.match(busPayload.confirmCode, /^[0-9]{6}$/, '总线载荷携带 6 位码（唯一携码面）');
   assert.equal(busPayload.token, pa.token);
-  // 控制台与总线投的是同一枚码
-  assert.ok(consoleHit!.includes(busPayload.confirmCode), '双通道投递同一枚码');
+  assert.ok(!consoleHit!.includes(busPayload.confirmCode), 'W6R：console 回执绝不含明文码');
+  assert.match(consoleHit!, /确认码已投递\(6位\)/, 'console 只打脱敏事实（"确认码已投递(6位)"）');
+  // 脱敏回执也不含码的任何子串拼接（对号信息只有 token 与时效）
+  assert.ok(!JSON.stringify(lines).includes(busPayload.confirmCode), '全程 console 输出无明文码');
+
+  // W6R 铁律②：无事件总线（ctx 缺席）⇒ 投递失败 ⇒ degraded（fail-closed）
+  armOutOfBandConfirmChannel(); // 无 ctx：唯一携码通道缺席
+  const pNoBus = approval.request('no bus op');
+  assert.equal(pNoBus.degraded, true, '无总线 ⇒ degraded（grant 将被拒 —— fail-closed）');
+  assert.equal(approval.grant(pNoBus.token, true), false);
 
   // 直接武装面（幂等）：armOutOfBandConfirmChannel 可独立调用
   armOutOfBandConfirmChannel(fakeCtx);
@@ -260,13 +283,14 @@ test('S2-8: doctorChannel 挂点 —— 控制台 + 事件总线双通道投递�
 // ─── H1：批注式审批 ───
 
 test('H1-1: 批注铸入与读取 —— amendment patch 结构完整、执行侧合并幂等', () => {
+  const { deliveries } = armCapture(); // W6R：批注用例同样走带码审批（无码 grant 已废除）
   const pa = approval.request('click the Send button', {
     actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5, target_description: 'Send button' },
   });
   assert.equal(approval.amendmentOf(pa.token), null, '批注缺席 ⇒ null（诚实）');
 
   const NOTE = '同意，但点右下角的小发送按钮，别点工具栏那个';
-  assert.deepEqual(approval.grantDetailed(pa.token, true, { note: NOTE }), { ok: true });
+  assert.deepEqual(approval.grantDetailed(pa.token, true, { note: NOTE, confirmCode: deliveries[0].confirmCode }), { ok: true });
 
   const am = approval.amendmentOf(pa.token);
   assert.ok(am, '批注铸入在场');
@@ -287,25 +311,27 @@ test('H1-1: 批注铸入与读取 —— amendment patch 结构完整、执行�
 
   // 无批注令牌 ⇒ 原样返回（幂等 no-op）
   const pb = approval.request('plain op');
-  approval.grant(pb.token, true);
+  const pbCode = deliveries.find(d => d.token === pb.token)!.confirmCode;
+  approval.grantDetailed(pb.token, true, { confirmCode: pbCode });
   const untouched = approval.applyAmendment(pb.token, { tool: 'click_mouse', target_description: 'x' });
   assert.deepEqual(untouched, { tool: 'click_mouse', target_description: 'x' });
 
   // 批注预算：超长截断到 200（Token 纪律）
   const pc = approval.request('long note op');
-  approval.grantDetailed(pc.token, true, { note: 'x'.repeat(500) });
+  approval.grantDetailed(pc.token, true, { note: 'x'.repeat(500), confirmCode: deliveries[deliveries.length - 1].confirmCode });
   assert.equal(approval.amendmentOf(pc.token)!.note.length, 200, '批注截 200');
 });
 
 test('H1-2: amended 示范事件 —— 消费/否决两类事件都带 amended 标注与批注内容', () => {
   const events: DemonstrationEvent[] = [];
   setDemonstrationObserver(ev => { events.push(ev); skillLibrary.learnFromDemonstration(ev); });
+  const { deliveries } = armCapture(); // W6R：授予走带码审批（拒绝路径无需人证）
 
   // 正示范 + 批注（用户背书的是「修正后的计划」）
   const pa = approval.request('send the email', {
     actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5, target_description: '发送' },
   });
-  approval.grantDetailed(pa.token, true, { note: '改用右下角的小发送' });
+  approval.grantDetailed(pa.token, true, { note: '改用右下角的小发送', confirmCode: deliveries[0].confirmCode });
   approval.consume(pa.token);
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, 'approval-consumed');
@@ -338,11 +364,12 @@ test('H1-3: 工具面批注 —— GRANTED 回显结构化 amendment；REVOKED �
   const cfg = { enableApprovalGate: true, enableDemonstrations: true } as unknown as Config;
   const reqTool = createRequestApprovalTool(cfg);
   const grantTool = createGrantApprovalTool(cfg);
+  const { deliveries } = armCapture(); // W6R：授予走带码审批（无码 grant 已废除）
 
   const reqOut = JSON.parse(await exec(reqTool)({ description: 'click 发送 to submit' }));
   const NOTE = 'yes but click the small Send at bottom-right';
   const g = JSON.parse(await exec(grantTool)({
-    token: reqOut.state_anchor.token, grant: true, note: NOTE,
+    token: reqOut.state_anchor.token, grant: true, note: NOTE, confirm_code: deliveries[0].confirmCode,
   }));
   assert.equal(g.status, 'GRANTED');
   assert.equal(g.state_anchor.amended, true, 'state_anchor 带 amended 标注');
@@ -376,11 +403,12 @@ test('S2-9: 码格式 —— 多次铸造均为 6 位十进制（zerosafe 格式
 
 // ─── 隔离缝 ───
 
-test('W1-2 隔离缝：resetApproval 卸载带外通道（恢复无码降级默认）', () => {
+test('W1-2 隔离缝：resetApproval 卸载带外通道（恢复通道缺席的 fail-closed 默认）', () => {
   armCapture();
   const pa = approval.request('armed op');
   assert.equal(pa.confirmCodeHash !== undefined, true);
   resetApproval();
   const pb = approval.request('post-reset op');
-  assert.equal(pb.degraded, true, 'reset 后恢复默认降级面（测试确定性基线）');
+  assert.equal(pb.degraded, true, 'reset 后恢复通道缺席默认（测试确定性基线 —— W6R：该令牌不可 grant）');
+  assert.equal(approval.grant(pb.token, true), false, 'fail-closed 基线：无通道即无同意');
 });

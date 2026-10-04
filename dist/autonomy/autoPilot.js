@@ -9,13 +9,26 @@ import { withSteerBias } from '../branchCards.js';
 //（goalKeywords/triedActionKeys 的单一事实源，不复制分词逻辑）。
 import { extractGoalKeywords } from './policyEngine.js';
 import { actionSignature } from './counterfactual.js';
-// W4-0（B 接线）：活意图漂移会话（W3-5 交付 API —— createSteerSession 绑定
-// 目标机与屏幕指纹源，会话铸造在 driveLoop 环内完成（goal 由调用方铸））。
-// W5-5（缝3）：SteerBiasStepper 类型随行 —— 换支重放偏置的步进面端口。
-import { createSteerSession, } from '../tools/steerTools.js';
+// W8-B4（判据证伪能力）：终局判据独立评估器官（否定判据 + fuzzy 容错 + OCR 缺席
+// 诚实降级 —— 三态判决纪律；⑧′ 处消费）。autonomy 包内模块，零回路。
+import { buildCriteriaPairs, evaluateCriteria } from './criteriaEval.js';
 // 纪元 Ε：预言端口与注记/动作键方言（路径显式指到桶文件 —— 目录导入在 Node
 // strip 装载器是 ERR_UNSUPPORTED_DIR_IMPORT，纪元 Ι 同律）。
 import { prophecyActionKey, prophecyJournalTag, } from '../prophecy/index.js';
+/**
+ * W8-B4：晚绑定注册器（破环装配面）—— 组合根在装载 tools 侧会话实现时喂入。
+ * 未注册即点亮 steer 端口 ⇒ 会话缺席（漂移检查整段零执行 —— 与端口缺席同降级，
+ * 绝不炸环绝不伪造会话）；重复注册以后注册者为准，null 可注销（测试隔离缝）。
+ */
+const w8SteerFactory = { factory: null };
+/** W8-B4：注册/注销 steer 会话工厂（tools 侧装配点调用；线程化单注册位） */
+export function bindSteerSessionFactory(factory) {
+    w8SteerFactory.factory = typeof factory === 'function' ? factory : null;
+}
+/** W8-B4：当前注册的 steer 会话工厂只读出口（缺省 null —— 审计/测试观察面） */
+export function boundSteerSessionFactory() {
+    return w8SteerFactory.factory;
+}
 /** W4-0（B）：在役 steer 会话（driveLoop 铸、跨环存续至下一环替换 —— 出题升级后
  *  用户的单字符应答经 steer_choice/steer_answer 工具对**同一会话**结算，环终清账
  *  会把「升级提问」变成死信；持有者只暴露只读出口，绝不炸） */
@@ -284,6 +297,9 @@ function syntheticDeclareAction(stage) {
  *  ⑦ execute(action) —— 异常或缺 outcome ⇒ error 步收敛；正常则 StepRecord 入轨迹
  *     （effectiveRiskTier = 宪法判决分层盖章，垃圾判决值视为缺席）；
  *  ⑧ criteriaEvidence 逐条 goal.recordCriterion（回填异常吞掉）；
+ *  ⑧′ W8-B4 判据证伪面：以最近完整感知的 OCR 语料独立复核**否定判据**（mustNotAppear:/
+ *     不得出现： 前缀）—— 命中禁词（精确∪fuzzy）⇒ violated（failed 终局）、语料在场
+ *     未命中 ⇒ met、OCR 缺席 ⇒ 零证据（诚实降级，否定判据不自动为真）；
  *  ⑨ goal.tick() → goal.evaluate()：achieved/failed/aborted/blocked 任一终局相即熔断；
  *  ⑩ 每步入轨迹即触发 onStep（回调异常吞掉）。
  * 任何依赖异常都不炸环；所有时间取注入时钟。
@@ -305,6 +321,9 @@ async function driveLoop(deps, opts) {
     }
     catch { /* 防御：spec 读取失败绝不炸环 */ }
     const criteriaTotal = Array.isArray(spec.successCriteria) ? spec.successCriteria.length : 0;
+    // W8-B4（判据证伪面）：判据对（原文 + 原始下标锚定 —— 非法条目剔除但不下标平移，
+    // 与 execute 侧判据对铸造同律）。⑧′ 独立评估的物料；空判据账 ⇒ ⑧′ 整段零执行。
+    const w8CriteriaPairs = buildCriteriaPairs(spec.successCriteria);
     // maxSteps 同律防御（与 goalState 构造器「非法 ⇒ 降级 24」一致）：stub 依赖给出
     // NaN/0/非数会把 stepCap 变 NaN（保险丝永不熔断 ⇒ 挂死）或 0（秒中止）
     const specMaxSteps = typeof spec.maxSteps === 'number' && Number.isFinite(spec.maxSteps) && spec.maxSteps >= 1
@@ -557,14 +576,16 @@ async function driveLoop(deps, opts) {
     }
     // W4-0（B 接线）：活意图漂移会话铸造 —— 仅 steer 端口点亮时（goal 在环内才出生，
     // 铸造点只能在 driveLoop）。指纹源 = 最近完整感知快照的 textDigest + sceneLabel
-    // 拼接（steerTools 的既定方言）；会话铸造防御式（goal 垃圾 ⇒ 永不出题的空转
+    // 拼接（会话实现侧的既定方言）；会话铸造防御式（goal 垃圾 ⇒ 永不出题的空转
     // 会话）。会话登记进模块持有者（跨环存续到下一环替换 —— 出题升级后用户的
     // 单字符应答经 steer_answer 对同一会话结算，环终清账会把升级提问变成死信）。
+    // W8-B4（破环）：会话工厂经晚绑定注册器喂入（tools 侧装配时注册）；未注册 ⇒
+    // 会话缺席（漂移检查整段零执行 —— 与端口缺席同降级，绝不炸环绝不伪造会话）。
     let w4SteerSession = null;
-    if (w4Steer !== null) {
+    if (w4Steer !== null && w8SteerFactory.factory !== null) {
         try {
             const conf = w4Steer;
-            w4SteerSession = createSteerSession({
+            w4SteerSession = w8SteerFactory.factory({
                 goal: deps.goal,
                 screenText: () => {
                     const s = lastFullSnapshot;
@@ -1005,6 +1026,34 @@ async function driveLoop(deps, opts) {
                     continue;
                 if (evidence.status !== 'met' && evidence.status !== 'violated')
                     continue;
+                try {
+                    deps.goal.recordCriterion(evidence.index, evidence.status);
+                }
+                catch { /* 回填异常吞掉 */ }
+                criteriaStatus.set(evidence.index, evidence.status);
+            }
+        }
+        // ⑧′ W8-B4（判据证伪面）：以最近完整感知快照的 OCR 语料（textDigest —— 本轮
+        //     环顶感知的产物，即当前世界最新全文观察）对**否定判据**独立复核：
+        //     ① 否定判据（'mustNotAppear:' / '不得出现：' 前缀）命中禁词（精确 ∪
+        //        fuzzy ⌈m/6⌉ 容错）⇒ violated —— goalState 判定律第 1 条：任一
+        //        violated ⇒ failed 终局（证伪面本体）；
+        //     ② 语料在场且未命中禁词 ⇒ met（否定判据由此可凑齐全 met 终局）；
+        //     ③ OCR 语料缺席/不可读 ⇒ 零证据（否定判据绝不因「看不见」自动为真 ——
+        //        三态判决纪律：保持 unverified，靠步数保险丝收）。
+        //     极性分工（行为零变化红线）：肯定判据的 met 通道归 execute 侧判据抽查
+        //     （runtime 既定管辖，本环不越权 —— 短判据的 fuzzy 近邻误命中如「关门/
+        //     开门」距离 1 会翻转既有终局语义）；criteriaEval 器官层肯定面同样具备
+        //     fuzzy 容错（单测执法），供执行侧拆分落地后整体采用。
+        if (w8CriteriaPairs.length > 0) {
+            const w8Corpus = lastFullSnapshot !== null && typeof lastFullSnapshot === 'object' &&
+                typeof lastFullSnapshot.textDigest === 'string'
+                ? lastFullSnapshot.textDigest
+                : null;
+            const w8Eval = evaluateCriteria(w8CriteriaPairs, w8Corpus);
+            for (const evidence of w8Eval.evidence) {
+                if (evidence.polarity !== 'must-not-appear')
+                    continue; // 肯定面归 execute 通道
                 try {
                     deps.goal.recordCriterion(evidence.index, evidence.status);
                 }

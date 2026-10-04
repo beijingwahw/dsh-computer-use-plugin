@@ -11,7 +11,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   approval, resetApproval, setDemonstrationObserver, configureDemonstrations,
-  type DemonstrationEvent,
+  setConfirmCodeChannel, type DemonstrationEvent, type ConfirmCodeDelivery,
 } from '../src/approval.ts';
 import { skillLibrary } from '../src/skillLibrary.ts';
 import {
@@ -24,6 +24,21 @@ beforeEach(() => {
   skillLibrary.reset();
   skillLibrary.configure(true, '', 50); // 内存库（零落盘 —— 测试离线确定性）
 });
+
+/** W6R fail-closed：带外码采集 sink —— 授予须携码（无码 grant 已废除；
+ *  采集 sink 正是生产中人类读码的视角）。 */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  oobSink.length = 0;
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function oobCodeOf(token: string): string | undefined {
+  return oobSink.find(d => d.token === token)?.confirmCode;
+}
+/** 携码授予（对旧 approval.grant(token, true) 的等价替换面） */
+function grantOob(token: string): boolean {
+  return approval.grantDetailed(token, true, { confirmCode: oobCodeOf(token) }).ok;
+}
 
 /** 观察者工厂：既收集事件（断言面）又喂技能库蒸馏（对齐生产接线 ——
  *  approvalTools.wireDemonstrationEducation 的观察者正是「采集+喂库」一体）。 */
@@ -49,11 +64,12 @@ test('Τ-1a: consume 成功 ⇒ approval-consumed；匹配技能可靠度 +β �
 
   const { events, fn } = collect();
   setDemonstrationObserver(fn);
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 发送 to submit the email', {
     actionShape: { tool: 'click_mouse', x: 0.6204, y: 0.2, target_description: '发送 button' },
     sceneFingerprint: 'f'.repeat(64),
   });
-  assert.equal(approval.grant(pa.token, true), true, '主流程：授予');
+  assert.equal(grantOob(pa.token), true, '主流程：授予');
   assert.equal(approval.consume(pa.token), true, '主流程：验收式消费成功');
 
   assert.equal(events.length, 1, '旁路：恰好一次正示范事件（拒绝/失败路径均不发射）');
@@ -79,10 +95,11 @@ test('Τ-1a: consume 成功 ⇒ approval-consumed；匹配技能可靠度 +β �
 test('Τ-1b: 无匹配技能 ⇒ 不伪造新技能（单例不足以成技），仅计数', () => {
   const { events, fn } = collect();
   setDemonstrationObserver(fn);
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('pay the invoice', {
     actionShape: { tool: 'drag_mouse', x: 0.1, y: 0.9, target_description: 'drag to trash' },
   });
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   approval.consume(pa.token);
 
   assert.equal(events.length, 1);
@@ -136,6 +153,7 @@ test('Τ-2b: 生产接线 —— grant_approval 拒绝路径附 education 注记
   const reqTool = createRequestApprovalTool(cfg);   // 装配即接线（观察者→技能库蒸馏）
   const grantTool = createGrantApprovalTool(cfg);
   const exec = (t: unknown) => (t as unknown as { execute: (a: unknown) => Promise<string> }).execute;
+  armOob(); // W6R：授予（grant=true）须带外码；拒绝路径无需人证
 
   const reqOut = JSON.parse(await exec(reqTool)({ description: 'delete the temp folder' }));
   assert.equal(reqOut.status, 'PENDING_USER_CONSENT', '既有字段不变');
@@ -147,7 +165,9 @@ test('Τ-2b: 生产接线 —— grant_approval 拒绝路径附 education 注记
 
   // 对照一：grant(true) 的注记是诚实的前瞻披露（此刻教育尚未发生，绝不冒充计数）
   const req2 = JSON.parse(await exec(reqTool)({ description: 'send the report' }));
-  const g2 = JSON.parse(await exec(grantTool)({ token: req2.state_anchor.token, grant: true }));
+  const g2 = JSON.parse(await exec(grantTool)({
+    token: req2.state_anchor.token, grant: true, confirm_code: oobCodeOf(req2.state_anchor.token),
+  }));
   assert.equal(g2.status, 'GRANTED', '既有字段不变');
   assert.match(g2.education_note, /待验收/, '授予时刻：教育待验收（诚实）');
 
@@ -167,6 +187,7 @@ test('Τ-2b: 生产接线 —— grant_approval 拒绝路径附 education 注记
 test('Τ-3: type_text 示范只含工具名+长度桶；tokenId 截断 8 位；蒸馏面二次脱敏', () => {
   const { events, fn } = collect();
   setDemonstrationObserver(fn);
+  armOob(); // W6R：授予须带外码
   const SECRET = 'Hunter2-Secret-密码';
   const pa = approval.request('type the password', {
     actionShape: {
@@ -174,7 +195,7 @@ test('Τ-3: type_text 示范只含工具名+长度桶；tokenId 截断 8 位；�
       target_description: 'password field',
     },
   });
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   approval.consume(pa.token);
 
   assert.equal(events.length, 1);
@@ -213,8 +234,9 @@ test('Τ-3: type_text 示范只含工具名+长度桶；tokenId 截断 8 位；�
 test('Τ-4: 观察者 throw ⇒ 主流程照常；关闭 ⇒ 观察者零调用；缺席 ⇒ 零行为', () => {
   let calls = 0;
   setDemonstrationObserver(() => { calls += 1; throw new Error('education pipeline exploded'); });
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('send it', { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
-  assert.equal(approval.grant(pa.token, true), true, '旁路异常不炸 grant');
+  assert.equal(grantOob(pa.token), true, '旁路异常不炸 grant');
   assert.equal(approval.consume(pa.token), true, '旁路异常不炸 consume（返回值不受影响）');
   assert.equal(calls, 1, 'throw 也算一次调用（异常被吞 —— 旁路义务）');
   const pb = approval.request('send it again', { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
@@ -226,7 +248,7 @@ test('Τ-4: 观察者 throw ⇒ 主流程照常；关闭 ⇒ 观察者零调用�
   let zero = 0;
   setDemonstrationObserver(() => { zero += 1; });
   const pc = approval.request('pay now', { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
-  approval.grant(pc.token, true);
+  grantOob(pc.token);
   approval.consume(pc.token);
   const pd = approval.request('pay later', { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
   approval.grant(pd.token, false);
@@ -235,7 +257,7 @@ test('Τ-4: 观察者 throw ⇒ 主流程照常；关闭 ⇒ 观察者零调用�
   // 观察者缺席（null）⇒ 零行为，主流程照常
   setDemonstrationObserver(null);
   const pe = approval.request('pay never', { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
-  approval.grant(pe.token, true);
+  grantOob(pe.token);
   assert.equal(approval.consume(pe.token), true, '无观察者：消费照常成功');
 });
 
@@ -244,6 +266,7 @@ test('Τ-4: 观察者 throw ⇒ 主流程照常；关闭 ⇒ 观察者零调用�
 test('Τ-5a: 请求≠同意 + 验收失败保留/续期/超限焚毁（失败路径零示范事件）', () => {
   const { events, fn } = collect();
   setDemonstrationObserver(fn); // 教育全程在环：任何回归都会炸主流程或漏事件
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('send email to Alice', { ttlMs: 60_000, maxAttempts: 2 });
   assert.ok(pa.token.startsWith('APR-'));
   assert.equal(approval.validate(pa.token), false, '请求 ≠ 同意（J-1：未授予不放行）');
@@ -251,7 +274,7 @@ test('Τ-5a: 请求≠同意 + 验收失败保留/续期/超限焚毁（失败�
 
   // V 序列（新令牌 —— 上面的拒绝性消费已焚毁 pa，这正是「用后即焚」的语义）
   const pv = approval.request('send email to Alice (retry)', { ttlMs: 60_000, maxAttempts: 2 });
-  assert.equal(approval.grant(pv.token, true), true);
+  assert.equal(grantOob(pv.token), true);
   const r1 = approval.attemptFailed(pv.token, 'no-effect');
   assert.equal(r1.valid, true, '未生效的尝试不消耗同意');
   assert.equal(r1.remainingAttempts, 1, '剩余预算 = 1');
@@ -270,13 +293,14 @@ test('Τ-5a: 请求≠同意 + 验收失败保留/续期/超限焚毁（失败�
 test('Τ-5b: consume 恰一次 + beginAttempt 预留/结算时序（双花封堵不回归）', () => {
   const { events, fn } = collect();
   setDemonstrationObserver(fn);
+  armOob(); // W6R：授予须带外码
   const pb = approval.request('click Send', { actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
-  approval.grant(pb.token, true);
+  grantOob(pb.token);
   assert.equal(approval.consume(pb.token), true, '第一次：有效');
   assert.equal(approval.consume(pb.token), false, '第二次：已焚毁');
 
   const pc = approval.request('submit order', { maxAttempts: 3, actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 } });
-  approval.grant(pc.token, true);
+  grantOob(pc.token);
   assert.equal(approval.beginAttempt(pc.token), true, '派发前预留成功');
   assert.equal(approval.beginAttempt(pc.token), false, '在途预留未结算：并发双花拒绝');
   const rf = approval.attemptFailed(pc.token, 'no-effect');
@@ -290,12 +314,13 @@ test('Τ-5b: consume 恰一次 + beginAttempt 预留/结算时序（双花封堵
 test('Τ-5c: 拒绝路径 + status 面 + TTL 过期（拒绝恰一次事件，过期消费零事件）', () => {
   const { events, fn } = collect();
   setDemonstrationObserver(fn);
+  armOob(); // W6R：授予须带外码
   const pd = approval.request('format disk');
   assert.equal(approval.grant(pd.token, false), true, 'grant(false) 返回 true（在场即作废）');
   assert.equal(approval.validate(pd.token), false, '立即作废');
 
   const pe = approval.request('click 发送');
-  approval.grant(pe.token, true);
+  grantOob(pe.token);
   assert.deepEqual(approval.status('APR-NONSENSE'), { present: false, granted: false, expired: false },
     '缺席令牌的 status 逐字段一致');
   let st = approval.status(pe.token);
@@ -307,7 +332,7 @@ test('Τ-5c: 拒绝路径 + status 面 + TTL 过期（拒绝恰一次事件，�
   assert.equal(st.remainingAttempts, 4);
 
   const pf = approval.request('expire me', { ttlMs: 2_000 });
-  approval.grant(pf.token, true);
+  grantOob(pf.token);
   const origNow = Date.now;
   try {
     Date.now = () => origNow() + 3_000; // 时钟前拨 —— 不真睡

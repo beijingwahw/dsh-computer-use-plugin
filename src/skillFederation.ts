@@ -1,4 +1,5 @@
 // src/skillFederation.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：技能联邦 —— 导入/导出/清单/协商围绕同一联邦协议方言（版本兼容矩阵），协议单文件即规范文本。
 // W4-2（创新提案 G3：策略联邦）—— 联邦从「评价计数」升级为「联邦怎么走」。
 // 纪元 Μ 联邦的是认知器官的成败水位（「这条路走得通吗」）；本模块把联邦对象
 // 提升为**技能本身**：「同一场景 + 同一参数形状的工作流，万机各自怎么走」。
@@ -35,6 +36,13 @@ import {
   DEFAULT_MAX_REMOTE_SHARE,
 } from './federation/index';
 import { swarm } from './swarm';
+// W7-0（W6-4 接线收尾）：持久化面 —— 原子写的 node:fs/node:path 原语
+//（federation 信任账 createFederationTrustFileStore 同律；零新依赖）。
+import {
+  closeSync, existsSync, fsyncSync, mkdirSync, openSync,
+  readFileSync, renameSync, unlinkSync, writeSync,
+} from 'node:fs';
+import { dirname as pathDirname } from 'node:path';
 
 // ─── 算法形状字面量（模块常量 —— 一切数值在此审计，绝无内联魔数） ───
 
@@ -656,6 +664,9 @@ class SkillFederation {
           }
           injected += 1;
           this.totals.thompsonAttempts += 1;
+          // W7-0：候选写入 = 账本突变（武装了持久化时按突变计数节流落盘；
+          // 缺省未武装 ⇒ 零磁盘，接收语义零变化）
+          noteSkillFedMutation();
           // 注入律②：候选默认 dormant —— 只登记，绝不进匹配池。已有候选 ⇒ 刷新
           // 统计但**保留 localHits 与 state**（本地证据只增不减，联邦刷新不清账）
           const existing = this.candidates.get(a.fingerprint);
@@ -714,6 +725,8 @@ class SkillFederation {
       }
       cand.localHits += 1;
       this.totals.localHits += 1;
+      // W7-0：命中记账 = 账本突变（节流落盘旁路；缺省未武装零磁盘）
+      noteSkillFedMutation();
       if (typeof now === 'function') {
         try {
           const t = now();
@@ -747,6 +760,8 @@ class SkillFederation {
       if (registered) {
         cand.state = 'active';
         this.totals.activations += 1;
+        // W7-0：激活 = 账本突变（同律节流落盘旁路）
+        noteSkillFedMutation();
         return { ok: true, state: 'active', localHits: cand.localHits, activated: true, registered: true };
       }
       return {
@@ -784,17 +799,326 @@ class SkillFederation {
     };
   }
 
-  /** 测试缝：账本归零（端口一并摘除 —— configure 重接；生产代码无理由调用） */
+  /** 测试缝：账本归零（端口一并摘除 —— configure 重接；生产代码无理由调用）。
+   *  W7-0：持久化武装一并解除（federation resetFederationRuntime 同律 —— 复位后
+   *  回纯内存缺省，零磁盘行为；下次 arm 重武装）。 */
   reset(): void {
     this.port = null;
     this.candidates.clear();
     this.totals = { localHits: 0, activations: 0, thompsonAttempts: 0 };
     this.lastReceivedAt = 0;
+    disarmSkillFedPersistence();
+  }
+
+  // ── W7-0（W6-4 接线收尾）：持久化面 —— 序列化 / 防御恢复（绝不抛） ──
+
+  /**
+   * W7-0：账本序列化（落盘形态；指纹字典序 ⇒ 同账本态同字节）。时钟可注入
+   * （savedAt 的确定性测试缝）；候选快照与 candidatesSnapshot 同源（防御副本）。
+   */
+  serialize(now?: () => number): string {
+    let savedAt = Date.now();
+    if (typeof now === 'function') {
+      try {
+        const t = now();
+        if (Number.isFinite(t)) savedAt = t;
+      } catch { /* 时钟故障保持 Date.now */ }
+    }
+    const doc: SkillFedStoreDoc = {
+      v: SKILL_FED_STORE_VERSION,
+      savedAt,
+      candidates: this.candidatesSnapshot(),
+      totals: { ...this.totals },
+      lastReceivedAt: this.lastReceivedAt,
+    };
+    return JSON.stringify(doc);
+  }
+
+  /**
+   * W7-0：防御恢复（垃圾归先验、绝不抛）—— 档**整体替换**账本候选与计数
+   * （restore 是权威语义；端口接线不落盘不复原 —— wiring 是运行时面）。
+   * 档级垃圾（非对象/版本错配/candidates 非数组）⇒ 整档拒绝（restored:0 +
+   * note，账本不动）；条目级垃圾（无指纹）⇒ skipped++；字段级垃圾归先验
+   * （state 垃圾 ⇒ dormant；数值垃圾 ⇒ 0/0.5/1 的保守缺省）。恢复幂等。
+   */
+  restoreLedger(payload: unknown): SkillFedRestoreReport {
+    try {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return { restored: 0, skipped: 0, note: '技能账档非对象：整档拒绝（内存账不动）' };
+      }
+      const doc = payload as Partial<SkillFedStoreDoc>;
+      if (doc.v !== SKILL_FED_STORE_VERSION) {
+        return { restored: 0, skipped: 0, note: `技能账档版本不符（期望 v=${SKILL_FED_STORE_VERSION}）：整档拒绝` };
+      }
+      if (!Array.isArray(doc.candidates)) {
+        return { restored: 0, skipped: 0, note: '技能账档 candidates 非数组：整档拒绝' };
+      }
+      const next = new Map<string, FederatedSkillCandidate>();
+      let skipped = 0;
+      for (const raw of doc.candidates) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { skipped++; continue; }
+        const e = raw as Partial<FederatedSkillCandidate>;
+        if (typeof e.fingerprint !== 'string' || e.fingerprint === '') { skipped++; continue; } // 无主条目不立账
+        const slotStats: Record<string, SkillSlotStat> = {};
+        if (e.slotStats && typeof e.slotStats === 'object' && !Array.isArray(e.slotStats)) {
+          for (const key of Object.keys(e.slotStats)) {
+            const st = (e.slotStats as Record<string, unknown>)[key] as Partial<SkillSlotStat> | null;
+            if (!st || typeof st !== 'object') continue; // 坏槽缺席（聚合/检疫同律）
+            // 字段级垃圾归 0（保守缺省 —— 中位数 0 的分布摘要不可执行件）
+            slotStats[key] = {
+              median: typeof st.median === 'number' && Number.isFinite(st.median) ? st.median : 0,
+              iqr: typeof st.iqr === 'number' && Number.isFinite(st.iqr) && st.iqr >= 0 ? st.iqr : 0,
+            };
+          }
+        }
+        next.set(e.fingerprint, {
+          fingerprint: e.fingerprint,
+          slotStats,
+          reliability: numOr(e.reliability, 0.5, 0, 1),       // 垃圾 ⇒ 0.5 先验
+          useCount: Math.max(1, sanitizeCount(e.useCount) || 1),
+          aggregatedFrom: sanitizeCount(e.aggregatedFrom),    // 垃圾 ⇒ 0（消费方 k≥3 门自会复审）
+          receivedAt: typeof e.receivedAt === 'number' && Number.isFinite(e.receivedAt) ? e.receivedAt : 0,
+          state: e.state === 'active' ? 'active' : 'dormant',  // 垃圾 ⇒ dormant（注入三律的安全方向）
+          localHits: sanitizeCount(e.localHits),
+        });
+      }
+      this.candidates.clear();
+      for (const [k, v] of next) this.candidates.set(k, v);
+      const t = (doc.totals ?? {}) as Partial<SkillFedTotals>;
+      this.totals = {
+        localHits: sanitizeCount(t.localHits),
+        activations: sanitizeCount(t.activations),
+        thompsonAttempts: sanitizeCount(t.thompsonAttempts),
+      };
+      this.lastReceivedAt = typeof doc.lastReceivedAt === 'number' && Number.isFinite(doc.lastReceivedAt)
+        ? doc.lastReceivedAt : 0;
+      resetSkillFedMutationClock(); // 恢复即权威：突变计数与节流钟一并归零
+      return { restored: next.size, skipped };
+    } catch {
+      return { restored: 0, skipped: 0, note: '恢复过程异常：整档拒绝（防御式兜底）' };
+    }
   }
 }
 
-/** W4-2：技能联邦接收端单例（账本纯内存不落盘 —— federation 信任账同律） */
+/** W4-2：技能联邦接收端单例（W7-0 前账本纯内存不落盘 —— 现可选持久化，缺省仍未武装） */
 export const skillFederation = new SkillFederation();
+
+// ─── W7-0（W6-4 接线收尾）：联邦技能账持久化 —— 信任账（federation 信任账）刚例的移植 ───
+//
+// 纪律（federation/index.ts W6-4 持久化缝包逐字同律）：
+//   · 原子写 —— tmp + fsync + rename：要么完整旧档要么完整新档，绝无半档；
+//     写失败 = 诚实 ok:false（账本继续在内存执法 —— 持久化是旁路义务）；
+//   · 防御恢复 —— 垃圾归先验：条目级跳过、字段级归 0/0.5/1、档级整档拒绝；
+//     state 垃圾 ⇒ dormant（dormant 安全律的恢复向：宁可重新攒两次本地命中）；
+//   · 节流 —— 突变计数制（每 N 次账本突变一次落盘）：无时钟依赖、离线可测；
+//   · 缺省未武装 —— arm 之前一切公开面零磁盘行为（与旧行为逐字节一致，
+//     resetSkillFederation 解除武装 = 测试隔离缝）。
+
+/** W7-0：技能账档 schema 版本（版本错配 ⇒ 整档拒绝恢复） */
+export const SKILL_FED_STORE_VERSION = 1;
+
+/** W7-0：突变计数节流缺省：每 8 次账本突变落盘一次（信任账 DEFAULT_TRUST_FLUSH_EVERY 同值） */
+export const DEFAULT_SKILL_FED_FLUSH_EVERY = 8;
+
+/** W7-0：技能账存储端口（注入面 —— 离线可测；生产用文件原子写实现） */
+export interface SkillFedStore {
+  /** 读持久化档原文（缺席/不可读 ⇒ null）；绝不抛 */
+  load(): string | null;
+  /** 原子落盘（tmp + fsync + rename）；返回 ok/error，绝不抛 */
+  save(text: string): { ok: boolean; error?: string };
+}
+
+/** W7-0：技能账档形态（serialize 的输出 / restoreLedger 的输入域） */
+export interface SkillFedStoreDoc {
+  v: typeof SKILL_FED_STORE_VERSION;
+  savedAt: number;
+  /** 候选账（指纹字典序 —— candidatesSnapshot 的输出序 ⇒ 落盘字节确定） */
+  candidates: FederatedSkillCandidate[];
+  totals: SkillFedTotals;
+  lastReceivedAt: number;
+}
+
+/** W7-0：账本计数的三元组形状（类内 totals 的序列化方言） */
+interface SkillFedTotals {
+  localHits: number;
+  activations: number;
+  thompsonAttempts: number;
+}
+
+/** W7-0：恢复报告（诚实面：恢复几条、跳几条、为什么） */
+export interface SkillFedRestoreReport {
+  restored: number;
+  skipped: number;
+  note?: string;
+}
+
+/** W7-0：单计数字段消毒（信任账 sanitizeTrustCount 同律）：有限非负 ⇒ 取整封顶；其余 ⇒ 0 */
+function sanitizeCount(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return 0;
+  return Math.min(Math.floor(v), Number.MAX_SAFE_INTEGER);
+}
+
+/** 已武装的存储端口（armSkillFederationPersistence 注入；null = 纯内存） */
+let skillFedStore: SkillFedStore | null = null;
+/** 节流阈值：每 N 次账本突变触发一次落盘 */
+let skillFedFlushEvery = DEFAULT_SKILL_FED_FLUSH_EVERY;
+/** 自上次成功落盘以来的突变计数（节流钟） */
+let skillFedMutations = 0;
+
+/** W7-0：突变计数推进 + 节流落盘（receive/noteLocalHit 的旁路尾钩，绝不抛） */
+function noteSkillFedMutation(): void {
+  try {
+    skillFedMutations++;
+    if (skillFedStore && skillFedMutations >= skillFedFlushEvery) flushSkillFederationLedger();
+  } catch {
+    /* 绝不抛 */
+  }
+}
+
+/** W7-0：突变计数归零（恢复/冲刷后的节流钟重置） */
+function resetSkillFedMutationClock(): void {
+  skillFedMutations = 0;
+}
+
+/** W7-0：解除武装（reset 的摘线面 + 测试隔离缝 —— 端口摘除、阈值回缺省、计数归零） */
+function disarmSkillFedPersistence(): void {
+  skillFedStore = null;
+  skillFedFlushEvery = DEFAULT_SKILL_FED_FLUSH_EVERY;
+  skillFedMutations = 0;
+}
+
+/** W7-0：文件存储实现（原子写：tmp + fsync + rename —— federation 信任账同律，绝不抛） */
+export function createSkillFedFileStore(filePath: string): SkillFedStore {
+  return {
+    load(): string | null {
+      try {
+        if (!filePath || !existsSync(filePath)) return null;
+        const text = readFileSync(filePath, 'utf8');
+        return typeof text === 'string' && text.trim() !== '' ? text : null;
+      } catch {
+        return null; // 读故障（含 ENOENT 竞态）= 无持久化账（诚实方向）
+      }
+    },
+    save(text: string): { ok: boolean; error?: string } {
+      if (!filePath) return { ok: false, error: 'skill-fed store path is empty' };
+      const tmp = filePath + '.tmp';
+      try {
+        mkdirSync(pathDirname(filePath), { recursive: true });
+        // fsync 落盘后再换名：rename 可先于数据块持久化 —— 崩溃后可能读到空/截断档
+        const fd = openSync(tmp, 'w');
+        try {
+          writeSync(fd, Buffer.from(text, 'utf8'));
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(tmp, filePath); // 原子换名：要么完整旧档要么完整新档
+        return { ok: true };
+      } catch (e: unknown) {
+        try { unlinkSync(tmp); } catch { /* tmp 可能未创建 */ }
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  };
+}
+
+/** W7-0：武装参数（节流阈值可注入 —— 离线确定性测试的完整缝） */
+export interface ArmSkillFedPersistenceOptions {
+  /** 突变计数节流阈值（正有限整数；非法回落缺省 8） */
+  flushEvery?: number;
+}
+
+/**
+ * W7-0：武装技能账持久化（幂等：重复武装以后一次为准）。store 结构非法 ⇒
+ * false（诚实拒绝，保持纯内存）。武装后账本突变每 flushEvery 次触发一次原子
+ * 落盘；flushSkillFederationLedger 随时可强制冲刷。绝不抛。
+ */
+export function armSkillFederationPersistence(
+  store: SkillFedStore | null | undefined,
+  opts?: ArmSkillFedPersistenceOptions,
+): boolean {
+  try {
+    if (!store || typeof store.load !== 'function' || typeof store.save !== 'function') return false;
+    skillFedStore = store;
+    const raw = opts?.flushEvery;
+    skillFedFlushEvery = typeof raw === 'number' && Number.isFinite(raw) && raw >= 1
+      ? Math.floor(raw)
+      : DEFAULT_SKILL_FED_FLUSH_EVERY;
+    skillFedMutations = 0;
+    return true;
+  } catch {
+    return false; // 防御式兜底：武装失败保持纯内存
+  }
+}
+
+/** W7-0：立即冲刷报告（flushSkillFederationLedger 的返回面） */
+export interface SkillFedFlushReport {
+  /** true = 已落盘 或 无需落盘（未武装/账空幂等跳过） */
+  ok: boolean;
+  /** 本次实际写入的候选条数 */
+  written: number;
+  error?: string;
+}
+
+/**
+ * W7-0：立即落盘（强制冲刷，绝不抛、幂等）。未武装 ⇒ ok:true + written:0
+ * （纯内存是合法配置态，不是故障）。写失败 ⇒ ok:false + error（突变计数保留
+ * ⇒ 下次突变即重试；内存账不受影响 —— 持久化失败绝不反噬联邦执法）。
+ */
+export function flushSkillFederationLedger(): SkillFedFlushReport {
+  try {
+    if (!skillFedStore) return { ok: true, written: 0 };
+    const text = skillFederation.serialize();
+    const res = skillFedStore.save(text);
+    if (res.ok) {
+      skillFedMutations = 0;
+      let written = 0;
+      try { written = (JSON.parse(text) as SkillFedStoreDoc).candidates.length; } catch { written = 0; }
+      return { ok: true, written };
+    }
+    return { ok: false, written: 0, error: res.error ?? 'save failed' };
+  } catch (e: unknown) {
+    return { ok: false, written: 0, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * W7-0：从存储端口读档并恢复（生产接线的一步调用：启动时 arm 前先 load）。
+ * 档缺席/不可读/坏 JSON ⇒ restored:0 + note（冷启动空账 —— 诚实方向，绝不抛）。
+ */
+export function loadSkillFederationLedger(store: SkillFedStore | null | undefined): SkillFedRestoreReport {
+  try {
+    if (!store || typeof store.load !== 'function') {
+      return { restored: 0, skipped: 0, note: '存储端口缺席：无持久化账可恢复' };
+    }
+    const text = store.load();
+    if (text === null || text === '') {
+      return { restored: 0, skipped: 0, note: '无持久化档：冷启动空账' };
+    }
+    try {
+      return skillFederation.restoreLedger(JSON.parse(text));
+    } catch {
+      return { restored: 0, skipped: 0, note: '技能账档坏 JSON：整档拒绝（冷启动空账）' };
+    }
+  } catch {
+    return { restored: 0, skipped: 0, note: '读档异常：整档拒绝（防御式兜底）' };
+  }
+}
+
+/** W7-0：持久化簿记状态（审计面：armed/阈值/未冲刷突变/候选数，防御副本） */
+export function skillFederationPersistenceStatus(): {
+  armed: boolean;
+  flushEvery: number;
+  pendingMutations: number;
+  candidates: number;
+} {
+  return {
+    armed: skillFedStore !== null,
+    flushEvery: skillFedFlushEvery,
+    pendingMutations: skillFedMutations,
+    candidates: skillFederation.ledgerStats().candidates,
+  };
+}
 
 // ─── swarm 接线（packet v2 的技能联邦段 + 晶体层联邦技能账） ───
 

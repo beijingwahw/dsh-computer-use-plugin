@@ -83,6 +83,8 @@ export function regularizedBeta(x, a, b) {
     return 1 - bt * betacf(1 - x, b, a) / b;
 }
 /** 连分式（NR 6.4：迭代至 |Δ| < 3e-12，上限 200 轮） */
+/** W6-1（风格债）：连分式迭代上限 —— 原裸字面量 200 提取为具名常量，数值逐位不变 */
+const BETACF_MAX_ITERATIONS = 200;
 function betacf(x, a, b) {
     const FPMIN = 1e-300;
     const qab = a + b, qap = a + 1, qam = a - 1;
@@ -91,7 +93,7 @@ function betacf(x, a, b) {
         d = FPMIN;
     d = 1 / d;
     let h = d;
-    for (let m = 1; m <= 200; m++) {
+    for (let m = 1; m <= BETACF_MAX_ITERATIONS; m++) {
         const m2 = 2 * m;
         let aa = (m * (b - m) * x) / ((qam + m2) * (a + m2));
         d = 1 + aa * d;

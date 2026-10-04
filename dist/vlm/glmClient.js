@@ -1,4 +1,5 @@
 // src/vlm/glmClient.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：GLM 主脑客户端 —— 直连路径 + providers 委托 + 故障切换池 + 级联咨询围绕单一 GlmClient 单例态（计费/回退/委托同账本），核心类约半文件，其余分区均不足独立成篇。
 // 纪元 Ω（Ω-1 云脑皮层）：智谱 GLM-5.3-Flash 视觉大模型客户端。
 // 纯视觉架构的「云脑」外接：本地反射弧（OCR/模糊/探针）处理毫秒级确定性，
 // GLM 视觉模型补上开放语义（整屏理解 / 复杂推理 / 未见过的界面形态）。
@@ -33,7 +34,11 @@ import { createAnthropicProvider } from './providers/anthropic.js';
 import { createGeminiProvider } from './providers/gemini.js';
 import { createOpenAiProvider } from './providers/openai.js';
 import { detectPresetFromBaseUrl, detectPresetFromEnv, getPreset } from './providers/registry.js';
-import { sanitizeError } from './providers/types.js';
+import { jitterDelayMs, sanitizeError } from './providers/types.js';
+// W6R-A4（工具去重）：传输小件 / JSON 剥壳律 / 可重试状态常量收拢 internalUtils
+// 单一实现 —— 本模块不再自持拷贝（jitter 退避取 providers/types 的防御版导出，
+// 对正常 attempt 域行为与原实现逐位一致）。
+import { extractBalancedJson, HTTP_STATUS_SERVER_ERROR_FLOOR, HTTP_STATUS_TOO_MANY_REQUESTS, isAbortError, safeBodyText, sleep, timeoutSignal, } from './internalUtils.js';
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
 const DEFAULT_MODEL = 'glm-5.3-flash';
 const METER_KIND = 'glm.chat';
@@ -41,88 +46,22 @@ const METER_KIND = 'glm.chat';
 function envApiKey() {
     return (process.env.GLM_API_KEY || process.env.ZHIPUAI_API_KEY || process.env.ZAI_API_KEY || '').trim();
 }
-/** 全抖动指数退避延迟 —— attempt 从 0 起：delay ∈ [0, min(500·2^attempt, 8000)) */
-function jitterDelayMs(attempt) {
-    const cap = Math.min(500 * 2 ** attempt, 8000);
-    return Math.floor(Math.random() * cap);
-}
-/** 构造超时信号 —— AbortSignal.timeout 主路径 + 旧 Node AbortController 兜底
- *  （与 physicalExecution/httpClient.ts 同款：timer unref 不阻进程退出） */
-function timeoutSignal(timeoutMs) {
-    try {
-        return AbortSignal.timeout(timeoutMs);
-    }
-    catch {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), timeoutMs);
-        t.unref?.();
-        return ctrl.signal;
-    }
-}
-/** 判超时异常 —— AbortSignal.timeout 抛 TimeoutError，手动 abort 抛 AbortError */
-function isAbortError(e) {
-    const name = e?.name;
-    return name === 'TimeoutError' || name === 'AbortError';
-}
+// W6R-A4（工具去重）：jitterDelayMs / timeoutSignal / isAbortError / stripFences /
+// scanBalanced / safeBodyText / sleep / 可重试状态常量的原本地拷贝已删除 ——
+// 单一实现见 internalUtils（传输小件与剥壳律）与 providers/types.jitterDelayMs
+// （防御版导出）。全抖动退避语义不变：attempt 从 0 起 delay ∈ [0, min(500·2^attempt, 8000))。
 /** 错误信息提取（网络异常的 code/message 归并，供 error 字符串） */
 function errText(e) {
     const anyE = e;
     const code = anyE?.cause?.code ?? anyE?.code ?? '';
     return `${code} ${anyE?.message ?? String(e)}`.trim();
 }
-/** 剥 Markdown 围栏 —— ```json\n{...}\n``` → {...（仅当整体被围栏包裹时） */
-function stripFences(s) {
-    const m = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```$/.exec(s.trim());
-    return m ? m[1].trim() : s.trim();
-}
-/** 从文本中取首个平衡的 {...} / [...] 片段 —— 字符串感知（跳过引号内的括号
- *  与转义），返回切出的原文片段；无平衡片段返回 null。 */
-function scanBalanced(s) {
-    const start = s.search(/[{[]/);
-    if (start < 0)
-        return null;
-    const open = s[start];
-    const close = open === '{' ? '}' : ']';
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < s.length; i++) {
-        const ch = s[i];
-        if (inStr) {
-            if (esc)
-                esc = false;
-            else if (ch === '\\')
-                esc = true;
-            else if (ch === '"')
-                inStr = false;
-            continue;
-        }
-        if (ch === '"') {
-            inStr = true;
-            continue;
-        }
-        if (ch === open)
-            depth++;
-        else if (ch === close) {
-            depth--;
-            if (depth === 0)
-                return s.slice(start, i + 1);
-        }
-    }
-    return null;
-}
 /** 健壮 JSON 提取：剥 ```json 围栏 → 取首个平衡 {...}/[...] → parse。
- *  成功返回解析值（可为 null/false 等合法 JSON 值）；失败返回 undefined。 */
+ *  成功返回解析值（可为 null/false 等合法 JSON 值）；失败/脏值返回 undefined。
+ *  W6R-A4：薄委托 internalUtils.extractBalancedJson（与 providers/
+ *  extractProviderJson 同源同律 —— 脏值安静返回 undefined 的不抛铁律统一）。 */
 export function extractGlmJson(text) {
-    const candidate = scanBalanced(stripFences(text));
-    if (candidate === null)
-        return undefined;
-    try {
-        return JSON.parse(candidate);
-    }
-    catch {
-        return undefined;
-    }
+    return extractBalancedJson(text);
 }
 /** 响应 content 提取 —— choices[0].message.content；数组方言（parts）防御兼容 */
 function extractContent(payload) {
@@ -148,15 +87,6 @@ function mapUsage(u) {
         ...(has(pt) ? { promptTokens: pt } : {}),
         ...(has(ct) ? { completionTokens: ct } : {}),
     };
-}
-/** 安全读响应正文 —— body 读失败（连接已断）返回空串，绝不抛 */
-async function safeBodyText(resp) {
-    try {
-        return await resp.text();
-    }
-    catch {
-        return '';
-    }
 }
 // ─── 纪元 Ψ：委托路径（非 glm 平台经 providers 三厂适配器铸造） ───
 /** 平台 id 归一：trim + 小写；非字符串/脏值安静归 '' */
@@ -475,7 +405,7 @@ export class GlmClient {
         }
         const doFetch = this.fetchImpl ?? (typeof fetch === 'function' ? fetch : undefined);
         if (!doFetch) {
-            return fail({ ok: false, text: '', error: 'fetch is not available (Node >= 18 required)' });
+            return fail({ ok: false, text: '', error: 'fetch is not available (Node >= 18 required)' }); // doctor-exempt: 文案字符串，非阈值比较（W6-2）
         }
         // OpenAI 兼容多模态消息：system（可选）在前，user = 文本 + 图片序列
         const messages = [];
@@ -550,7 +480,8 @@ export class GlmClient {
                 return finish(r);
             }
             // 非 2xx：429/5xx 可重试，其余 4xx 立即失败（请求本身有病，重试无义）
-            const retryable = resp.status === 429 || resp.status >= 500;
+            // W6-2：具名常量单一立法（W6R-A4 起收拢 internalUtils，与 fetchWithRetry 同源），数值逐位不变
+            const retryable = resp.status === HTTP_STATUS_TOO_MANY_REQUESTS || resp.status >= HTTP_STATUS_SERVER_ERROR_FLOOR;
             if (retryable && attempt < maxRetries) {
                 await safeBodyText(resp); // 排干 body 再退避（连接复用礼貌）
                 await sleep(jitterDelayMs(attempt));
@@ -614,10 +545,6 @@ export class GlmClient {
         }
         return { ok: true, value: value, raw: res.text };
     }
-}
-/** sleep Promise —— 退避专用 */
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
 }
 // ─── 模块级单例 ───
 let singleton = null;

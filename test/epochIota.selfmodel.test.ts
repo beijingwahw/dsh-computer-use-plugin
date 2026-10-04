@@ -7,8 +7,9 @@
 //   Ι-2 衰减（懒结算）：8 成 2 败后推进 3 个半衰期 ⇒ 旧证据权重 2⁻³=1/8；
 //       再记 1 败全重入场 ⇒ mean 显著拉低；衰减后 n<minEvidence ⇒ 建议诚实退场
 //   Ι-3 场景桶分格：同 actionKind 不同 sceneBucket ⇒ 独立格子；dhash 64 位位串
-//       量化 16bit 桶（4×4 块均值阈值位图）；指纹缺席/不可量化 ⇒ 诚实降级
-//       actionKind 单轴（同一格，绝不伪造场景）
+//       量化 24bit 两段式桶（W8-B5 精化：16bit 粗段 4×4 块均值阈值位图 + 8bit
+//       细段行密度位图，桶串 6 位十六进制、前 4 位 = 旧 16bit 桶）；指纹缺席/
+//       不可量化/旧 4 位粗桶串 ⇒ 诚实降级 actionKind 单轴（同一格，绝不伪造场景）
 //   Ι-4 闸门接线：destructive 动作 + selfModel 给出低经验置信 ⇒ 闸门用经验置信
 //       触发 ask_human（escalateReason='epistemic-gate'，红律按经验置信执法）；
 //       selfModel 缺席 vs 返回 null ⇒ 两跑逐字段一致（纪元 Η 零回归红律）
@@ -57,7 +58,7 @@ function destructiveClick(label: string, utility: number): Act {
   };
 }
 
-/** 固定世界快照（dhash = 全 1 的 64 位位串 —— 量化桶恒 'ffff'） */
+/** 固定世界快照（dhash = 全 1 的 64 位位串 —— W8-B5 两段式量化桶恒 'ffffff'：粗段 ffff + 细段 8 行行密度全 1 ⇒ ff） */
 const SNAP: WorldSnapshot = {
   takenAt: 1_000, width: 1920, height: 1080, dhash: '1'.repeat(64),
   elements: [], textDigest: '', popups: [], focusedRegion: null,
@@ -153,20 +154,25 @@ test('Ι-3: 同 actionKind 不同 sceneBucket ⇒ 独立格子；指纹缺席 �
   const sm = new SelfModel();
   sm.configure({ minEvidence: 5, halfLifeH: 168, now: () => clock });
 
-  // 量化器原子面：64 位位串 → 16bit 桶（4×4 块均值阈值位图，worldModel 同门方言）
-  const fpA = '1'.repeat(64);   // 全 1 ⇒ 每块 4/4 ≥ 2 ⇒ 'ffff'
-  const fpB = '0'.repeat(64);   // 全 0 ⇒ 每块 0/4 ⇒ '0000'
-  assert.equal(sceneBucketFromFingerprint(fpA), 'ffff');
-  assert.equal(sceneBucketFromFingerprint(fpB), '0000');
-  assert.equal(sceneBucketFromFingerprint(fpA.slice(0, 63) + '0'), 'ffff', '块均值阈值吸收单 bit 微抖');
-  assert.equal(sceneBucketFromFingerprint('f3a0'), 'f3a0', '已是桶串 ⇒ 幂等直通');
+  // 量化器原子面：64 位位串 → 24bit 两段式桶（W8-B5：粗段 4×4 块位图 + 细段行密度
+  // 位图；桶串 = 粗段 4 位十六进制（= 旧 16bit 桶）+ 细段 2 位 —— 前缀保持旧方言）
+  const fpA = '1'.repeat(64);   // 全 1 ⇒ 每块 4/4 ≥ 2 且每行 8/8 ≥ 4 ⇒ 'ffffff'
+  const fpB = '0'.repeat(64);   // 全 0 ⇒ 每块 0/4 且每行 0/8 ⇒ '000000'
+  assert.equal(sceneBucketFromFingerprint(fpA), 'ffffff');
+  assert.equal(sceneBucketFromFingerprint(fpB), '000000');
+  assert.equal(sceneBucketFromFingerprint(fpA.slice(0, 63) + '0'), 'ffffff', '块均值+行多数阈值吸收单 bit 微抖');
+  // 断言形态随 W8-B5 新粒度同步：幂等直通面收窄为 6 位十六进制新桶串（旧 'f3a0'
+  // 4 位粗桶不再直通 —— 细段行密度在旧量化时已丢、粗→细一对多不可恢复，直通
+  // 等于伪造细段 ⇒ null 诚实降级；旧档桶键的迁移语义在 restore 执法，见 w8.memory）
+  assert.equal(sceneBucketFromFingerprint('f3a0c9'), 'f3a0c9', '已是新桶串（6 位十六进制）⇒ 幂等直通');
+  assert.equal(sceneBucketFromFingerprint('f3a0'), null, '旧 16bit 粗桶串 ⇒ null（细段不可恢复，不伪造）');
   assert.equal(sceneBucketFromFingerprint('#3 dHash=10101010 popup=false'), null, '摘要文本不可量化');
   assert.equal(sceneBucketFromFingerprint(undefined), null, '字段缺席 ⇒ null');
   assert.equal(sceneBucketFromFingerprint(42), null, '非串 ⇒ null');
 
-  // 分格：同 actionKind 不同 sceneBucket ⇒ 独立格子
-  const cellA = { actionKind: 'click_mouse', sceneBucket: 'ffff' };
-  const cellB = { actionKind: 'click_mouse', sceneBucket: '0000' };
+  // 分格：同 actionKind 不同 sceneBucket ⇒ 独立格子（桶串按新粒度 6 位十六进制同步）
+  const cellA = { actionKind: 'click_mouse', sceneBucket: 'ffffff' };
+  const cellB = { actionKind: 'click_mouse', sceneBucket: '000000' };
   for (let i = 0; i < 10; i++) sm.recordOutcome(cellA, true, clock);
   sm.recordOutcome(cellB, false, clock);
   const cA = sm.competence(cellA);
@@ -192,11 +198,12 @@ test('Ι-3: 同 actionKind 不同 sceneBucket ⇒ 独立格子；指纹缺席 �
 test('Ι-4: destructive + selfModel 低经验置信 ⇒ 闸门用经验置信触发 ask_human（epistemic-gate）；场景指纹透传', async () => {
   const spec: GoalSpec = { goal: '清理磁盘', successCriteria: ['磁盘已清理'] };
 
-  // 真实 SelfModel（非桩）：click × 场景桶 ffff 记 12 败 ⇒ Beta(1,13) mean≈0.071
+  // 真实 SelfModel（非桩）：click × 场景桶 ffffff 记 12 败 ⇒ Beta(1,13) mean≈0.071
+  // （桶串随 W8-B5 新粒度同步：SNAP.dhash 全 1 位串量化 = 'ffffff'，数学逐位不变）
   const real = new SelfModel();
   real.configure({ minEvidence: 8, halfLifeH: 168, now: () => 1_000 });
   for (let i = 0; i < 12; i++) {
-    real.recordOutcome({ actionKind: 'click', sceneBucket: 'ffff' }, false, 1_000);
+    real.recordOutcome({ actionKind: 'click', sceneBucket: 'ffffff' }, false, 1_000);
   }
   // 包装桩：拦截入参取证（动作对象 + 快照 dhash 原文透传），裁决走真模型
   const seenFingerprints: unknown[] = [];
@@ -426,14 +433,14 @@ test('Ι-5: 坏 cell/坏时间戳/坏建议全吸收（永不抛）；topCells/b
 });
 
 test('Ι-5: get_metrics —— selfModel 新字段在场（top/bottom 各 3 条 + 总格子数 + 总证据量）且旧字段零变化', async () => {
-  // 单例自省面（生产同一枚）：注入钟 + 两格战绩（一擅一拙）
+  // 单例自省面（生产同一枚）：注入钟 + 两格战绩（一擅一拙；桶串随 W8-B5 新粒度同步）
   selfModel.reset();
   selfModel.configure({ enabled: true, minEvidence: 1, halfLifeH: 168, now: () => 1_000 });
   for (let i = 0; i < 6; i++) {
-    selfModel.recordOutcome({ actionKind: 'click_mouse', sceneBucket: 'ffff' }, true, 1_000);
+    selfModel.recordOutcome({ actionKind: 'click_mouse', sceneBucket: 'ffffff' }, true, 1_000);
   }
   for (let i = 0; i < 6; i++) {
-    selfModel.recordOutcome({ actionKind: 'press_hotkey', sceneBucket: '0000' }, false, 1_000);
+    selfModel.recordOutcome({ actionKind: 'press_hotkey', sceneBucket: '000000' }, false, 1_000);
   }
 
   // 宿主 defineTool 的运行时参数校验要求 args 为对象（类型面 0 参签名与运行时
@@ -455,7 +462,7 @@ test('Ι-5: get_metrics —— selfModel 新字段在场（top/bottom 各 3 条 
   assert.equal(j.selfModel.top.length, 2, 'top 条数 = min(3, 格子数)');
   assert.equal(j.selfModel.bottom.length, 2, 'bottom 条数 = min(3, 格子数)');
   assert.equal(j.selfModel.top[0].cell.actionKind, 'click_mouse');
-  assert.equal(j.selfModel.top[0].cell.sceneBucket, 'ffff');
+  assert.equal(j.selfModel.top[0].cell.sceneBucket, 'ffffff'); // W8-B5：桶串形态按新粒度（6 位十六进制）同步
   assert.ok(Math.abs(j.selfModel.top[0].mean - 7 / 8) < 1e-9, '6成0败 ⇒ (6+1)/(6+2)=0.875');
   assert.equal(j.selfModel.bottom[0].cell.actionKind, 'press_hotkey');
   assert.ok(Math.abs(j.selfModel.bottom[0].mean - 1 / 8) < 1e-9, '0成6败 ⇒ 1/8');

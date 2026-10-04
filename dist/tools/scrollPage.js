@@ -6,12 +6,64 @@
 // Y-3 闭环滚动（Epoch Y）：滚动从「发射后不管」升维为「发射后测量」——
 // 前后帧行亮度互相关（motionEstimator）给出实际内容位移（亚行精度）、
 // 方向一致性、滚动边界判决。锚点直接回答「滚了吗 / 滚对了没 / 到底了没」。
+//
+// W7-0（W6-5 接线收尾）：水平滚动的列亮度证据消费 —— judgeScroll 的第三参
+// （colEst）在 W6-5 已就位但生产面从未喂食。backend/adapter 无 frameColmeans
+// 端点（实读 contracts.ts 确认），故在工具侧以现有帧数据自算：frameStats 的
+// 垂直条带（归一化 region）均值序列即列亮度 —— 不改 adapter/，零协议增量。
+// 列证据缺席（frameStats 故障/脏形状/纵向滚动）⇒ judgeScroll 回落旧行为，
+// 判决逐字节不变（降级红律）。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import * as backend from '../physicalBackend.js';
 import { sleep } from '../actionVerifier.js';
-import { estimateRowShift, judgeScroll } from '../motionEstimator.js';
+import { estimateRowShift, estimateColShift, judgeScroll } from '../motionEstimator.js';
 import { toolOk, toolErr } from '../toolResult.js';
+/** W7-0：列亮度采样条带数（frameRowmeans 的 grid=64 同律的横向对偶；32 条带
+ *  对 1080p 全屏 ≈ 每条带 60px 列宽 —— estimateColShift 的 ±16 缺省搜索窗内
+ *  分辨率与噪声的平衡） */
+export const COLUMN_STRIP_COUNT = 32;
+/**
+ * W7-0：帧 → 列亮度序列（backend 无 frameColmeans 的就地补全 —— frameStats
+ * 垂直条带自算，导出供测试离线断言）。任一条带均值缺席/脏形状/端口抛错 ⇒
+ * null（列证据诚实缺席，消费方按降级路径处理，绝不抛）。
+ */
+export async function frameColLuminance(frameId, strips = COLUMN_STRIP_COUNT) {
+    try {
+        if (typeof frameId !== 'number' || !Number.isFinite(frameId))
+            return null;
+        const n = Math.floor(strips);
+        if (!(n >= 4))
+            return null; // 过稀条带无相位分辨力 —— 不产弱证据
+        const regions = Array.from({ length: n }, (_, i) => ({
+            x: i / n, y: 0, width: 1 / n, height: 1, // 归一化垂直条带（intent.ts focusRegionNorm 同坐标系）
+        }));
+        const stats = await backend.frameStats(frameId, regions);
+        if (!Array.isArray(stats) || stats.length !== n)
+            return null;
+        const cols = [];
+        for (const s of stats) {
+            const m = s?.mean;
+            if (typeof m !== 'number' || !Number.isFinite(m))
+                return null; // 单条带脏 ⇒ 整序列缺席（不零填充伪造平线）
+            cols.push(m);
+        }
+        return cols;
+    }
+    catch {
+        return null; // 端口故障 = 无列证据（诚实降级）
+    }
+}
+/** W7-0：水平方向的列移证据（前后帧列亮度 → estimateColShift；缺席 ⇒ null） */
+async function columnShiftEvidence(beforeFrameId, afterFrameId) {
+    const [colsA, colsB] = await Promise.all([
+        frameColLuminance(beforeFrameId),
+        frameColLuminance(afterFrameId),
+    ]);
+    if (colsA === null || colsB === null)
+        return null;
+    return estimateColShift(colsA, colsB);
+}
 export function createScrollPageTool(config) {
     return defineTool({
         name: 'scroll_page',
@@ -65,7 +117,14 @@ export function createScrollPageTool(config) {
                     backend.frameRowmeans(after.frameId, 64),
                 ]);
                 const est = estimateRowShift(rowsA, rowsB);
-                const verdict = judgeScroll(est, dir);
+                // W7-0（W6-5 接线收尾）：水平方向才求列证据（纵向判决只认行证据 ——
+                // judgeScroll 立法；纵向路径零 frameStats 调用，成本与接前一致）。
+                // 列证据缺席（端口故障/脏形状）⇒ null ⇒ judgeScroll 走旧行为臂。
+                let colEst = null;
+                if (dir === 'left' || dir === 'right') {
+                    colEst = await columnShiftEvidence(before.frameId, after.frameId);
+                }
+                const verdict = judgeScroll(est, dir, colEst);
                 return JSON.stringify({
                     status: 'SUCCESS',
                     action: `Scrolled '${direction}' by ${amount} lines.`,
@@ -78,6 +137,9 @@ export function createScrollPageTool(config) {
                             effective: verdict.effective, // 内容真的动了吗
                             direction_consistent: verdict.directionConsistent, // 位移与请求方向一致吗
                             at_boundary: verdict.atBoundary, // 到达滚动边界了吗
+                            // W7-0：水平滚动的列证据读数（colEst 在场才有 —— 纵向/降级路径
+                            // 键缺席，消费方可按缺席判降级；纯增量字段）
+                            ...(colEst ? { content_shift_cols: colEst.shift, col_residual: colEst.residual } : {}),
                         },
                     },
                     next_step: verdict.atBoundary

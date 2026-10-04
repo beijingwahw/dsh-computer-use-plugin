@@ -28,26 +28,12 @@ const state = {
     starting: null, adapter: null, manager: null,
     health: null, screen: null, displays: null,
 };
-function unwrap(result, what) {
-    if (result.ok)
-        return result.value;
-    throw new Error(`[physicalBackend] ${what} failed: ${result.error.kind}: ${result.error.detail}`);
-}
-/** 端口占用探测：健康端点有响应即视为「已有服务存活」 */
-async function probeAlive(port) {
-    try {
-        const resp = await fetch(`http://127.0.0.1:${port}/v1/health`, {
-            signal: AbortSignal.timeout(800),
-        });
-        const alive = resp.ok;
-        // 取消响应体：未消费的 body 会占住连接池里挂起的 socket
-        resp.body?.cancel().catch(() => { });
-        return alive;
-    }
-    catch {
-        return false;
-    }
-}
+// W6-2（doctor smell.over-engineering 清偿）：私有生命周期小件（unwrap/probeAlive/versionLt）
+// 已分区提取至 physicalBackend.internal.ts；Surface 方言与 diff_view 帧环 →
+// physicalBackend.surface.ts。行为零变化；导入面不变 —— 再分发。
+import { unwrap, probeAlive, versionLt } from './physicalBackend.internal.js';
+import { hostSurface as hostSurfaceOf, resetDiffFrameRing } from './physicalBackend.surface.js';
+export { parseSurfaceId, hostSurface, androidSurface, noteFrameForDiff, lastTwoDiffFrames } from './physicalBackend.surface.js';
 async function startOnPort(port) {
     const manager = new PhysicalServiceManager({
         tcpPort: port,
@@ -85,17 +71,6 @@ async function startOnPort(port) {
         throw e;
     }
     return adapter;
-}
-/** 语义化版本比较（数字段逐段）：字符串序会把 '0.10.0' 判小于 '0.4.0'，必须按段数值比 */
-function versionLt(a, b) {
-    const pa = a.split('.').map(s => parseInt(s, 10) || 0);
-    const pb = b.split('.').map(s => parseInt(s, 10) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const d = (pa[i] ?? 0) - (pb[i] ?? 0);
-        if (d !== 0)
-            return d < 0;
-    }
-    return false;
 }
 /** 收养已存活服务：稳定密钥路径 ⇒ 同一 HMAC ⇒ 令牌互通 */
 async function adoptExisting(port) {
@@ -291,31 +266,6 @@ export async function getDisplays() {
     state.displays = r.displays;
     return state.displays;
 }
-/** surface id → 结构化（畸形 id throw —— 调用方契约错误的快速失败）。 */
-export function parseSurfaceId(spec) {
-    const m = /^(host|android):(.+)$/.exec(spec.trim());
-    if (!m) {
-        throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)} (expected 'host:<index>' or 'android:<serial>')`);
-    }
-    if (m[1] === 'host') {
-        if (!/^\d+$/.test(m[2])) {
-            throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)}: host index must be a non-negative integer`);
-        }
-        return { kind: 'host', index: parseInt(m[2], 10) };
-    }
-    if (!m[2]) {
-        throw new Error(`[physicalBackend] invalid surface id ${JSON.stringify(spec)}: android serial must be non-empty`);
-    }
-    return { kind: 'android', serial: m[2] };
-}
-/** 显示器索引 → 'host:<i>'（Σ-5 display 的泛化形态）。 */
-export function hostSurface(index) {
-    return `host:${index}`;
-}
-/** adb serial → 'android:<serial>'。 */
-export function androidSurface(serial) {
-    return `android:${serial}`;
-}
 /** adb 设备清单（真机/adb 缺席 ⇒ 空清单 + degraded + 真实原因 —— 诚实降级）。 */
 export async function listMobileDevices() {
     const a = await adapter();
@@ -325,7 +275,7 @@ export async function listMobileDevices() {
 export async function listSurfaces() {
     const [displays, inventory] = await Promise.all([getDisplays(), listMobileDevices()]);
     return {
-        host: displays.map((_, i) => hostSurface(i)),
+        host: displays.map((_, i) => hostSurfaceOf(i)),
         android: inventory.devices.map(d => d.surface_id),
         degraded: inventory.degraded,
         ...(inventory.reason ? { reason: inventory.reason } : {}),
@@ -361,22 +311,6 @@ export async function getUiTree(args) {
 export function healthSnapshot() {
     return state.health;
 }
-// ─── diff_view 帧登记：最近两张 keepFrame 截图的服务端帧 id ───
-const diffFrameRing = [];
-/** take_screenshot（keepFrame 捕获）登记帧 id —— diff_view 的默认对比对 */
-export function noteFrameForDiff(frameId) {
-    if (frameId == null)
-        return;
-    diffFrameRing.push(frameId);
-    while (diffFrameRing.length > 2)
-        diffFrameRing.shift();
-}
-/** 最近两张已登记帧（旧在前）；不足两张返回 null */
-export function lastTwoDiffFrames() {
-    if (diffFrameRing.length < 2)
-        return null;
-    return [diffFrameRing[diffFrameRing.length - 2], diffFrameRing[diffFrameRing.length - 1]];
-}
 /** 生命周期归零（插件卸载 / 测试） */
 export async function stopBackend() {
     state.starting = null;
@@ -384,7 +318,7 @@ export async function stopBackend() {
     state.health = null;
     state.screen = null;
     state.displays = null;
-    diffFrameRing.length = 0;
+    resetDiffFrameRing(); // W6-2：帧环随 surface 分区搬迁，归零语义逐字节不变
     if (state.manager) {
         const m = state.manager;
         state.manager = null;

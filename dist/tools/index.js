@@ -43,14 +43,24 @@ import { activeSteerSession } from '../autonomy/autoPilot.js';
  * 无在役会话（steer 未点亮 / 尚未跑环）⇒ 永不出题的空转面：maybeCheckAndAsk
  * 恒 null、answer 恒 no-pending（诚实缺席）。goal 出口仅在役时回真值（工具
  * 执行面不触达；空对象兜底防误用炸裂）。
+ * W7-0（W5-5 接线收尾）：转发面补齐 4 个可选方法（drainAmendments /
+ * holdBranchCard / branchCard / takeBranchBias —— steerTools 的 W5-5 扩展面）。
+ * 守卫式转发：无在役会话 / 会话未实现该可选面 / 任何故障 ⇒ 各自的缺席语义
+ * （空数组 / no-op / null / null —— runPilotLoop 消费方按零执行处理），
+ * 缺省跳过语义与接前逐字节一致。sessionSource 注入缝：缺省 activeSteerSession
+ *（生产血脉不变），测试可注入假源离线断言转发语义。
  */
-function w4ForwardingSteerSession() {
+// W8-B4（破环装配）：activeSteerSession 的持有面已收窄为结构端口（PilotSteerSession
+// —— autoPilot 对 tools 零 import）。会话真身由注册进闭环的工厂铸造（本桶装载
+// steerTools 即注册），运行时恒为完整 SteerSession —— 装配点收窄还原（结构镜像
+// 只减成员，真身满足全成员面）。
+export function w4ForwardingSteerSession(sessionSource = activeSteerSession) {
     return {
         get goal() {
-            return activeSteerSession()?.goal ?? {};
+            return sessionSource()?.goal ?? {};
         },
         maybeCheckAndAsk(stepIndex, entropy) {
-            const s = activeSteerSession();
+            const s = sessionSource();
             if (s === null)
                 return null;
             try {
@@ -61,7 +71,7 @@ function w4ForwardingSteerSession() {
             }
         },
         pending() {
-            const s = activeSteerSession();
+            const s = sessionSource();
             if (s === null)
                 return null;
             try {
@@ -72,7 +82,7 @@ function w4ForwardingSteerSession() {
             }
         },
         answer(raw) {
-            const s = activeSteerSession();
+            const s = sessionSource();
             if (s === null) {
                 return { status: 'no-pending', hint: '当前无在役 steer 会话（漂移检查未点亮或尚未跑环）' };
             }
@@ -84,11 +94,63 @@ function w4ForwardingSteerSession() {
             }
         },
         lastDrift() {
-            const s = activeSteerSession();
+            const s = sessionSource();
             if (s === null)
                 return null;
             try {
                 return s.lastDrift();
+            }
+            catch {
+                return null;
+            }
+        },
+        // ── W7-0（W5-5 接线收尾）：4 个可选面的守卫式转发 ──
+        /** 缝1（B 应答回灌账）：在役会话的修订判据一次性移交（缺席 ⇒ 空数组 = 回灌零执行） */
+        drainAmendments() {
+            const s = sessionSource();
+            if (s === null || typeof s.drainAmendments !== 'function')
+                return [];
+            try {
+                const out = s.drainAmendments();
+                return Array.isArray(out) ? out : [];
+            }
+            catch {
+                return []; // 会话故障 ⇒ 空账（绝不炸工具面）
+            }
+        },
+        /** 缝3（岔路卡持有面）：注入/清除会话持卡（缺席 ⇒ no-op） */
+        holdBranchCard(card) {
+            const s = sessionSource();
+            if (s === null || typeof s.holdBranchCard !== 'function')
+                return;
+            try {
+                s.holdBranchCard(card);
+            }
+            catch {
+                /* 持卡是旁路义务：故障吞掉 */
+            }
+        },
+        /** 缝3（持卡读回）：防御浅拷贝（缺席 ⇒ null） */
+        branchCard() {
+            const s = sessionSource();
+            if (s === null || typeof s.branchCard !== 'function')
+                return null;
+            try {
+                const c = s.branchCard();
+                return c !== null && typeof c === 'object' ? c : null;
+            }
+            catch {
+                return null;
+            }
+        },
+        /** 缝3（偏置步进面移交）：一次性取走重放预算执法权（缺席 ⇒ null = 无偏置原路） */
+        takeBranchBias() {
+            const s = sessionSource();
+            if (s === null || typeof s.takeBranchBias !== 'function')
+                return null;
+            try {
+                const b = s.takeBranchBias();
+                return b !== null && typeof b === 'object' ? b : null;
             }
             catch {
                 return null;

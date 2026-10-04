@@ -6,7 +6,12 @@
 //
 // 用法: node scripts/processScore.mjs <journal.jsonl> [--out <report.json>]
 //                                            [--threshold <0..1>] [--late-bias <0..1>]
+//                                            [--segments]
 // 输出: stdout 人类可读摘要;默认落盘 <journal.jsonl>.score.json(--out 覆盖)。
+//
+// W7-0(W6-5 接线收尾):--segments 旗标 —— 多任务分段口径(AGENT_BEGIN 边界
+// 切段 + 段间步数加权汇总,scoreJournalSegmentsText/renderSegmentedScore)。
+// 旗标缺席 ⇒ 单任务口径逐字节不变(缺省零回归)。
 //
 // 兼容性:核心是 .ts(Node 原生不认)。Node >= 22.18 内置类型剥离直接跑;
 // Node 22.6–22.17 需 --experimental-strip-types —— 本壳检测后以该旗标透明重启
@@ -40,21 +45,24 @@ const positional = [];
 let outPath;
 let threshold;
 let lateBias;
+// W7-0:--segments 分段模式开关(缺省 false = 单任务口径,行为与接前逐字节一致)
+let segments = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--out') outPath = argv[++i];
   else if (a === '--threshold') threshold = Number(argv[++i]);
   else if (a === '--late-bias') lateBias = Number(argv[++i]);
+  else if (a === '--segments') segments = true;
   else if (a === '--help' || a === '-h') {
     console.log('用法: node scripts/processScore.mjs <journal.jsonl> [--out <report.json>] ' +
-      '[--threshold <0..1>] [--late-bias <0..1>]');
+      '[--threshold <0..1>] [--late-bias <0..1>] [--segments]');
     process.exit(0);
   } else positional.push(a);
 }
 if (positional.length < 1) {
   // W3-8:缺文件参数 ⇒ 用法提示,退出 1(友好信息,不抛)
   console.error('用法: node scripts/processScore.mjs <journal.jsonl> [--out <report.json>] ' +
-    '[--threshold <0..1>] [--late-bias <0..1>]');
+    '[--threshold <0..1>] [--late-bias <0..1>] [--segments]');
   process.exit(1);
 }
 
@@ -69,15 +77,17 @@ try {
 }
 
 // W3-8:核心加载与评分(核心零依赖 ⇒ strip-types 下直接可载)
-const { scoreJournalText, renderProcessScore } = await import(
-  new URL('../src/processScore.ts', import.meta.url).href
-);
-const report = scoreJournalText(text, { lowStepThreshold: threshold, lateBias: lateBias });
+// W7-0:分段模式动态取 scoreJournalSegmentsText/renderSegmentedScore ——
+// 缺省臂仍只取 scoreJournalText/renderProcessScore(加载面不变,缺省零回归)。
+const core = await import(new URL('../src/processScore.ts', import.meta.url).href);
+const report = segments
+  ? core.scoreJournalSegmentsText(text, { lowStepThreshold: threshold, lateBias: lateBias })
+  : core.scoreJournalText(text, { lowStepThreshold: threshold, lateBias: lateBias });
 
-console.log(renderProcessScore(report));
+console.log(segments ? core.renderSegmentedScore(report) : core.renderProcessScore(report));
 console.log(`source: ${journalPath}`);
 
-const target = outPath ?? journalPath + '.score.json';
+const target = outPath ?? journalPath + (segments ? '.segments.score.json' : '.score.json');
 try {
   writeFileSync(target, JSON.stringify(report, null, 2) + '\n', 'utf8');
   console.log(`report: ${target}`);

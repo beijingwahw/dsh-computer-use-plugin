@@ -23,21 +23,10 @@ export const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(
 async function sharpAvailable(): Promise<boolean> {
   try { const { getSharp } = await import('./_legacyDeps'); await getSharp(); return true; } catch { return false; }
 }
-
-export interface EffectReport {
-  /**
-   * true = 发生真实变化；false = 判定无变化；null = 指纹退化（空/全零/长度
-   * 不等），**无法判定**（Δ-7 诚实降级）。退化指纹的比对结果是边界假信号：
-   * 空/全零对任意指纹会产出 sim=0 或 sim=1 的极端值，旧实现把它当真判决 ——
-   * 「证据不可用」被伪报成「检测到变化/无变化」。消费方对 null 应视为未验证
-   * （绝不当变化采信，也无需当盲点定罪）。
-   */
-  effect_detected: boolean | null;
-  similarity_pct: number;    // 前后相似度（越高越可能没点中；退化指纹时为无效测量值）
-  distance: number;          // 汉明距离原始值（退化指纹时为无效测量值）
-  /** 指纹退化原因（effect_detected=null 时在场）：absent | zero | length */
-  unverifiable?: 'absent' | 'zero' | 'length';
-}
+export { reportEffect } from './actionVerifier.effect';
+export type { EffectReport } from './actionVerifier.effect';
+import { reportEffect } from './actionVerifier.effect';
+import type { EffectReport } from './actionVerifier.effect';
 
 export interface SettleOptions {
   adaptive: boolean;
@@ -109,97 +98,15 @@ export async function captureBefore(
   };
 }
 
-/** 纯对比：给定前后指纹生成报告。
- *  Δ-7 指纹退化三态（诚实降级，防边界假信号）：
- *    ① absent —— 任一侧指纹为空（服务端未返回 dhash 时 captureBefore 以 '' 占位）
- *    ② zero   —— 归一化后全零（hexToBits 对损坏 hex 的回退值；与真·无梯度平面帧
- *      的 dHash 不可区分 —— 全零指纹信息量为零，任意两张平面帧都判 sim=1）
- *    ③ length —— 归一化后长度不等（异构指纹不可比；hammingDistance 取 max(len)
- *      把 sim 压到 0，旧实现据此虚报 effect_detected=true 假阳性）
- *  任一态 ⇒ effect_detected=null（无法判定）+ unverifiable 原因；distance/
- *  similarity_pct 照报原始测量值（证据保留），但其判决资格已被 null 否决。 */
-export function reportEffect(before: string, after: string, noopThreshold: number): EffectReport {
-  const nb = normalizeHash(before);
-  const na = normalizeHash(after);
-  // 归一化域判退化：'' 经 hexToBits 回退为全零（BigInt('0x') 抛错 → '0'.repeat(64)），
-  // 故 absent 检查必须在归一化**前**的原始串上做；zero/length 检查在归一化后做
-  const unverifiable: EffectReport['unverifiable'] =
-    before === '' || after === '' ? 'absent'
-      : (/^0+$/.test(nb) || /^0+$/.test(na)) ? 'zero'
-        : nb.length !== na.length ? 'length'
-          : undefined;
-  const distance = hammingDistance(nb, na);
-  const sim = similarity(nb, na);
-  if (unverifiable) {
-    return {
-      effect_detected: null,
-      similarity_pct: Math.round(sim * 1000) / 10,
-      distance,
-      unverifiable,
-    };
-  }
-  return {
-    effect_detected: sim < noopThreshold,
-    similarity_pct: Math.round(sim * 1000) / 10,
-    distance,
-  };
-}
+// W6-2（doctor smell.over-engineering 清偿）：CombinedEffect 与稳定帧轮询已分区提取至
+// actionVerifier.stable.ts；EffectReport/reportEffect → actionVerifier.effect.ts（行为零变化）。
+export { waitForStableHash, waitForStableFrame } from './actionVerifier.stable';
+export type { CombinedEffect } from './actionVerifier.stable';
+import { waitForStableHash, waitForStableFrame } from './actionVerifier.stable';
+import type { CombinedEffect } from './actionVerifier.stable';
 
-export interface CombinedEffect {
-  detected: boolean;               // 全屏 OR 区域任一检测到变化
-  screen: EffectReport;
-  region: EffectReport | null;     // 无焦点/禁用时为 null
-  scale: 'page-level' | 'element-level' | 'none';
-  afterBuffer: Buffer;             // 稳定后的帧（供语义核对等下游消费；D-5 路径可能为空 buffer）
-  afterHash: string;               // 稳定帧指纹（振荡检测已在此消费）
-  oscillation: string | null;      // 振荡告警（屏幕状态在动作间反复回归旧值）
-  /** C-1 意图裁决：期望 kind + 物理规则是否找到证据（未声明期望时 undefined） */
-  intent?: { expected: string; satisfied: boolean; evidence: string };
-  /**
-   * Q 纪元（Q-2 感知层）：pHash 频谱佐证 —— DCT 低频指纹对 detected 判决的
-   * 独立第二意见（null = sharp 缺席/计算降级，诚实缺席；true/false = 频谱域
-   * 同判/异议）。两指纹失效模式近似正交：异议时锚点可提示模型细看。
-   */
-  phashCorroborates?: boolean;
-  /**
-   * Δ-7：双尺度皆指纹退化时的降级注记（'screen:zero;region:length' 形）。
-   * 此时 detected 是**保守 false**（见 settleAndVerify 注记）—— 消费方据此
-   * 可把「未验证」与「判定无变化」区分开（提示模型截图细看，而非定罪盲点）。
-   */
-  unverifiable?: string;
-  /** D-5 路径：稳定帧帧环 id（语义核对/物理规则/弹窗传感的服务端引用锚） */
-  afterFrameId?: number | null;
-  /**
-   * W4-8 L4 声学证据：观察到的非语义音频事件（**端口在场时**才落键；
-   * null = 已查询无事件）。这是 failureMemory 签名维度的只读证据源 ——
-   * 消费方（failureMemory.record 的 actionSignature 语境）自行取用，
-   * 本引擎绝不在此改写任何视觉判决字段。
-   */
-  audioEvent?: AudioEvent | null;
-  /**
-   * W5-3（L3 跨机互证）远程取证报告：**仅 remoteEvidence 端口在场、remotePeers
-   * 非空、且本动作视觉阳性**时落键（其余情形键整体缺席 —— 逐字节兼容）。
-   * 这是「A 的动作效果必须出现在 B 屏」的旁路互证车道：corroborated 计数
-   * 不改写 detected/scale 等任何视觉判决字段（消费方自行决定采纳程度），
-   * unverified 是诚实缺席 —— peer 离线/超时/无期望区域都只降格，绝不误判。
-   */
-  remote?: {
-    /** 本次取证使用的期望区域（归一化；null = 未声明 —— 严格不互证） */
-    hint: RemoteRegion | null;
-    perPeer: Array<{ peer: string } & RemoteJudgement>;
-    corroborated: number;
-    unverified: number;
-  };
-  /**
-   * W4-8 门控音频判决：**仅视觉阴性**（detected=false 且无退化注记）时计算
-   * —— success_chime ⇒ probable_effect（no_effect 升级，置信 ≤ 法条二封顶）；
-   * error_beep ⇒ recheck（触发复核，判决不动）。视觉阳性在场时此键缺席
-   * （法条一：音频无权稀释/顶替视觉确定性证据）。detected 主字段恒为纯视觉
-   * 判决（quantumSense.recordEffect 的 boolean 契约锁死）—— 升级只活在
-   * 本旁路车道，消费方自行决定是否把 no_effect 改称 probable_effect。
-   */
-  audioGated?: { verdict: AudioGatedVerdict; event: AudioEventKind; confidence: number };
-}
+
+
 
 // ─── W5-3（L3 跨机互证）远程世界变化谓词：A 的动作效果必须出现在 B 屏 ───
 //
@@ -250,77 +157,13 @@ export interface RemoteJudgement {
   reason?: string;
 }
 
-/** W5-3 防御式净化：归一化矩形形状/值域不合法或退化（x1≤x0 等）⇒ null */
-function sanitizeRemoteRegion(r: unknown): RemoteRegion | null {
-  try {
-    if (!r || typeof r !== 'object') return null;
-    const o = r as { x0?: unknown; y0?: unknown; x1?: unknown; y1?: unknown };
-    if (![o.x0, o.y0, o.x1, o.y1].every(v => typeof v === 'number' && Number.isFinite(v))) return null;
-    const c = (v: number): number => Math.max(0, Math.min(1, v));
-    const x0 = c(o.x0 as number), y0 = c(o.y0 as number), x1 = c(o.x1 as number), y1 = c(o.y1 as number);
-    if (!(x1 > x0 && y1 > y0)) return null; // 退化框：零面积 ⇒ 无判决资格
-    return { x0, y0, x1, y1 };
-  } catch {
-    return null;
-  }
-}
-
-/** W5-3 防御式净化：RemoteChange 载荷形状不合法 ⇒ null（证据缺席）；regions 内坏框静默剔除 */
-function sanitizeRemoteChange(c: unknown): RemoteChange | null {
-  try {
-    if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
-    const o = c as { screen?: unknown; region?: unknown; regions?: unknown };
-    const regions = Array.isArray(o.regions)
-      ? o.regions.map(sanitizeRemoteRegion).filter((r): r is RemoteRegion => r !== null)
-      : [];
-    return {
-      screen: typeof o.screen === 'string' ? o.screen : '',
-      region: typeof o.region === 'string' ? o.region : null,
-      regions,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * W5-3：跨机互证谓词（纯函数、确定性、绝不抛）——「A 的动作效果必须出现在
- * B 屏」的判决核心：
- *   · 证据缺席（change=null）⇒ unverified 'absent'（peer 离线/超时/载荷坏）；
- *   · 无期望区域（hint=null/非法）⇒ unverified 'no-hint'（严格：说不出该出现
- *     在哪，就无权互证）；
- *   · 无有效变化区域 ⇒ unverified 'no-change-regions'（B 屏没变 —— 诚实
- *     缺席而非反驳：region 证据链断在哪环都不臆造）；
- *   · 判据：max over regions of（区域∩期望）/（期望面积）≥ REMOTE_EVIDENCE_
- *     OVERLAP_MIN ⇒ corroborated；否则 unverified 'overlap-below-min'
- *     （overlap 照报最优值 —— 证据保留）。
- */
-export function judgeRemoteChange(
-  hint: RemoteRegion | null,
-  change: RemoteChange | null,
-): RemoteJudgement {
-  const un = (reason: string): RemoteJudgement => ({ verdict: 'unverified', overlap: 0, reason });
-  try {
-    if (change === null) return un('absent');
-    const h = sanitizeRemoteRegion(hint);
-    if (h === null) return un('no-hint');
-    if (change.regions.length === 0) return un('no-change-regions');
-    const hArea = (h.x1 - h.x0) * (h.y1 - h.y0);
-    if (!(hArea > 0)) return un('no-hint');
-    let best = 0;
-    for (const r of change.regions) {
-      const iw = Math.min(h.x1, r.x1) - Math.max(h.x0, r.x0);
-      const ih = Math.min(h.y1, r.y1) - Math.max(h.y0, r.y0);
-      if (iw > 0 && ih > 0) best = Math.max(best, (iw * ih) / hArea);
-    }
-    const overlap = Math.round(best * 10000) / 10000;
-    return overlap >= REMOTE_EVIDENCE_OVERLAP_MIN
-      ? { verdict: 'corroborated', overlap }
-      : { verdict: 'unverified', overlap, reason: 'overlap-below-min' };
-  } catch {
-    return un('absent');
-  }
-}
+// W6-2（doctor smell.over-engineering 清偿）：W5-3 判决函数与 W4-8 类型/净化面已
+// 分区提取至 actionVerifier.channels.ts（行为零变化；立法常量按「立法在源」测试
+// 锁定留守本文件）；导入面不变 —— 再分发。
+import { judgeRemoteChange, sanitizeAudioEvent, sanitizeRemoteRegion, sanitizeRemoteChange } from './actionVerifier.channels';
+export { judgeRemoteChange } from './actionVerifier.channels';
+export type { AudioEventKind, AudioEvent, AudioGatedVerdict } from './actionVerifier.channels';
+import type { AudioEvent, AudioEventKind, AudioGatedVerdict } from './actionVerifier.channels';
 
 // ─── W4-8 L4 声学证据通道（有节制的破戒）：非语义物理证据，恒低于视觉 ───
 //
@@ -345,90 +188,13 @@ export function judgeRemoteChange(
 //   视觉「未验证」（unverifiable，指纹退化）不是视觉阴性 —— 音频不得在
 //   视觉缺席处制造确定性（Δ-7 同律：证据不可用 ≠ 无变化）。
 
-/** W4-8：五类非语义音频事件（与 audio.py 的 EVENT_KINDS 字面镜像） */
-export type AudioEventKind =
-  | 'notification_ding'
-  | 'error_beep'
-  | 'success_chime'
-  | 'key_click'
-  | 'silence';
-
-/** W4-8：音频事件（audio.py 输出契约 {event, confidence, ts} 的 TS 镜像） */
-export interface AudioEvent {
-  event: AudioEventKind;
-  /** python 端分类置信（0..1）—— 未经封顶的原始探测器置信 */
-  confidence: number;
-  /** unix ms（audio.py 检出时刻） */
-  ts: number;
-}
-
 /** 法条一（W4-8 视觉优先律）：音频证据恒低权于视觉 —— 立法文本见上方注释块 */
 export const AUDIO_VISUAL_PRIORITY = true as const;
 /** 法条二（W4-8 置信封顶）：音频单通道效果判决的置信硬上限（0.5 < 视觉 1.0） */
 export const AUDIO_EVIDENCE_CONFIDENCE_CAP = 0.5 as const;
 
-/** W4-8：门控音频判决种类（probable_effect = 阴性升级；recheck = 触发复核） */
-export type AudioGatedVerdict = 'probable_effect' | 'recheck';
-
-/** W4-8 防御式净化：注入方给的 AudioEvent 形状/值域不合法 ⇒ 视为缺席（null）。
- *  证据通道的垃圾输入绝不进入判决链（防御式绝不抛的外延）。 */
-function sanitizeAudioEvent(ev: unknown): AudioEvent | null {
-  if (!ev || typeof ev !== 'object') return null;
-  const e = ev as { event?: unknown; confidence?: unknown; ts?: unknown };
-  const kinds: readonly unknown[] = ['notification_ding', 'error_beep', 'success_chime', 'key_click', 'silence'];
-  if (typeof e.event !== 'string' || !kinds.includes(e.event)) return null;
-  const confidence = typeof e.confidence === 'number' && Number.isFinite(e.confidence)
-    ? Math.max(0, Math.min(1, e.confidence))
-    : 0;
-  const ts = typeof e.ts === 'number' && Number.isFinite(e.ts) ? e.ts : Date.now();
-  return { event: e.event as AudioEventKind, confidence, ts };
-}
-
-/** 轮询直到屏幕稳定：服务端指纹轮询（meta_only —— 不编码不传图）。
- *  纪元 Ξ（Ξ-D 生产接线）：稳定判距读内核注册表 —— verify.stableGap（缺省 1：
- *  汉明距离 ≤ 此值视为同帧）。未注册 ⇒ getOrDefault 回声字面量，逐字节不变。 */
-export async function waitForStableHash(
-  pollMs: number,
-  maxWaitMs: number,
-): Promise<{ hash: string; frameId: number | null }> {
-  const stableGap = kernelRegistry.getOrDefault('verify.stableGap', 1);
-  const start = Date.now();
-  let prev = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
-  let prevHash = prev.dhash ? normalizeHash(prev.dhash) : '';
-  let prevFrameId = prev.frameId ?? null;
-  while (Date.now() - start < maxWaitMs) {
-    await sleep(pollMs);
-    const cur = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
-    const hash = cur.dhash ? normalizeHash(cur.dhash) : '';
-    if (hash && hammingDistance(prevHash, hash) <= stableGap) {
-      return { hash, frameId: cur.frameId ?? null };
-    }
-    prevHash = hash;
-    prevFrameId = cur.frameId ?? null; // 超时返回 (hash, frameId) 必须同帧 —— 指纹与帧环 id 配对错位会误导下游锚定
-  }
-  return { hash: prevHash, frameId: prevFrameId };
-}
-
-/** legacy 路径：buffer 轮询（sharp 可用且显式保留 buffer 时）。stableGap 同键同缺省。 */
-export async function waitForStableFrame(
-  pollMs: number,
-  maxWaitMs: number,
-): Promise<{ buffer: Buffer; hash: string }> {
-  const stableGap = kernelRegistry.getOrDefault('verify.stableGap', 1);
-  const start = Date.now();
-  let prevBuf = await system.captureScreen();
-  let prevHash = await dhash(prevBuf);
-  while (Date.now() - start < maxWaitMs) {
-    await sleep(pollMs);
-    const buf = await system.captureScreen();
-    const hash = await dhash(buf);
-    if (hammingDistance(prevHash, hash) <= stableGap) return { buffer: buf, hash };
-    prevBuf = buf;
-    prevHash = hash;
-  }
-  return { buffer: prevBuf, hash: prevHash };
-}
-
+// W6-2：音频事件类型与净化面已随 channels 分区提取（AudioEventKind/AudioEvent/
+// AudioGatedVerdict/sanitizeAudioEvent → actionVerifier.channels.ts，经上方再导出回流）。
 /**
  * 动作后统一入口：自适应等待稳定帧，然后双尺度对比。
  * 决策矩阵：全屏变 = page-level；仅区域变 = element-level；都没变 = none（盲点）。

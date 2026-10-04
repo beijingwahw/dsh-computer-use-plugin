@@ -14,7 +14,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve as pathResolve } from 'node:path';
@@ -142,6 +142,9 @@ async function authHeaders(): Promise<Record<string, string>> {
   return {
     'Content-Type': 'application/json',
     'X-Cap-Token': mintToken(keyBytes, process.pid, ALL_CAPS, 60),
+    // W6-R-A3 nonce 强制：X-Request-Id 单次性防重放头 —— 服务端缺头即 401、
+    // 同 nonce 重放即 401。每请求新鲜 randomUUID（本函数每请求各调一次 ⇒ 天然新鲜）。
+    'X-Request-Id': randomUUID(),
   };
 }
 

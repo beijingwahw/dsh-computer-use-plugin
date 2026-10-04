@@ -1,4 +1,5 @@
 // src/visualDiff.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：E 系视觉差分 —— dHash/pHash/区域网格/振荡检测围绕同一差分代数（sim/distance 单位约定），拆分将复制指纹方言。
 // 第四轮创新之一：视觉差分引擎（what-changed-where）。
 // 模型自己对比两张整屏截图既费 Token 又容易看漏；本引擎在像素层直接算出
 // 「哪些区域变了」：降采样 → 逐像素差 → 分块聚合 → 连通域合并 → 变化区域清单。
@@ -484,6 +485,12 @@ export interface LedgerAnalysis {
   rowShift: RowShiftEstimate | null;
   /** 行移估计所用的行数（差分分辨率 —— dyPx 的换算基数；rowShift 缺席时无效） */
   diffRows: number;
+  /**
+   * W7-0（W6-5 接线收尾）：列亮度序列（水平滚动的横向证据面 —— 消费方喂
+   * motionEstimator.estimateColShift 做水平滚动分诊；rowLuminance 的横向对偶）。
+   * 可选字段：注入端口不填 ⇒ 缺席（消费方守卫式降级，账本判决零变化 —— 纯增量）。
+   */
+  colLuminance?: { before: number[]; after: number[]; cols: number } | null;
 }
 
 /** W3-3：注入端口 —— 分析（diff+行移）/ 帧哈希（快路径静默判定）/ 墙钟（TTL） */
@@ -637,8 +644,11 @@ export function regionsToPatchRects(
  * （diffRegionsFromRaw 共用）+ 行亮度序列喂 motionEstimator.estimateRowShift
  * （只读导入 —— 滚动判定的物理事实源）。before === after（冷启动探测）时
  * 恒返回 identical。
+ * W7-0（W6-5 接线收尾）：同一对 raw 缓冲顺带铸 colLuminance（列亮度序列进
+ * 分析面 —— 增量账本水平滚动分诊的横向证据；零额外解码，判决逻辑零变化）。
+ * 导出面：测试与自定义端口的对照实现基准。
  */
-async function defaultAnalyze(before: Buffer, after: Buffer): Promise<LedgerAnalysis> {
+export async function defaultAnalyze(before: Buffer, after: Buffer): Promise<LedgerAnalysis> {
   const sharp = await getSharp();
   const afterMeta = await sharp(after).metadata();
   const W = DIFF_WIDTH;
@@ -665,6 +675,8 @@ async function defaultAnalyze(before: Buffer, after: Buffer): Promise<LedgerAnal
     identical: changedFraction < 0.001,
     rowShift,
     diffRows: H,
+    // W7-0：列亮度（W7 列，差分分辨率 —— 与行亮度同一缓冲同一尺度）
+    colLuminance: { before: columnLuminance(a, W, H), after: columnLuminance(b, W, H), cols: W },
   };
 }
 
@@ -679,6 +691,22 @@ function rowLuminance(buf: Buffer, W: number, H: number): number[] {
     }
     out[y] = sum / W;
   }
+  return out;
+}
+
+/** W7-0：raw RGBA 缓冲 → 列平均亮度序列（rowLuminance 的横向对偶 —— 供
+ *  estimateColShift 的输入方言；同缓冲单遍 O(W×H)，零额外解码） */
+function columnLuminance(buf: Buffer, W: number, H: number): number[] {
+  const out = new Array<number>(W);
+  for (let x = 0; x < W; x++) out[x] = 0;
+  for (let y = 0; y < H; y++) {
+    const rowBase = y * W * 4;
+    for (let x = 0; x < W; x++) {
+      const i = rowBase + x * 4;
+      out[x] += (buf[i] + buf[i + 1] + buf[i + 2]) / 3;
+    }
+  }
+  for (let x = 0; x < W; x++) out[x] /= H;
   return out;
 }
 

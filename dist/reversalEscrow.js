@@ -38,16 +38,45 @@ import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync, openSync, 
 import path from 'node:path';
 import { similarity } from './perceptualHash.js';
 import { setDispatchEscrowHook, setEscrowSettlementHook } from './approval.js';
+// W9-2（D-C1 落锤）：外部策略表装载面需要分级注册表的同步登记通道 —— 方向是
+// reversalEscrow → riskGate（单向）。riskGate 不得反向 import 本模块（会与
+// approval → riskGate 成环，riskGate 注释同律）；本向无环：riskGate 仅依赖
+// confusables 生成档。两表对齐从「注释纪律 + 测试执法」升格为「装载面原子
+// 执法」，键对齐律（S5-5d）继续在内置表上由 w4reverse/w6fix 遍历把守。
+import { reversibilityRegistry } from './riskGate.js';
 /**
  * 内置初始集（策略表 = 内置 + 注入扩展，扩展同键覆盖内置）。
  * 键是动作语义类别（派发层对危险动作的分类面，riskGate 词表的对齐产物）：
  *   form-submit  → 草稿箱回收 / Ctrl+Z（多数表单提交会留草稿或支持撤销）
  *   file-delete  → 回收站还原 / Ctrl+Z（GUI 删除默认进回收站 —— 可逆性最强）
  *   file-write   → Ctrl+Z / 编辑菜单撤销（文档类写入普遍支持 undo 栈）
+ *   text-input   → Ctrl+Z（W6-3 扩表：输入类普遍支持应用内 undo 栈 —— riskGate
+ *                  BUILTIN_LEVELS 早已判 compensable，策略表缺键曾令 escrow 执法
+ *                  路径 fail-closed，分级与补偿知识在此对齐）
+ *   navigation   → 后退导航 Backspace（W6-3 扩表：浏览器/资源管理器的返回键 —
+ *                  回到动作前页面，导航类的天然逆动作）
  *   send-message → manual-only（已发出的消息无法收回 —— 唯一例外：部署注入
  *                  「延迟发送队列撤回」类扩展后方可自动派发）
  *   payment      → manual-only（退款不是撤销 —— 资金流的逆流是新交易）
  *   permanent-delete → manual-only（不进回收站的删除 —— 语义上已放弃可逆性）
+ * W8-A4（DEBTS D-C1 第二轮扩表）新增 manual-only 三键 —— 把「无法安全自动
+ * 补偿」的判断从 mintPlan 的 no-strategy 缺席面（「须先分类」）升格为显式
+ * 立法登记（携带理由的人类可读拒绝），与 DEFAULT_DANGER_PATTERNS 的词族
+ * 对齐（reset/清空、uninstall/卸载 在分级注册表尚无语义锚点，导出是经典
+ * 不可逆）：
+ *   data-export → manual-only（副本离开信任边界 —— 召回不是撤销）
+ *   factory-reset → manual-only（重置/清空一步抹掉设置+会话+数据 —— 重置
+ *                  没有回收站，permanent-delete 的广谱同族）
+ *   app-uninstall → manual-only（卸载移除的不只是文件 —— 用户数据/配置的
+ *                  丢失无法由重装补偿）
+ * 扩表纪律（W8-A4 执法）：内置表新增 compensate 键受「S5-5d 键对齐律」硬
+ * 约束 —— w4reverse/w6fix 遍历 builtinCompensationSemantics() 断言每个内置
+ * 键与 riskGate 分级注册表一致（compensate ⇔ compensable；manual-only ⇔
+ * irreversible），而 riskGate.BUILTIN_LEVELS 的 compensable 键已全部在表 ⇒
+ * 内置 compensate 扩面的前置是分级表同步登记（riskGate 所有权之外的部署
+ * 决策）。部署在两表同步登记前的正确姿势 = arm({strategies}) 注入扩展
+ * （扩展键不在对齐律遍历域内）+ reversibilityRegistry.setLevel 对齐级别 +
+ * createCompositeCompensationExecutor 接线 shaper 撤销栈 —— 见函数注释。
  */
 const BUILTIN_STRATEGIES = new Map([
     ['form-submit', {
@@ -80,6 +109,28 @@ const BUILTIN_STRATEGIES = new Map([
             verify: { mode: 'screen-hash' },
             notes: '文档类写入普遍支持应用内 undo 栈',
         }],
+    // W6-3（W5-0 遗留清偿）：text-input / navigation 增补 —— 两键在 riskGate
+    // BUILTIN_LEVELS 均判 compensable（escrow 道），但策略表查无此键 ⇒ mintPlan
+    // fail-closed，分级说「有托管补偿路径」而托管说「无策略」—— 执法路径自相
+    // 矛盾。增补后两表对齐（w4reverse S5-5d 键对齐律自动覆盖新键）。
+    ['text-input', {
+            kind: 'compensate',
+            semantics: 'text-input',
+            steps: [
+                { method: 'hotkey', label: 'Ctrl+Z undo the typing', keys: ['ctrl', 'z'] },
+            ],
+            verify: { mode: 'screen-hash' },
+            notes: 'W6-3 扩表：输入类普遍支持应用内 undo 栈 —— Ctrl+Z 即补偿',
+        }],
+    ['navigation', {
+            kind: 'compensate',
+            semantics: 'navigation',
+            steps: [
+                { method: 'hotkey', label: 'Backspace navigate back', keys: ['backspace'] },
+            ],
+            verify: { mode: 'screen-hash' },
+            notes: 'W6-3 扩表：后退导航（Backspace，浏览器/资源管理器同律）回到动作前页面',
+        }],
     ['send-message', {
             kind: 'manual-only',
             semantics: 'send-message',
@@ -94,6 +145,26 @@ const BUILTIN_STRATEGIES = new Map([
             kind: 'manual-only',
             semantics: 'permanent-delete',
             reason: 'permanent delete bypasses the recycle bin by intent — irreversibility was the point — the human must perform this personally',
+        }],
+    // W8-A4（DEBTS D-C1 第二轮扩表）：manual-only 显式登记三键 —— 见函数头
+    // 「扩表纪律」。这些语义此前落在 no-strategy 缺席面（「须先分类」）；显式
+    // 登记后拒绝携带立法理由（人类亲办的「为什么」），审计与升级报告可引用。
+    // 键对齐律天然满足：三键未在分级注册表登记 ⇒ classify 保守律默认最高级
+    // irreversible，与 manual-only 期望一致（w4reverse S5-5d / w6fix F3-② 遍历执法）。
+    ['data-export', {
+            kind: 'manual-only',
+            semantics: 'data-export',
+            reason: 'data exports leave the trust boundary: a downloaded or copied-out file is a NEW copy in the wild — recall is not undo — the human must perform this personally',
+        }],
+    ['factory-reset', {
+            kind: 'manual-only',
+            semantics: 'factory-reset',
+            reason: 'factory reset / wipe-all erases settings, sessions AND data in one stroke — there is no recycle bin for a reset — the human must perform this personally',
+        }],
+    ['app-uninstall', {
+            kind: 'manual-only',
+            semantics: 'app-uninstall',
+            reason: 'uninstalling removes executables plus user data and configuration that a reinstall does NOT restore — the human must perform this personally',
         }],
 ]);
 // ─── 常量 ───
@@ -159,6 +230,8 @@ let clipboardPort = null;
 let focusPort = null;
 let interruptPort = null;
 let executorPort = null;
+/** W6-3：热键端口（hotkey 类补偿步骤的专用出口；null = 缺席 ⇒ 回落 executor） */
+let hotkeyPort = null;
 /** 注入扩展的策略表（同键覆盖内置） */
 let extensionStrategies = new Map();
 let inFlightPlans = new Map(); // planId → plan
@@ -504,8 +577,13 @@ async function mintPlan(info) {
         const focusWindow = await captureFromPort('focus', () => focusPort?.current() ?? Promise.resolve(null), degraded, 'no-focus-port');
         const preActionHash = await captureFromPort('hash', () => hashPort?.capture() ?? Promise.resolve(null), degraded, 'no-hash-port');
         const clipboardBackupHandle = await captureFromPort('clipboard', () => clipboardPort?.backup() ?? Promise.resolve(null), degraded, 'no-clipboard-port');
-        if (executorPort === null)
+        if (executorPort === null
+            && (hotkeyPort === null || strategy.steps.some(s => s.method !== 'hotkey'))) {
+            // W6-3：执行通道判定 —— 全 hotkey 策略 + 热键端口在场 = 可执行
+            // （executor 缺席不再必然降级：仅有热键管线的部署也能自动补偿 hotkey 类
+            // 预案）；含非 hotkey 步骤且 executor 缺席，或热键端口亦缺席 ⇒ 标记照旧。
             degraded.push('no-executor-port');
+        }
         if (escrowStorage === null)
             degraded.push('no-storage');
         const now = eNow();
@@ -688,8 +766,12 @@ function buildEscalation(plan, whatHappened, attempted, failureDetail, suggested
  * （screen-hash 回预案态 / 谓词确认 / 无通道 ⇒ compensated-unverified 诚实降级）。
  */
 async function runCompensation(plan, trigger, reason) {
-    // 降级：执行端口缺席 ⇒ 仅记账（预案与触发原因全量入册 —— 审计面完整）
-    if (executorPort === null) {
+    // 降级：无任何可执行通道 ⇒ 仅记账（预案与触发原因全量入册 —— 审计面完整）。
+    // W6-3：可执行性按步骤判定 —— 全 hotkey 预案 + 热键端口在场 ⇒ 可执行
+    // （executor 缺席不再必然降级）；含非 hotkey 步骤且 executor 缺席，或热键
+    // 端口亦缺席 ⇒ degraded-record-only 照旧（降级记账方向不变）。
+    const needsExecutorPort = plan.compensation.some(s => s.method !== 'hotkey');
+    if (executorPort === null && (needsExecutorPort || hotkeyPort === null)) {
         closePlan(plan, {
             outcome: 'degraded-record-only',
             trigger,
@@ -714,6 +796,34 @@ async function runCompensation(plan, trigger, reason) {
                     continue; // 剪贴板是伴生恢复，失败不阻断主补偿
                 }
                 continue;
+            }
+            if (step.method === 'hotkey' && hotkeyPort !== null) {
+                // W6-3（W3-1 遗留清偿）：hotkey 步骤路由到热键端口 —— 补偿中的热键类
+                // （Ctrl+Z / Backspace 返回导航）经注入的专用端口派发，不再依赖通用
+                // executor 恰好认识热键。失败语义与 executor 同律：ok:false ⇒ 补偿失败
+                // 升级人工（绝不静默）；端口抛错由外层 catch 兜底（防御式）。
+                const r = await hotkeyPort.send(Array.isArray(step.keys) ? step.keys : []);
+                if (!r.ok) {
+                    closePlan(plan, {
+                        outcome: 'compensation-failed',
+                        trigger,
+                        ...(reason !== undefined ? { reason } : {}),
+                        executedSteps: [...attempted],
+                        ...(degraded.length > 0 ? { degraded: [...new Set(degraded)] } : {}),
+                        escalation: buildEscalation(plan, `Dangerous "${plan.semantics}" action failed acceptance (trigger: ${trigger}) and automated compensation FAILED at hotkey step "${step.label}". ` +
+                            'The world may be left in an unintended state.', [...attempted], r.detail ?? 'hotkey port reported failure', plan.description
+                            ? `Manually inspect: ${plan.description}. Then compensate by hand — remaining path: ${plan.compensation.slice(attempted.length).map(s => s.label).join('; ') || step.label}.`
+                            : `Manually inspect the "${plan.semantics}" action and compensate by hand: ${plan.compensation.map(s => s.label).join('; ')}.`),
+                    });
+                    return;
+                }
+                continue; // 热键步已派发成功 ⇒ 下一步（热键端口缺席则穿透到 executor）
+            }
+            if (executorPort === null) {
+                // W6-3 防御式：函数头的可执行性判定保证正常流不可达（全 hotkey 预案
+                // 不会走到此处）。若仍抵达（预案数据被恢复面注入污染）⇒ 走外层 catch
+                // 的 compensation-failed 升级 —— 绝不静默跳过一个无通道的补偿步骤。
+                throw new Error(`no compensation channel for non-hotkey step "${step.label}"`);
             }
             const r = await executorPort.execute(step, plan);
             if (!r.ok) {
@@ -892,6 +1002,8 @@ export const reversalEscrow = {
                 interruptPort = opts.interruptPort ?? null;
             if ('executorPort' in opts)
                 executorPort = opts.executorPort ?? null;
+            if ('hotkeyPort' in opts)
+                hotkeyPort = opts.hotkeyPort ?? null; // W6-3
             if (Array.isArray(opts.strategies)) {
                 const m = new Map();
                 for (const s of opts.strategies) {
@@ -998,6 +1110,7 @@ export const reversalEscrow = {
             ledgerEntries: ledger.length,
             degraded: lastDegraded || [...inFlightPlans.values()].some(p => (p.degraded?.length ?? 0) > 0),
             storageArmed: escrowStorage !== null,
+            hotkeyPortArmed: hotkeyPort !== null,
             ttlMs: escrowTtlMs,
             ...(walPersistError !== undefined ? { persistError: walPersistError } : {}),
             builtinStrategies: BUILTIN_STRATEGIES.size,
@@ -1015,6 +1128,7 @@ export const reversalEscrow = {
         focusPort = null;
         interruptPort = null;
         executorPort = null;
+        hotkeyPort = null; // W6-3：热键端口随隔离缝归零
         extensionStrategies = new Map();
         inFlightPlans = new Map();
         tokenPlan = new Map();
@@ -1028,6 +1142,56 @@ export const reversalEscrow = {
 /** W3-1：托管武装的独立函数面（组合根挂点 —— 与 armApprovalQueue 同风格） */
 export function armReversalEscrow(opts = {}) {
     reversalEscrow.arm(opts);
+}
+// ─── W8-A4（DEBTS D-C1）：组合补偿执行器 —— shaper 撤销栈接入统一账本 ───
+//
+// 环境整形类补偿（缩放/对比度/窗口几何）有现成机制：environmentShaper 的
+// UndoRecipe/undoLog（D-2：改变世界的权力与复原世界的义务对称）已经由
+// createShaperCompensationExecutor 包装成补偿执行端口（method 'shaper-undo'
+// → restoreAll LIFO 复原）。但 escrow 的 arm 只收**一个** executorPort ——
+// 部署既有 GUI 执行器（热键/菜单/回收站）又有 shaper 桥时，含 shaper-undo
+// 步骤的预案无从落地。本组合器是组合根的接线件：
+//   arm({ executorPort: createCompositeCompensationExecutor(guiExec, createShaperCompensationExecutor()) })
+// 路由律（一步恰一执行器 —— 绝不双发）：
+//   · method 'shaper-undo' → 优先 shaper 桥（最知情的执行者）；桥缺席回落
+//     primary（部署可能以全知 GUI 执行器统一承接 shaper-undo）；
+//   · 其余 method → 优先 primary；primary 缺席回落 shaper 桥（由桥自己醒目
+//     拒绝 —— 「只处理 shaper-undo」的说明比组合器吞掉步骤更诚实）；
+//   · 两者皆缺席 ⇒ ok:false 醒目拒绝（绝不假装执行）。
+// 防御式：执行器缺席/抛错/垃圾步骤一律收敛为诚实返回值，绝不抛（runCompensation
+// 的外层 catch 之外的第二层兜底 —— 组合器是可独立复用的件）。零 import：两侧
+// 执行器均经参数注入（reversalEscrow ↔ environmentShaper 保持零运行时耦合）。
+/** W8-A4：组合补偿执行器（GUI 执行器 + shaper 撤销栈执行器的分method路由） */
+export function createCompositeCompensationExecutor(primary, shaperUndo) {
+    const p = primary ?? null;
+    const s = shaperUndo ?? null;
+    return {
+        async execute(step, plan) {
+            try {
+                if (!step || typeof step !== 'object' || typeof step.method !== 'string') {
+                    return { ok: false, detail: 'composite executor received a malformed compensation step — refusing to execute garbage' };
+                }
+                const first = step.method === 'shaper-undo' ? (s ?? p) : (p ?? s);
+                if (first === null) {
+                    return {
+                        ok: false,
+                        detail: `composite executor has no port for step "${String(step.label ?? '')}" (method "${step.method}") — ` +
+                            'neither the GUI executor nor the shaper-undo executor is armed, refusing to pretend execution',
+                    };
+                }
+                try {
+                    return await first.execute(step, plan);
+                }
+                catch (e) {
+                    // 执行器抛错 = 该步失败（与 ok:false 同律）—— 升级决策交 runCompensation
+                    return { ok: false, detail: `composite executor port threw for step "${String(step.label ?? '')}": ${e instanceof Error ? e.message : String(e)}` };
+                }
+            }
+            catch {
+                return { ok: false, detail: 'internal composite routing failure — treating as step failure (fail-closed)' };
+            }
+        },
+    };
 }
 /** 内置策略表视图（透明化 —— 派发层告知模型哪些语义有自动补偿路径） */
 export function builtinCompensationSemantics() {
@@ -1057,5 +1221,184 @@ export function compensationPathOf(semantics) {
     }
     catch {
         return { kind: 'none', steps: [], reason: 'internal query failure — treating as unclassified (fail-closed)' };
+    }
+}
+/** 外部表条目数上界（无界表 = 无界策略面 —— 与账册/步骤封顶同律） */
+const EXTERNAL_TABLE_MAX_ENTRIES = 64;
+/** 单策略步骤数上界（补偿路径是「按序尝试」的短清单，不是宏） */
+const EXTERNAL_TABLE_MAX_STEPS = 8;
+/**
+ * W9-2（D-C1 落锤）：装载外部补偿策略表（JSON）—— 补偿路径 + 语义级别一次
+ * 原子落两表（escrow 扩展表 + riskGate 分级注册表同步登记通道）。
+ *
+ * 文件形状（唯一合法形状 —— 保守立法）：
+ *   { "version": 1, "strategies": [
+ *     { "kind": "compensate", "semantics": "volume-change",
+ *       "steps": [{ "method": "hotkey", "label": "restore volume", "keys": ["ctrl","shift","arrowdown"] }],
+ *       "verify": { "mode": "screen-hash" } },
+ *     { "kind": "manual-only", "semantics": "account-signout", "reason": "..." } ] }
+ * · version 缺席视为 1；非 1 ⇒ bad-shape（前向不猜）；
+ * · verify.mode 仅收 screen-hash / none —— predicate 模式拒绝（JSON 无从携带
+ *   谓词函数，装载一个永远无验证通道的策略是坏表，不是降级）；
+ * · steps.method 仅收 CompensationStep 的白名单七值（与 sanitizeStep 同律）；
+ * · 级别派生律：compensate ⇒ compensable；manual-only ⇒ irreversible ——
+ *   文件**不携带** level 字段（级别是策略 kind 的必然投影，双写才有失配面）。
+ *
+ * 顺序律：arm 不携带 strategies 参数 ⇒ 外部表存活（arm 只修订显式给出的面，
+ * 组合根「先 arm({executorPort,...}) 后 load(path)」与反序皆可）；arm 显式
+ * 携带 strategies（含空数组）⇒ 扩展面被整体替换 —— 部署显式修订压过文件
+ * 装载，后见者胜（w9deploy D-C1-①b 执法）。绝不抛；成功后
+ * builtinCompensationSemantics() 视图与 mintPlan 的内置键行为逐字节不变
+ * （外部键走扩展覆盖语义）。
+ */
+export function loadExternalStrategyTable(filePath) {
+    try {
+        // ① 原子读（单次全文读 —— 半写档在 parse 面死）
+        if (typeof filePath !== 'string' || filePath.trim() === '') {
+            return { ok: false, reason: 'unreadable-path', detail: 'file path is required' };
+        }
+        let text;
+        try {
+            text = readFileSync(filePath, 'utf8');
+        }
+        catch (e) {
+            return { ok: false, reason: 'unreadable-path', detail: e instanceof Error ? e.message : String(e) };
+        }
+        // ② 解析 + 根形状
+        let root;
+        try {
+            root = JSON.parse(text);
+        }
+        catch (e) {
+            return { ok: false, reason: 'malformed-json', detail: e instanceof Error ? e.message : String(e) };
+        }
+        if (!root || typeof root !== 'object' || Array.isArray(root)) {
+            return { ok: false, reason: 'bad-shape', detail: 'root must be an object with a "strategies" array' };
+        }
+        const r = root;
+        if (r.version !== undefined && r.version !== 1) {
+            return { ok: false, reason: 'bad-shape', detail: `unsupported table version ${String(r.version)} (expected 1)` };
+        }
+        if (!Array.isArray(r.strategies)) {
+            return { ok: false, reason: 'bad-shape', detail: '"strategies" array is required' };
+        }
+        if (r.strategies.length === 0) {
+            return { ok: false, reason: 'bad-shape', detail: 'empty strategy table carries no knowledge — refusing (a mistake should surface, not load as a no-op)' };
+        }
+        if (r.strategies.length > EXTERNAL_TABLE_MAX_ENTRIES) {
+            return { ok: false, reason: 'bad-shape', detail: `table exceeds ${EXTERNAL_TABLE_MAX_ENTRIES} entries` };
+        }
+        // ③ 逐条防御校验（一条坏 ⇒ 整表拒 —— 绝不静默过滤后收下残表）
+        const ALLOWED_METHODS = ['hotkey', 'menu', 'recycle-bin-restore', 'clipboard-restore', 'navigate', 'shaper-undo', 'custom'];
+        const parsed = [];
+        const seen = new Set();
+        for (let i = 0; i < r.strategies.length; i++) {
+            const entry = r.strategies[i];
+            const where = `strategies[${i}]`;
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                return { ok: false, reason: 'bad-entry', detail: `${where}: not an object` };
+            }
+            const s = entry;
+            const semantics = strOrUndef(s.semantics, 64);
+            if (semantics === undefined)
+                return { ok: false, reason: 'bad-entry', detail: `${where}: semantics is required (non-empty string)` };
+            if (seen.has(semantics)) {
+                return { ok: false, reason: 'bad-entry', detail: `${where}: duplicate semantics "${semantics}"` };
+            }
+            if (s.kind === 'manual-only') {
+                const reason = strOrUndef(s.reason, 800);
+                if (reason === undefined)
+                    return { ok: false, reason: 'bad-entry', detail: `${where} (${semantics}): manual-only requires a human-readable "reason"` };
+                seen.add(semantics);
+                parsed.push({ strategy: { kind: 'manual-only', semantics, reason }, level: 'irreversible' });
+                continue;
+            }
+            if (s.kind !== 'compensate') {
+                return { ok: false, reason: 'bad-entry', detail: `${where} (${semantics}): kind must be "compensate" or "manual-only"` };
+            }
+            if (!Array.isArray(s.steps) || s.steps.length === 0 || s.steps.length > EXTERNAL_TABLE_MAX_STEPS) {
+                return { ok: false, reason: 'bad-entry', detail: `${where} (${semantics}): compensate requires 1..${EXTERNAL_TABLE_MAX_STEPS} steps` };
+            }
+            const steps = [];
+            for (let j = 0; j < s.steps.length; j++) {
+                const raw = s.steps[j];
+                const w = `${where}.steps[${j}]`;
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+                    return { ok: false, reason: 'bad-entry', detail: `${w}: not an object` };
+                }
+                const st = raw;
+                if (typeof st.method !== 'string' || !ALLOWED_METHODS.includes(st.method)) {
+                    return { ok: false, reason: 'bad-entry', detail: `${w}: method must be one of ${ALLOWED_METHODS.join('/')}` };
+                }
+                const label = strOrUndef(st.label, 200);
+                if (label === undefined)
+                    return { ok: false, reason: 'bad-entry', detail: `${w}: label is required (non-empty string)` };
+                const step = { method: st.method, label };
+                if (st.keys !== undefined) {
+                    if (!Array.isArray(st.keys) || st.keys.length === 0 || st.keys.length > 8
+                        || st.keys.some((k) => typeof k !== 'string' || k.trim() === '')) {
+                        return { ok: false, reason: 'bad-entry', detail: `${w}: keys must be 1..8 non-empty strings` };
+                    }
+                    step.keys = st.keys.map(k => k.slice(0, 32));
+                }
+                const target = strOrUndef(st.target, 200);
+                if (target !== undefined)
+                    step.target = target;
+                steps.push(step);
+            }
+            if (!s.verify || typeof s.verify !== 'object' || Array.isArray(s.verify)) {
+                return { ok: false, reason: 'bad-entry', detail: `${where} (${semantics}): verify is required ({mode:"screen-hash"|"none"})` };
+            }
+            const v = s.verify;
+            if (v.mode !== 'screen-hash' && v.mode !== 'none') {
+                return { ok: false, reason: 'bad-entry', detail: `${where} (${semantics}): verify.mode must be "screen-hash" or "none" — "predicate" is refused (a JSON table cannot carry the predicate function; a strategy that can never verify is a bad table, not a degradation)` };
+            }
+            const verify = v.mode === 'screen-hash'
+                ? { mode: 'screen-hash', ...(typeof v.threshold === 'number' && Number.isFinite(v.threshold) && v.threshold > 0 && v.threshold <= 1 ? { threshold: v.threshold } : {}) }
+                : { mode: 'none' };
+            const notes = strOrUndef(s.notes, 400);
+            seen.add(semantics);
+            parsed.push({
+                strategy: { kind: 'compensate', semantics, steps, verify, ...(notes !== undefined ? { notes } : {}) },
+                level: 'compensable',
+            });
+        }
+        // ④ 对齐律前置校验：不改判已判定的键（内置立法优先；已装载扩展同样不翻案）
+        for (const { strategy, level } of parsed) {
+            const existing = reversibilityRegistry.levelOf(strategy.semantics);
+            if (existing !== null && existing.level !== level) {
+                return {
+                    ok: false, reason: 'builtin-conflict',
+                    detail: `semantics "${strategy.semantics}" is already registered as ${existing.level} (${existing.source}) but the table declares ${strategy.kind} (${level}) — external tables ADD knowledge, they do not overrule existing legislation (fail-closed)`,
+                };
+            }
+        }
+        // ⑤ riskGate 侧同步登记（全有或全无的批量通道 —— W9-2 增量登记面）
+        const reg = reversibilityRegistry.registerLevels(parsed.map(({ strategy, level }) => ({ semantics: strategy.semantics, level })));
+        if (!reg.ok) {
+            return { ok: false, reason: 'registration-failed', detail: reg.error ?? 'level registration rejected' };
+        }
+        // ⑥ 装载后复验（防御臂）：登记读回必须与派生级别一致。此臂正常流不可达
+        //（registerLevels 恰好写入了 ⑤ 传入的值）；若仍失配 ⇒ 拒表。方向论证：
+        // 此时级别已登记而策略未入表 —— 残留态是 fail-closed 安全向（compensable
+        // 已登记但无补偿策略 ⇒ mintPlan 照样 no-strategy 拒绝；irreversible 更严），
+        // 不存在「策略在表而分级不知道」的放行向残留。
+        for (const { strategy, level } of parsed) {
+            const after = reversibilityRegistry.levelOf(strategy.semantics);
+            if (after === null || after.level !== level) {
+                return {
+                    ok: false, reason: 'alignment-violation',
+                    detail: `post-registration verification failed for "${strategy.semantics}" (expected ${level}, read ${after?.level ?? 'null'}) — strategies NOT applied; the residual registered level is fail-closed safe (no strategy ⇒ mintPlan refuses)`,
+                };
+            }
+        }
+        // ⑦ 全部通过 ⇒ 策略入扩展表（arm({strategies}) 同一落点 —— 扩展覆盖内置，
+        // 与既有扩展语义一致；reset() 随隔离缝一并归零）
+        for (const { strategy } of parsed)
+            extensionStrategies.set(strategy.semantics, strategy);
+        return { ok: true, applied: parsed.length, semantics: parsed.map(p => p.strategy.semantics) };
+    }
+    catch (e) {
+        return { ok: false, reason: 'registration-failed', detail: `internal loader failure — table refused (${e instanceof Error ? e.message : String(e)})` };
     }
 }

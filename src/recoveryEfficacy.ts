@@ -52,142 +52,16 @@ const EFFICACY_VERSION = 1;
 /** 单侧计数的合法上限（防御恢复：垃圾巨值不淹没后验） */
 const MAX_COUNT = 1_000_000;
 
-// ── W2-5：症候签名（单次失败级的粗粒度症候 —— 疗效表的第一轴）──
-//
-// 命名空间辨析：diagnosis.Syndrome 是**系统级**症候（CUSUM/Hurst 聚合统计的
-// 会诊结论）；本处的症候签名是**单次失败级**的粗化特征（失败事件现场可得：
-// 症状首句关键词 + 熔断前缀 + 工具族缺省）。两者不混用 —— 单次失败没有
-// 聚合统计，冒用系统症候名是语义污染。闭集 ≤ 6 值是疗效账可积累的前提
-// （原始症状字符串做键 ⇒ 每条失败一个新格，永远凑不满样本闸）。
+// W6-2（doctor smell.over-engineering 清偿）：症候签名面 → recoveryEfficacy.syndromes.ts、
+// 事件与回合结构（纯类型）→ recoveryEfficacy.contracts.ts（行为零变化）；导入面不变 —— 再分发。
+import { RECOVERY_SYNDROME_IDS, parseRecoverySyndrome, classifySyndromeSignature, classifyRecoveryAction } from './recoveryEfficacy.syndromes';
+import type { RecoverySyndromeId } from './recoveryEfficacy.syndromes';
+export { RECOVERY_SYNDROME_IDS, parseRecoverySyndrome, classifySyndromeSignature, classifyRecoveryAction } from './recoveryEfficacy.syndromes';
+export type { RecoverySyndromeId } from './recoveryEfficacy.syndromes';
+export type { RecoveryEventKind, RecoveryEvent, RecoveryObservation, RecoveryEpisodeRecord, RecoveryCell, EfficacySnapshot } from './recoveryEfficacy.contracts';
+import type { RecoveryEventKind, RecoveryEvent, RecoveryObservation, RecoveryEpisodeRecord, RecoveryCell, EfficacySnapshot } from './recoveryEfficacy.contracts';
 
-/** W2-5：单次失败的粗粒度症候签名（闭集 —— 疗效表第一轴） */
-export type RecoverySyndromeId =
-  | 'guard-blocked'        // 熔断/守卫拦截（聚合症状 —— 回合允许从熔断事件起算）
-  | 'target-not-found'     // 定位/识别失败（找不到目标）
-  | 'no-world-effect'      // 动作报败且屏幕无变化（点空/坐标偏差）
-  | 'verification-mismatch'// 语义核对失败（读到的与预期不符 / 校验器判负）
-  | 'stall-timeout'        // 超时/卡顿/冻结（世界没在响应）
-  | 'generic-failure';     // 兜底（症状无决定性特征 —— 诚实的粗桶）
 
-/** W2-5：运行时枚举面（防御解析的合法值域） */
-export const RECOVERY_SYNDROME_IDS: readonly RecoverySyndromeId[] = [
-  'guard-blocked', 'target-not-found', 'no-world-effect',
-  'verification-mismatch', 'stall-timeout', 'generic-failure',
-];
-
-/** W2-5：防御解析 —— 任意值 → 合法症候签名（垃圾值 ⇒ generic-failure 兜底桶） */
-export function parseRecoverySyndrome(v: unknown): RecoverySyndromeId {
-  return typeof v === 'string' && (RECOVERY_SYNDROME_IDS as readonly string[]).includes(v)
-    ? (v as RecoverySyndromeId)
-    : 'generic-failure';
-}
-
-/**
- * W2-5：症候签名分类器（纯函数、确定性、首中即断 —— 与规则表同哲学）。
- * 判据序：熔断前缀 → 症状关键词（找不到 / 无变化 / 核对不符 / 卡顿）→
- * 工具族先验（感知类工具的失败模式是本职失败：找不到）→ 兜底粗桶。
- */
-export function classifySyndromeSignature(symptom: unknown, tool?: unknown): RecoverySyndromeId {
-  const s = typeof symptom === 'string' ? symptom.toLowerCase() : '';
-  const t = typeof tool === 'string' ? tool.toLowerCase() : '';
-  if (s.startsWith('circuit-breaker:')) return 'guard-blocked';
-  if (/not found|no match|cannot find|can't find|not located|unrecognized|not detected|no .*located/.test(s)) {
-    return 'target-not-found';
-  }
-  if (/no change|unchanged|no effect|nothing happen|did not change|didn't change|no visible/.test(s)) {
-    return 'no-world-effect';
-  }
-  if (/mismatch|differ|expected|verify|incorrect|wrong text/.test(s)) {
-    return 'verification-mismatch';
-  }
-  if (/timeout|timed out|stall|freez|hang|unresponsive/.test(s)) {
-    return 'stall-timeout';
-  }
-  // 症状词缺席 ⇒ 工具族先验（感知/识别类工具的失败即「找不到」）
-  if (t === 'find_text' || t === 'read_text' || t === 'zoom_inspect' || t === 'extract_ui_vision') {
-    return 'target-not-found';
-  }
-  return 'generic-failure';
-}
-
-/**
- * W2-5：恢复动作分类器（纯函数）—— 工具名 → 规范动作（diagnosis 的动作词汇）。
- * 不在表内的工具 ⇒ null：该事件仍消耗回合窗口（是一次真实尝试），但不产生
- * 疗效观察（无法记名的动作不入账 —— 与 unknown 根因不写库同律）。
- */
-const ACTION_TOOL_FAMILY: ReadonlyArray<readonly [RecoveryActionId, readonly string[]]> = [
-  ['zoom-refine', ['zoom_inspect']],
-  ['switch-modality', ['press_hotkey', 'type_text', 'scroll_page', 'recall_ui', 'switch_tab', 'switch_window', 'open_url']],
-  ['re-observe', ['take_screenshot', 'diff_view', 'ask_screen']],
-  ['ground-target', ['find_text', 'probe_interactivity', 'read_text', 'extract_ui_vision']],
-];
-
-export function classifyRecoveryAction(tool: unknown): RecoveryActionId | null {
-  if (typeof tool !== 'string') return null;
-  for (const [action, tools] of ACTION_TOOL_FAMILY) {
-    if (tools.includes(tool)) return action;
-  }
-  return null;
-}
-
-// ── W2-5：事件与回合结构 ──
-
-export type RecoveryEventKind = 'failure' | 'success' | 'unknown';
-
-/** 疗效事件流的一个事件（生产：守卫逐事件喂入；测试/回放：注入） */
-export interface RecoveryEvent {
-  kind: RecoveryEventKind;
-  tool: string;
-  /** failure 的症状原文（症候签名的推导源；缺席 ⇒ 工具族缺省） */
-  symptom?: string;
-  /** failure 的根因（鉴别探针结论；缺席/垃圾 ⇒ unknown —— parseRootCause 律） */
-  rootCause?: RootCauseId | string;
-  /** 墙钟（可选 —— 审计面；缺席 ⇒ null，回合判定零墙钟依赖） */
-  at?: number;
-}
-
-/** 回合内一次可记名恢复动作的观察（Beta 账的一笔） */
-export interface RecoveryObservation {
-  tool: string;
-  action: RecoveryActionId;
-  success: boolean;
-}
-
-/** 划定后的恢复回合（审计可回放：开闭下标 + 窗口 + 逐动作观察） */
-export interface RecoveryEpisodeRecord {
-  syndrome: RecoverySyndromeId;
-  rootCause: RootCauseId;
-  outcome: 'recovered' | 'timeout' | 'open';
-  /** 开回合事件的下标（事件流内 —— 回放锚） */
-  openIndex: number;
-  /** 闭回合事件的下标（null = 未决 open —— 流尽而窗未满） */
-  closeIndex: number | null;
-  openedAt: number | null;
-  closedAt: number | null;
-  /** 划界窗口 N（回合判定所用值 —— 快照可解释性） */
-  window: number;
-  observations: RecoveryObservation[];
-  /** 窗内无法记名动作的事件数（窗口消耗面 —— 诚实申报） */
-  unclassifiedActions: number;
-}
-
-/** 疗效表的一格：(症候签名 × 根因 × 恢复动作) 的 Beta 账 */
-export interface RecoveryCell {
-  syndrome: RecoverySyndromeId;
-  rootCause: RootCauseId;
-  action: RecoveryActionId;
-  successes: number;
-  failures: number;
-}
-
-/** 疗效表快照（metrics / doctor 的消费面 —— 只读投影） */
-export interface EfficacySnapshot {
-  cells: Array<RecoveryCell & { n: number; posteriorMean: number }>;
-  episodes: RecoveryEpisodeRecord[];
-  totals: { recovered: number; timedOut: number; observations: number };
-  window: number;
-  minSamples: number;
-}
 
 // ── W2-5：回合划定状态机（demarcate 纯函数与增量 tracker 共用同一机芯）──
 //

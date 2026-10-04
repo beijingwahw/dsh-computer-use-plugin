@@ -29,63 +29,12 @@ import { isLocalBaseUrl, sanitizeError } from './types';
 import type { VisionChatRequest, VisionImage, VisionProvider } from './types';
 import type { PlatformPreset } from './registry';
 
-// ─── 协议类型 ───
+// W6-2（doctor smell.over-engineering 清偿）：协议类型 → ensemble.types.ts、元素方言归一
+// → ensemble.elements.ts（行为零变化）；导入面不变 —— 再分发。
+export type { EnsembleQuery, EnsembleMemberResult, EnsembleTextAnswer, EnsembleVerdict } from './ensemble.types';
+import type { EnsembleQuery, EnsembleMemberResult, EnsembleTextAnswer, EnsembleVerdict } from './ensemble.types';
+import { normalizeElements, fusePair, confOr } from './ensemble.elements';
 
-/** 合议庭问询：一次并席发问的请求（各字段语义同 VisionChatRequest，无 maxRetries） */
-export interface EnsembleQuery {
-  /** 截图序列（至少一帧才有视觉语义） */
-  images: VisionImage[];
-  /** 系统提示词（askVerdict / askElements 缺省注入各自裁决/接地系统词） */
-  system?: string;
-  /** 用户指令（与截图一起进最后一条 user 消息） */
-  prompt: string;
-  /** 最大生成 token 数（透传各成员适配器缺省） */
-  maxTokens?: number;
-  /** 采样温度（透传各成员适配器缺省） */
-  temperature?: number;
-  /** true 时文本问询也请求结构化输出 */
-  jsonMode?: boolean;
-  /** 单次 fetch 尝试超时毫秒（透传各成员适配器缺省） */
-  timeoutMs?: number;
-}
-
-/** 庭员普查条目：每颗脑在本次问询中的成败、原文与延迟（census 透明律的最小单元） */
-export interface EnsembleMemberResult {
-  /** 庭员标识（VisionProvider.id —— 归因主键） */
-  id: string;
-  /** 该成员本次问询是否成功（未配置 / 失败 / 违约上抛 ⇒ false） */
-  ok: boolean;
-  /** 成功时的模型回复原文（jsonMode 路径为 raw 原文；失败恒 ''，但 chatJson 失败可带 raw） */
-  text: string;
-  /** 该成员整次调用的墙钟延迟 */
-  latencyMs: number;
-  /** 失败原因（ok:false 时必有；已经 sanitizeError 密钥卫生处理） */
-  error?: string;
-}
-
-/** 文本合议答案：融合后的文本 + 庭内一致性测度 + 法定人数档位 + 全员普查 */
-export interface EnsembleTextAnswer {
-  /** 融合后的答案（代表簇首家的文本；全败为 ''） */
-  text: string;
-  /** 成员间 normalizedLevenshtein 两两相似度均值（0..1；单家成功 = 1，全败 = 0） */
-  agreement: number;
-  /** 法定人数档位：unanimous 全体同簇 / majority 最大簇占比 ≥0.5 / split 分裂 / degraded 无从合议 */
-  quorum: 'unanimous' | 'majority' | 'split' | 'degraded';
-  /** 全体庭员普查表（长度恒等于庭员数，含未配置成员的失败记账） */
-  members: EnsembleMemberResult[];
-}
-
-/** 裁决合议判决：多数票判决 + 胜方置信 + 少数派点名 + 全员普查 */
-export interface EnsembleVerdict {
-  /** 判决：confirmed / refuted 多数票胜出；平票（含全垃圾载荷）⇒ uncertain */
-  verdict: 'confirmed' | 'refuted' | 'uncertain';
-  /** 胜方置信均值 × 胜方票数占比（uncertain 恒 0） */
-  confidence: number;
-  /** 少数派点名，格式 `${id}:${verdict}`（uncertain 平票时列出全部已投有效票） */
-  dissents: string[];
-  /** 全体庭员普查表 */
-  members: EnsembleMemberResult[];
-}
 
 // ─── 内部常量与默认提示词 ───
 
@@ -163,109 +112,6 @@ function clusterBySimilarity(texts: string[], threshold = CLUSTER_THRESHOLD): nu
     .sort((a, b) => b.length - a.length || a[0]! - b[0]!);
 }
 
-// ─── 内部：元素方言归一（askElements 的逐家规整层） ───
-
-/** label 兜底与截断上限（对齐 grounding.ts 的防注入纪律） */
-const LABEL_FALLBACK = '未知元素';
-const LABEL_MAX = 80;
-const ROLE_FALLBACK = 'unknown';
-const ROLE_MAX = 24;
-/** VLM 未给 confidence 时的中性记账值（对齐 grounding.ts） */
-const DEFAULT_CONFIDENCE = 0.5;
-
-/** bbox 双形态解析：[x0,y0,x1,y1] 数组或 {x0,y0,x1,y1} 对象 → 对象；非法 ⇒ null（不做 clamp） */
-function parseBbox(raw: unknown): { x0: number; y0: number; x1: number; y1: number } | null {
-  let ns: unknown[];
-  if (Array.isArray(raw)) {
-    if (raw.length < 4) return null;
-    ns = [raw[0], raw[1], raw[2], raw[3]];
-  } else if (raw !== null && typeof raw === 'object') {
-    const o = raw as Record<string, unknown>;
-    ns = [o.x0, o.y0, o.x1, o.y1];
-  } else {
-    return null;
-  }
-  if (!ns.every(v => typeof v === 'number' && Number.isFinite(v))) return null;
-  return { x0: ns[0] as number, y0: ns[1] as number, x1: ns[2] as number, y1: ns[3] as number };
-}
-
-/** 字符串兜底：非字符串/空白 → fallback；超长截断（防注入纪律） */
-function strOr(raw: unknown, fallback: string, max: number): string {
-  if (typeof raw !== 'string') return fallback;
-  const s = raw.trim();
-  return s.length === 0 ? fallback : s.slice(0, max);
-}
-
-/** confidence 兜底：非有限数字 → 中性 0.5；数字夹 [0,1]（越界值不外溢） */
-function confOr(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_CONFIDENCE;
-  return Math.min(1, Math.max(0, raw));
-}
-
-/**
- * 逐家元素归一：成员 chatJson 载荷的 elements 数组 → 仓库标准 GroundedElement[]。
- * 规整律（与 grounding.ts 同调，但不做 clamp / NMS —— 交由 arbitrateElements 配对）：
- *   - bbox 数组/对象双形态转 {x0,y0,x1,y1} 像素对象，非法元素整条丢弃（宁可少报）；
- *   - id 归一 'e1'.. 序号；label/role 兜底 + 截断；confidence 夹 [0,1] 缺省 0.5；
- *   - center 取 bbox 中点；source 恒 'vlm'（本庭成员全是云脑信道）。
- */
-function normalizeElements(raw: unknown): GroundedElement[] {
-  if (!Array.isArray(raw)) return [];
-  const out: GroundedElement[] = [];
-  for (const item of raw) {
-    if (item === null || typeof item !== 'object') continue;
-    const o = item as Record<string, unknown>;
-    const bbox = parseBbox(o.bbox);
-    if (bbox === null) continue;
-    out.push({
-      id: `e${out.length + 1}`,
-      label: strOr(o.label ?? o.name, LABEL_FALLBACK, LABEL_MAX),
-      role: strOr(o.role ?? o.type, ROLE_FALLBACK, ROLE_MAX),
-      bbox,
-      center: { x: (bbox.x0 + bbox.x1) / 2, y: (bbox.y0 + bbox.y1) / 2 },
-      confidence: confOr(o.confidence),
-      source: 'vlm',
-    });
-  }
-  return out;
-}
-
-/** 四坐标精确相等（arbitrateElements 对未配对元素 bbox 原样直通 —— 可作身份指纹） */
-function sameBbox(
-  a: { x0: number; y0: number; x1: number; y1: number },
-  b: { x0: number; y0: number; x1: number; y1: number },
-): boolean {
-  return a.x0 === b.x0 && a.y0 === b.y0 && a.x1 === b.x1 && a.y1 === b.y1;
-}
-
-/**
- * 两家元素经真 arbitrateElements 融合（vlm 源语义）：acc 为左席（vlm 侧）、
- * next 为右席（local 侧 —— GroundedElement 结构上满足 LocalElement 三测度）。
- * 仲裁输出回映 GroundedElement：前 acc.length 个输出与 acc 按序一一对应
- * （融合或直通，role 原位继承 acc）；其后追加的右席单源元素 bbox 原样直通，
- * 以 bbox 指纹回查 next 找回 role（查无兜底 'unknown'）。id 统一重排 'e1'..。
- */
-function fusePair(acc: GroundedElement[], next: GroundedElement[]): GroundedElement[] {
-  const verdict = arbitrateElements(acc, next);
-  return verdict.elements.map((el, i) => {
-    let role: string;
-    if (i < acc.length) {
-      role = acc[i]!.role; // 左席位序保持 —— 融合/直通均原位继承
-    } else {
-      const hit = next.find(n => sameBbox(n.bbox, el.bbox));
-      role = hit !== undefined ? hit.role : ROLE_FALLBACK;
-    }
-    return {
-      id: `e${i + 1}`,
-      label: el.label,
-      role,
-      bbox: el.bbox,
-      center: el.center,
-      confidence: Math.min(1, Math.max(0, el.confidence)),
-      source: 'vlm' as const,
-    };
-  });
-}
 
 // ─── 云脑合议庭 ───
 

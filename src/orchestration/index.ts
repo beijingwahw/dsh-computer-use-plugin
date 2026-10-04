@@ -218,9 +218,21 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
       try {
         const { createSemanticFromVlm } = await import('./visionAdapters');
         const { system } = await import('../system');
+        // W8-B2 接线（DEBTS D-B3 SoM 种子投喂面通电）：somMarkers 端口接 som.ts
+        // 的供源工装（W8-A3 备好并经 w8.organwiring 测试证明接入即生效 —— 推荐形态
+        // `createSomMarkerSeedSupply({ screenSize, capture })`：a11y 元素 + OCR 词
+        // 双通道铸种，交互置信键诚实缺席 —— 组合根绝不 import interactivityProbe
+        //（会污染 D-6 模块图，som.ts 顶部纪律同源）。缺省零行为双闸：som.sparseBudget
+        // 缺省 0 ⇒ applySparseSom 预算闸先行放行原图（供给口根本不被调用）；
+        // 预算开 ⇒ 供给口调用时动态装载 uiExtractor/textReader（模块图零污染）。
+        const { createSomMarkerSeedSupply } = await import('../vlm/som');
         semanticSource = createSemanticFromVlm({
           capture: () => system.captureScreen(),
           screenSize: () => system.getScreenSize(),
+          somMarkers: createSomMarkerSeedSupply({
+            capture: () => system.captureScreen(),
+            screenSize: () => system.getScreenSize(),
+          }),
         });
         ownedSources.push(['dsh.vision.semantic', semanticSource]);
         console.log('[Orchestration] VLM semantic source wired (Ω cloud cortex — L3 grounding).');

@@ -158,7 +158,7 @@ export function createOpenAiProvider(config?: OpenAiProviderConfig): VisionProvi
 
       const doFetch = fetchImpl ?? (typeof fetch === 'function' ? fetch : undefined);
       if (!doFetch) {
-        return finish({ ok: false, text: '', error: `${providerId} fetch is not available (Node >= 18 required)` });
+        return finish({ ok: false, text: '', error: `${providerId} fetch is not available (Node >= 18 required)` }); // doctor-exempt: 文案字符串，非阈值比较（W6-2）
       }
 
       // OpenAI 多模态消息：system（可选）在前，user = 文本 + 图片序列

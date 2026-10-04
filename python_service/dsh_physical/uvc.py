@@ -295,7 +295,8 @@ class Cv2FrameSource:
                 ErrorKind.SCREEN_CAPTURE_FAILED,
                 "cv2 read() returned no frame (signal lost?)",
             )
-        return Image.fromarray(cv2_to_rgb(frame, np))
+        # cv2_to_rgb 已返回 PIL Image,不得再包 fromarray(双重包装 TypeError,W6 集成修复 D-E1)
+        return cv2_to_rgb(frame, np)
 
     def close(self) -> None:
         if self._cap is not None:
@@ -724,5 +725,16 @@ def _run_selftest() -> int:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         raise SystemExit(_run_selftest())
-    print("usage: python -m dsh_physical.uvc --selftest")
+    if "--selftest-real" in sys.argv:
+        # W9-4 真机实证探针入口:本模块逻辑零侵入,委托 real_probe.py
+        # (枚举 DirectShow 设备 → 真帧过校准/门控/编码全管线,证据落 JSON)。
+        import pathlib as _pl
+
+        _svc_root = _pl.Path(__file__).resolve().parent.parent
+        if str(_svc_root) not in sys.path:
+            sys.path.insert(0, str(_svc_root))
+        from real_probe import run_debt_probe
+
+        raise SystemExit(run_debt_probe("D-A1"))
+    print("usage: python -m dsh_physical.uvc --selftest | --selftest-real")
     raise SystemExit(2)

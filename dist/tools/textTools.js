@@ -13,6 +13,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { readTextAny } from '../textReader.js';
 import { classifyWordShape, probePoints } from '../interactivityProbe.js';
 import { extractUrls } from '../urlSense.js';
+import { toolOkNoAction } from '../toolResult.js';
 export function createReadTextTool(config) {
     return defineTool({
         name: 'read_text',
@@ -55,32 +56,25 @@ export function createReadTextTool(config) {
                 const { text } = await readTextAny(region, config.ocrLang);
                 const clean = text.replace(/\n{3,}/g, '\n\n').trim();
                 if (!clean) {
-                    return JSON.stringify({
-                        status: 'SUCCESS',
-                        state_anchor: { scope: cropNote, text_found: false },
-                        next_step: 'No readable text in scope. If the area contains text, it may be too small — try zoom_inspect or a larger half_size.',
-                    }, null, 2);
+                    // W8/B-4：回执走工厂（toolOkNoAction —— 历史无 action 形状，逐字节同构）
+                    return toolOkNoAction({ scope: cropNote, text_found: false }, 'No readable text in scope. If the area contains text, it may be too small — try zoom_inspect or a larger half_size.');
                 }
                 // AA-1 URL 感知：正文里的链接自动浮出 —— 「自动跳转」的感知面。
                 // 屏幕上的 URL 不是控件（点击被 Z-2 闸门否决），跳转的正确出口是
                 // open_url；read_text 顺手把燃料备好，模型不必再手抄。
                 const urls = extractUrls(clean);
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    state_anchor: {
-                        scope: cropNote,
-                        text_found: true,
-                        char_count: clean.length,
-                        // 文本本身也做预算：超长截断
-                        text: clean.length > 1500 ? clean.slice(0, 1500) + '...[truncated]' : clean,
-                        ...(urls.length > 0 ? { urls_detected: urls } : {}),
-                    },
-                    next_step: urls.length > 0
-                        ? `URLs detected in the text. To FOLLOW one, call 'open_url' with it — do NOT click the text ` +
-                            `(it is static content; the interactivity gate will refuse). ` +
-                            `Use the text content for your reasoning; call find_text when you need clickable coordinates for any label.`
-                        : 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.',
-                }, null, 2);
+                return toolOkNoAction({
+                    scope: cropNote,
+                    text_found: true,
+                    char_count: clean.length,
+                    // 文本本身也做预算：超长截断
+                    text: clean.length > 1500 ? clean.slice(0, 1500) + '...[truncated]' : clean,
+                    ...(urls.length > 0 ? { urls_detected: urls } : {}),
+                }, urls.length > 0
+                    ? `URLs detected in the text. To FOLLOW one, call 'open_url' with it — do NOT click the text ` +
+                        `(it is static content; the interactivity gate will refuse). ` +
+                        `Use the text content for your reasoning; call find_text when you need clickable coordinates for any label.`
+                    : 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.');
             }
             catch (error) {
                 return `[Error]: OCR failed (${error.message}). The OCR engine may be unavailable (rapidocr for the service path, tesseract.js for the legacy path); fall back to take_screenshot.`;
@@ -114,11 +108,7 @@ export function createFindTextTool(config) {
                 const needle = args.keyword.toLowerCase().trim();
                 const hits = words.filter(w => w.text.toLowerCase().includes(needle));
                 if (hits.length === 0) {
-                    return JSON.stringify({
-                        status: 'SUCCESS',
-                        state_anchor: { keyword: args.keyword, matches: 0 },
-                        next_step: 'No match on screen. The text may be off-screen (scroll_page), inside an unopened menu, or rendered as an image/icon. Fall back to visual search via take_screenshot.',
-                    }, null, 2);
+                    return toolOkNoAction({ keyword: args.keyword, matches: 0 }, 'No match on screen. The text may be off-screen (scroll_page), inside an unopened menu, or rendered as an image/icon. Fall back to visual search via take_screenshot.');
                 }
                 // Z-1：几何先验分类 + 悬停物理实验。探针优先级：ambiguous（最需实验）
                 // > content-like（本 bug 的危险形态）> control-like（先验已足）。
@@ -156,23 +146,19 @@ export function createFindTextTool(config) {
                 });
                 const anyControl = [...probes.values()].some(p => p.verdict === 'control');
                 const anyText = [...probes.values()].some(p => p.verdict === 'text');
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    state_anchor: {
-                        keyword: args.keyword,
-                        matches: hits.length,
-                        probed: probes.size,
-                        locations: lines,
-                    },
-                    next_step: 'ONLY click a match with interactivity=control (OS-confirmed clickable). ' +
-                        'Matches with interactivity=text are static content — chat messages or document ' +
-                        'text that merely MENTIONS the keyword; clicking them is always a mistake. ' +
-                        'unprobed matches: rely on shape (content-like full-width rows are text; ' +
-                        'compact labels are likely controls) and verify with zoom_inspect or ' +
-                        'probe_interactivity before clicking. If NO match is a control, the real entry ' +
-                        'is elsewhere: scroll_page, open the right menu, or take_screenshot and search visually.' +
-                        (anyControl ? ' A control match exists in this result.' : anyText ? ' WARNING: only text matches were found — do not click any of them.' : ''),
-                }, null, 2);
+                return toolOkNoAction({
+                    keyword: args.keyword,
+                    matches: hits.length,
+                    probed: probes.size,
+                    locations: lines,
+                }, 'ONLY click a match with interactivity=control (OS-confirmed clickable). ' +
+                    'Matches with interactivity=text are static content — chat messages or document ' +
+                    'text that merely MENTIONS the keyword; clicking them is always a mistake. ' +
+                    'unprobed matches: rely on shape (content-like full-width rows are text; ' +
+                    'compact labels are likely controls) and verify with zoom_inspect or ' +
+                    'probe_interactivity before clicking. If NO match is a control, the real entry ' +
+                    'is elsewhere: scroll_page, open the right menu, or take_screenshot and search visually.' +
+                    (anyControl ? ' A control match exists in this result.' : anyText ? ' WARNING: only text matches were found — do not click any of them.' : ''));
             }
             catch (error) {
                 return `[Error]: OCR failed (${error.message}). Fall back to visual grounding via take_screenshot + zoom_inspect.`;

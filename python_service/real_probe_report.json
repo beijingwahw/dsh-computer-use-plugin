@@ -1,0 +1,402 @@
+{
+  "schema": "w9-real-probe/1",
+  "env": {
+    "python": "3.14.6",
+    "platform": "win32",
+    "cv2": "5.0.0",
+    "comtypes": "1.4.17",
+    "pyserial": "3.5",
+    "node": "C:\\Users\\28646\\.cache\\omega-node\\node-v22.14.0-win-x64\\node.EXE",
+    "ts": "2026-10-04T08:15:29+0800"
+  },
+  "debts": {
+    "D-A1": {
+      "probe": "real_probe.py --dA1",
+      "depth": "真软件栈+真DirectShow设备帧",
+      "cv2": "5.0.0",
+      "devices": [
+        {
+          "index": 0,
+          "readable": true,
+          "shape": [
+            480,
+            640,
+            3
+          ]
+        }
+      ],
+      "raw_reads": {
+        "n": 15,
+        "elapsed_s": 0.936,
+        "fps_est": 16.0,
+        "frame_means": [
+          116.92,
+          116.142,
+          116.137,
+          115.996,
+          115.903,
+          115.805,
+          115.74,
+          115.681,
+          115.592,
+          115.528,
+          115.448,
+          115.383,
+          115.326,
+          115.252,
+          115.191
+        ],
+        "frame_stds": [
+          39.312,
+          39.7,
+          39.533,
+          39.463,
+          39.359,
+          39.29,
+          39.2,
+          39.118,
+          39.077,
+          38.987,
+          38.942,
+          38.872,
+          38.798,
+          38.76,
+          38.698
+        ]
+      },
+      "pipeline": {
+        "png_ok": true,
+        "png_bytes": 319969,
+        "dims": [
+          640,
+          480
+        ],
+        "dhash0": "0f0c202060400000",
+        "jpeg_ok": true,
+        "jpeg_bytes": 10213,
+        "jpeg_dims": [
+          320,
+          240
+        ],
+        "gate": {
+          "attempts": 12,
+          "unchanged": 12,
+          "regenerated": 0,
+          "hamming_vs_ref": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "gate_mechanism_ok": true,
+        "overscan_dims": [
+          512,
+          384
+        ],
+        "overscan_ok": true
+      },
+      "rectify": {
+        "out_size": [
+          576,
+          482
+        ],
+        "natural": [
+          576,
+          482
+        ],
+        "ms": 5.8
+      },
+      "status": "ok",
+      "verdict": "真 DirectShow 设备帧经完整 uvc 管线(校准/门控/编码)闭环 —— D-A1 的「帧管线真硬件在环」缺口在软件在环层面闭合;唯余:真实 HDMI 采集卡过扫描/方言对齐的现场标定(需采集卡在场)",
+      "elapsed_s": 4.109
+    },
+    "D-A2": {
+      "probe": "real_probe.py --dA2",
+      "depth": "真软件栈(pyserial loop:// 序列化)+无棒(mock 物理层)",
+      "comports": [],
+      "ch9329_stick_present": false,
+      "frames_sent": 12,
+      "wire_bytes": 168,
+      "frames_parsed": [
+        {
+          "addr": 0,
+          "cmd": "0x02",
+          "len": 6,
+          "data_head": [
+            1,
+            255,
+            63
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x02",
+          "len": 6,
+          "data_head": [
+            0,
+            255,
+            63
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x02",
+          "len": 6,
+          "data_head": [
+            0,
+            204,
+            12
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x02",
+          "len": 6,
+          "data_head": [
+            1,
+            204,
+            12
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x02",
+          "len": 6,
+          "data_head": [
+            1,
+            50,
+            115
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x02",
+          "len": 6,
+          "data_head": [
+            0,
+            50,
+            115
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x08",
+          "len": 10,
+          "data_head": [
+            2,
+            0,
+            11
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x08",
+          "len": 10,
+          "data_head": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x08",
+          "len": 10,
+          "data_head": [
+            0,
+            0,
+            12
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x08",
+          "len": 10,
+          "data_head": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x08",
+          "len": 10,
+          "data_head": [
+            3,
+            0,
+            41
+          ]
+        },
+        {
+          "addr": 0,
+          "cmd": "0x08",
+          "len": 10,
+          "data_head": [
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "status": "ok",
+      "verdict": "CH9329 协议帧经真 pyserial 序列化(loop:// 全双工回环)写出→回读→逐帧SUM 校验通过 —— 比 mock 深一层(真 Serial.write/read 代码路径);本机无 CH9329 棒(COM 枚举空)—— D-A2 唯余真棒在目标设备注入的硬件闭环",
+      "elapsed_s": 0.24
+    },
+    "D-A3": {
+      "probe": "real_probe.py --dA3",
+      "depth": "在场性探测(定谳证据)",
+      "adb_on_path": null,
+      "scrcpy_on_path": null,
+      "scrcpy_server_jars": [],
+      "android_device_attached": false,
+      "status": "ok",
+      "verdict": "本机无 adb(PATH 未命中)、无 scrcpy(PATH 未命中)、无 scrcpy-server.jar(未找到) —— D-A3 唯余 Android 设备+adb 在场(离线契约/mock runner 证据链已由 --selftest 闭)",
+      "elapsed_s": 0.004
+    },
+    "D-A4": {
+      "probe": "real_probe.py --dA4",
+      "depth": "真软件栈(原始 vtable WASAPI)+真播放声学在环",
+      "audio_py_runner_status": {
+        "available": false,
+        "backend": "wasapi-loopback",
+        "reason": "wasapi loopback unavailable: TypeError: POINTER(IMMDevice) 'out' parameter must be passed as default value"
+      },
+      "link": {
+        "ok": true,
+        "endpoint_id": "{0.0.0.00000000}.{bcd9de2b-4677-4283-9068-752176187ba3}"
+      },
+      "mix_format": {
+        "tag": 3,
+        "channels": 2,
+        "sr": 48000,
+        "bits": 32
+      },
+      "playback": {
+        "played": true,
+        "note": "playback path unavailable: [WinError 32] 另一个程序正在使用此文件，进程无法访问。: 'C:\\\\Users\\\\28646\\\\AppData\\\\Local\\\\Temp\\\\tmp2ravyoic\\\\w9_ding.wav'"
+      },
+      "capture": {
+        "frames": 116640,
+        "elapsed_s": 2.5,
+        "seconds_audio": 2.43
+      },
+      "classifier_verdict": {
+        "event": "notification_ding",
+        "confidence": 0.7333
+      },
+      "non_silence": true,
+      "status": "ok",
+      "verdict": "WASAPI 真建链(原始 vtable)+ 真播放→回环→分类闭环:判决=notification_ding —— D-A4 软件在环已闭;audio.py 既有 WasapiLoopbackRunner 在 py3.14+comtypes1.4.17 因 ctypes 出参约定回归不可用(reason=wasapi loopback unavailable: TypeError: POINTER(IMMDevice) 'out' parameter must be passed as default value);唯余:真实系统提示音生态现场长跑",
+      "elapsed_s": 3.179
+    },
+    "D-A5": {
+      "probe": "real_probe.py --dA5",
+      "depth": "真三进程+真 socket(环回 127.0.0.1,非进程内 hub)",
+      "server": {
+        "pid": 25752,
+        "port": 63205,
+        "boot_log_head": "{\"event\":\"listening\",\"address\":\"127.0.0.1\",\"port\":63205,\"epoch\":\"Mu2\",\"pid\":25752,\"auth\":\"open (UNAUTHENTICATED — set DSH_FEDERATION_TOKEN to enforce HMAC signatures)\",\"barrierAuth\":\"open (no token co"
+      },
+      "roundtrip_s": 0.47,
+      "clients": {
+        "A": {
+          "pid": 2756,
+          "rc": 0,
+          "stdout": "RESULT {\"ok\":true,\"peer\":\"A\",\"name\":\"w9-real-1791072937\",\"seq\":1,\"peers\":[\"A\",\"B\"],\"ackOk\":true,\"reason\":null,\"waitedMs\":151,\"pid\":2756}"
+        },
+        "B": {
+          "pid": 20584,
+          "rc": 0,
+          "stdout": "RESULT {\"ok\":true,\"peer\":\"B\",\"name\":\"w9-real-1791072937\",\"seq\":1,\"peers\":[\"A\",\"B\"],\"ackOk\":true,\"reason\":null,\"waitedMs\":91,\"pid\":20584}"
+        }
+      },
+      "outcomes": {
+        "A": {
+          "ok": true,
+          "peer": "A",
+          "name": "w9-real-1791072937",
+          "seq": 1,
+          "peers": [
+            "A",
+            "B"
+          ],
+          "ackOk": true,
+          "reason": null,
+          "waitedMs": 151,
+          "pid": 2756
+        },
+        "B": {
+          "ok": true,
+          "peer": "B",
+          "name": "w9-real-1791072937",
+          "seq": 1,
+          "peers": [
+            "A",
+            "B"
+          ],
+          "ackOk": true,
+          "reason": null,
+          "waitedMs": 91,
+          "pid": 20584
+        }
+      },
+      "status_query_after": {
+        "ok": false,
+        "reason": "unknown-barrier"
+      },
+      "status": "ok",
+      "verdict": "真三进程(server + 客户端 A + 客户端 B)经 127.0.0.1 真 socket 完成两阶段 barrier 往返并退休 —— D-A5 从「环回参考」升为「真 socket 多进程实证」;唯余:跨物理机的生产拓扑(TLS/限速/反代 —— 部署面 D-C2)",
+      "elapsed_s": 0.612
+    },
+    "D-A6": {
+      "probe": "real_probe.py --dA6",
+      "depth": "唯余硬件(真模型/长跑)",
+      "bench_files": {
+        "test/w5cascade.bench.ts": 8620,
+        "test/w5gate.bench.ts": 7923,
+        "test/w5ledger.bench.ts": 9675,
+        "test/w5macro.bench.ts": 12290,
+        "test/w5roi.bench.ts": 10594,
+        "test/w5settle.bench.ts": 9050,
+        "test/ablation.bench.ts": 16346
+      },
+      "w5somcall_present": true,
+      "status": "ok",
+      "verdict": "七项效能证据全部为离线确定性基准(bench 文件在场:7 个)+ SoM 模拟证据(w5somcall在)—— 在线真 VLM 对照/A-B 增益需真模型 API 密钥与长跑预算,软件在环已尽(mock 边界诚实申报),唯余真模型在场",
+      "elapsed_s": 0.0
+    },
+    "D-A7": {
+      "probe": "real_probe.py --dA7",
+      "depth": "唯余硬件(Linux 真机 CI)",
+      "socket_AF_UNIX": false,
+      "uds_create_error": null,
+      "platform": "win32",
+      "ci_yml": {
+        "linux_physical_e2e": true,
+        "mentions_dev_shm": true
+      },
+      "status": "ok",
+      "verdict": "本机 win32:socket.AF_UNIX=缺席 —— POSIX UDS 真机执法无法在本机复现;ci.yml Linux 物理服务 e2e 步骤在场(D-A7 半闭状态)—— 唯余下次 push 后 Linux CI runner 真机首验",
+      "elapsed_s": 0.0
+    },
+    "D-G4": {
+      "probe": "real_probe.py --dG4",
+      "depth": "唯余硬件(生产数据长跑)",
+      "calibration_ts": true,
+      "sleep_index_ts": true,
+      "status": "ok",
+      "verdict": "标定值生产数据面:睡眠④幕立法语义=只建议不落值(calibration.ts在;sleep/index.ts在)—— Kalman/GPD 落值与 Schmitt/NCD 原子(弹窗帧三元组/检索回访标签)需生产环境长跑数据积累,软件在环已尽,唯余生产数据在场",
+      "elapsed_s": 0.0
+    }
+  }
+}

@@ -1,4 +1,5 @@
 // src/vlm/grounding.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：视觉接地引擎 —— 坐标几何/校准/预算门控/验证共守同一接地不变量（roundtrip 精度契约），分区将增加跨文件耦合面。
 // 纪元 Ω（Ω-4 视觉接地）：GLM-5.3-Flash 云脑皮层的元素接地器官 —— 截图进、
 // 可点击元素（像素坐标 + 语义标签）出，本地启发元素源之外的云脑直读路径。
 // 本模块是云输出的**规整与执法层**：VLM 回话是方言（bbox 可能是 4 元数组、
@@ -15,7 +16,15 @@
 // 中心偏差 >8px 且 OCR 文字一致 ⇒ 取复核值，文字冲突 ⇒ 保守取原值并降置信。
 // 预算封顶（每任务 8 次）防雪崩；复核 VLM 端口缺席/失败一律放行原值，绝不抛、
 // 绝不阻塞（闸门评估本身零网络、零 sharp —— 未接线时行为逐字节不变）。
-import { getGlmClient, isGlmConfigured, type GlmClient } from './glmClient';
+// W6R-A4（预算作用域化）：任务级预算账本按 verifyTaskId 键控（Map + LRU 封顶
+// 64 槽防泄漏）—— 并发任务互不吃预算；缺省不传 taskId 时共用模块缺省账本，
+// 与历史模块级计数行为逐字节一致（既有调用方与测试零改动）。
+// W8-A6（VLM 架构债 · 依赖倒置最小形态）：本模块的云端依赖面自 GlmClient
+// 具体类降为 StructuredVisionPort 窄端口（configured + chatJson）—— 多供应商
+// （备选池/合议庭/复核第二意见脑）可直入，GlmClient 结构天然满足（传入处
+// 零改动）；不改变任何运行时行为（现网仍传 GlmClient 实例）。
+import { getGlmClient, isGlmConfigured } from './glmClient';
+import type { StructuredVisionPort } from './providers/types';
 import { encodeForVlmMeta, mapBboxEncodedToOriginal, mapInsetToOriginal, type Bbox } from './codec';
 import { buildGroundingSystemPrompt, buildGroundingUserPrompt } from './som';
 import { kernelRegistry } from '../kernel/registry';
@@ -91,9 +100,10 @@ export interface VerifyGateEvent {
 
 /** W1-8：复核闸报告（GroundingResult.verifyGate 的载体） */
 export interface VerifyGateReport {
-  /** 任务级（模块级）已消耗复核次数 —— 本调用结束后 */
+  /** 任务级已消耗复核次数（本调用结束后）—— W6R-A4：账本按 verifyTaskId
+   *  作用域化（缺省共用模块缺省账本；并发任务互不侵占） */
   budgetUsed: number;
-  /** 任务级复核预算上限（模块常量 VERIFY_BUDGET_MAX；resetVerifyGateBudget 开新任务） */
+  /** 任务级复核预算上限（模块常量 VERIFY_BUDGET_MAX；resetVerifyGateBudget(taskId?) 开新任务） */
   budgetMax: number;
   /** true = 有触发但被预算封顶放行原值（degraded 记账 —— 防雪崩） */
   budgetExhausted?: boolean;
@@ -202,12 +212,66 @@ export function nmsElements<T extends { bbox: Bbox }>(elements: T[], iouThreshol
 
 // ─── W1-8（P3 置信度门控级联注视）：Zoom 复核闸 —— 预算 / 裁剪 / 交叉验证 ───
 
-/** W1-8：任务级复核预算计数（模块级 —— 跨 groundElements 调用累计；测试/宿主隔离用重置口） */
-let verifyBudgetUsed = 0;
+/**
+ * W6R-A4（预算作用域化）：任务级复核预算账本 —— 单任务跨 groundElements
+ * 调用累计的计数载体。此前为模块级单一可变计数（并发任务互相吃预算的串账
+ * 面）；现按 taskId 键控持有：同一 taskId 的调用链共享同一账本（单任务防
+ * 雪崩语义不变），不同 taskId 互不可见（并发隔离）。缺省（不传 taskId）
+ * 共用模块级缺省账本 —— 与历史行为逐字节一致（既有调用方/测试零改动）。
+ */
+interface VerifyBudgetLedger {
+  /** 本任务已消耗的复核次数（真实下发复核 grounding 时 +1） */
+  used: number;
+}
 
-/** W1-8：复核预算清零 —— 新任务开始时由宿主调用（防上一任务的用量雪崩进下一任务） */
-export function resetVerifyGateBudget(): void {
-  verifyBudgetUsed = 0;
+/**
+ * W6R-A4：任务预算账本表（taskId → 账本）。LRU 语义：命中即重插刷新位置
+ * （插入序 = 最近使用序），容量封顶 VERIFY_BUDGET_LEDGER_CAP —— 超限时逐出
+ * 最久未用的账本（防 Map 无界泄漏；被逐出的任务若复活则从 0 重新起账，
+ * 宁可多给复核机会，不可内存漏账）。
+ */
+const taskBudgetLedgers = new Map<string, VerifyBudgetLedger>();
+
+/** W6R-A4：账本表容量封顶 —— 防御式上限（真实并发任务数远低于此；溢出即 LRU 逐出） */
+const VERIFY_BUDGET_LEDGER_CAP = 64;
+
+/** W6R-A4：缺省账本 —— 不传 taskId 的既有调用方共用（历史模块级计数的等价物） */
+let defaultBudgetLedger: VerifyBudgetLedger = { used: 0 };
+
+/**
+ * W6R-A4：取（或建）任务的预算账本 —— LRU 刷新 + 容量封顶逐出。
+ * taskId 脏值（空串/非字符串）安静回落缺省账本（零行为变化律）。
+ */
+function getVerifyBudgetLedger(taskId: string | undefined): VerifyBudgetLedger {
+  if (typeof taskId !== 'string' || taskId === '') return defaultBudgetLedger;
+  const hit = taskBudgetLedgers.get(taskId);
+  if (hit) {
+    // LRU 刷新：删了重插，让插入序保持「最近使用在后」
+    taskBudgetLedgers.delete(taskId);
+    taskBudgetLedgers.set(taskId, hit);
+    return hit;
+  }
+  if (taskBudgetLedgers.size >= VERIFY_BUDGET_LEDGER_CAP) {
+    const oldest = taskBudgetLedgers.keys().next().value;
+    if (oldest !== undefined) taskBudgetLedgers.delete(oldest);
+  }
+  const fresh: VerifyBudgetLedger = { used: 0 };
+  taskBudgetLedgers.set(taskId, fresh);
+  return fresh;
+}
+
+/**
+ * W1-8：复核预算清零 —— 新任务开始时由宿主调用（防上一任务的用量雪崩进下一任务）。
+ * W6R-A4 作用域化：带 taskId ⇒ 只清该任务的账本（并发任务互不干扰）；
+ * 不带（历史签名）⇒ 清缺省账本 + 全部任务账本（既有调用方语义保持）。
+ */
+export function resetVerifyGateBudget(taskId?: string): void {
+  if (typeof taskId === 'string' && taskId !== '') {
+    taskBudgetLedgers.delete(taskId); // 下次触达重建为 0
+    return;
+  }
+  defaultBudgetLedger = { used: 0 };
+  taskBudgetLedgers.clear();
 }
 
 /**
@@ -324,8 +388,12 @@ interface VerifyGateContext {
   /** 源图（buffer 像素）尺寸 —— ROI 裁剪与偏差度量的公共坐标系 */
   srcW: number;
   srcH: number;
-  /** W1-8：复核用 VLM 端口（显式接线才复核；缺席 ⇒ 触发事件 port-absent 放行） */
-  verifyClient: GlmClient | undefined;
+  /** W1-8：复核用 VLM 端口（显式接线才复核；缺席 ⇒ 触发事件 port-absent 放行）。
+   *  W8-A6：类型自 GlmClient 降为 StructuredVisionPort —— 第二意见脑可直入 */
+  verifyClient: StructuredVisionPort | undefined;
+  /** W6R-A4：任务级预算账本（按 opts.verifyTaskId 键控；缺省共用模块缺省账本）——
+   *  并发任务各持各账，互不侵占；单任务内跨调用累计 + VERIFY_BUDGET_MAX 封顶不变 */
+  ledger: VerifyBudgetLedger;
   /** 本调用复核次数上限（opts.verifyBudget；Infinity = 仅任务级封顶） */
   callBudget: number;
   /** 聚焦问题（复核 grounding 透传 —— 注视同一目标） */
@@ -339,7 +407,9 @@ interface VerifyGateContext {
  * vlmOcr 交叉验证 → 按偏差/文字一致性裁决。设计铁律：
  *   · 绝不抛：每元素体 try/catch 兜底，异常 ⇒ gate-error 放行原值；
  *   · 预算封顶：任务级 VERIFY_BUDGET_MAX 与调用级 callBudget 双闸，超限
- *     放行原值并记 budgetExhausted（degraded 记账 —— 防雪崩）；
+ *     放行原值并记 budgetExhausted（degraded 记账 —— 防雪崩）。任务级账本
+ *     按 ctx.ledger 作用域化（W6R-A4：verifyTaskId 键控 —— 并发任务互不
+ *     侵占；缺省共用模块缺省账本，历史行为不变）；
  *   · 降级安全：端口缺席/裁剪不可用/复核 grounding 或 OCR 失败 ⇒ 一律放行
  *     原值（预算只在真实下发复核 grounding 时消耗）；
  *   · 保守裁决：文字冲突 ⇒ 原值保留 + 置信折半 + 冲突证据入事件；偏差 ≤8px
@@ -348,7 +418,7 @@ interface VerifyGateContext {
  * 元素 id/label/role 恒不改动（下游「点 3 号」引用锚点稳定）。
  */
 async function runVerifyGate(ctx: VerifyGateContext): Promise<VerifyGateReport> {
-  const report: VerifyGateReport = { budgetUsed: verifyBudgetUsed, budgetMax: VERIFY_BUDGET_MAX, events: [] };
+  const report: VerifyGateReport = { budgetUsed: ctx.ledger.used, budgetMax: VERIFY_BUDGET_MAX, events: [] };
   let callUsed = 0;
   // buffer 系 ⇄ 输出系换算（源图宽高恒 ≥1 —— encodeForVlmMeta 契约；病值兜底 1:1）
   const sx = ctx.srcW >= 1 ? ctx.outW / ctx.srcW : 1;
@@ -380,7 +450,7 @@ async function runVerifyGate(ctx: VerifyGateContext): Promise<VerifyGateReport> 
       continue;
     }
     // ── 预算封顶：任务级/调用级双闸 ⇒ 放行原值 + degraded 记账（防雪崩）──
-    if (verifyBudgetUsed >= VERIFY_BUDGET_MAX || callUsed >= ctx.callBudget) {
+    if (ctx.ledger.used >= VERIFY_BUDGET_MAX || callUsed >= ctx.callBudget) {
       ev.outcome = 'budget-exhausted';
       report.budgetExhausted = true;
       continue;
@@ -398,9 +468,9 @@ async function runVerifyGate(ctx: VerifyGateContext): Promise<VerifyGateReport> 
         continue;
       }
       // 预算在此记账：真实下发复核 grounding 的时刻（裁剪失败不计 —— 未耗云脑）
-      verifyBudgetUsed += 1;
+      ctx.ledger.used += 1;
       callUsed += 1;
-      report.budgetUsed = verifyBudgetUsed;
+      report.budgetUsed = ctx.ledger.used;
 
       // ── 重跑 grounding（复核端口；verifyGate:false 斩断自递归）──
       const re = await groundElements(roiBuf, {
@@ -538,15 +608,22 @@ function pickDim(preferred: unknown, fallback: number): number {
 export async function groundElements(buffer: Buffer, opts?: {
   width?: number; height?: number;   // 屏幕/图像像素尺寸（缺省从编码结果取）
   question?: string;                 // 聚焦问题（如"找到设置入口"）
-  client?: GlmClient;                // 测试注入；缺省 getGlmClient()
+  /** 云脑端口 —— W8-A6：自 GlmClient 降为 StructuredVisionPort（GlmClient 结构
+   *  天然满足，传入处零改动；备选池/合议庭脑亦可直入）；缺省 getGlmClient() */
+  client?: StructuredVisionPort;
   /** W1-8：复核闸开关（false = 显式关闭；缺省开 —— 触发条件本身很窄） */
   verifyGate?: boolean;
   /** W1-8：复核用 VLM 端口（Zoom 复核的 grounding+OCR 都走此端口；缺省无 ⇒
    *  触发后以 port-absent 放行原值 —— 显式接线的降级安全设计，主 client 不被
-   *  复核流量打扰；宿主可传同一 client 或独立第二意见脑） */
-  verifyClient?: GlmClient;
+   *  复核流量打扰；宿主可传同一 client 或独立第二意见脑）。W8-A6：同为端口面 */
+  verifyClient?: StructuredVisionPort;
   /** W1-8：本调用复核次数上限（与任务级预算取更严者；缺省仅任务级封顶） */
   verifyBudget?: number;
+  /** W6R-A4：任务级预算作用域键 —— 同键调用链共享一份复核预算（单任务 8 次
+   *  防雪崩），异键并发任务互不侵占（修复模块级全局预算的串账面）。缺省
+   *  （不传/空串）共用模块缺省账本，行为与历史逐字节一致。账本表 LRU 封顶
+   *  64 槽防泄漏；新任务以 resetVerifyGateBudget(taskId) 定点清零 */
+  verifyTaskId?: string;
   /** @internal W1-8：复核递归深度（闸内重入标记，外部勿用） */
   _zoomDepth?: number;
 }): Promise<GroundingResult> {
@@ -555,7 +632,7 @@ export async function groundElements(buffer: Buffer, opts?: {
     ({ ok: false, elements: [], degraded, error, latencyMs: Date.now() - t0, strategy });
   try {
     // 0) 配置哨兵：未配置且未注入测试 client ⇒ 零网络降级（不拨号、不编码）
-    let client: GlmClient;
+    let client: StructuredVisionPort;
     if (opts?.client) {
       client = opts.client;
     } else {
@@ -683,6 +760,7 @@ export async function groundElements(buffer: Buffer, opts?: {
         srcW,
         srcH,
         verifyClient: opts?.verifyClient,
+        ledger: getVerifyBudgetLedger(opts?.verifyTaskId),
         callBudget: typeof rawCallBudget === 'number' && Number.isFinite(rawCallBudget) && rawCallBudget >= 0
           ? Math.floor(rawCallBudget)
           : Number.POSITIVE_INFINITY,

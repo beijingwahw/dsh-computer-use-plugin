@@ -210,8 +210,8 @@ const BUILTIN_LEVELS = new Map([
     ['form-submit', 'compensable'], // Ctrl+Z / 草稿箱回收
     ['file-delete', 'compensable'], // 回收站还原 / Ctrl+Z
     ['file-write', 'compensable'], // 应用内 undo 栈
-    ['text-input', 'compensable'], // 输入 → 全选退格（破坏性补偿 —— 过审批闸）
-    ['navigation', 'compensable'], // open_url → 后退导航
+    ['text-input', 'compensable'], // Ctrl+Z（W6-3 扩表后与 escrow 策略表对齐：输入类走应用内 undo）
+    ['navigation', 'compensable'], // 后退导航 Backspace（W6-3 扩表：返回动作前页面）
     // 不可逆：策略表明示 manual-only
     ['send-message', 'irreversible'], // 已发出的消息无法收回
     ['payment', 'irreversible'], // 退款是新交易不是撤销
@@ -299,7 +299,7 @@ function putEvidence(semantics, ev) {
     }
     evidenceStore.set(semantics, ev);
 }
-/** Beta 后验均值：Beta(1+adverse, 1+supportive) 的 mean = (β)/(α+β) */
+/** Beta 后验均值：Beta(1+adverse, 1+supportive) 的 mean = α/(α+β)（α=1+adverse；W7 审计改正原注释方向笔误） */
 function posteriorMean(ev) {
     return (ev.adverse + 1) / (ev.adverse + ev.supportive + 2);
 }
@@ -441,6 +441,78 @@ export const reversibilityRegistry = {
         }
         catch {
             return false;
+        }
+    },
+    // ─── W9-2（DEBTS D-C1 落锤）：外部补偿策略表的同步登记通道（增量）───
+    //
+    // 决策理由：D-C1 的剩余债是「compensate 扩表面待部署知识」—— 内置表受
+    // S5-5d 键对齐律封死（riskGate 所有权），部署方扩表的正确姿势是**以文件
+    // 扩表而非改源码**：reversalEscrow.loadExternalStrategyTable(path) 从 JSON
+    // 外部表装载补偿路径，本通道是它在分级注册表侧的对应落点 —— 两表在同一
+    // 次装载里同键登记（compensate ⇔ compensable；manual-only ⇔ irreversible），
+    // 「两侧同步登记」由装载面原子完成，不再依赖部署方手工两次接线。
+    // 立法边界：本通道只**增量登记**（compensable / irreversible 两级，不收
+    // reversible —— 外部表没有「快道」语义面）；批量全有或全无（一条坏件 ⇒
+    // 整批拒绝，绝不留下半套登记的中间态）；一切公开面绝不抛。
+    /**
+     * W9-2：批量定级登记（全有或全无 —— 外部策略表装载的分级侧半边）。
+     * entries 每项 { semantics, level }；level 仅收 'compensable' | 'irreversible'
+     * （reversible 是内置快道知识，不经部署文件面注入 —— 保守缺省）。
+     * 任何一项不合格 ⇒ { ok:false } 且**零登记**（调用方整批重试或放弃）。
+     */
+    registerLevels(entries) {
+        try {
+            if (!Array.isArray(entries) || entries.length === 0) {
+                return { ok: false, error: 'entries must be a non-empty array' };
+            }
+            const parsed = [];
+            for (let i = 0; i < entries.length; i++) {
+                const e = entries[i];
+                if (!e || typeof e !== 'object')
+                    return { ok: false, error: `entry ${i}: not an object` };
+                const key = cleanStr(e.semantics, 64);
+                const level = e.level;
+                if (key === undefined)
+                    return { ok: false, error: `entry ${i}: semantics is required` };
+                if (level !== 'compensable' && level !== 'irreversible') {
+                    return { ok: false, error: `entry ${i} (${key}): level must be 'compensable' or 'irreversible'` };
+                }
+                if (parsed.some(p => p.semantics === key)) {
+                    return { ok: false, error: `entry ${i}: duplicate semantics "${key}"` };
+                }
+                parsed.push({ semantics: key, level });
+            }
+            for (const p of parsed)
+                extensionLevels.set(p.semantics, p.level);
+            return { ok: true, registered: parsed.length };
+        }
+        catch {
+            return { ok: false, error: 'internal registration failure — nothing registered' };
+        }
+    },
+    /**
+     * W9-2：基级查询（校准前的注册表基础级别 —— 双侧对齐律的校验锚点）。
+     * 与 classify 的分野：classify 叠加证据门校准（只升不降）与保守律默认，
+     * 结果是「当下该怎么派发」；levelOf 返回注册表里**登记了什么**（内置/
+     * 扩展来源面），供装载面验证「文件说的级别 = 注册表登记的级别」——
+     * 对齐律校验必须用基级，否则校准升级（安全方向）会被误判为不对齐。
+     * 未知键 ⇒ null（诚实缺席，不猜）。
+     */
+    levelOf(semantics) {
+        try {
+            const key = cleanStr(semantics, 64);
+            if (key === undefined)
+                return null;
+            const ext = extensionLevels.get(key);
+            if (ext !== undefined)
+                return { level: ext, source: 'extension' };
+            const builtin = BUILTIN_LEVELS.get(key);
+            if (builtin !== undefined)
+                return { level: builtin, source: 'builtin' };
+            return null;
+        }
+        catch {
+            return null;
         }
     },
     /** 武装（幂等）：注入扩展级别表 / failureMemory 负证据只读查询。绝不抛。 */

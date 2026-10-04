@@ -31,7 +31,7 @@ import {
   reversibilityRegistry, dispatchLaneFor,
 } from '../src/riskGate.ts';
 import {
-  approval, resetApproval,
+  approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery,
 } from '../src/approval.ts';
 import {
   reversalEscrow, builtinCompensationSemantics, compensationPathOf,
@@ -62,6 +62,16 @@ beforeEach(() => {
   shaper.clearUndoLog();
   shaper.configure(false, false);
 });
+
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手） */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function grantOob(token: string): boolean {
+  const hit = oobSink.find(d => d.token === token);
+  return approval.grantDetailed(token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok;
+}
 
 // ─── S5-1 三级映射 ───
 
@@ -237,6 +247,7 @@ test('S5-5b approval.request 携带级别：reversibilityOf/status/dispatchLaneO
 });
 
 test('S5-5c Τ示范事件喂注册表：grant(false) ⇒ adverse++；consume ⇒ supportive++（经 approval 全链接线）', () => {
+  armOob(); // W6R：授予（grant=true）须带外码；拒绝路径无需人证
   // 拒绝路径：request 携带分级 → grantDetailed(false) → 注册表 adverse +1
   const pd = approval.request('click 删除 report.docx', {
     actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 },
@@ -252,7 +263,7 @@ test('S5-5c Τ示范事件喂注册表：grant(false) ⇒ adverse++；consume �
   const pc = approval.request('click 删除 other.docx', {
     reversibility: { level: 'compensable', semantics: 'file-delete', source: 'builtin' },
   });
-  assert.equal(approval.grantDetailed(pc.token, true).ok, true);
+  assert.equal(grantOob(pc.token), true);
   assert.equal(approval.consume(pc.token), true);
   assert.deepEqual(
     reversibilityRegistry.dumpEvidence().find(e => e.semantics === 'file-delete'),

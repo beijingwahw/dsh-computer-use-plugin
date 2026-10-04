@@ -379,3 +379,52 @@ TTL）；增量总闸内核键缺省 0；联邦 arm/noteLocalHit/排练场景源
 冷启动（seedSceneHash 空）⇒ 零证据均匀分配（诚实降级非缺陷）；④ 全量验收窗口
 内并行批次（W5-1..W5-5）在途文件瞬时红不由本批背书（本批产权文件 tsc 0 错、
 w5wire 14/0）。
+
+---
+
+## 十一、W5 第五批收官潮（2026-10-03 七器官：注册落盘 · 梦回放 · 跨机 · SoM 调用面 · steer 闭环 · 效能基准）
+
+不新增旗舰命题——把前四批「申报在册的留白与零调用方装备」逐个兑现，并把六个
+既有器官的量化主张过秤：七包并行交付（执法册 TS 83/0 + 7 bench 全绿 + Python
+冒烟 9），全量 2018 用例、typecheck 0 错；创世登记已入 GENESIS.md W5 纪元段，
+全局遗留汇总已入 DEBTS.md（本纪元新增债务台账，账实分离的治理面）。
+
+| 器官（执法册） | 一句话根基 | 接线状态 |
+|---|---|---|
+| W5-0 集成接线收官（14 用例） | 第四批五血脉接进生产面（增量键+observer / 联邦组合根 / 可逆分道 / 拍卖状态面） | ✅ 前批已完工（w5wire 14/0 在册；W4 纪元段明细） |
+| W5-1 Python 注册落盘（9 冒烟） | W4-6/W4-8 注册行落盘：uvc/hid/audio 端点 + /health hardware 面 + auth 覆盖；硬件缺席 ⇒ 结构化 200 信封绝不 5xx | ✅ routes.py 常驻注册；dry-run 通道零硬件可用；本机复核 8/9（1 fail = cv2 在场环境暴露的 Cv2Source.read 双重包装缺陷，DEBTS D-E1——非注册面回归，作者环境基线全绿） |
+| W5-2 梦回放（9 用例） | PER 优先级 p = ŝ×cost×recency（公式手算可验）+ 同构世界冻结重放 + 分歧点双写（lab kernel + EXP4）+ 独立梦水位线幂等 | ⏸ SleepDeps.dream 注入缝就位；index.ts 组合根暂未投 failures 源（dep 缺席 ⇒ 六幕零漂移——器官在册、投喂待接，DEBTS D-B4） |
+| W5-3 跨机编排（25 用例） | 分布式 barrier 四支柱（全到达才放行 / 序号防重放 / 两阶段防脑裂 / 有界状态）+ 跨机视觉互证谓词（交叠覆盖率 ≥0.25） | ✅ orchestrator crossMachine 注入缝 + settleAndVerify 三端口（缺席 ⇒ golden 逐字节不变）；server 冒烟为环回参考端（federation-server.mjs），生产多机部署待决策（DEBTS D-A5） |
+| W5-4 SoM 调用面（9 用例） | W1-7 三件装备接进 orchestration L3 生产管线：同尺寸叠加零缩放 ⇒ 坐标闭环 ≤1e-9；降级四路；像素级断言 | ⏸ 调用面已通电（W1 潮「零调用方」缝隙闭合）；somSparseBudget 缺省仍 0 + 组合根 somMarkers 种子源未投（DEBTS D-B3）——翻转默认待真机在线 A/B |
+| W5-5 steer 闭环（17 用例） | 三缝收官：B 应答回灌重启（跨 goal 防御）/ 岔路账支点锚 journal 面强校验 / steer(k) 换支偏置 12 步预算执法 | ✅ W3-5/W4-0 申报的三个留白全部闭合（autonomousRun.ts 三点接线：branchAnchor + takeBranchBias + complete 收尾）；缺省逐字节旧路 |
+| W5-6 效能基准（7 bench） | 六器官过秤，声明 vs 实测同表：C1 跳过率 50.0%（声明 >15–30%）/ P2C3 token 省 74.6%（>30%）/ A5 等待省 50.0%（≥40%）/ A1 决策省 71.4%（30–50%，超上沿如实呈报）/ C2 节省率 0.55（闭式互证）/ A2 守护住（开销不倒贴 + 噪声判决在岗） | ✅ 六文件七用例全绿（独立跑批不入全量通配）；全部离线确定性基准——真模型/真机 A/B 待长跑（DEBTS D-A6） |
+
+**激活策略（审慎立法）**：本批全部增量缺省零回归（梦 dep 缺席零漂移 / crossMachine·
+steerBias·branchAnchor·remoteEvidence 注入面显式在场才生效 / uvc·hid·audio 硬件
+缺席恒结构化降级）；somSparseBudget 维持 0 关（W1-7 立法不变，证据链未跑满）。
+
+**本批已知诚实边界**：① Cv2Source.read 双重包装缺陷（uvc.py:298，cv2 在场 +
+DirectShow 可读环境必 TypeError → internal_error；作者环境测不到，本机复核暴露
+——W5-1②b 1 fail 与基线 0 fail 的偏差即此，源码修复归 W6 后续包，DEBTS D-E1）；
+② A5 慢世界边界档 33.3% < 40% 声明下限（两轮判稳世界与固定等待打平——声明的
+诚实边界，bench 如实呈报不作断言）；③ A1 实测 71.4% 超声明档上沿（宏一次决策
+覆盖全链所致，如实呈报）；④ W5-4 的锚点增益为注入假 VLM 的模拟证据（真模型
+增益需在线 A/B，翻转 SoM 稀疏默认的前置）。
+
+---
+
+## 十二、W6/W7/W8 收口浪潮状态表（2026-10-04 W9-5 终账补录：债清偿 · 终局验证 · 世界创新修复）
+
+三浪潮审判数字为 W9-5 逐文件实跑复取（node v22.14.0，TAP 计数，不抄收稿报告）；
+明细见 GENESIS.md 对应浪潮段。
+
+| 浪潮 | 主题 | 执法册 | 审判 | 状态 |
+|---|---|---|---|---|
+| W6 债清偿 | W6-R 修复批（审批带外人证 fail-closed / 重放面收口 nonce+HMAC / 壳启动面加固 / 入口审计扩容 MUTATING_TOOLS 6→18 / 重复守卫双网格 / federation robust 投产 / UVC 双重包装根治）+ 深化三连包 / 缝隙修复 / 持久化缝三包 | w6deep / w6fix / w6persist / w6r.doctor / w6r.shellhardening（五册） | 68/0 实测全绿 | ✅ 完工（DEBTS 36→43；D-B6/D-E1 闭，新增 7 条如实入册） |
+| W7 终局验证 | 创世审计器 genesis_audit 立宪（账实一致机器执法）+ doctor 官方豁免治理 + 全器官 E2E + 全开压力 + 确定性模糊 + 性能回归门 + 接线收尾 | w7audit / w7doctor / w7e2e / w7fullon / w7fuzz / w7gate / w7wire（七册） | 96/0 实测全绿 | ✅ 完工（--check 在册执法，W9-5 补录后复跑通过） |
+| W8 世界创新修复 | 世界创新债清偿：三大巨文件拆分（gym/approval/runtime）/ 判据证伪器官 / 包级断环 / 记忆升级 / 预言细化 / 重放公证 / federation-server 单源化 / SoM·梦·增量三线接线收口 | w8.arch / w8.criteria / w8.escrow / w8.finalwiring / w8.incremental / w8.memory / w8.organwiring / w8.prophecy / w8.providerPort / w8.replaynotary / w8gymsplit（十一册） | 96/0 实测全绿（另全量 2472/2467/0 fail 系 W8-C2 收稿口径） | ✅ 完工（DEBTS 43→47：翻案闭 11 + 新增 4） |
+| W9 终账 | 已知取舍 12 条终谳（设计决策定谳面）+ GENESIS 纪元补录 + 审计校账 | —（占位） | 占位——集成者收官填终数 | ⏳ 收口中 |
+
+三浪潮按 GENESIS 既有浪潮章节格式登记（不带「纪元 Wn」标题——w7audit 执法册
+deepEqual 锁定审计宇宙恰为 W1-W5 五纪元，审计器头注亦立「w7+ 不属本审计宇宙」律；
+扩宇宙须先修执法册，属后续窗口决策）。

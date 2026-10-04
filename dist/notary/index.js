@@ -23,56 +23,14 @@ import path from 'path';
 import { journal } from '../journal.js';
 import { mmrVerify } from '../proof.js';
 import { requestRfc3161Timestamp, verifyTimestampToken } from './rfc3161.js';
-import { deterministicReplay } from '../sandbox/engine.js';
-import { sandboxLog } from '../sandbox/log.js';
-// ─── 密码学原语复刻（journal.ts 模块私有 —— 复刻非复制实现，先例：sandbox/log.ts） ───
-// 前缀重走（章③）必须逐字节复算 journal 的链哈希：canonical 键排序 + 过滤
-// undefined 值（journal 的哈希域语义：值为 undefined 的自有键与缺键同域）。
-// 若两者漂移，重走必然误报断链 —— 此处的逐字节一致是公证有效性的前提。
-/** 稳定序列化：键排序 + undefined 值过滤（与 journal.canonical 同律） */
-function canonical(obj) {
-    if (obj === null || typeof obj !== 'object')
-        return JSON.stringify(obj);
-    if (Array.isArray(obj))
-        return '[' + obj.map(canonical).join(',') + ']';
-    return '{' + Object.keys(obj).sort()
-        .filter(k => obj[k] !== undefined)
-        .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
-}
-function sha256Hex(s) {
-    return createHash('sha256').update(s, 'utf8').digest('hex');
-}
-/** journal 条目的链式哈希（与 journal.chainHash 逐字节一致 —— 前缀重走的原语） */
-function journalChainHash(prev, entry) {
-    const domain = { ...entry };
-    delete domain.hash; // 哈希域不含自身
-    return sha256Hex(prev + canonical(domain));
-}
-/** 锚记录哈希：sha256(canonical(记录去掉自身 hash)) —— 锚自链的链式指纹 */
-function anchorHash(record) {
-    return sha256Hex(canonical(record));
-}
-/** 异常归因为安全字符串（绝不二次抛出 —— pilotStore 同律） */
-function errText(err) {
-    if (err instanceof Error)
-        return err.message;
-    try {
-        const text = String(err);
-        return text === '' ? '未知异常' : text;
-    }
-    catch {
-        return '未知异常';
-    }
-}
-/** 记录防御性深拷贝（记录恒为 JSON 安全数据 —— JSON 往返即深拷贝） */
-function copyRecord(rec) {
-    try {
-        return JSON.parse(JSON.stringify(rec));
-    }
-    catch {
-        return rec;
-    }
-}
+// W6-2（doctor smell.over-engineering 清偿）：锚记录+密码学原语 → primitives、重放一致性 → replay（行为零变化）；导入面不变。
+// D-G5（W8 第 2 批）：回放轨迹见证 → replayWitness（数据面在 primitives 同册）。
+import { attestReplayConsistency } from './replay.js';
+export { attestReplayConsistency } from './replay.js';
+export { canonical, sha256Hex, journalChainHash, anchorHash, errText, copyRecord } from './primitives.js';
+export { replayStepFingerprint, anchorReplayTrajectoryOn, } from './replayWitness.js';
+import { canonical, journalChainHash, anchorHash, errText, copyRecord } from './primitives.js';
+import { anchorReplayTrajectoryOn } from './replayWitness.js';
 /** 真 journal 单例的适配面（只用 journal 导出的公开 API —— 不复制其实现） */
 const journalLedger = {
     entries: () => journal.list(false),
@@ -82,83 +40,6 @@ const journalLedger = {
     mmrRoot: () => journal.mmrRoot(),
     mmrProof: (index) => journal.mmrProof(index),
 };
-/**
- * 重放一致性章（独立可调；永不抛 —— 内部异常吞为红章，绝不炸调用方）：
- *   沙箱段在场且带屏指纹 ⇒ 逐段 deterministicReplay 重演比对（逐位）；
- *   无沙箱段 ⇒ n/a（真机 journal 段不可复现 —— 理由在场，诚实）；
- *   旧格式无指纹 ⇒ n/a(legacy)；
- *   分歧 ⇒ red（注记首个分歧步）。
- */
-export function attestReplayConsistency(opts = {}) {
-    try {
-        const ledger = opts.sandboxLedger ?? sandboxLog; // 注入优先，缺省沙箱单例
-        const entries = ledger.list();
-        const isRehearsal = (kind) => kind === 'rehearsal-begin' || kind === 'rehearsal-step';
-        if (!entries.some(e => isRehearsal(e.kind))) {
-            return {
-                status: 'n/a',
-                detail: 'no sandbox rehearsal segment on the sandbox ledger — real-machine journal '
-                    + 'segments stay honestly unattested (world non-determinism: screens/timings); '
-                    + 'nothing replayable in scope',
-            };
-        }
-        const newFormat = entries.some(e => isRehearsal(e.kind) && e.data?.fpFormat !== undefined);
-        const segments = ledger.exportRehearsalSegments();
-        if (segments.length === 0) {
-            if (!newFormat) {
-                return {
-                    status: 'n/a(legacy)',
-                    detail: `sandbox ledger holds ${entries.length} pre-Χ entr${entries.length === 1 ? 'y' : 'ies'} `
-                        + 'with rehearsal records but no screen fingerprints (legacy format) — bit-level '
-                        + 'replay attestation requires Χ-format records; honest n/a(legacy), not a false green',
-                };
-            }
-            return {
-                status: 'n/a',
-                detail: 'rehearsal records present but no reconstructable replay segment '
-                    + '(virtual scene absent from the records, or segment head evicted by capacity) — honest n/a',
-            };
-        }
-        let totalSteps = 0;
-        let firstDivergence = null;
-        for (const seg of segments) {
-            const actions = seg.steps.map(s => s.action);
-            const r = deterministicReplay(actions, { scene: seg.scene });
-            if (r.fingerprints.length !== seg.steps.length) {
-                firstDivergence ??= `segment ${seg.chainId}: replay produced ${r.fingerprints.length} `
-                    + `fingerprint(s) for ${seg.steps.length} recorded step(s)`;
-                continue;
-            }
-            for (let i = 0; i < seg.steps.length; i++) {
-                if (r.fingerprints[i] !== seg.steps[i].fingerprint) {
-                    firstDivergence ??= `segment ${seg.chainId}: FIRST DIVERGENCE at step ${i} `
-                        + `(chain index ${seg.steps[i].index}) — recorded ${seg.steps[i].fingerprint.slice(0, 12)}… `
-                        + `vs replayed ${r.fingerprints[i].slice(0, 12)}…`;
-                    break;
-                }
-            }
-            totalSteps += seg.steps.length;
-        }
-        if (firstDivergence) {
-            return {
-                status: 'red',
-                detail: `${firstDivergence}; attested ${segments.length} segment(s) / ${totalSteps} step(s) — `
-                    + 'history NOT reproducible: the chain may verify intact yet its content diverges '
-                    + 'from what the deterministic world produces',
-            };
-        }
-        return {
-            status: 'green',
-            detail: `replayed ${segments.length} sandbox segment(s) / ${totalSteps} step(s) — every post-step `
-                + 'screen fingerprint recomputed by re-entering the virtual screen matches the ledger '
-                + 'bit-for-bit (deterministic world reproduces the history); real-machine journal segments '
-                + 'remain honestly outside replay scope',
-        };
-    }
-    catch (e) {
-        return { status: 'red', detail: `replay attestation crashed: ${errText(e)}` };
-    }
-}
 /** 铸 nonce：CSPRNG 16 字节；首字节 MSB 清零 + 置低位（DER INTEGER 正号位且无前导零剥除歧义） */
 function mintNonce(random) {
     const raw = random(16);
@@ -168,10 +49,17 @@ function mintNonce(random) {
 function toB64(bytes) {
     return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }
-/** 锚载荷摘要（sha256 原始 32 字节）：时间戳背书所绑定的「账本状态」指纹 */
+/**
+ * 锚载荷摘要（sha256 原始 32 字节）：时间戳背书所绑定的「账本状态」指纹。
+ * D-G5：witness 在场 ⇒ 一并入摘要域（第三方回执连同回放见证一起绑定）；
+ * 缺席 ⇒ canonical 过滤 undefined —— 摘要与旧形态逐字节一致（向后兼容）。
+ */
 function anchorPayloadDigest(a) {
     return createHash('sha256')
-        .update(canonical({ seq: a.seq, chainTip: a.chainTip, mmrRoot: a.mmrRoot, prevAnchorHash: a.prevAnchorHash }), 'utf8')
+        .update(canonical({
+        seq: a.seq, chainTip: a.chainTip, mmrRoot: a.mmrRoot,
+        prevAnchorHash: a.prevAnchorHash, witness: a.witness,
+    }), 'utf8')
         .digest();
 }
 class Notary {
@@ -190,6 +78,12 @@ class Notary {
     get lastError() { return this._lastError; }
     /** 内存锚链长度 */
     get anchorCount() { return this.anchors.length; }
+    /**
+     * 宿主装配状态（D-G5 公证缺席判据）：configure 是否发生过（显式接线或
+     * ensureConfigured 兜底均计）。未装配 ⇒ 重放铸证等便捷面诚实降级 ——
+     * 公证纪律由宿主开闸，缺省零行为。
+     */
+    isConfigured() { return this.configuredOnce; }
     /**
      * 装配：endpoint/tracePath。tracePath 变更（或首配）⇒ 重放 JSONL 铸回内存锚链
      * （断尾行容忍 —— 被杀进程的半行跳过，之前的完好行照常铸态）。永不抛。
@@ -249,7 +143,9 @@ class Notary {
             const mmrRoot = ledger.mmrRoot();
             const prevAnchorHash = this.anchors.at(-1)?.hash ?? null; // 首锚 null 哨兵
             const nonce = mintNonce(random);
-            const digest = anchorPayloadDigest({ seq, chainTip, mmrRoot, prevAnchorHash });
+            // D-G5：TSA 请求摘要与锚载荷同域 —— witness 在场 ⇒ 第三方回执连回放
+            // 见证一起绑定（canonical 过滤 undefined ⇒ 无见证锚的摘要逐字节旧形态）
+            const digest = anchorPayloadDigest({ seq, chainTip, mmrRoot, prevAnchorHash, witness: opts.witness });
             const endpoint = (opts.endpoint !== undefined ? opts.endpoint : this.endpoint).trim();
             let timestamp;
             if (endpoint === '') {
@@ -275,7 +171,12 @@ class Notary {
                     };
                 }
             }
-            const seed = { seq, chainTip, mmrRoot, timestamp, prevAnchorHash };
+            const seed = {
+                seq, chainTip, mmrRoot, timestamp, prevAnchorHash,
+                // D-G5：见证在场 ⇒ 入哈希域（anchorHash 覆盖全部字段 —— 防篡改同律）；
+                // 缺席 ⇒ 键不落（canonical 语义下 undefined 与缺键同域 —— 旧锚逐字节不变）
+                ...(opts.witness !== undefined ? { witness: opts.witness } : {}),
+            };
             const record = { ...seed, hash: anchorHash(seed) };
             this.anchors.push(record);
             this.appendAnchor(record);
@@ -566,4 +467,12 @@ export function notaryAutoAnchorIfConfigured(config) {
     catch {
         /* 绝不炸宿主 */
     }
+}
+/**
+ * 把回放轨迹见证铸进 notary 单例锚（D-G5 便捷面，绑定单例 —— 永不抛）：
+ * 未装配 ⇒ 诚实降级（reason 申报公证缺席）；endpoint 空 = 本地时间锚零网络
+ * （既有纪律保持）。结构性注入测试走 anchorReplayTrajectoryOn（假件执法缝）。
+ */
+export async function anchorReplayTrajectory(witness, opts = {}) {
+    return anchorReplayTrajectoryOn(notary, witness, opts);
 }

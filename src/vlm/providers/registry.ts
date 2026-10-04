@@ -254,6 +254,26 @@ export function getPreset(id: string): PlatformPreset | null {
 }
 
 /**
+ * W8-A6（DEBTS D-G3 端点暴露）：provider 生效端点解析 —— 三级回退：
+ *   1. provider 自报 baseUrl（适配器装配期定格的绝对 URL）优先；
+ *   2. 缺席 ⇒ 该 id 命中的平台预设缺省端点（baseUrl 与预设同步的唯一真相源）；
+ *   3. 再缺（未知 id / 脏入参）⇒ ''（不臆造端点）。
+ * 「同平台不同端点」的判别（反驳法院剔同源脑）以自报值为准 —— 预设只是
+ * 未回填时的诚实回退。纯查表零 I/O、绝不抛异常；展示面输出前请配
+ * providers/types.maskBaseUrl 打码（打码纪律）。
+ */
+export function effectiveBaseUrl(provider: { id?: string; baseUrl?: string }): string {
+  try {
+    const self = typeof provider?.baseUrl === 'string' ? provider.baseUrl.trim() : '';
+    if (self !== '') return self;
+    const preset = getPreset(typeof provider?.id === 'string' ? provider.id : '');
+    return preset ? preset.baseUrl : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 按 baseUrl 识别平台（host + 端口 + 路径前缀匹配）：
  *  - 主机精确比对（小写；'api.openai.com.evil.tld' 等后缀仿冒不匹配）
  *  - 端口须一致（显式缺省端口归一到 80/443；本地三兄弟 11434/1234/8000 各归各位）

@@ -39,10 +39,19 @@ export type JournalMarker =
   /** W2-2（S4）：派发前审计 WAL 行 —— 变更类工具物理派发**之前**先行入链的
    *  审计意图记录（args 已由调用方脱敏）。fail-closed 语义的落点：
    *  appendPreDispatch 返回 ok=false ⇒ 守卫拒绝派发该动作。 */
-  | { kind: 'AUDIT_PRE'; tool: string; args?: Record<string, unknown> };
+  | { kind: 'AUDIT_PRE'; tool: string; args?: Record<string, unknown> }
+  /** W6-4（持久化缝包）：子代理黑板事件存证 —— claim（租约认领）/ post（发现
+   *  张贴）的审计行。封闭联合的定向扩展：入链走 appendMarker（status 恒为
+   *  'MARKER'）受防篡改哈希链保护，但**永不进 ACTION_TOOLS** —— 重放
+   *  （orchestrator 的 ACTION_TOOLS 过滤）、技能归纳（sinceTaskStart/list(true)）、
+   *  过程评分（processScore 的 status==='MARKER' 旁路）全部天然跳过黑板行，
+   *  与 AUDIT_PRE（W2-2）同律的白名单隔离：黑板绝不污染动作重放。 */
+  | { kind: 'AGENT_NOTE'; agentId: string; event: 'claim' | 'post'; subject: string; body?: string };
 
-/** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'） */
-const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE']);
+/** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'）。
+ *  W6-4：AGENT_NOTE 入白名单（黑板行经 appendMarker 入链）；ACTION_TOOLS
+ *  不动 —— 白名单隔离是单向的：能入链 ≠ 能重放。 */
+const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE', 'AGENT_NOTE']);
 
 export interface JournalEntry {
   ts: number;

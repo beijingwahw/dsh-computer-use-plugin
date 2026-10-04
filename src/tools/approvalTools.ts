@@ -133,12 +133,17 @@ export function createRequestApprovalTool(config: Config) {
 
       // W1-2（S2）：带外确认码在场情况透明化。安全核心 —— **确认码本身绝不出
       // 现在本返回值的任何位置**（码只经带外通道投给人类；模型上下文不可见 ⇒
-      // 模型无法伪造同意）。只透出布尔事实与通道状态，降级时诚实标记。
+      // 模型无法伪造同意）。只透出布尔事实与通道状态。
+      // W6R fail-closed：通道缺席（confirmCodeHash 缺席 ⇒ degraded）时不再给
+      // 「照旧 yes/no 同意」的话术 —— 无码同意已废除，grant_approval 会拒绝
+      // 该令牌；诚实告知用户须经宿主 UI 完成人工确认。
       const codeRequired = pa.confirmCodeHash !== undefined;
       const consentAsk = codeRequired
         ? 'To approve, reply with the 6-DIGIT CONFIRMATION CODE shown in your approval console / ' +
           'notification (it was sent to you out-of-band, NOT in this chat). To refuse, reply "no".'
-        : 'Do you approve? (yes / no)';
+        : 'The out-of-band confirm channel is ABSENT in this host — this approval CANNOT be granted ' +
+          'in this chat (fail-closed). 带外确认通道缺席，无法完成人工确认，请用户通过宿主 UI 操作' +
+          '（或由宿主接线 approval/confirm-code 事件总线后重新发起审批）。To refuse, reply "no".';
       const retryClause =
         `Never fabricate or reuse a token. ONE consent covers the whole task: if a click does not ` +
         `take verified effect, the token stays valid for up to ${pa.maxAttempts} attempts within ` +
@@ -150,9 +155,11 @@ export function createRequestApprovalTool(config: Config) {
           'you will NEVER see it and must NOT guess it. If they approve, they reply WITH the code: call ' +
           'grant_approval with the token, grant=true and confirm_code=THE CODE THE USER GAVE YOU. ' +
           'If they refuse, do NOT proceed — propose an alternative or stop. ' + retryClause
-        : 'RELAY the message_to_relay to the user VERBATIM and WAIT for their reply. ' +
-          'If they approve, call grant_approval with the token, then re-invoke click_mouse with ' +
-          'approval_token set. If they refuse, do NOT proceed — propose an alternative or stop. ' + retryClause;
+        : 'The out-of-band confirm channel is ABSENT (fail-closed): grant_approval will REFUSE this ' +
+          'token — there is NO code-less consent anymore. 带外确认通道缺席，无法完成人工确认，' +
+          '请用户通过宿主 UI 操作。If the action must proceed, the host must arm the ' +
+          'approval/confirm-code event bus (wireDoctorVerdictChannel) and a FRESH request_approval ' +
+          'must be minted; do NOT retry grant_approval for this token. If the user refuses, do NOT proceed.';
 
       return JSON.stringify({
         status: 'PENDING_USER_CONSENT',
@@ -161,9 +168,10 @@ export function createRequestApprovalTool(config: Config) {
           action: args.description,
           expires_in_seconds: Math.round((pa.expiresAt - Date.now()) / 1000),
           retry_budget: pa.maxAttempts,
-          // W1-2（S2）：码要求的布尔事实（不含码本身）；降级时诚实标记
+          // W1-2（S2）：码要求的布尔事实（不含码本身）；W6R：通道缺席 ⇒
+          // 诚实标记 absent（该令牌不可经对话授予 —— fail-closed）
           confirm_code_required: codeRequired,
-          confirm_channel: codeRequired ? 'out-of-band' : 'legacy-degraded',
+          confirm_channel: codeRequired ? 'out-of-band' : 'out-of-band-absent',
           // W2-1（H4）：暂存降级透明化 —— 用户离开时超时后的非阻塞出路
           staging: (() => {
             const s = approvalQueue.stagingAvailability();
@@ -201,6 +209,8 @@ export function createGrantApprovalTool(config: Config) {
       'W1-2 (S2): when the approval was minted with confirm_code_required=true, grant=true ALSO needs ' +
       'confirm_code — the 6-digit code the USER read from their out-of-band approval console and gave you. ' +
       'Never guess or fabricate the code: mismatches burn the token. ' +
+      'W6R fail-closed: if the approval console reports confirm_channel=out-of-band-absent, the token ' +
+      'can NEVER be granted in chat — the user must confirm through the HOST UI instead. ' +
       'W1-2 (H1): optional note carries the user annotation amending the plan (e.g., "yes, but click the ' +
       'small Send at the bottom-right") — it is cast onto the token as a structured amendment the executor ' +
       'honors before dispatch. ' +
@@ -274,19 +284,26 @@ export function createGrantApprovalTool(config: Config) {
       if (!res.ok) {
         const reason = res.reason === 'rate-limited' ? 'invalid-or-expired-token' : res.reason;
         const nextStep =
-          res.reason === 'confirm-code-required'
-            ? 'This approval requires the OUT-OF-BAND confirm code. Ask the USER for the 6-digit code shown ' +
-              'in their approval console / notification, then call grant_approval again with grant=true and ' +
-              'confirm_code=that code. The code is NEVER shown to you — only to the user.'
-            : res.reason === 'confirm-code-mismatch'
-              ? 'The confirm code does NOT match (constant-time check — no hint about which digits are ' +
-                'wrong). Ask the user to re-read the code from the approval console and retry with it. ' +
-                'Do NOT guess codes: repeated mismatches burn the token.'
-              : res.reason === 'code-attempts-exhausted'
-                ? 'Too many wrong confirm codes — the token is void (anti-enumeration cap). Call ' +
-                  'request_approval to mint a fresh one; the new code is delivered to the user out-of-band again.'
-                : 'This token is not pending (unknown, already consumed, or expired). ' +
-                  'Call request_approval again to mint a fresh one.';
+          res.reason === 'confirm-channel-absent'
+            ? '带外确认通道缺席，无法完成人工确认，请用户通过宿主 UI 操作。' +
+              'This token was minted while the out-of-band confirm channel was absent (or delivery ' +
+              'failed), so it can NEVER be granted — no code-less consent exists (fail-closed). ' +
+              'Do NOT retry grant_approval for this token; the user must act through the HOST UI, ' +
+              'or the host must arm the approval/confirm-code event bus (wireDoctorVerdictChannel) ' +
+              'and a FRESH request_approval must be minted.'
+            : res.reason === 'confirm-code-required'
+              ? 'This approval requires the OUT-OF-BAND confirm code. Ask the USER for the 6-digit code shown ' +
+                'in their approval console / notification, then call grant_approval again with grant=true and ' +
+                'confirm_code=that code. The code is NEVER shown to you — only to the user.'
+              : res.reason === 'confirm-code-mismatch'
+                ? 'The confirm code does NOT match (constant-time check — no hint about which digits are ' +
+                  'wrong). Ask the user to re-read the code from the approval console and retry with it. ' +
+                  'Do NOT guess codes: repeated mismatches burn the token.'
+                : res.reason === 'code-attempts-exhausted'
+                  ? 'Too many wrong confirm codes — the token is void (anti-enumeration cap). Call ' +
+                    'request_approval to mint a fresh one; the new code is delivered to the user out-of-band again.'
+                  : 'This token is not pending (unknown, already consumed, or expired). ' +
+                    'Call request_approval again to mint a fresh one.';
         return JSON.stringify({
           status: 'FAILED',
           state_anchor: { token: args.token, granted: false, reason },

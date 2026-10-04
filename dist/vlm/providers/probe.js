@@ -2,9 +2,6 @@
 // 纪元 Ψ（Ψ-7 万脑归一）：探针与模型发现 —— 各平台体检（能不能通/有哪些视觉模型可用）。
 import { fetchWithRetry, sanitizeError } from './types.js';
 import { getSharp } from '../../_legacyDeps.js';
-import { createAnthropicProvider } from './anthropic.js';
-import { createGeminiProvider } from './gemini.js';
-import { createOpenAiProvider } from './openai.js';
 /** 探针超时缺省 —— 比正式调用（30s）更急：一次不通就快速让位 */
 const PROBE_TIMEOUT_MS = 15_000;
 /** 探针的回复预算 —— 只需要一句「ok」，8 token 足矣 */
@@ -227,7 +224,7 @@ async function listModelsOnce(args) {
             : typeof fetch === 'function' ? fetch
                 : undefined;
         if (!doFetch)
-            return { ok: false, error: `${tag}：fetch 不可用（Node >= 18）` };
+            return { ok: false, error: `${tag}：fetch 不可用（Node >= 18）` }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
         const headers = { Accept: 'application/json', ...authHeaders(protocol, apiKey) };
         const fr = await fetchWithRetry({
             doFetch,
@@ -301,70 +298,10 @@ export async function discoverModels(opts) {
         return { ok: false, models: [], error: redactDetail(sanitizeError(e, 'discover')) };
     }
 }
-// ─── 平台预设视图（registry 收编版：单一数据源 + 探针展示标签叠层） ───
-import { PLATFORM_PRESETS as REGISTRY_PRESETS } from './registry.js';
-/**
- * 探针报告展示标签叠层 —— registry label 的体检报告方言（含部署形态括注）。
- * 仅是展示字符串，不参与任何连接决策；协议/基址/模型/env 键等物料全部
- * 单一来源自 registry（删桩不留重复源 —— 换脑只改 registry 一处）。
- */
-const PROBE_LABELS = {
-    glm: '智谱 GLM（bigmodel）',
-    openai: 'OpenAI 官方云',
-    anthropic: 'Anthropic Claude',
-    gemini: 'Google Gemini',
-    qwen: '通义千问（DashScope 兼容模式）',
-    moonshot: '月之暗面 Kimi（Moonshot）',
-    doubao: '火山方舟 豆包',
-    xai: 'xAI Grok',
-    siliconflow: '硅基流动 SiliconFlow',
-    openrouter: 'OpenRouter',
-    ollama: 'Ollama 本地',
-    lmstudio: 'LM Studio 本地',
-    vllm: 'vLLM 本地',
-};
-/** 万脑平台预设表 —— 云端十家 + 本地三家（探针遍历此表体检）；
- *  数据单一来源投影自 registry.PLATFORM_PRESETS（十三平台花名册）。 */
-export const PLATFORM_PRESETS = REGISTRY_PRESETS.map((p) => ({
-    label: PROBE_LABELS[p.id] ?? p.label,
-    id: p.id,
-    protocol: p.protocol,
-    baseUrl: p.baseUrl,
-    ...(p.defaultModel !== '' ? { model: p.defaultModel } : {}),
-    envKeys: [...p.envKeys],
-    ...(p.localAuthOptional === true ? { localAuthOptional: true } : {}),
-}));
-/** 取首个非空环境变量（trim 后比对；全空 ⇒ ''） */
-function firstEnv(names) {
-    for (const n of names) {
-        try {
-            const v = process.env[n];
-            if (typeof v === 'string' && v.trim() !== '')
-                return v.trim();
-        }
-        catch { /* 环境面故障视为未设置 */ }
-    }
-    return '';
-}
-/** 按预设协议铸 provider —— 云脑三家工厂的分发面（全字段可注入，测试零联网） */
-function castPlatformProvider(args) {
-    const { preset, apiKey, baseUrl, model, fetchImpl } = args;
-    const cfg = {
-        id: preset.id,
-        idPreset: preset.id,
-        apiKey,
-        baseUrl,
-        model: model !== '' ? model : undefined,
-        defaultBaseUrl: preset.baseUrl,
-        defaultModel: preset.model,
-        fetchImpl,
-    };
-    if (preset.protocol === 'anthropic')
-        return createAnthropicProvider(cfg);
-    if (preset.protocol === 'gemini')
-        return createGeminiProvider(cfg);
-    return createOpenAiProvider(cfg);
-}
+// W6-2（doctor smell.over-engineering 清偿）：平台预设视图已分区提取至 probe.presets.ts
+// （行为零变化）；导入面不变 —— 再分发。
+import { PLATFORM_PRESETS, firstEnv, castPlatformProvider } from './probe.presets.js';
+export { PLATFORM_PRESETS } from './probe.presets.js';
 // ─── probeAllPlatforms：万脑总体检 ───
 /**
  * 单平台探测任务（纪元 Δ-2 空模型发现路径的执行体）—— 永不抛：

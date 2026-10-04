@@ -3,6 +3,9 @@
 // confirm:true 显式确认（防误触发真实桌面操作）；步数上限由配置约束；
 // click_element 依赖运行时元素缓存，重放时显式跳过并说明原因。
 // B-4：返回值统一走 toolResult 工厂（反幻觉锚点全覆盖）。
+// D-G5（W8 第 2 批）：回放完成时把轨迹摘要（步指纹序列 + 三态结局 + 整体
+// 成败）铸入 notary 锚 —— DEBTS「replayOne 重放层不采集公证证据」清偿；
+// 公证缺席 ⇒ 降级标注（notarization.status='degraded' + reason），不阻断回放。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import { journal } from '../journal.js';
@@ -21,10 +24,30 @@ export function isDeadStep(hashBefore, hashAfter, deadDistance = DEAD_STEP_DISTA
         return false; // 证据缺席：不判死（放行）
     return hammingDistance(normalizeHash(hashBefore), normalizeHash(hashAfter)) <= deadDistance;
 }
+/**
+ * 回放步结局三态（纯函数 —— D-G5 见证口径）：true=已执行 / false=失败
+ * （安全闸门拦截、派发异常 —— FAILED 前缀）/ null=跳过（SKIPPED 或模型侧
+ * 恢复指令 —— 未执行且非失败）。诚实三态，绝不把跳过伪装成执行或失败。
+ */
+export function replayStepExecuted(line) {
+    try {
+        if (typeof line !== 'string')
+            return null;
+        if (line.startsWith('FAILED:') || line.includes(SAFETY_GATE_BLOCK))
+            return false;
+        if (line.startsWith('SKIPPED') || line.startsWith('OK (model-side'))
+            return null;
+        return true;
+    }
+    catch {
+        return null; // 判读绝不抛
+    }
+}
 import { sleep } from '../actionVerifier.js';
 import { toolOk, toolErr, toolActionRequired } from '../toolResult.js';
 import { assertActionAllowed, SAFETY_GATE_BLOCK } from './actionGate.js';
 import { approval } from '../approval.js';
+import { anchorReplayTrajectory, replayStepFingerprint, } from '../notary/index.js';
 export function createReplayActionsTool(config) {
     return defineTool({
         name: 'replay_actions',
@@ -67,6 +90,8 @@ export function createReplayActionsTool(config) {
                 return toolErr('Replay rejected.', `${steps.length} steps exceed replayMaxSteps (${config.replayMaxSteps}).`, 'Narrow the from_step/to_step range and retry in batches.');
             }
             const log = [];
+            // D-G5（重放公证）：轨迹见证采集 —— 步指纹序列 + 三态结局，回放完成时铸锚
+            const witnessSteps = [];
             let halted = null;
             let haltGate = 'dead-step';
             const gated = config.verifyActions && !config.dryRun;
@@ -79,6 +104,12 @@ export function createReplayActionsTool(config) {
                     : null;
                 const line = await replayOne(entry, config);
                 log.push(`#${entry.ts} ${entry.tool}: ${line}`);
+                witnessSteps.push({
+                    index: i,
+                    tool: entry.tool,
+                    fingerprint: replayStepFingerprint(entry),
+                    executed: replayStepExecuted(line),
+                });
                 await sleep(150); // 步间微歇，给 UI 响应时间
                 // Δ 纪元（审计#1）：安全闸门拦截 ⇒ fail-fast 中止 —— 宏的后续步骤建立在
                 // 被拦截的不可逆步骤之上，继续只会制造半途而废的世界状态（与 Y-6 死步
@@ -108,6 +139,22 @@ export function createReplayActionsTool(config) {
                     }
                 }
             }
+            // D-G5（重放公证接线）：回放完成（走完或 halt 诚实中止 —— 中止也是结局，
+            // 照铸不讳）⇒ 把回放轨迹摘要（步指纹序列 + 三态结局 + 整体成败）铸入
+            // notary 锚，走既有 anchorOnce 通道（endpoint 空 = 本地时间锚零网络，
+            // 既有纪律保持；见证入锚的哈希域与时间戳摘要域 —— 防篡改同律）。
+            // 公证缺席（宿主未装配 notary）或铸锚失败 ⇒ 诚实降级标注 —— 公证是旁路
+            // 仪式，绝不阻断回放、绝不伪造 anchored。
+            const replayNotarization = await anchorReplayTrajectory({
+                kind: 'replay-trajectory',
+                version: 1,
+                source: 'replay_actions',
+                replayedSteps: witnessSteps.filter(s => s.executed === true).length,
+                totalSteps: steps.length,
+                success: halted === null,
+                halt: halted === null ? null : { gate: haltGate, index: halted.index, tool: halted.tool },
+                steps: witnessSteps,
+            });
             if (halted) {
                 return JSON.stringify({
                     status: 'PARTIAL_FAILURE',
@@ -121,6 +168,7 @@ export function createReplayActionsTool(config) {
                             : haltGate === 'step-failure'
                                 ? 'step dispatch failure (system-layer exception) — 该步未执行即失败'
                                 : 'per-step scene hash (dHash dead-step detection)',
+                        notarization: replayNotarization,
                     },
                     execution_log: log.join('\n'),
                     next_step: haltGate === 'safety-gate'
@@ -135,7 +183,7 @@ export function createReplayActionsTool(config) {
                                 'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
                 }, null, 2);
             }
-            return toolOk(`Replayed ${steps.length} action(s).`, { replayed_steps: steps.length, detail: log }, "Call 'take_screenshot' to verify the final state matches the expected outcome.");
+            return toolOk(`Replayed ${steps.length} action(s).`, { replayed_steps: steps.length, detail: log, notarization: replayNotarization }, "Call 'take_screenshot' to verify the final state matches the expected outcome.");
         },
     });
 }

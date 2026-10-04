@@ -14,7 +14,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Config } from '../src/config.ts';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { journal } from '../src/journal.ts';
 import { system } from '../src/system.ts';
 import { setAccessibilityProvider } from '../src/uiExtractor.ts';
@@ -33,6 +33,16 @@ const originalNotary = {
   readStructuralName: notaryEvidence.readStructuralName.bind(notaryEvidence),
 };
 let clicks = 0;
+
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手） */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function grantOob(token: string): boolean {
+  const hit = oobSink.find(d => d.token === token);
+  return approval.grantDetailed(token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok;
+}
 
 beforeEach(() => {
   resetApproval();
@@ -106,8 +116,9 @@ test('Ρ-1: 描述无害但 OCR 实读「删除」⇒ 判危险需令牌（含�
   assert.equal(leet.allowed, false, 'leet 变体命中');
 
   // 已授予令牌解封（公证判危险 = 审批域语义，不因通道来源而变）
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('点击删除按钮以清空回收站');
-  assert.equal(approval.grant(pa.token, true), true);
+  assert.equal(grantOob(pa.token), true);
   const ok = assertActionAllowed(
     'click_mouse',
     { target_description: 'press the 删除 button', approval_token: pa.token },
@@ -179,8 +190,9 @@ test('Ρ-2: 描述与 OCR 不符 ⇒ notary-mismatch 引导重述；相符放行
   assert.equal(dangerFirst.reason, 'irreversible-action');
 
   // 令牌不豁免握手：已授予令牌但描述与实读不符 ⇒ 仍拒（令牌授权的是「这个目标」）
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('删除文件');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   const lying = assertActionAllowed(
     'click_mouse',
     { target_description: 'press the button', approval_token: pa.token },
@@ -366,8 +378,9 @@ test('Ρ-5: click_element 不再绕闸 —— 元素名自述 + 落点 OCR 公�
   assert.equal(clicks, 1, '元素名危险同样不派发');
 
   // ⑤ 已授予令牌 + 描述与实读一致 ⇒ 放行（审批域闭环）
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('点击「删除全部」清空列表');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   notaryEvidence.readOcrLabel = async () => '删除全部';
   const approved = await runJson(tool, { id: 2, approval_token: pa.token });
   assert.equal(approved.status, 'SUCCESS');

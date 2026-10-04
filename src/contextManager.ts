@@ -15,69 +15,34 @@
 //   （grounding 命中/点击目标的 bbox），下次编码经 suggestFoveaCenter 组装三路
 //   候选（锚点 + visualDiff 质心 + 光标）交 gazeRouter 加权，产出的归一化注视
 //   中心直供 encodeForVlm 的 foveaCenter。参数式注入面：不读 config、不读注册表。
+// W8-A5（DEBTS D-C3 增量编码消费方）：驱逐摘要改用增量编码产物 —— 开关
+//   configureIncremental 缺省关；开 ⇒ 每帧入窗时经内部 ScreenStateLedger（或
+//   调用方显式投喂 recordIncrementalDelta）铸帧间增量判决随记录入窗，驱逐时
+//   增量几何（codec 补丁锚点/滚动向量/静默判决）以有界文本随墓志铭存活
+//   （省 token + 保信息：图片走了，变化留下）。关 ⇒ 记录形状与驱逐文本与
+//   现状逐字节一致（回归锁）。参数式开关：不读 config、不读注册表 —— 部署
+//   决策（DEBTS D-C3「宿主编码层取投递产物」）降维成拨本开关。
 import { journal } from './journal';
 import { embed, cosine, type SparseVector } from './semanticHash';
 import { hammingDistance, similarity } from './perceptualHash';
 import { kernelRegistry } from './kernel/registry';
 // W1-9：gazeRouter 纯函数（vlm/codec 无反向依赖 —— 依赖方向 context → vlm 单向）
-import { gazeRouter, type GazeCandidate, type GazeDecision } from './vlm/codec';
+import { gazeRouter, estimateVlmTokens, type GazeCandidate, type GazeDecision } from './vlm/codec';
+// W8-A5：视觉状态账本（增量判决的生产机 —— visualDiff 不反向依赖本模块，无环）
+import { ScreenStateLedger } from './visualDiff';
 
-/**
- * W1-9（P1 任务驱动注视）：任务锚点 —— 上一轮任务目标的屏幕位置记忆。
- * 供下次编码消费：normalized 是 encodeForVlm.foveaCenter 的直接方言
- * （源图归一化 [0,1]²）；bbox/center 保留像素系原值供点击层复核。
- */
-export interface TaskAnchor {
-  /** 源图像素系 bbox（记录时防御规整：倒置交换、压扁扩 1px、整数化） */
-  bbox: { x0: number; y0: number; x1: number; y1: number };
-  /** bbox 几何中心（源图像素，不取整 —— 取整权留给点击层） */
-  center: { x: number; y: number };
-  /** 源图归一化中心 [0,1]²（记录时给了 viewport 才在场；缺席 = 无法归一） */
-  normalized?: { x: number; y: number };
-  /** 锚点来源路（'grounding' | 'diff' | 'cursor'；自定义串原样保留 —— 路由器按已知路过滤） */
-  route: string;
-  /** 任务相关度 [0,1]（缺省 1 —— 路由先验即分数；目标已完成可下调） */
-  taskRelevance?: number;
-  capturedAt: number;
-  /** 锚点指向的截图 id（可选 —— 与窗口内记录解耦） */
-  screenshotId?: number;
-}
-
-/** W1-9：clamp 进 [0,1]（归一化坐标的防御收口；非有限按 0 记） */
-function clampUnit(v: number): number {
-  if (!Number.isFinite(v)) return 0;
-  return Math.min(1, Math.max(0, v));
-}
-
-export interface ScreenshotRecord {
-  id: number;
-  timestamp: number;
-  base64: string; // 仅最新几张保留图片数据；置空即「已降级」（空字符串天然 falsy）
-  hash?: string; // 整屏 dHash 指纹（元数据，不占图片位）：变化门控与场景匹配的事实源
-  textSummary?: string; // 旧截图降级后的文本描述（B-6 起含 OCR 遗像）
-  // ── C-4 认知焦点引擎 ──
-  /** 显著度 0~1：类型加权 × 任务相关 × 时间衰减。驱逐顺序的事实源 */
-  salience?: number;
-  /** 高显著度豁免驱逐（登录态/任务目标锚点等）。名额受 pinBudget 硬顶 */
-  pinned?: boolean;
-  /**
-   * E-4 预测误差（第五维·信息热力学）：本帧与前一帧的指纹汉明距离 ——
-   * 预测残差的离散度量。≥24/64 位（≈37.5% 位翻转 = 页面级跳变）的帧
-   * 在显著度评估中获得加成：「世界刚剧变的那一帧」值得注意力优先驻留。
-   * 首帧/无指纹 ⇒ 缺席（无前馈即无残差 —— 诚实缺席，不伪造基线）。
-   */
-  surpriseBits?: number;
-  /**
-   * S-6/Q-2：本帧 pHash 频谱指纹（截图入窗时一次铸就，与帧同生命周期）。
-   * Δ-3 修正注记：潜意识条目的 scenePhash 从这里取 —— 旧实现驱逐时误用
-   * lastPhash（驱逐时刻**新入帧**的 pHash），「死者」的遗像里存的是
-   * 「目击者」的指纹：既视感的第二指从根上指错了帧（victim 与新帧的
-   * pHash 几乎必然不同 ⇒ 双指共识几乎必然否决 ⇒ S-6 复核通道形同虚设）。
-   */
-  phash?: string;
-}
+// W6-2（doctor smell.over-engineering 清偿）：记录类型与纯小函数已分区提取至
+// contextManager.records.ts（行为零变化）；导入面不变 —— 再分发。
+import {
+  clampUnit, SURPRISE_BIT_FLOOR, approxKb,
+  DEFAULT_INCREMENTAL_SUMMARY_CHARS, MIN_INCREMENTAL_SUMMARY_CHARS,
+  cleanIncrementalDelta, incrementalEvictionSummary,
+  type TaskAnchor, type ScreenshotRecord, type IncrementalDelta,
+} from './contextManager.records';
+export type { TaskAnchor, ScreenshotRecord, IncrementalDelta } from './contextManager.records';
 
 /** C-4 潜意识元组：被驱逐记录的有损压缩残响。纯文本 + 硬容量，Token 消耗恒定 */
+// W6-2：本接口按 epochS S-6「立法在源」锁定留守本文件。
 export interface SubconsciousTrace {
   /** 驱逐时的整屏 dHash —— 既视感（déjà-vu）匹配键 */
   sceneHash: string;
@@ -88,10 +53,7 @@ export interface SubconsciousTrace {
   scenePhash?: string;
 }
 
-/** base64 字符数 → 近似 KB（data URL 前缀开销可忽略，预算用途足够精确） */
-function approxKb(b64: string): number {
-  return b64.length / 1024;
-}
+
 
 class ContextManager {
   private history: ScreenshotRecord[] = [];
@@ -110,8 +72,27 @@ class ContextManager {
   private subconsciousMatchDistance = 6;   // 既视感触发阈值（dHash 汉明距离）
   private taskQueryCache: { text: string; vec: SparseVector } | null = null; // 任务向量缓存
   // ── W1-9（P1 任务驱动注视）──
-  /** 上一轮任务目标锚点（null = 无锚点 —— suggestFoveaCenter 自然少一路候选） */
+  /** 上一轮任务锚点（null = 无锚点 —— suggestFoveaCenter 自然少一路候选） */
   private taskAnchor: TaskAnchor | null = null;
+  // ── W8-A5（DEBTS D-C3 增量编码消费方）──
+  /** 增量消费总开关（缺省 false —— 关 = 本节全部行为缺席，驱逐文本与现状逐字节一致） */
+  private incrementalEnabled = false;
+  /** 驱逐摘要增补段字符预算（缺省 480 —— 容得下单条三系锚点；墓志铭从段的量级） */
+  private incrementalSummaryMaxChars = DEFAULT_INCREMENTAL_SUMMARY_CHARS;
+  /** 内部视觉状态账本（开启后首帧懒建 —— 差分判决的生产机；reset 归零） */
+  private incrementalLedger: ScreenStateLedger | null = null;
+  /** 显式投喂的待入账判决（单槽 —— 下一次 addScreenshot 消费，压过内部账本） */
+  private pendingIncrementalDelta: IncrementalDelta | null = null;
+  /** 收益遥测：入账帧数 / 判决附着数（分 kind）/ 驱逐摘要数 / 降级数 / 保住 token 估算 */
+  private incrStats = {
+    framesIngested: 0,
+    deltasAttached: 0,
+    byKind: { keyframe: 0, patch: 0, scroll: 0, silent: 0 } as Record<IncrementalDelta['kind'], number>,
+    explicitFeeds: 0,
+    evictionSummaries: 0,
+    estVisualTokensPreserved: 0,
+    degradedIngests: 0,
+  };
 
   constructor(maxImageCount: number = 3) {
     this.maxImageCount = maxImageCount;
@@ -138,12 +119,146 @@ class ContextManager {
     this.subconsciousMatchDistance = Math.max(0, subconsciousMatchDistance);
   }
 
+  // ── W8-A5（DEBTS D-C3 增量编码消费方）：开关 / 投喂面 / 收益遥测 ──
+
+  /**
+   * W8-A5：增量编码消费开关 —— 本模块自有的参数式注入面（与 configureFocus
+   * 同族；不读 config / 不读注册表 / 不依赖 index.ts 铸键）。
+   * 开（enabled=true）⇒ 每次 addScreenshot：优先消费 recordIncrementalDelta
+   * 显式投喂的判决，缺席则内部 ScreenStateLedger 对本帧真差分（sharp 480px
+   * 管线 —— 与 autonomy/runtime 的账本同机不同例，各自独立开关互不干扰）；
+   * 干净判决随记录入窗，驱逐时铸造增量摘要增补段。
+   * 关（缺省）⇒ 上述全部缺席：不建账本、不解码、不附着、驱逐文本与现状
+   * 逐字节一致（显式投喂也被丢弃 —— 单一开关辖制投喂与消费两面）。
+   * summaryMaxChars：增补段字符预算（缺省 480；脏值回声缺省）。绝不抛。
+   */
+  configureIncremental(enabled: boolean, summaryMaxChars?: number) {
+    this.incrementalEnabled = enabled === true;
+    if (typeof summaryMaxChars === 'number' && Number.isFinite(summaryMaxChars) && summaryMaxChars >= MIN_INCREMENTAL_SUMMARY_CHARS) {
+      this.incrementalSummaryMaxChars = Math.floor(summaryMaxChars);
+    }
+    if (!this.incrementalEnabled) this.pendingIncrementalDelta = null; // 关向即刻弃投喂（不跨开关泄漏）
+  }
+
+  /**
+   * W8-A5：显式投喂增量判决 —— 下一次 addScreenshot 的帧间变化物料（参数式
+   * 注入面，与 recordTaskAnchor 同族：宿主感知层/测试把账本判决交来即可，
+   * 压过内部账本的自算 —— 调用方已有判决时不必重复差分）。
+   * 入参宽入口（LedgerVerdict 形状或手工构造）：cleanIncrementalDelta 规整，
+   * 脏值拒收返回 false（不猜、不抛）。单槽：重复投喂以最后一次为准。
+   * 开关关 ⇒ 拒收返回 false（单一开关辖制投喂与消费两面 —— 杜绝陈旧判决
+   * 跨开关存活、在错误帧上错位附着）。
+   */
+  recordIncrementalDelta(raw: unknown): boolean {
+    if (!this.incrementalEnabled) return false;
+    const cleaned = cleanIncrementalDelta(raw);
+    if (!cleaned) return false;
+    this.pendingIncrementalDelta = cleaned;
+    this.incrStats.explicitFeeds += 1;
+    return true;
+  }
+
+  /**
+   * W8-A5：收益遥测快照（模块自有的仪表盘面 —— 与 imageCount/imageKb 同族的
+   * Token 仪表盘扩展；防御副本）。estVisualTokensPreserved = 逐次驱逐摘要
+   * 附带携带的源图视觉 token 估算之和（codec.estimateVlmTokens 现尺 ——
+   * 「被驱逐图片的视觉 token 中，多少的变化几何在文本里活了下来」）。
+   */
+  incrementalDeltaStats(): {
+    enabled: boolean;
+    framesIngested: number;
+    deltasAttached: number;
+    byKind: Record<IncrementalDelta['kind'], number>;
+    explicitFeeds: number;
+    evictionSummaries: number;
+    estVisualTokensPreserved: number;
+    degradedIngests: number;
+  } {
+    return {
+      enabled: this.incrementalEnabled,
+      framesIngested: this.incrStats.framesIngested,
+      deltasAttached: this.incrStats.deltasAttached,
+      byKind: { ...this.incrStats.byKind },
+      explicitFeeds: this.incrStats.explicitFeeds,
+      evictionSummaries: this.incrStats.evictionSummaries,
+      estVisualTokensPreserved: this.incrStats.estVisualTokensPreserved,
+      degradedIngests: this.incrStats.degradedIngests,
+    };
+  }
+
+  /**
+   * W8-A5：本帧的增量判决求值（addScreenshot 内部调用 —— 开关开时）。
+   * 优先级：显式投喂 > 内部账本真差分。防御式绝不抛：
+   *   · data URL 前缀剥离后 base64 解码为空（脏输入）⇒ undefined + 降级计数；
+   *   · 内部账本 ingest 抛错 / 判决带 degraded 注记（端口缺席/分析失败——
+   *     账本自己申报「本次判断不可信」）⇒ undefined + 降级计数（诚实降级：
+   *     无可信判决就不附着，驱逐摘要自然回退纯墓志铭语义）；
+   *   · 判决干净 ⇒ cleanIncrementalDelta 规整后返回（维度从账本 prevDims 补全
+   *     —— 锚点归一化换算与 token 估算的基准）。
+   */
+  private async resolveIncrementalDelta(dataUrl: string): Promise<IncrementalDelta | undefined> {
+    try {
+      // 显式投喂优先（调用方已有判决 ⇒ 免重复差分）；单槽即取即清
+      if (this.pendingIncrementalDelta) {
+        const fed = this.pendingIncrementalDelta;
+        this.pendingIncrementalDelta = null;
+        this.incrStats.framesIngested += 1;
+        return fed;
+      }
+      const bare = dataUrl.replace(/^data:[^;]+;base64,/, '');
+      const buf = Buffer.from(bare, 'base64');
+      if (buf.length === 0) {
+        this.incrStats.framesIngested += 1;
+        this.incrStats.degradedIngests += 1;
+        return undefined; // 脏 base64：无可信判决，不附着
+      }
+      if (!this.incrementalLedger) this.incrementalLedger = new ScreenStateLedger({}, {});
+      const verdict = await this.incrementalLedger.ingest(buf);
+      this.incrStats.framesIngested += 1;
+      if (verdict.degraded) {
+        this.incrStats.degradedIngests += 1;
+        return undefined; // 账本自报不可信（端口缺席/分析失败）—— 诚实降级
+      }
+      const dims = this.incrementalLedger.stats().prevDims;
+      const cleaned = cleanIncrementalDelta({
+        kind: verdict.kind,
+        changedPct: verdict.changedPct,
+        patches: verdict.patches,
+        scroll: verdict.scroll,
+        generation: verdict.generation,
+        ...(dims && dims.width >= 1 && dims.height >= 1
+          ? { sourceWidth: dims.width, sourceHeight: dims.height } : {}),
+      });
+      if (!cleaned) {
+        this.incrStats.degradedIngests += 1;
+        return undefined;
+      }
+      return cleaned;
+    } catch {
+      this.incrStats.degradedIngests += 1;
+      return undefined; // 增量是增益不是依赖：任何意外都不带崩截图主路径
+    }
+  }
+
   /** 生命周期规范：插件卸载时清空历史（由入口的 ctx.effect disposer 调用） */
   reset() {
     this.history = [];
     this.subconscious = [];
     this.taskQueryCache = null;
     this.taskAnchor = null; // W1-9：锚点随会话清空（新任务不继承旧注视）
+    // W8-A5：增量面一并归零 —— 账本（会话边界：帧链不跨任务延续）、待投喂、
+    // 收益遥测（与潜意识池同律：reset 即新会话的诚实起点）
+    if (this.incrementalLedger) this.incrementalLedger.reset();
+    this.pendingIncrementalDelta = null;
+    this.incrStats = {
+      framesIngested: 0,
+      deltasAttached: 0,
+      byKind: { keyframe: 0, patch: 0, scroll: 0, silent: 0 },
+      explicitFeeds: 0,
+      evictionSummaries: 0,
+      estVisualTokensPreserved: 0,
+      degradedIngests: 0,
+    };
   }
 
   // ── W1-9（P1 任务驱动注视）：任务锚点缓存与注入面 ──
@@ -302,12 +417,12 @@ class ContextManager {
     const ageMin = (now - record.timestamp) / 60_000;
     const recency = Math.exp(-ageMin / 5);
     const base = Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
-    // E-4 预测残差加成：页面级跳变帧（≥24/64 位）+0.45（封顶 1）。基线帧
+    // E-4 预测残差加成：页面级跳变帧（≥SURPRISE_BIT_FLOOR/64 位）+0.45（封顶 1）。基线帧
     // 0.8×0.5×1.0=0.4 被抬到 0.85 —— 跨过 0.8 钉扎线，世界剧变锚点获得
     // 与任务目标同级的钉扎优先权（预测处理理论：注意力跟随预测误差）。
-    // 24 与 0.45 是算法形状字面量：24 位 ≈ 全屏 dHash 的页面级变化下界
+    // SURPRISE_BIT_FLOOR 与 0.45 是算法形状字面量：24 位 ≈ 全屏 dHash 的页面级变化下界
     // （元素级反馈撑不满此距离，不误伤）；0.45 恰把满新近度基线抬过钉扎线。
-    if ((record.surpriseBits ?? 0) >= 24) return Math.min(1, base + 0.45);
+    if ((record.surpriseBits ?? 0) >= SURPRISE_BIT_FLOOR) return Math.min(1, base + 0.45);
     return base;
   }
 
@@ -424,8 +539,22 @@ class ContextManager {
     // 页面级跳变 ⇒ surpriseBits 入记录 ⇒ 显著度加成 + 钉扎资格（见 assessSalience）
     const prevHash = this.lastImageRecord()?.hash;
     const surpriseBits = hash && prevHash ? hammingDistance(prevHash, hash) : undefined;
+    // W8-A5（D-C3 增量编码消费方）：开关开 ⇒ 求值本帧增量判决（显式投喂优先，
+    // 缺席走内部账本真差分）随记录入窗；关 ⇒ undefined —— push 的条件展开为空，
+    // 记录自身键集与现状逐字节一致（回归锁）。任何降级（脏 base64/账本自报
+    // 不可信/意外异常）⇒ 不附着，驱逐摘要自然回退纯墓志铭语义。
+    const incrementalDelta = this.incrementalEnabled
+      ? await this.resolveIncrementalDelta(base64)
+      : undefined;
+    if (incrementalDelta) {
+      this.incrStats.deltasAttached += 1;
+      this.incrStats.byKind[incrementalDelta.kind] += 1;
+    }
     // Δ-3：pHash 与帧同生（入窗即铸）—— 驱逐时潜意识条目取 victim 自己的第二指
-    this.history.push({ id: newId, timestamp: newId, base64, hash, surpriseBits, phash: this.lastPhash ?? undefined });
+    this.history.push({
+      id: newId, timestamp: newId, base64, hash, surpriseBits, phash: this.lastPhash ?? undefined,
+      ...(incrementalDelta ? { incrementalDelta } : {}),
+    });
 
     // C-4 注意力刷新：显著度评估 + 钉扎决策（驱逐顺序的事实源）
     this.refreshPins();
@@ -448,11 +577,28 @@ class ContextManager {
       const legacy = this.legacySummary && this.enableOcr
         ? await this.makeLegacySummary()
         : '';
-      // 降级话术三要素：时间属性 + 原因 + 行为指引（+ 遗像内容）—— 防模型对已驱逐图产生幻觉或执着
+      // W8-A5（D-C3 增量编码消费）：开关开且 victim 携带干净增量判决 ⇒ 铸造
+      // 增补段（silent 恒同申报 / patch 补丁锚点 / scroll 滚动向量 / keyframe
+      // 诚实申报无紧凑差分）—— codec.patchAnchorText 产物随文本存活。关或
+      // 无判决 ⇒ 空串，墓志铭与现状逐字节一致（回归锁）。收益遥测：源图
+      // 视觉 token 估算计入 estVisualTokensPreserved。
+      const incrSegment = this.incrementalEnabled && victim.incrementalDelta
+        ? incrementalEvictionSummary(victim.incrementalDelta, this.incrementalSummaryMaxChars)
+        : '';
+      if (incrSegment) {
+        this.incrStats.evictionSummaries += 1;
+        this.incrStats.estVisualTokensPreserved += estimateVlmTokens(
+          victim.incrementalDelta!.sourceWidth ?? 0,
+          victim.incrementalDelta!.sourceHeight ?? 0,
+        );
+      }
+      // 降级话术三要素：时间属性 + 原因 + 行为指引（+ 遗像内容 + 增量增补段）
+      // —— 防模型对已驱逐图产生幻觉或执着
       victim.textSummary =
         `[System Note: Screenshot #${victim.id} was taken earlier and has been cleared ` +
         `from memory to save context space. Rely on the most recent screenshots for current UI state.]` +
-        (legacy ? ` Last visible text: ${legacy}` : '');
+        (legacy ? ` Last visible text: ${legacy}` : '') +
+        incrSegment;
       // C-4 潜意识沉淀：驱逐不等于遗忘 —— (指纹, 要旨) 压缩入潜意识池
       this.sinkToSubconscious(victim, legacy || victim.textSummary.slice(0, 60));
       victim.base64 = ''; // 释放内存；置空与谓词翻转原子地同时发生

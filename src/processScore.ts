@@ -591,3 +591,227 @@ export function renderProcessScore(rep: ProcessScoreReport): string {
   L.push('steps: ' + rep.steps.map(s => `${s.index}=${s.score.toFixed(3)}`).join(' '));
   return L.join('\n');
 }
+
+// ─── W6-5：多任务分段评分（AGENT_BEGIN 边界切分 —— W3-8 遗留「多任务轨迹仅取
+//     最后 AGENT_END」的补全）───
+//
+// 边界语义：每个 AGENT_BEGIN 行开启一个任务段（行本身归入该段 —— objective 由此
+// 提取；AGENT_BEGIN 本就是 OSC_RESET_MARKERS，段起点即签名连续性的物理断点，各段
+// 独立状态机与此自洽）。首段 BEGIN 之前的散步行（无任务语境的头部）成独立
+// 「prologue 段」（objective=null —— 诚实缺席）；空 prologue 不成段。无任何
+// BEGIN 边界 ⇒ 单段（与旧口径同一覆盖，只是套了段壳）。
+//
+// 汇总口径（summary.method 注明，报告自解释）：
+//   · weighted_mean（主口径）= Σ(nᵢ·wᵢ)/Σnᵢ —— 段间按步数加权；wᵢ 为段内
+//     PBR 晚期加权均值（late_bias 段内独立生效：每任务的「后期步」是它自己的
+//     后期，不是整条轨迹的后期 —— 这正是多任务该有的刻度）；
+//   · plain_mean（并列口径）= 全步简单均值（Σnᵢ·pᵢ/Σnᵢ，与单任务口径可直接对比）；
+//   · final_mean = 非 null 段终局分的均值（无 AGENT_END 的段不计入 —— 缺席
+//     不是 0 分，与单任务「终局缺席 = null」同律）；
+//   · blended = 0.7×weighted + 0.3×final_mean（两口径齐备才有，否则 null）。
+// 旧行为零触碰：scoreJournalText/scoreJournalLines 原样保留（无 BEGIN 边界 =
+// 现状；单 BEGIN 也 = 现状 —— 自动切型会破坏既有消费方的返回类型契约，故新
+// 能力走独立入口 opt-in）。防御式绝不抛：最外层兜底捕获产出 ok=false 段报告。
+
+/** W6-5：单段报告（每任务一段：过程分 + 终局分 + 首低分步都在段报告里） */
+export interface SegmentScoreReport {
+  /** 段序号（0-based；prologue 段在前，objective=null） */
+  index: number;
+  /** 该段 AGENT_BEGIN 的任务目标（prologue 段 = null —— 诚实缺席） */
+  objective: string | null;
+  /** 段内过程评分报告（与单任务 ProcessScoreReport 同构 —— 每段独立状态机） */
+  report: ProcessScoreReport;
+}
+
+/** W6-5：多任务分段报告（整体 = 段数组 + 汇总） */
+export interface SegmentedScoreReport {
+  ok: boolean;
+  caliber_version: string;
+  generated_by: string;
+  internal_error: string | null;
+  segment_count: number;
+  segments: SegmentScoreReport[];
+  summary: {
+    /** 汇总口径注明（消费方可复算的锚）：段间步数加权，段内 late-bias */
+    method: 'step-weighted';
+    total_steps: number;
+    plain_mean: number | null;              // 并列口径：全步简单均值
+    weighted_mean: number | null;           // 主口径：Σ(nᵢ·wᵢ)/Σnᵢ
+    final_scores: Array<number | null>;     // 并列：各段终局分（缺 AGENT_END = null）
+    final_mean: number | null;              // 非 null 段终局分均值（缺席段不计入）
+    blended: number | null;                 // 0.7×weighted + 0.3×final_mean
+  };
+  /** 全轨迹行统计（Σ 段 —— 文本入口另并入 blank/garbage 层计数） */
+  totals: ProcessScoreReport['totals'];
+}
+
+/** W6-5：AGENT_BEGIN 边界切分（纯函数）。BEGIN 行归入其后段；头部散步成
+ *  prologue 段（仅当非空）；无 BEGIN ⇒ [全轨迹] 单段。 */
+function splitAtAgentBegin(lines: readonly unknown[]): unknown[][] {
+  const begins: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (isPlainObject(l) && l.tool === 'AGENT_BEGIN') begins.push(i);
+  }
+  if (begins.length === 0) return [lines.slice()];
+  const segs: unknown[][] = [];
+  if (begins[0] > 0) segs.push(lines.slice(0, begins[0])); // prologue 段
+  for (let k = 0; k < begins.length; k++) {
+    const end = k + 1 < begins.length ? begins[k + 1] : lines.length;
+    segs.push(lines.slice(begins[k], end));
+  }
+  return segs;
+}
+
+function emptyTotals(): ProcessScoreReport['totals'] {
+  return {
+    lines_total: 0, lines_blank: 0, lines_garbage: 0,
+    lines_unscored_tool: 0, action_steps: 0, marker_lines: 0,
+  };
+}
+
+function fallbackSegmented(msg: string): SegmentedScoreReport {
+  return {
+    ok: false,
+    caliber_version: SCORE_CALIBER_VERSION,
+    generated_by: 'W6-5 processScore.segments',
+    internal_error: msg,
+    segment_count: 0,
+    segments: [],
+    summary: {
+      method: 'step-weighted',
+      total_steps: 0, plain_mean: null, weighted_mean: null,
+      final_scores: [], final_mean: null, blended: null,
+    },
+    totals: emptyTotals(),
+  };
+}
+
+/** W6-5：分段核心（已 parse 的行对象）。每段独立调 scoreParsed —— 段内
+ *  AGENT_END 取该段最后一个（多 END 段以末为准，与单任务口径同律）。 */
+function scoreParsedSegments(lines: readonly unknown[], cal: Calibration): SegmentedScoreReport {
+  const totals = emptyTotals();
+  const segments: SegmentScoreReport[] = splitAtAgentBegin(lines).map((seg, index) => {
+    const rep = scoreParsed(seg, cal);
+    totals.lines_total += seg.length;
+    totals.lines_blank += rep.totals.lines_blank;
+    totals.lines_garbage += rep.totals.lines_garbage;
+    totals.lines_unscored_tool += rep.totals.lines_unscored_tool;
+    totals.action_steps += rep.totals.action_steps;
+    totals.marker_lines += rep.totals.marker_lines;
+    return { index, objective: rep.task.objective, report: rep };
+  });
+  // 汇总：步数加权（段内 late-bias 独立；缺席段按其 null 语义跳过）
+  const withSteps = segments.filter(s => s.report.task.step_count > 0);
+  const totalSteps = withSteps.reduce((n, s) => n + s.report.task.step_count, 0);
+  let plain: number | null = null;
+  let weighted: number | null = null;
+  if (totalSteps > 0) {
+    plain = r3(withSteps.reduce(
+      (acc, s) => acc + s.report.task.step_count * (s.report.task.plain_mean ?? 0), 0) / totalSteps);
+    weighted = r3(withSteps.reduce(
+      (acc, s) => acc + s.report.task.step_count * (s.report.task.weighted_mean ?? 0), 0) / totalSteps);
+  }
+  const finalScores = segments.map(s => s.report.task.final_score);
+  const finals = finalScores.filter((x): x is number => x !== null);
+  const finalMean = finals.length > 0 ? r3(finals.reduce((a, b) => a + b, 0) / finals.length) : null;
+  const blended = weighted !== null && finalMean !== null
+    ? r3(BLEND_PROCESS * weighted + BLEND_FINAL * finalMean)
+    : null;
+  return {
+    ok: true,
+    caliber_version: SCORE_CALIBER_VERSION,
+    generated_by: 'W6-5 processScore.segments',
+    internal_error: null,
+    segment_count: segments.length,
+    segments,
+    summary: {
+      method: 'step-weighted',
+      total_steps: totalSteps,
+      plain_mean: plain,
+      weighted_mean: weighted,
+      final_scores: finalScores,
+      final_mean: finalMean,
+      blended,
+    },
+    totals,
+  };
+}
+
+/**
+ * W6-5：多任务分段入口（对象数组 —— 已 parse 的 journal 行）。
+ * AGENT_BEGIN 边界切分为段数组 + 步数加权汇总；绝不抛（兜底 → ok=false）。
+ * 旧单任务入口（scoreJournalLines）原样保留 —— 本入口是新能力的 opt-in 面。
+ */
+export function scoreJournalSegmentsLines(
+  lines: readonly unknown[],
+  opts: ScoreOptions = {},
+): SegmentedScoreReport {
+  try {
+    const arr = Array.isArray(lines) ? lines : [];
+    return scoreParsedSegments(arr, resolveCalibration(opts));
+  } catch (e: unknown) {
+    return fallbackSegmented(`internal: ${String((e as { message?: string })?.message ?? e)}`);
+  }
+}
+
+/**
+ * W6-5：多任务分段主入口（journal JSONL 文本）。
+ * 文本层与 scoreJournalText 同律：空白行不算垃圾、非行对象计垃圾；
+ * blank/garbage 计数并入整体 totals（段 totals 只数对象行）。
+ */
+export function scoreJournalSegmentsText(text: string, opts: ScoreOptions = {}): SegmentedScoreReport {
+  try {
+    const parsed: unknown[] = [];
+    let blank = 0, garbage = 0;
+    const lines = typeof text === 'string' ? text.split(/\r?\n/) : [];
+    for (const raw of lines) {
+      if (!raw || !raw.trim()) { blank++; continue; }
+      try {
+        const v = JSON.parse(raw);
+        if (isPlainObject(v)) parsed.push(v);
+        else garbage++;
+      } catch {
+        garbage++;
+      }
+    }
+    const rep = scoreParsedSegments(parsed, resolveCalibration(opts));
+    rep.totals.lines_total += blank + garbage;
+    rep.totals.lines_blank += blank;
+    rep.totals.lines_garbage += garbage;
+    return rep;
+  } catch (e: unknown) {
+    return fallbackSegmented(`internal: ${String((e as { message?: string })?.message ?? e)}`);
+  }
+}
+
+/** W6-5：分段报告的人类可读渲染（renderProcessScore 同风格） */
+export function renderSegmentedScore(rep: SegmentedScoreReport): string {
+  const f3 = (x: number | null): string => x === null ? '-' : x.toFixed(3);
+  const L: string[] = [
+    `[ProcessScore.segments] caliber=${rep.caliber_version} segments=${rep.segment_count}` +
+    ` steps=${rep.summary.total_steps} lines=${rep.totals.lines_total}` +
+    ` (blank=${rep.totals.lines_blank} garbage=${rep.totals.lines_garbage}` +
+    ` unscored=${rep.totals.lines_unscored_tool} markers=${rep.totals.marker_lines})`,
+  ];
+  if (!rep.ok) {
+    L.push(`internal-error: ${rep.internal_error} (defensive fallback — nothing thrown)`);
+    return L.join('\n');
+  }
+  for (const s of rep.segments) {
+    const t = s.report.task;
+    L.push(
+      `seg#${s.index} : ${s.objective ?? '(no-begin / prologue)'}` +
+      ` steps=${t.step_count} plain=${f3(t.plain_mean)} weighted=${f3(t.weighted_mean)}` +
+      ` final=${f3(t.final_score)} (${t.final_status ?? 'no-end-marker'})` +
+      ` low=${s.report.first_low_step ? `#${s.report.first_low_step.index}@${s.report.first_low_step.score.toFixed(3)}` : 'none'}`,
+    );
+  }
+  const sm = rep.summary;
+  L.push(
+    `summary: method=${sm.method} (段间步数加权,段内 late_bias)` +
+    ` plain=${f3(sm.plain_mean)} weighted=${f3(sm.weighted_mean)}` +
+    ` final=[${sm.final_scores.map(f3).join(',')}]→${f3(sm.final_mean)} blended=${f3(sm.blended)}`,
+  );
+  return L.join('\n');
+}

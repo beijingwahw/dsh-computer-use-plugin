@@ -34,6 +34,9 @@ import { convergeMemoryOps } from '../src/knowledge/memoryOps.ts';
 // ⑥ 的被测面
 import { createRequestApprovalTool } from '../src/tools/approvalTools.ts';
 import { approvalQueue, resetApproval, setConfirmCodeChannel } from '../src/approval.ts';
+// ① 的装配补线（W8-B4 破环）：steer 会话工厂改为晚绑定注册 —— steerTools 装载
+// 即注册生产工厂；本文件不经 tools 桶，须显式装载否则 steer 端口点亮也无会话。
+import '../src/tools/steerTools.ts';
 
 // ─── 假件工坊 ───
 

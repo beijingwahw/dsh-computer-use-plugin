@@ -41,8 +41,9 @@ import { createFederationSyncTool } from './federationTools';
 // W4-0（A 接线）：活意图漂移工具（W3-5 交付工厂）+ 在役会话转发面 —— 会话本体
 // 由 driveLoop 在 steer 端点点亮时铸造（绑定当轮 goal），此处只做工具注册与
 // 会话转发（无在役会话 ⇒ 诚实空转 NO_PENDING_STEER，绝不伪造问题）。
-import { createSteerChoiceTool, createSteerAnswerTool, type SteerSession } from './steerTools';
+import { createSteerChoiceTool, createSteerAnswerTool, type SteerSession, type SteerAmendmentHandoff, type SteerBiasStepper } from './steerTools';
 import { activeSteerSession } from '../autonomy/autoPilot';
+import type { BranchCard } from '../branchCards';
 import type { GoalStateMachine } from '../autonomy/goalState';
 
 /**
@@ -51,14 +52,26 @@ import type { GoalStateMachine } from '../autonomy/goalState';
  * 无在役会话（steer 未点亮 / 尚未跑环）⇒ 永不出题的空转面：maybeCheckAndAsk
  * 恒 null、answer 恒 no-pending（诚实缺席）。goal 出口仅在役时回真值（工具
  * 执行面不触达；空对象兜底防误用炸裂）。
+ * W7-0（W5-5 接线收尾）：转发面补齐 4 个可选方法（drainAmendments /
+ * holdBranchCard / branchCard / takeBranchBias —— steerTools 的 W5-5 扩展面）。
+ * 守卫式转发：无在役会话 / 会话未实现该可选面 / 任何故障 ⇒ 各自的缺席语义
+ * （空数组 / no-op / null / null —— runPilotLoop 消费方按零执行处理），
+ * 缺省跳过语义与接前逐字节一致。sessionSource 注入缝：缺省 activeSteerSession
+ *（生产血脉不变），测试可注入假源离线断言转发语义。
  */
-function w4ForwardingSteerSession(): SteerSession {
+// W8-B4（破环装配）：activeSteerSession 的持有面已收窄为结构端口（PilotSteerSession
+// —— autoPilot 对 tools 零 import）。会话真身由注册进闭环的工厂铸造（本桶装载
+// steerTools 即注册），运行时恒为完整 SteerSession —— 装配点收窄还原（结构镜像
+// 只减成员，真身满足全成员面）。
+export function w4ForwardingSteerSession(
+  sessionSource: () => SteerSession | null = activeSteerSession as () => SteerSession | null,
+): SteerSession {
   return {
     get goal(): GoalStateMachine {
-      return activeSteerSession()?.goal ?? ({} as GoalStateMachine);
+      return sessionSource()?.goal ?? ({} as GoalStateMachine);
     },
     maybeCheckAndAsk(stepIndex, entropy) {
-      const s = activeSteerSession();
+      const s = sessionSource();
       if (s === null) return null;
       try {
         return s.maybeCheckAndAsk(stepIndex, entropy);
@@ -67,7 +80,7 @@ function w4ForwardingSteerSession(): SteerSession {
       }
     },
     pending() {
-      const s = activeSteerSession();
+      const s = sessionSource();
       if (s === null) return null;
       try {
         return s.pending();
@@ -76,7 +89,7 @@ function w4ForwardingSteerSession(): SteerSession {
       }
     },
     answer(raw) {
-      const s = activeSteerSession();
+      const s = sessionSource();
       if (s === null) {
         return { status: 'no-pending', hint: '当前无在役 steer 会话（漂移检查未点亮或尚未跑环）' };
       }
@@ -87,10 +100,54 @@ function w4ForwardingSteerSession(): SteerSession {
       }
     },
     lastDrift() {
-      const s = activeSteerSession();
+      const s = sessionSource();
       if (s === null) return null;
       try {
         return s.lastDrift();
+      } catch {
+        return null;
+      }
+    },
+    // ── W7-0（W5-5 接线收尾）：4 个可选面的守卫式转发 ──
+    /** 缝1（B 应答回灌账）：在役会话的修订判据一次性移交（缺席 ⇒ 空数组 = 回灌零执行） */
+    drainAmendments(): SteerAmendmentHandoff[] {
+      const s = sessionSource();
+      if (s === null || typeof s.drainAmendments !== 'function') return [];
+      try {
+        const out = s.drainAmendments();
+        return Array.isArray(out) ? out : [];
+      } catch {
+        return []; // 会话故障 ⇒ 空账（绝不炸工具面）
+      }
+    },
+    /** 缝3（岔路卡持有面）：注入/清除会话持卡（缺席 ⇒ no-op） */
+    holdBranchCard(card: unknown): void {
+      const s = sessionSource();
+      if (s === null || typeof s.holdBranchCard !== 'function') return;
+      try {
+        s.holdBranchCard(card);
+      } catch {
+        /* 持卡是旁路义务：故障吞掉 */
+      }
+    },
+    /** 缝3（持卡读回）：防御浅拷贝（缺席 ⇒ null） */
+    branchCard(): BranchCard | null {
+      const s = sessionSource();
+      if (s === null || typeof s.branchCard !== 'function') return null;
+      try {
+        const c = s.branchCard();
+        return c !== null && typeof c === 'object' ? c : null;
+      } catch {
+        return null;
+      }
+    },
+    /** 缝3（偏置步进面移交）：一次性取走重放预算执法权（缺席 ⇒ null = 无偏置原路） */
+    takeBranchBias(): SteerBiasStepper | null {
+      const s = sessionSource();
+      if (s === null || typeof s.takeBranchBias !== 'function') return null;
+      try {
+        const b = s.takeBranchBias();
+        return b !== null && typeof b === 'object' ? b : null;
       } catch {
         return null;
       }

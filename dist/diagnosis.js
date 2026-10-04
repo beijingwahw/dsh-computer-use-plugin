@@ -1,4 +1,5 @@
 // src/diagnosis.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：H 纪元会诊皮层 —— 贝叶斯 CPT 标定/规则表/遥测观测/R1 根因链四节共享同一症候群词表与首中即断序，规则表与证据词表必须同框审计。
 // H 纪元（创世纪·场的统一）：联合诊断皮层 —— 统计引擎之上的症候群规则表。
 //
 // 孤立信号只能报告「某指标异常」；症候群（信号组合）才能诊断「得了什么病」。
@@ -112,8 +113,14 @@ export function bayesianBelief(signals) {
         .map((x, i) => ({ syndrome: x.s, posterior: Math.round((ws[i] / z) * 1000) / 1000 }))
         .sort((a, b) => b.posterior - a.posterior);
 }
-const isLoop = (b) => !!b && ((b.normalized !== null && b.normalized <= 0.3 && b.length >= 24) ||
-    (b.phrases <= 6 && b.length >= 20));
+// W6-2（doctor smell.magic-number 清偿）：行为近周期判据的样本数下界（数值逐位不变）。
+// 熵率臂：归一化熵率 ≤0.3 且样本 ≥24（渐近域）；短语臂：短语数 ≤6 且样本 ≥20
+// （短序列的倍增签名 —— 归一化在小 n 时通胀，短语绝对数不受此影响）。
+// 导出供 observabilityTools 洞见判据复用（「与 get_metrics 同律 —— 一处立法」）。
+export const LOOP_ENTROPY_MIN_ACTIONS = 24;
+export const LOOP_PHRASE_MIN_ACTIONS = 20;
+const isLoop = (b) => !!b && ((b.normalized !== null && b.normalized <= 0.3 && b.length >= LOOP_ENTROPY_MIN_ACTIONS) ||
+    (b.phrases <= 6 && b.length >= LOOP_PHRASE_MIN_ACTIONS));
 /**
  * 会诊主入口（纯函数）：规则按诊断价值降序，首中即断。
  * 全部信号正常 ⇒ null（健康是诚实的缺席，不是「轻度亚健康」）。
@@ -187,9 +194,8 @@ export function observeSignalsForCalibration(deps) {
     return {
         shifted: deps.regimeShifts.length > 0,
         hurstHigh: typeof deps.hurst === 'number' && deps.hurst > 0.6,
-        loop: !!(deps.behavior &&
-            ((deps.behavior.normalized !== null && deps.behavior.normalized <= 0.3 && deps.behavior.length >= 24) ||
-                (deps.behavior.phrases <= 6 && deps.behavior.length >= 20))),
+        // W6-2：复用上方 isLoop 同律谓词（与 get_metrics 洞见判据一处立法）
+        loop: isLoop(deps.behavior),
         heavyTail: deps.heavyLatencyTail === true,
         highNoop: deps.highNoopTools.length > 0,
     };

@@ -20,10 +20,13 @@
 //     mean = (s+1)/(s+f+2)；95% 可信区间取正态近似 mean ± 1.96·sd，
 //     sd = sqrt(αβ/((α+β)²(α+β+1)))，夹 [0,1]。
 //   · 场景桶：64 位 dhash 指纹（WorldSnapshot.dhash / contextManager 记录的
-//     '0'/'1' 位串）量化成 16bit 桶 —— 8×8 网格按 2×2 分块共 4×4 块，每块
-//     均值阈值位图（块内 1 的个数 ≥2 记 1），参照 worldModel 类型学的
-//     TYPE_QUANTIZE 手法（精确坐标是噪声，区域是信号）。指纹字段缺席 ⇒
-//     只用 actionKind 单轴（诚实降级，绝不伪造场景）。
+//     '0'/'1' 位串）量化成 24bit 两段式桶（W8-B5 精化，原 16bit）—— 粗段
+//     16bit：8×8 网格按 2×2 分块共 4×4 块，每块均值阈值位图（块内 1 的个数
+//     ≥2 记 1），与旧 16bit 桶逐位同律（新桶串前 4 位十六进制 = 旧桶）；
+//     细段 8bit：行密度位图（每行 8 位中 ≥4 个 1 记 1）—— 粗段只答「大致在
+//     哪片区域」，细段补「纵向密度分布」，两段正交互补（粗段相同的两个指纹
+//     可被细段分开 —— 旧 16bit 的混桶由此精化）。指纹字段缺席 ⇒ 只用
+//     actionKind 单轴（诚实降级，绝不伪造场景）。
 //
 // 接线（纪元 Ι）：autoPilot 认识论闸门消费 adviseConfidence（缺席/null ⇒
 // 纪元 Η 自报链逐字节不变）；buildAutonomyStack 经 config.enableSelfModel
@@ -38,14 +41,29 @@ const EVIDENCE_FLOOR = 1;
 const Z95 = 1.96;
 /** 衰减权重的数值下界：低于此按 0 计（防永久残尾） */
 const WEIGHT_EPSILON = 1e-9;
+/** W6-2（doctor smell.magic-number 清偿）：dhash 位串合法长度（row-major 8×8 网格），数值逐位不变 */
+const DHASH_BITSTRING_LEN = 64;
+/** W8-B5：桶串合法长度 —— 24bit 两段式（16bit 粗段 + 8bit 细段）= 6 位十六进制 */
+const BUCKET_HEX_LEN = 6;
+/** W8-B5：旧 16bit 粗桶串长度（4 位十六进制）—— 仅迁移面承认，不再铸造/直通 */
+const LEGACY_BUCKET_HEX_LEN = 4;
+/** W8-B5：细段行密度阈值 —— 8 位行中 ≥4 个 1 记 1（多数律，与粗段块阈值 2/4 同门） */
+const FINE_ROW_THRESHOLD = 4;
 /**
- * 场景桶量化（纯函数）：64 位 '0'/'1' dhash 位串 → 16bit 桶（4 位十六进制串）。
+ * 场景桶量化（纯函数）：64 位 '0'/'1' dhash 位串 → 24bit 两段式桶（6 位十六进制串）。
  *
- * 8×8 网格按 2×2 分块共 4×4 块，块 (R,C) 覆盖行 {2R,2R+1} × 列 {2C,2C+1}；
- * 块内 1 的个数 ≥2（均值阈值 0.5）记 1，位序 R·4+C —— 与 worldModel
- * transitionActionKey 的 TYPE_QUANTIZE=4 同一门方言（「大致在哪片」，不记精确位）。
- * 输入宽容性：已是 4 位十六进制桶串 ⇒ 原样归一化直通（幂等）；其它一切
- * （缺字段/摘要文本/8 位前缀锚点等）⇒ null —— 诚实降级到 actionKind 单轴。
+ * 粗段 16bit（与旧 16bit 桶逐位同律）：8×8 网格按 2×2 分块共 4×4 块，块 (R,C)
+ * 覆盖行 {2R,2R+1} × 列 {2C,2C+1}；块内 1 的个数 ≥2（均值阈值 0.5）记 1，位序
+ * R·4+C —— 与 worldModel transitionActionKey 的 TYPE_QUANTIZE=4 同一门方言
+ * （「大致在哪片」，不记精确位）。
+ * 细段 8bit（W8-B5 精化）：行 row（0..7）的 8 位中 1 的个数 ≥4 记 1，位序 row ——
+ * 纵向密度分布信号，与粗段区域信号部分正交（粗段相同的指纹可被细段分开）。
+ * 布局：粗段占高 16bit、细段占低 8bit ⇒ **新桶串前 4 位十六进制 = 旧 16bit 桶**
+ * （前缀保持性质 —— 调试与迁移面一眼对上旧方言）。
+ * 输入宽容性：已是 6 位十六进制桶串 ⇒ 原样归一化直通（幂等：桶化桶还是桶）；
+ * 旧 4 位十六进制粗桶串 ⇒ **null**（W8-B5 方言收窄）—— 细段在旧量化时已丢失，
+ * 粗→细是一对多、不可恢复，直通等于伪造细段（诚实律：宁可降级，绝不伪造）；
+ * 其它一切（缺字段/摘要文本/非串等）⇒ null —— 诚实降级到 actionKind 单轴。
  * 永不抛异常。
  */
 export function sceneBucketFromFingerprint(fingerprint) {
@@ -53,12 +71,12 @@ export function sceneBucketFromFingerprint(fingerprint) {
         if (typeof fingerprint !== 'string')
             return null;
         const fp = fingerprint.trim();
-        // 已量化桶串直通（幂等：桶化桶还是桶）
-        if (/^[0-9a-f]{4}$/i.test(fp))
+        // 已量化桶串直通（幂等：桶化桶还是桶 —— 新方言 24bit/6 位十六进制）
+        if (fp.length === BUCKET_HEX_LEN && /^[0-9a-f]+$/i.test(fp))
             return fp.toLowerCase();
-        // 64 位 dhash 位串（row-major 8×8）→ 4×4 块均值阈值位图
-        if (fp.length === 64 && /^[01]+$/.test(fp)) {
-            let value = 0;
+        // 64 位 dhash 位串（row-major 8×8）→ 24bit 两段式桶
+        if (fp.length === DHASH_BITSTRING_LEN && /^[01]+$/.test(fp)) {
+            let coarse = 0;
             for (let r = 0; r < 4; r++) {
                 for (let c = 0; c < 4; c++) {
                     // 块内 4 位：行 2r/2r+1 × 列 2c/2c+1（位索引 = row·8 + col）
@@ -70,10 +88,20 @@ export function sceneBucketFromFingerprint(fingerprint) {
                         }
                     }
                     if (ones >= 2)
-                        value |= 1 << (r * 4 + c);
+                        coarse |= 1 << (r * 4 + c);
                 }
             }
-            return value.toString(16).padStart(4, '0');
+            let fine = 0;
+            for (let row = 0; row < 8; row++) {
+                let ones = 0;
+                for (let col = 0; col < 8; col++) {
+                    if (fp[row * 8 + col] === '1')
+                        ones++;
+                }
+                if (ones >= FINE_ROW_THRESHOLD)
+                    fine |= 1 << row;
+            }
+            return (coarse * 0x100 + fine).toString(16).padStart(BUCKET_HEX_LEN, '0');
         }
         return null;
     }
@@ -81,14 +109,24 @@ export function sceneBucketFromFingerprint(fingerprint) {
         return null; // 量化绝不抛（运行层铁律）
     }
 }
-/** 格子键（纯函数）：actionKind 单轴或 actionKind|sceneBucket 双轴；永不抛 */
+/** 旧 16bit 粗桶串判定（迁移面专用）：4 位十六进制（大小写宽容 —— 篡改档同律聚合） */
+function isLegacyBucket(bucket) {
+    return bucket.length === LEGACY_BUCKET_HEX_LEN && /^[0-9a-f]+$/i.test(bucket);
+}
+/**
+ * 格子键（纯函数）：actionKind 单轴或 actionKind|sceneBucket 双轴；永不抛。
+ * W8-B5 方言执法：入账桶串必须是 6 位十六进制（新粒度）；旧 4 位粗桶/垃圾桶串
+ * ⇒ 诚实降级为单轴键（与「sceneBucket 非法 ⇒ 单轴」既有同律 —— 细段不可恢复，
+ * 不伪造新粒度格子）。写读同律 ⇒ dump 只落新方言键，快照往返逐字段等价。
+ */
 function cellKey(cell) {
     try {
         const kind = cell && typeof cell.actionKind === 'string' ? cell.actionKind.trim() : '';
         if (kind === '')
             return null;
-        const bucket = cell.sceneBucket !== undefined && typeof cell.sceneBucket === 'string' && cell.sceneBucket.trim() !== ''
-            ? cell.sceneBucket.trim().toLowerCase()
+        const raw = cell.sceneBucket;
+        const bucket = typeof raw === 'string' && raw.trim().length === BUCKET_HEX_LEN && /^[0-9a-f]+$/i.test(raw.trim())
+            ? raw.trim().toLowerCase()
             : null;
         return bucket === null ? kind : `${kind}|${bucket}`;
     }
@@ -170,7 +208,8 @@ export class SelfModel {
     /**
      * 记录面：一格战绩入账（ok=true 成 / false 败）。
      * ts 非有限数 ⇒ 注入钟（缺省系统钟）兜底；坏 cell（null/非对象/空 actionKind）
-     * ⇒ 静默吸收；sceneBucket 非法 ⇒ 诚实降级为 actionKind 单轴格。永不抛。
+     * ⇒ 静默吸收；sceneBucket 非法或旧 4 位粗桶方言（W8-B5 收窄）⇒ 诚实降级为
+     * actionKind 单轴格（细段不可恢复 ⇒ 不伪造新粒度格子）。永不抛。
      */
     recordOutcome(cell, ok, ts) {
         try {
@@ -234,7 +273,8 @@ export class SelfModel {
     /**
      * 闸门建议面：给认识论闸门的经验校准置信。
      * action 取字符串（工具名/动作类）或带 kind 的动作对象；sceneFingerprint 取
-     * 原始指纹（64 位 dhash 位串或已是桶串）—— 桶量化在本面内完成，调用方零方言。
+     * 原始指纹（64 位 dhash 位串或已是 6 位十六进制新桶串；旧 4 位粗桶不可再铸
+     * 细段 ⇒ null 同降级）—— 桶量化在本面内完成，调用方零方言。
      * 有效证据 n < minEvidence（含冷启动 null/模型禁用）⇒ null —— 不掺入闸门
      * （诚实冷启动：宁可走纪元 Η 自报链，不伪造经验）。永不抛。
      */
@@ -374,6 +414,15 @@ export class SelfModel {
     /**
      * 快照水合（checkpoint 恢复面）：防御式整体替换 —— 任一行非法即跳过该行
      * （半水合诚实：好行入账、坏行弃置，绝不因一行脏数据丢整本账）。永不抛。
+     *
+     * W8-B5 迁移语义（旧 16bit 桶键 → 新 24bit 粒度）：
+     *   旧档键形如 'click_mouse|f3a0'（4 位十六进制粗桶）。粗→细不可映射（细段
+     *   行密度在旧量化时已丢，一对多）⇒ **不伪造新粒度格子**；但细→粗可映射 ——
+     *   旧场景格是 actionKind 单轴格（全场景并集语义）的严格细分种群，且格子种群
+     *   本就不相交（每条战绩恰入一格）⇒ 聚合（计数求和 + lastTs 取 max）进单轴格
+     *   是**无损并集**，非冷启动丢证。聚合时旧计数按各自 lastTs 先折算到并集
+     *   lastTs（懒衰减数学，restore 内一次折算）—— 不同时点的证据不在同一基准
+     *   上相加。新 6 位桶键与其余键原样入账（快照往返逐字段等价不破）。
      */
     restore(snapshot) {
         try {
@@ -383,6 +432,23 @@ export class SelfModel {
             if (!Array.isArray(snap.cells))
                 return;
             const next = new Map();
+            /** 细→粗聚合：把一行旧场景格账并进单轴格（同 ts 基准折算后求和；缺则建格） */
+            const mergeIntoAxis = (kind, s, f, lastTs) => {
+                const existing = next.get(kind);
+                if (!existing) {
+                    next.set(kind, { s, f, lastTs });
+                    return;
+                }
+                const target = Math.max(existing.lastTs, lastTs);
+                const hl = this.halfLifeMs();
+                // 每笔计数从自己的 lastTs 折算到 target（target ≥ from ⇒ factor ≤ 1；绝不放大）
+                const decay = (v, from) => v <= 0 ? 0 : v * Math.pow(2, -(target - from) / hl);
+                next.set(kind, {
+                    s: decay(existing.s, existing.lastTs) + decay(s, lastTs),
+                    f: decay(existing.f, existing.lastTs) + decay(f, lastTs),
+                    lastTs: target,
+                });
+            };
             for (const row of snap.cells) {
                 const r = row;
                 if (!r || typeof r.key !== 'string' || r.key.trim() === '' || r.key.includes('\n'))
@@ -395,6 +461,18 @@ export class SelfModel {
                     continue;
                 if (r.s + r.f <= 0)
                     continue; // 空格子不入账
+                // W8-B5 迁移面：kind|旧16bit粗桶 ⇒ 聚合进 kind 单轴格（见方法注释）；
+                // kind 需 trim 稳定（真旧档键由 cellKey 铸造时已 trim；带空格的篡改键
+                // 不迁移、按原样保留为死格 —— 不因迁移面引入新键）
+                const bar = r.key.indexOf('|');
+                if (bar > 0) {
+                    const kind = r.key.slice(0, bar);
+                    const bucket = r.key.slice(bar + 1);
+                    if (kind.trim() === kind && isLegacyBucket(bucket)) {
+                        mergeIntoAxis(kind, r.s, r.f, r.lastTs);
+                        continue;
+                    }
+                }
                 next.set(r.key, { s: r.s, f: r.f, lastTs: r.lastTs });
             }
             this.cells = next;

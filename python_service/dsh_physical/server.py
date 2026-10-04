@@ -133,11 +133,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 await uvc_ctrl.close()
             except Exception:  # noqa: BLE001
                 pass
-            # W5-1：HID 串口句柄收口（HidController 无 close 门面 —— 经 transport
-            # 最佳努力；未写过帧 ⇒ 未开串口 ⇒ no-op）
+            # W5-1：HID 串口句柄收口（W6-R-A3 封装修复：改走 HidController.close
+            # 公有门面 —— 不再穿刺 ``_transport`` 私有属性；未写过帧 ⇒ 未开串口
+            # ⇒ no-op）
             try:
-                shutdown_loop = asyncio.get_running_loop()
-                shutdown_loop.run_in_executor(None, hid_ctrl._transport.close)  # type: ignore[attr-defined]
+                await hid_ctrl.close()
             except Exception:  # noqa: BLE001
                 pass
             # W5-1（W4-8）：声学通道后台采集线程收口（未建链 ⇒ no-op）
@@ -177,6 +177,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return response
 
     # ─── 中间件：认证（三层纵深）───
+    # W6-R-A3 错误码修正：认证失败是传输/安全层判决（非业务层），返回
+    # HTTP 401（信封 JSON 结构不变 —— ``{status:'failure', error:{...}}``）。
+    # 业务失败仍走 HTTP 200 + failure 信封（errors.py 的既有契约，不动）。
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         # 健康检查 / openapi 不需认证
@@ -192,7 +195,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         token = request.headers.get("X-Cap-Token", "")
         if not token:
             return JSONResponse(
-                status_code=200,
+                status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     "missing X-Cap-Token header",
@@ -203,7 +206,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         auth_result = parse_token(key, token)
         if not auth_result.ok:
             return JSONResponse(
-                status_code=200,
+                status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     f"token invalid: {auth_result.reason}",
@@ -217,7 +220,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         scope_pid = request.scope.get("peer_pid")
         if scope_pid is not None and auth_result.pid != scope_pid:
             return JSONResponse(
-                status_code=200,
+                status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     f"token pid {auth_result.pid} != SO_PEERCRED peer pid {scope_pid}",
@@ -225,12 +228,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 ),
             )
 
-        # Nonce 防重放（exp 直接取自 parse_token —— J 纪元修正：
-        # 旧实现手工二次 base64 解码 payload，双解析浪费且易漂移）
+        # Nonce 防重放（exp 直接取自 parse_token —— J 纪元修正：旧实现手工
+        # 二次 base64 解码 payload，双解析浪费且易漂移）。
+        # W6-R-A3 重放修复：token 认证一旦启用，X-Request-Id（单次性 nonce）
+        # 即为**强制头** —— 旧实现只在头在场时才校验，缺头请求在 60s TTL 内
+        # 可无限重放（防重放层形同虚设）。缺头 = 拒绝（401），无静默豁免。
         nonce = request.headers.get("X-Request-Id", "")
-        if nonce and not check_and_consume_nonce(nonce, auth_result.exp):
+        if not nonce:
             return JSONResponse(
-                status_code=200,
+                status_code=401,
+                content=failure(
+                    ErrorKind.UNAUTHORIZED,
+                    "missing X-Request-Id header (single-use nonce required; "
+                    "requests are one-shot, replays are rejected)",
+                    latency_ms=0,
+                ),
+            )
+        if not check_and_consume_nonce(nonce, auth_result.exp):
+            return JSONResponse(
+                status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     "nonce already consumed (replay attack?)",
@@ -242,7 +258,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         capability = _match_capability(path, request.method)
         if capability and capability not in auth_result.caps:
             return JSONResponse(
-                status_code=200,
+                status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     f"token lacks capability: {capability!r} (has: {list(auth_result.caps)})",
@@ -258,7 +274,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             and not attest_pid(auth_result.pid)
         ):
             return JSONResponse(
-                status_code=200,
+                status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
                     f"pid {auth_result.pid} binary not in whitelist",
@@ -302,6 +318,26 @@ def run() -> None:
     app = create_app(config)
 
     import uvicorn
+
+    # W6-R-B8（集成校验补）：Layer 2 状态启动期诚实标注 —— TS 端 serviceManager
+    # 已不再强制 DSH_PHYSICAL_PID_ATTESTATION=false，开关回到本端按平台决定；
+    # 实际形态（武装 / 平台性降级）须在服务日志可见，而非静默缺席。
+    # Windows/macOS 无 /proc 与 SO_PEERCRED ⇒ 降级标注（Layer 1+3 承担认证），
+    # 绝不报错 —— 这是平台事实，不是故障。
+    if config.auth.enable_pid_attestation and sys.platform == "linux":
+        print(
+            "[dsh-physical] PID attestation: armed (linux /proc whitelist; "
+            "UDS transport additionally captures SO_PEERCRED peer pid)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[dsh-physical] PID attestation: degraded (platform={sys.platform}, "
+            f"enable_pid_attestation={config.auth.enable_pid_attestation}) — "
+            "no /proc attestation layer on this platform; Layer 1 (transport binding) "
+            "+ Layer 3 (HMAC Cap Token + nonce) carry authentication",
+            file=sys.stderr,
+        )
 
     if config.server.transport == "uds":
         # M 纪元（留白兑现）：UDS + Linux ⇒ SO_PEERCRED 协议子类（peer_pid 入

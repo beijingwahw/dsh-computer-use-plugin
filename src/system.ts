@@ -10,7 +10,6 @@
 // take_screenshot / click_mouse 100% 抛错。防腐层的意义正是在于：换底层
 // 只改本文件，全部工具无感继承。
 import type { Config } from './config';
-import { Config as ConfigSchema } from './config';
 import { serialize } from './ioMutex';
 import * as backend from './physicalBackend';
 import type { OverlayBox } from './physicalBackend';
@@ -132,80 +131,12 @@ export interface DisplayInfo {
 let dryRun = false;
 let windowDelegate: ((keyword: string) => Promise<void | { matched?: string | null }>) | null = null;
 
-// ─── P1-3（地基速修）：系统级热键黑名单 ───
-// Alt+F4 关窗、Meta/Win 唤起系统壳层、Ctrl+Alt+Delete —— 这些和弦不是「在应用内
-// 操作」，而是把动作射向 OS 壳层/会话管理器：逃逸出纯视觉闭环的验证范围
-//（点了之后桌面发生了什么，模型看不见也验证不了），且多数不可逆。执法点放在
-// system.pressHotkey（全部热键调用方的唯一漏斗：工具层/shaper/autonomy/replay），
-// 拒绝 = 直接 throw（与「白名单外的键名被拒绝」同方言，由各调用方 catch 降级）。
+// W6-2（doctor smell.over-engineering 清偿）：P1-3 热键黑名单执法面已分区提取至
+// system.hotkeyPolicy.ts（行为零变化；nut-js 导入铁律仍只在本文件）；导入面不变 —— 再分发。
+import { hotkeyBlacklistHit, HOTKEY_BLACKLIST_MARKER, getHotkeyBlacklistCsv, setHotkeyBlacklistCsv } from './system.hotkeyPolicy';
+export { hotkeyBlacklistHit, isHotkeyBlacklistError, HOTKEY_BLACKLIST_MARKER } from './system.hotkeyPolicy';
 
-/** config.hotkeyBlacklist 缺省镜像：schema 不可载时的降级值（单一事实源仍是 config.ts） */
-const FALLBACK_HOTKEY_BLACKLIST = 'alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete';
 
-/**
- * config schema 的规范化调用面（与 ioMutex.P1-1 同口径）：schemastery 运行时可调用，
- * 项目内 TS 类型未暴露调用签名 —— 单点窄函数断言，不做 as-any 走私。
- */
-type SchemaDefaults = (input?: Record<string, unknown>) => { hotkeyBlacklist?: unknown };
-
-/** 缺省黑名单：单一事实源是 config schema 声明的 hotkeyBlacklist 缺省 */
-let hotkeyBlacklistCsv: string = (() => {
-  try {
-    const v = (ConfigSchema as unknown as SchemaDefaults)({}).hotkeyBlacklist;
-    return typeof v === 'string' ? v : FALLBACK_HOTKEY_BLACKLIST;
-  } catch {
-    return FALLBACK_HOTKEY_BLACKLIST; // schema 调用失败：降级镜像值，绝不阻断装载
-  }
-})();
-
-/** P1-3 拒绝标记（工具层据此区分黑名单拦截与白名单拒绝/底层故障） */
-export const HOTKEY_BLACKLIST_MARKER = '[SYSTEM_HOTKEY_BLOCKED]';
-
-/** 键名等价归一表：win/meta/cmd/cmdsuper/super 同指 OS 壳层修饰键；长名折叠为白名单短名 */
-const HOTKEY_ALIASES: Record<string, string> = {
-  win: 'meta', meta: 'meta', cmd: 'meta', command: 'meta', super: 'meta', cmdsuper: 'meta',
-  escape: 'esc', control: 'ctrl', del: 'delete', return: 'enter',
-};
-
-/** 单键归一：小写 + 去空白 + 别名折叠（'Win'/'CMD'/'Escape' → 'meta'/'meta'/'esc'） */
-function normalizeHotkeyKey(k: unknown): string {
-  const n = String(k ?? '').trim().toLowerCase();
-  return HOTKEY_ALIASES[n] ?? n;
-}
-
-/**
- * 黑名单命中裁决（纯函数，测试直测）：命中返回触发的黑名单条目原文，未命中返回 null。
- * 两条判定律（与 config.hotkeyBlacklist 描述一致）：
- *   1) 和弦整体归一（小写+别名折叠+排序无关）后与含 '+' 的条目全等 —— 如 'alt+f4'；
- *   2) 和弦包含任一单键条目 —— 如 'meta'/'win'（任何含 OS 壳层修饰键的组合都拒）。
- * 空黑名单（空串/全空白条目）= 全放行（部署明示不设防）。
- */
-export function hotkeyBlacklistHit(keys: readonly unknown[], blacklistCsv: string): string | null {
-  const csv = String(blacklistCsv ?? '').trim();
-  if (!csv) return null; // 空黑名单 = 全放行
-  const normKeys = (Array.isArray(keys) ? keys : []).map(normalizeHotkeyKey).filter(Boolean);
-  const chordSig = [...normKeys].sort().join('+');
-  const keySet = new Set(normKeys);
-  for (const raw of csv.split(',')) {
-    const entry = raw.trim().toLowerCase();
-    if (!entry) continue;
-    if (entry.includes('+')) {
-      // 整体和弦条目：同律归一后全等比较（'cmd+q' 与 ['meta','Q'] 命中）
-      const sig = entry.split('+').map(normalizeHotkeyKey).filter(Boolean).sort().join('+');
-      if (sig && sig === chordSig) return raw.trim();
-    } else {
-      // 单键条目：和弦含此键即拒（'meta' ⇒ ['ctrl','shift','meta'] 也拒）
-      const single = normalizeHotkeyKey(entry);
-      if (single && keySet.has(single)) return raw.trim();
-    }
-  }
-  return null;
-}
-
-/** 程序化判别：这次 pressHotkey 失败是不是黑名单拦截（工具层据此给出针对性 next_step） */
-export function isHotkeyBlacklistError(e: unknown): boolean {
-  return e instanceof Error && e.message.includes(HOTKEY_BLACKLIST_MARKER);
-}
 
 function guardDryRun(action: string, detail: unknown): boolean {
   if (!dryRun) return false;
@@ -213,12 +144,27 @@ function guardDryRun(action: string, detail: unknown): boolean {
   return true;
 }
 
+// ─── W6R-A8：openUrl 壳层启动通道的可注入缝（先例：_legacyDeps._resetSharpCache_forTest）───
+// 测试注入假 spawn 捕获 (cmd, argv, opts)，断言启动面安全属性：数组形态、
+// 无 cmd /c、无手工引号。默认 null = 真实 child_process.spawn；仅供测试，
+// 宿主永不触碰。防御式：注入非函数一律按 null（真实通道）处理。
+type SpawnLike = (
+  cmd: string,
+  args: readonly string[],
+  opts: { detached: boolean; stdio: 'ignore' },
+) => { on(ev: 'error', cb: (e: Error) => void): unknown; unref(): void };
+let openUrlSpawnOverride: SpawnLike | null = null;
+export function _setOpenUrlSpawnForTest(fn: SpawnLike | null): void {
+  openUrlSpawnOverride = typeof fn === 'function' ? fn : null;
+}
+
+
 export const system = {
   /** 应用插件配置；D-5 路径下仅 dryRun 生效（服务端无鼠标速度概念） */
   async configure(config: Config): Promise<void> {
     dryRun = config.dryRun;
     // P1-3：热键黑名单随配置接线（cordis.yml 的 hotkeyBlacklist 直达执法点）
-    if (typeof config.hotkeyBlacklist === 'string') hotkeyBlacklistCsv = config.hotkeyBlacklist;
+    if (typeof config.hotkeyBlacklist === 'string') setHotkeyBlacklistCsv(config.hotkeyBlacklist);
     if (forceLegacy()) {
       try {
         const nj = await _getNutJS();
@@ -394,7 +340,7 @@ export const system = {
     if (guardDryRun('pressHotkey', { keys })) return;
     // P1-3：系统级热键黑名单执法 —— 归一和弦命中条目 / 含黑名单单键 ⇒ 拒绝。
     // 在 legacy 与 D-5 两条路径之前拦截（逃逸动作哪条躯体都不许碰）
-    const hit = hotkeyBlacklistHit(keys, hotkeyBlacklistCsv);
+    const hit = hotkeyBlacklistHit(keys, getHotkeyBlacklistCsv());
     if (hit !== null) {
       throw new Error(
         `${HOTKEY_BLACKLIST_MARKER} 系统级热键被黑名单拦截: chord "${keys.join('+')}" ` +
@@ -460,7 +406,7 @@ export const system = {
    * 用操作系统默认浏览器打开 URL（AA-1 世界跳转引擎的躯体）。
    *
    * 壳层动作，非屏幕交互 —— 不经 D-5 物理微服务（那里是键鼠/截图的躯体），
-   * 直接调用平台 opener：win=cmd start / darwin=open / linux=xdg-open。
+   * 直接调用平台 opener：win=rundll32 FileProtocolHandler / darwin=open / linux=xdg-open。
    * 调用方（open_url 工具）负责 URL 安检（scheme 白名单）；本层只管
    * 忠实把已安检的 URL 交给壳层并报告启动方式。fire-and-forget：浏览器
    * 的启动成败由世界回击（take_screenshot / switch_window）验证，本层
@@ -473,16 +419,30 @@ export const system = {
     // 异步 'error' 事件到达 —— 无监听即 uncaught exception 炸宿主进程。启动成败
     // 本就由世界回击验证（见 JSDoc），此处只封崩溃面
     if (process.platform === 'win32') {
-      // windowsVerbatimArguments：URL 由本层手工加引号 —— Node 默认的 argv
-      // 引用只在含空格时触发，`&`（查询参数常态）裸露会被 cmd 当命令分隔符
-      const quoted = `"${url.replace(/"/g, '')}"`;
-      const child = spawn('cmd.exe', ['/c', 'start', '""', quoted], {
+      // W6R-A8 shell 启动面加固：弃 cmd.exe /c start。cmd 解析层会展开
+      // %VAR% 环境变量、把 & | > , 当命令语法 —— 旧实现的手工引号只包住
+      // 外层，URL 内部字符仍身处一个 shell 解释器。改走
+      // rundll32 url.dll,FileProtocolHandler：不经 shell 解析、不做变量
+      // 展开，URL 作为独立 argv 数组元素原样直达（spawn 数组形态 = 无
+      // 字符串拼接、无手工引号、无 windowsVerbatimArguments）。
+      // FileProtocolHandler 与 start 同落 ShellExecute 的默认协议处理器
+      // —— 功能等价，解释层更少。
+      const launch = openUrlSpawnOverride ?? (spawn as unknown as SpawnLike);
+      const child = launch('rundll32.exe', ['url.dll,FileProtocolHandler', url], {
         detached: true, stdio: 'ignore',
-        windowsVerbatimArguments: true,
       });
-      child.on('error', () => {});
+      child.on('error', () => {
+        // rundll32 不可用（ENOENT/EACCES）⇒ 回退 explorer.exe <url>：
+        // 同样数组参数、同样不经 shell —— 回退通道不得比主通道更宽。
+        // 回退成败仍由世界回击验证（fire-and-forget 契约不变），此处只封崩溃面。
+        try {
+          const fb = launch('explorer.exe', [url], { detached: true, stdio: 'ignore' });
+          fb.on('error', () => {});
+          fb.unref();
+        } catch { /* 永不因回退失败炸宿主（防御式吞异常） */ }
+      });
       child.unref();
-      return { method: 'shell:start' };
+      return { method: 'rundll32:FileProtocolHandler' };
     }
     if (process.platform === 'darwin') {
       const child = spawn('open', [url], { detached: true, stdio: 'ignore' });

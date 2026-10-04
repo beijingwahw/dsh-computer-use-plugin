@@ -49,6 +49,8 @@ export const Config = Schema.object({
     dangerPatterns: Schema.string().default('send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,confirm,确认订单,format,格式化,erase,抹掉,uninstall,卸载,reset,重置,清空,withdraw,提现,transfer,转账').description('Comma-separated irreversible-action keywords triggering approval'),
     approvalTokenTtlMs: Schema.number().default(600000).description('Approval-token TTL (ms). ONE user consent covers the whole task retry window; each failed attempt re-arms it (capped at 3x TTL from mint)'),
     approvalMaxAttempts: Schema.number().default(5).description('Max physical attempts per approval token: failed (unverified) clicks retry under the same consent without re-asking; beyond this a fresh approval is required'),
+    // ─── W6R（安全收口）：危险令牌路径的验证旁路双重逃生门 ───
+    allowUnverifiedDangerous: Schema.boolean().default(false).description('DANGEROUS (risk flag, default false): allow dangerous (approval-token / beginAttempt-consume) actions to dispatch when effect verification is unavailable (verifyActions=false), the grounding freshness probe is absent/failed, or the canary probe is absent/failed on a token-bearing call. false (default) = fail-closed at all three points. true = explicit escape hatch restoring degraded pass-through / legacy unverified-dispatch-consumed dialect (verification bypass additionally requires verifyActions=false — two explicit keys). Irreversible actions may then execute unverified — only for deployments that explicitly accept that risk.'),
     enableTelemetry: Schema.boolean().default(true).description('Telemetry: per-tool success/no-op rates, latency percentiles, memory hit rates'),
     checkpointPath: Schema.string().default('').description('Cognitive-state checkpoint JSON (atomic). Auto-restore on start, auto-save on unload. Empty = disabled'),
     // ─── 创世纪（B-5~B-8） ───
@@ -89,6 +91,8 @@ export const Config = Schema.object({
     doctorStrict: Schema.boolean().default(false).description('Strict mode: genesis violations surface loudly (CLI exit code 1); never throws'),
     doctorMemoryPath: Schema.string().default('doctor-memory.json').description('Evolution-memory file for lessons and baselines (developer asset, not runtime cognition)'),
     // ─── 纪元 Ω（GLM-5.3-Flash 云脑皮层） ───
+    // W8-A2：配置档（含本字段）落盘归 cordis 宿主管辖，插件只读；插件侧密钥落盘唯一写点
+    // vlm-connection.json 已走 src/filePerms.ts 加固 —— 详见上方 interface 注释的边界界定
     vlmApiKey: Schema.string().default('').description('GLM vision-model API key; empty = fall back to env (GLM_API_KEY/ZHIPUAI_API_KEY/ZAI_API_KEY). Takes priority over env when set'),
     vlmBaseUrl: Schema.string().default('https://open.bigmodel.cn/api/paas/v4').description('GLM OpenAI-compatible base URL'),
     vlmModel: Schema.string().default('glm-5.3-flash').description('GLM vision model name'),

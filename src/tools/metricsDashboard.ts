@@ -288,7 +288,7 @@ export function createMetricsDashboardTool() {
   return defineTool({
     name: 'metrics_dashboard',
     description:
-      'Renders a five-pane TEXT dashboard of whole-system health (monospace-aligned, <=80 columns): ' +
+      'Renders a five-pane TEXT dashboard of whole-system health (monospace-aligned, <=80 columns): ' + // doctor-exempt: 文案字符串（终端排版说明），非阈值比较（W6-2）
       'tools pane (per-tool calls / success rate / P50 / P95, top 10 by volume, plus the global GPD ' +
       'latency-tail report when available), vlm pane (VlmMeter calls / failures / P50 / P95 / tokens / ' +
       'by-kind, plus live isGlmConfigured state), autonomy pane (autonomous_run telemetry record, a ' +

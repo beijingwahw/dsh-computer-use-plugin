@@ -4,49 +4,116 @@
     "category": "setup",
     "prompt": "开场清理：关闭所有可能残留的记事本、画图、计算器、资源管理器、Edge 窗口（alt+f4，遇到保存提示选择不保存）。用 take_screenshot 确认桌面干净后报告。",
     "expect": ["take_screenshot"],
-    "timeoutMs": 420000
+    "timeoutMs": 420000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processAbsent", "name": "notepad.exe" },
+        { "kind": "processAbsent", "name": "mspaint.exe" },
+        { "kind": "processAbsent", "names": ["CalculatorApp.exe", "Calculator.exe", "calc.exe"], "comment": "W6R-B3:计算器进程名跨 Win10/Win11/旧版有方言,names 任一在跑即未清干净" },
+        { "kind": "windowAbsent", "titleRegex": "Edge", "comment": "W6R-B3:msedge 有'关闭后仍后台运行'模式,processAbsent 会误报,窗口域才是'窗口关净'的事实" }
+      ]
+    }
   },
   {
     "id": "todo-file-lifecycle",
     "category": "real",
     "prompt": "真实任务：创建一份待办清单文件。1) win+r 输入 notepad 回车打开记事本；2) 用 type_text 输入 6 行待办事项（第一行是 TODO-LIST，后面 5 行分别是 Task1 到 Task5，行间真实换行）；3) ctrl+s 保存，在保存对话框的文件名框里输入完整路径 D:\\dsh3\\test-runs\\playground\\todo-a.md 并回车保存；4) 截图确认标题栏变成 todo-a.md。完成后报告保存证据。",
     "expect": ["press_hotkey", "type_text", "take_screenshot"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "contains": "TODO-LIST", "minBytes": 20, "comment": "W6R-B3:磁盘直查保存产物,不信 agent 自报'已保存'" },
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "containsRegex": "\\bTask1\\b" },
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "containsRegex": "\\bTask5\\b", "comment": "W6R-B3:首尾行锚定,抓'少敲行/空文件'的假保存" },
+        { "kind": "processRunning", "name": "notepad.exe" },
+        { "kind": "windowExists", "titleRegex": "todo-a", "comment": "W6R-B3:prompt 第4步验收标准'标题栏变成 todo-a.md'的世界侧等价物" }
+      ]
+    }
   },
   {
     "id": "ocr-verify-todo",
     "category": "ocr",
     "prompt": "OCR 核对：记事本当前打开着 todo-a.md。1) 用 find_text 查找 \"TODO-LIST\"，报告命中几个位置及坐标；2) 用 read_text 读取记事本文档区域，报告提取到的行数和内容；3) 判断是否与 6 行待办一致。不要修改内容。",
     "expect": ["find_text", "read_text"],
-    "timeoutMs": 360000
+    "timeoutMs": 360000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "contains": "TODO-LIST", "comment": "W6R-B3:OCR 读数对错是纯视觉不可独立核查;仅核查 prompt'不要修改内容'的磁盘侧约束未被违背" }
+      ]
+    }
   },
   {
     "id": "edit-line-precision",
     "category": "real",
     "prompt": "精确编辑任务：记事本打开着 todo-a.md。1) ctrl+home 回到文首；2) 用方向键下移到第 3 行（Task2 那行）；3) shift+end 选中整行；4) type_text 输入 Task2-DONE-EDITED 替换；5) ctrl+s 保存；6) 用 read_text 验证第 3 行已变成 Task2-DONE-EDITED。报告验证结果。",
     "expect": ["press_hotkey", "read_text"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "contains": "Task2-DONE-EDITED", "comment": "W6R-B3:第3行替换已 ctrl+s 落盘(磁盘事实,非 read_text 自报)" },
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "contains": "TODO-LIST", "comment": "W6R-B3:整行替换未毁全文,首行仍在" }
+      ]
+    }
   },
   {
     "id": "scroll-navigation-long-doc",
     "category": "scroll",
     "prompt": "长文档导航：记事本打开着 todo-a.md。1) ctrl+end 跳到文末，在末尾追加输入 40 行（LINE001 到 LINE040，真实换行，可以分多次输入）；2) ctrl+home 回顶部；3) scroll_page direction=down amount=10 滚动若干次直到文末；4) read_text 读屏幕确认能看到 LINE040；5) 报告 closed_loop.at_boundary 是否为 true 以及滚动轮数。不要保存文件。",
     "expect": ["scroll_page", "read_text"],
-    "timeoutMs": 540000
+    "timeoutMs": 540000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "allOf", "checks": [
+          { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "contains": "Task2-DONE-EDITED" },
+          { "kind": "not", "check": { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\todo-a.md", "containsRegex": "LINE040" } }
+        ], "comment": "W6R-B3:prompt 明示'不要保存文件'——追加的 40 行不得落盘;先钉住文件存在且为编辑版(防文件缺失时 not 误 pass),再断言不含 LINE040;滚动/读屏本身纯视觉不可独立核查" }
+      ]
+    }
   },
   {
     "id": "two-app-switch",
     "category": "window",
     "prompt": "双应用切换（重点检验）：1) win+r 打开 calc 计算器；2) 用 switch_window titleKeyword 匹配记事本（关键词用 todo-a 或 记事本 或 Notepad，选你能匹配的），报告 focus_handoff.verified 和 foreground_title；3) 再 switch_window 切到计算器，同样报告取证字段；4) 两个方向都要 verified=true 才算成功。保持两个窗口都打开。",
     "expect": ["switch_window", "focus_handoff"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processRunning", "name": "notepad.exe" },
+        { "kind": "processRunning", "names": ["CalculatorApp.exe", "Calculator.exe", "calc.exe"], "comment": "W6R-B3:计算器进程名跨版本方言" },
+        { "kind": "windowExists", "titleRegex": "todo-a|记事本|Notepad" },
+        { "kind": "windowExists", "titleRegex": "计算器|Calculator", "comment": "W6R-B3:prompt 承诺'保持两个窗口都打开'——进程+窗口双证据;verified=true 本身是工具自报不可信" },
+        { "kind": "windowCount", "titleRegex": "todo-a|记事本|Notepad|计算器|Calculator", "equals": 2, "comment": "W8-B7 顺带升级:'保持两个窗口都打开'的计数等价物——恰 2 个;两个 windowExists 只证各≥1,不能排除重复/残留窗;按状态机此刻桌面仅此两窗(Edge/画图/资源管理器均未开),无误报源" }
+      ]
+    }
   },
   {
     "id": "calc-arithmetic",
     "category": "real",
-    "prompt": "真实计算任务：计算器已打开。1) 用键盘输入算式 (123+456)*7-89 —— 可以用 type_text 逐段输入（123+456= 然后 *7= 然后 -89=），也可以按 press_hotkey；2) 用 read_text 或 find_text 读取计算器显示屏上的结果数字；3) 报告读到的结果（正确答案是 3964）。如果读数和答案不符，用 take_screenshot 复核并报告实际显示。",
-    "expect": ["read_text|find_text"],
-    "timeoutMs": 480000
+    "prompt": "真实计算任务：计算器已打开。1) 用键盘输入算式 (123+456)*7-89 —— 可以用 type_text 逐段输入（123+456= 然后 *7= 然后 -89=），也可以按 press_hotkey；2) 用 read_text 或 find_text 读取计算器显示屏上的结果数字并核对（正确答案是 3964）；3) win+r 输入 notepad 打开一个新的记事本窗口，用 type_text 把算式和结果写成一行：(123+456)*7-89=3964（数字连写，不要千位分隔符）；4) ctrl+s 保存到完整路径 D:\\dsh3\\test-runs\\playground\\calc-result.txt 并回车；5) 关闭这个临时记事本窗口，以及桌面上任何其他非 todo-a 的残留记事本窗口（alt+f4，保存提示一律选不保存）——最终桌面只保留 todo-a 记事本和计算器。报告读到的结果和保存证据。",
+    "expect": ["read_text|find_text", "type_text"],
+    "timeoutMs": 540000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "fileExists", "path": "D:\\dsh3\\test-runs\\playground\\calc-result.txt", "containsRegex": "\\b3964\\b", "comment": "W8-B7:根治 W6R-B3 缺口——计算器 UI 读数不可独立核查,改设计让 agent 把结果落盘(沿用 playground 惯例);期望值手算:(123+456)*7-89=579*7-89=4053-89=3964,与原 prompt 自带答案一致;\\b 词边界锚定防 39640/13964 部分命中" },
+        { "kind": "processRunning", "names": ["CalculatorApp.exe", "Calculator.exe", "calc.exe"], "comment": "W8-B7:后续 zoom/diff/memory 四任务的前提是'计算器打开中',钉住状态机(进程名跨 Win10/Win11 方言,与 W6R-B3 同款)" },
+        { "kind": "windowExists", "titleRegex": "计算器|Calculator" },
+        { "kind": "windowCount", "titleRegex": "todo-a|记事本|Notepad", "equals": 1, "comment": "W8-B7:prompt 第5步契约——临时记事本关净,该域只剩 todo-a 一个;>1=临时窗泄漏(含复跑残留,提示语已要求一并清理,归属正确),<1=误关 todo-a" }
+      ]
+    }
   },
   {
     "id": "zoom-precise-small-target",
@@ -74,42 +141,90 @@
     "category": "real",
     "prompt": "关闭计算器：alt+f4 关闭计算器窗口，take_screenshot 确认只剩记事本。报告。",
     "expect": ["press_hotkey", "take_screenshot"],
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processAbsent", "names": ["CalculatorApp.exe", "Calculator.exe", "calc.exe"], "comment": "W6R-B3:计算器进程名跨版本方言,三候选任一在跑即未关净" },
+        { "kind": "windowAbsent", "titleRegex": "计算器|Calculator", "comment": "W6R-B3:此刻桌面仅余记事本,窗口正则无误报源" }
+      ]
+    }
   },
   {
     "id": "paint-drawing-real",
     "category": "real",
     "prompt": "绘画任务：1) win+r 输入 mspaint 回车打开画图；2) win+up 最大化；3) 用 drag_mouse 画三笔：一笔从 (0.3,0.3) 到 (0.55,0.45)，一笔从 (0.35,0.45) 到 (0.35,0.3)（近似 L 形），一笔从 (0.6,0.6) 到 (0.75,0.7)；4) take_screenshot 验证画布上出现线条；5) 报告每笔 drag_mouse 的 effect 和 transport 字段要点。保持画图打开。",
     "expect": ["drag_mouse", "take_screenshot"],
-    "timeoutMs": 540000
+    "timeoutMs": 540000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processRunning", "name": "mspaint.exe" },
+        { "kind": "windowExists", "titleRegex": "画图|Paint", "comment": "W6R-B3:prompt 承诺'保持画图打开';画布线条未保存成文件,线条本身纯视觉不可独立核查" }
+      ]
+    }
   },
   {
     "id": "popup-discard-dialog",
     "category": "popup",
     "prompt": "弹窗处理：画图打开且有未保存线条。1) alt+f4 触发关闭；2) 会弹出\"是否保存\"对话框 —— 用 dismiss_popup 处理（选不保存），如果 dismiss_popup 不可用就 find_text 定位\"不保存\"按钮再 click_mouse；3) take_screenshot 验证画图已关闭。报告弹窗处理方式与结果。",
     "expect": ["dismiss_popup|find_text|click_mouse", "take_screenshot"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processAbsent", "name": "mspaint.exe" },
+        { "kind": "windowAbsent", "titleRegex": "画图|Paint", "comment": "W6R-B3:'不保存'关闭的世界侧事实(此刻桌面仅余记事本,无误报源);'不保存'意味着无新文件,故无文件谓词可加" }
+      ]
+    }
   },
   {
     "id": "explorer-folder-tour",
     "category": "real",
     "prompt": "资源管理器导航：1) win+e 打开资源管理器；2) ctrl+l 聚焦地址栏（或直接点击地址栏），type_text 输入 D:\\dsh3\\test-runs\\playground 回车；3) find_text 查找 todo-a，报告是否在文件列表中命中；4) read_text 读取文件列表区域，报告看到的文件名。保持资源管理器打开。",
     "expect": ["type_text", "find_text|read_text"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "dirExists", "path": "D:\\dsh3\\test-runs\\playground" },
+        { "kind": "windowExists", "titleRegex": "playground", "comment": "W6R-B3:资源管理器窗口标题=文件夹名;explorer.exe 是常驻 shell 进程恒在,processRunning 无判别力" }
+      ]
+    }
   },
   {
     "id": "explorer-new-folder",
     "category": "real",
     "prompt": "创建文件夹：资源管理器当前在 playground 目录。1) 点击工具栏\"新建\"按钮（或右键空白处选新建-文件夹）；2) 命名为 dsh-made 并回车；3) find_text 查找 dsh-made 验证文件夹已出现。报告过程和验证结果。",
     "expect": ["find_text|read_text|take_screenshot"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "dirExists", "path": "D:\\dsh3\\test-runs\\playground\\dsh-made", "comment": "W6R-B3:文件夹创建的磁盘直查,不信 find_text 自报命中" },
+        { "kind": "windowExists", "titleRegex": "dsh-made|playground", "comment": "W6R-B3:资源管理器保持打开(标题为文件夹名,新建后停在 playground 或点进 dsh-made 均算)" }
+      ]
+    }
   },
   {
     "id": "explorer-close",
     "category": "real",
     "prompt": "关闭资源管理器：alt+f4 关闭所有资源管理器窗口，take_screenshot 确认。报告。",
     "expect": ["press_hotkey", "take_screenshot"],
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processRunning", "name": "explorer.exe", "comment": "W6R-B3:关窗口不得误杀 shell——桌面进程应存活" },
+        { "kind": "windowAbsent", "titleRegex": "playground|文件资源管理器|File Explorer", "comment": "W6R-B3:explorer.exe 进程恒在不能用 processAbsent,窗口域才是'窗口关净'" }
+      ]
+    }
   },
   {
     "id": "guard-bounds",
@@ -137,14 +252,30 @@
     "category": "skill",
     "prompt": "技能全流程：记事本应仍打开着。1) 在记事本输入 SKILL-E2E-MARK；2) save_skill 描述\"在记事本输入标记文本\"，报告 exit fingerprint 是否记录；3) ctrl+a 后输入 CHANGED-SCENE-BREAK（改变场景指纹）；4) run_skill 用刚才的技能名（confirm=true）；5) 报告 postcondition 字段全部内容和最终状态（SUCCESS / SUCCESS_UNVERIFIED / BLOCKED）。保持记事本打开。",
     "expect": ["save_skill", "run_skill"],
-    "timeoutMs": 540000
+    "timeoutMs": 540000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processRunning", "name": "notepad.exe" },
+        { "kind": "windowExists", "titleRegex": "todo-a|记事本|Notepad", "comment": "W6R-B3:prompt 承诺'保持记事本打开';技能库/场景指纹/postcondition 是插件内存态,verifyCore 谓词域不可达;缓冲区脏内容未保存,磁盘文件无变化,故无文件谓词" }
+      ]
+    }
   },
   {
     "id": "orchestration-dag-budget",
     "category": "orchestration",
-    "prompt": "预算感知编排：调用 start_complex_task 执行\"打开一个新的记事本窗口，输入 ORCH-DONE-2026，然后关闭该窗口（不保存）\"，参数 time_budget_sec=240。报告：编排器拆出的子任务列表（含依赖关系）、每步执行状态、最终结果标记、是否超时。",
+    "prompt": "预算感知编排：调用 start_complex_task 执行\"打开一个新的记事本窗口，输入 ORCH-DONE-2026，然后关闭该窗口（不保存）\"，参数 time_budget_sec=240。报告：编排器拆出的子任务列表（含依赖关系）、每步执行状态、最终结果标记、是否超时。完成后桌面应与开始时相同——todo-a 记事本仍在，不新增任何窗口。",
     "expect": ["start_complex_task"],
-    "timeoutMs": 540000
+    "timeoutMs": 540000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "windowCount", "titleRegex": "todo-a|记事本|Notepad", "equals": 1, "comment": "W8-B7:根治 W6R-B3 缺口——任务语义=编排器开一个新记事本窗又关掉(不保存) ⇒ 跑前跑后该域窗口数不变;状态机保证跑前恰为 todo-a 一个(前面 calc-arithmetic 的 windowCount 已钉住并清理复跑残留):>1=编排器泄漏窗口(如'不保存'弹窗未处理干净),<1=误关 todo-a;'不保存'意味着无落盘产物,无文件谓词可加" },
+        { "kind": "windowCount", "titleRegex": "ORCH-DONE", "lte": 0, "comment": "W8-B7:编排器输入过 ORCH-DONE-2026,若其窗口残留(未关净)标题仍含该串——计数为 0 即窗口确已关闭(弱断言,主断言是上一条等数)" }
+      ]
+    }
   },
   {
     "id": "journal-audit",
@@ -165,20 +296,46 @@
     "category": "real",
     "prompt": "浏览器标签页：1) win+r 输入 msedge 回车打开 Edge（首页没网也能开）；2) ctrl+t 新开一个标签页；3) 调用 switch_tab 切换标签页，报告返回的前台标签信息；4) 报告 tab 切换的验证字段。保持 Edge 打开。",
     "expect": ["switch_tab", "press_hotkey"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processRunning", "name": "msedge.exe" },
+        { "kind": "windowExists", "titleRegex": "Edge", "comment": "W6R-B3:prompt 承诺'保持 Edge 打开'(Edge 标题尾部必含 ASCII 'Edge',此刻桌面仅记事本+Edge 无误报源);标签页切换细节是插件自报不可独立核查" }
+      ]
+    }
   },
   {
     "id": "edge-close",
     "category": "real",
     "prompt": "关闭 Edge：ctrl+w 或 alt+f4 关闭所有 Edge 窗口（若提示\"关闭全部标签页\"则确认关闭），take_screenshot 确认桌面只剩记事本。报告。",
     "expect": ["take_screenshot"],
-    "timeoutMs": 360000
+    "timeoutMs": 360000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "windowAbsent", "titleRegex": "Edge", "comment": "W6R-B3:刻意不用 processAbsent msedge——Edge'关闭后继续运行后台应用'会让进程残留导致误报,窗口域才是任务事实" }
+      ]
+    }
   },
   {
     "id": "final-cleanup-y3",
     "category": "setup",
     "prompt": "最终清理：关闭所有记事本（todo-a.md 已保存的直接关，改动过未保存的不保存关闭）、Edge、画图、计算器、资源管理器全部窗口。take_screenshot 确认桌面干净，报告清理结果。",
     "expect": ["take_screenshot"],
-    "timeoutMs": 480000
+    "timeoutMs": 480000,
+    "verify": {
+      "mode": "all",
+      "screenshot": true,
+      "checks": [
+        { "kind": "processAbsent", "name": "notepad.exe" },
+        { "kind": "processAbsent", "name": "mspaint.exe" },
+        { "kind": "processAbsent", "names": ["CalculatorApp.exe", "Calculator.exe", "calc.exe"] },
+        { "kind": "windowAbsent", "titleRegex": "Edge" },
+        { "kind": "windowAbsent", "titleRegex": "playground|文件资源管理器|File Explorer", "comment": "W6R-B3:与开场 cleanup 对称;清理不净直接 FAIL,不再依赖截图自报——真机日志显示本任务曾有 2 次工具错误仍 PASS,这正是双轨合一要抓的形态" }
+      ]
+    }
   }
 ]

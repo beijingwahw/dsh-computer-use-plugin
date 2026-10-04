@@ -10,6 +10,7 @@
 // 界面里，正文提到目标关键词与真入口像素等价。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { probeInteractivity } from '../interactivityProbe.js';
+import { toolOkNoAction } from '../toolResult.js';
 export function createProbeInteractivityTool(config) {
     return defineTool({
         name: 'probe_interactivity',
@@ -53,18 +54,15 @@ export function createProbeInteractivityTool(config) {
                         spent_ms: r.economics.spent_ms,
                     },
                 } : {};
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    state_anchor: {
-                        probed_point: `(${args.x}, ${args.y})`,
-                        verdict: r.verdict,
-                        confidence: r.confidence,
-                        evidence: r.evidence,
-                        ...(r.note ? { note: r.note } : {}),
-                        ...economicsNote,
-                    },
-                    next_step: explain[r.verdict],
-                }, null, 2);
+                // W8/B-4：回执走工厂（toolOkNoAction —— 历史无 action 形状，逐字节同构）
+                return toolOkNoAction({
+                    probed_point: `(${args.x}, ${args.y})`,
+                    verdict: r.verdict,
+                    confidence: r.confidence,
+                    evidence: r.evidence,
+                    ...(r.note ? { note: r.note } : {}),
+                    ...economicsNote,
+                }, explain[r.verdict]);
             }
             catch (error) {
                 return `[Error]: Probe failed (${error.message}). The physical service may be an older version without /move_mouse and /cursor_kind — restart it, or fall back to zoom_inspect for visual affordance.`;

@@ -34,13 +34,40 @@ const LEDGER_CAPACITY = 500;
 const CAPACITY_MAX = 10_000;
 /** 挂起预言的诚实作废时限（ms）：60s 内取不到真实下一屏型 ⇒ 作废（绝不伪造） */
 const PENDING_TTL_MS = 60_000;
-/** 错题本缺省榜单长度（TopK） */
-const DEFAULT_TOP_K = 5;
-/** 概率夹取下界（−log₂ 的数值地平：p=0 的惊异按此封顶） */
-const PROB_EPSILON = 1e-9;
 
 /** 预言结算三态 + 铸造暂态（pending 只存在于铸造与结算之间，绝不入账） */
 export type ProphecyOutcome = 'hit' | 'miss' | 'no-model' | 'pending';
+
+// ─── D-G2 细化（W8 第 2 批）：屏型身份粗层桥 + 惊异喂养通道 ───
+//
+// 台账原文（DEBTS D-G2）：「屏型身份用 dhash 指纹（粒度粗于世界模型聚类 ⇒
+// no-model 偏多——诚实但待细化）+ 惊异喂 EvolutionEngine 通道未接」。两处细化：
+//   1. 身份桥：闭环屏型身份是整幅 dhash 指纹（hex 方言）—— 像素级抖动（光标
+//      闪烁/任务栏时钟/广告位轮换）翻掉任意比特 ⇒ 新指纹 ⇒ 转移表精确键查无
+//      ⇒ no-model 偏多。细化 = 铸造时精确键优先、无证据则粗层回退一问（dhash
+//      前 8 hex 字 = 上 32 位梯度的汇聚格）；结算回灌双写（精细格 + 粗格，
+//      粗格只粗化 from 侧 —— to 侧保持精细身份，结算比对 fine↔fine 方言不串）。
+//      非 hex / 短于前缀的屏型（世界模型聚类 id 'screen-12' 等）不经此桥 ——
+//      旧方言逐字节零漂移。粗层预言在记录上诚实标注 predictedVia:'coarse'
+//      （统计面 coarseAssisted 可观测 —— 回退的收益不掺水分）。
+//   2. 惊异喂养：错题本的消费面 —— 失手记录（含惊异 bits）经结构性端口
+//      surpriseFeed.ingest 喂给进化引擎（EvolutionEngine 结构性满足，与
+//      sleep/dreamReplay 的 DreamEvolutionLike 同律；autonomy 栈侧接线属
+//      autonomy 产权域，本模块只出通道与执法面）。
+
+/** 粗层屏型前缀长度（hex 字符）：闭环 dhash 16 hex 字 ⇒ 前 8 字符 = 上 32 位梯度 */
+export const COARSE_PREFIX_HEX = 8;
+
+/**
+ * 屏型粗化（纯函数，永不抛 —— D-G2 身份桥）：hex 方言指纹截前
+ * COARSE_PREFIX_HEX 字符；非 hex / 不长于前缀 ⇒ 原样返回（旧方言零漂移 ——
+ * 世界模型聚类 id 不经 dhash 面，双写与回退对它们天然跳过）。
+ */
+export function coarseScreenType(screenType: string): string {
+  const s = typeof screenType === 'string' ? screenType : '';
+  if (s.length <= COARSE_PREFIX_HEX) return s;
+  return /^[0-9a-f]+$/i.test(s) ? s.slice(0, COARSE_PREFIX_HEX) : s;
+}
 
 /** 一条预言的完整生命（铸造 ⇒ 结算）：账本里的最小审计单元 */
 export interface ProphecyRecord {
@@ -52,6 +79,8 @@ export interface ProphecyRecord {
   predictedType?: string;
   /** 预言的转移概率（predict 首名概率） */
   predictedProb?: number;
+  /** 预言来源层（D-G2）：'exact' 精确屏型键 / 'coarse' 粗层回退键；缺席 = 旧记录 */
+  predictedVia?: 'exact' | 'coarse';
   /** 结算惊异差值（bits）：模型对实际到达的平滑惊讶 —— 命中小、失手大 */
   surpriseBits?: number;
   /** 结算判定：hit 命中 / miss 失手 / no-model 模型无知（pending = 铸而未验） */
@@ -78,6 +107,8 @@ export interface ProphecyStats {
   missRate: number;
   /** 失手平均惊异 bits（无失手 ⇒ 0） */
   avgMissSurpriseBits: number;
+  /** 粗层助攻数（D-G2）：predictedVia='coarse' 的已结算预言 —— 粗格让抖动变体免于无知 */
+  coarseAssisted: number;
   /** 错题本：最常失手的 (屏型, 动作) TopK（count 降序、键字典序破平 —— 确定序） */
   topMisses: Array<{ screenType: string; actionKey: string; count: number }>;
 }
@@ -102,72 +133,9 @@ export interface ProphecyPort {
   settle(actualType: string | null | undefined, success?: boolean): ProphecyRecord | null;
 }
 
-// ─── 内部纯工具（零异常） ───
-
-/** 非空字符串守卫 */
-function nonEmptyStr(v: unknown): boolean {
-  return typeof v === 'string' && v.length > 0;
-}
-
-/** 安全时钟读数：注入钟缺席/抛错 ⇒ Date.now；永不抛 */
-function safeNow(injected: (() => number) | undefined): number {
-  try {
-    if (typeof injected === 'function') {
-      const t = injected();
-      if (typeof t === 'number' && Number.isFinite(t)) return t;
-    }
-  } catch { /* 坏钟 ⇒ 系统钟兜底 */ }
-  return Date.now();
-}
-
-/** 展示位截断（journal 一行的 Token 纪律：指纹全量留在账本，注记只留锚点） */
-function shortId(s: string): string {
-  return s.length > 16 ? `${s.slice(0, 16)}…` : s;
-}
-
-/** 结果解析：Result 形状的成功值（坏形状/坏值 ⇒ null —— 防御式读模型） */
-function resultValue<T>(r: unknown): T | null {
-  if (!r || typeof r !== 'object' || (r as { ok?: unknown }).ok !== true) return null;
-  const v = (r as { value?: unknown }).value;
-  return (v ?? null) as T | null;
-}
-
-/**
- * 结算惊异差值（bits）—— 铸预言的自误定价（纯函数，永不抛）。
- * 优先走世界模型现成的 surprise() 读面（Laplace 平滑惊讶，与 D-7 计费器同一
- * 口径 —— 绝不复制实现，只复用读面）；模型缺席/抛错/坏值 ⇒ 按预言自身定价
- * 回退：miss 为 −log₂(1−p)（预言落空的惊异 —— 越自信错得越响，恒正），
- * hit 为 −log₂(p)（言中残差，≥0）。
- */
-function settleSurpriseBits(
-  record: ProphecyRecord,
-  actualType: string,
-  outcome: 'hit' | 'miss',
-  worldModel: WorldModel | null | undefined,
-): number | undefined {
-  try {
-    if (worldModel && typeof worldModel.surprise === 'function') {
-      const r = worldModel.surprise(record.screenType, record.actionKey, actualType);
-      const v = resultValue<{ bits?: unknown }>(r);
-      if (v && typeof v.bits === 'number' && Number.isFinite(v.bits) && v.bits >= 0) {
-        return Math.round(v.bits * 1e6) / 1e6;
-      }
-    }
-  } catch { /* 模型故障 ⇒ 回退自误定价（绝不炸结算） */ }
-  try {
-    const p = typeof record.predictedProb === 'number' && Number.isFinite(record.predictedProb)
-      ? Math.min(1, Math.max(0, record.predictedProb))
-      : 0.5; // 无概率读数 ⇒ 中性 0.5（不自夸也不自贬）
-    if (outcome === 'hit') {
-      const q = Math.min(1, Math.max(PROB_EPSILON, p));
-      return Math.round(-Math.log2(q) * 1e6) / 1e6;
-    }
-    const q = Math.min(1 - PROB_EPSILON, Math.max(PROB_EPSILON, 1 - p));
-    return Math.round(-Math.log2(q) * 1e6) / 1e6; // 夹 (0,1) ⇒ 恒正
-  } catch {
-    return undefined; // 数学库故障（理论上不可达）⇒ 惊异缺席，绝不抛
-  }
-}
+// W6-2（doctor smell.over-engineering 清偿）：内部纯工具已分区提取至 internal.ts
+// （行为零变化；PROB_EPSILON 随迁 —— 仅 settleSurpriseBits 消费）。
+import { nonEmptyStr, safeNow, shortId, resultValue, settleSurpriseBits } from './internal';
 
 // ─── 铸造与结算（纯函数面） ───
 
@@ -177,6 +145,10 @@ function settleSurpriseBits(
  *     绝不把「没见过」伪装成任何预测）；
  *   · 有历史 ⇒ 取分布首名（typeId + prob），outcome 'pending'（铸而未验 ——
  *     三态终值只由 settleProphecy 落锤）。
+ *   · D-G2 粗层回退：精确键查无 ⇒ 粗格（coarseScreenType）再问一次；粗格有
+ *     证据 ⇒ 预言标注 predictedVia:'coarse'（抖动变体免于无知的细化通道，
+ *     来源层如实入账）；粗格也无 ⇒ 仍诚实 no-model。非 hex 屏型无粗格
+ *     （coarseScreenType 原样返回 ⇒ 回退跳过）—— 旧方言零漂移。
  * @param ts 铸造时刻（缺省 Date.now —— 引擎注入闭环时钟）
  */
 export function mintProphecy(
@@ -189,26 +161,42 @@ export function mintProphecy(
   const s = nonEmptyStr(screenType) ? screenType : String(screenType ?? '');
   const k = nonEmptyStr(actionKey) ? actionKey : String(actionKey ?? '');
   const base = { screenType: s, actionKey: k, ts: t };
-  let pred: TransitionPrediction | null = null;
-  try {
-    if (worldModel && typeof worldModel.predict === 'function' && nonEmptyStr(s) && nonEmptyStr(k)) {
-      pred = resultValue<TransitionPrediction | null>(worldModel.predict(s, k));
+  const ask = (key: string): { typeId: string; prob?: number } | null => {
+    try {
+      if (!worldModel || typeof worldModel.predict !== 'function' || !nonEmptyStr(key) || !nonEmptyStr(k)) {
+        return null;
+      }
+      const pred = resultValue<TransitionPrediction | null>(worldModel.predict(key, k));
+      const nextTypes = pred && Array.isArray((pred as TransitionPrediction).nextTypes)
+        ? (pred as TransitionPrediction).nextTypes
+        : [];
+      const top = nextTypes[0] as { typeId?: unknown; prob?: unknown } | undefined;
+      if (!top || !nonEmptyStr(top.typeId)) return null;
+      const hit = { typeId: String(top.typeId) };
+      if (typeof top.prob === 'number' && Number.isFinite(top.prob)) {
+        (hit as { prob?: number }).prob = Math.min(1, Math.max(0, top.prob));
+      }
+      return hit;
+    } catch {
+      return null; // 模型故障 = 无知识（诚实吞掉，绝不炸，绝不伪造）
     }
-  } catch {
-    pred = null; // 模型故障 = 无知识（诚实吞掉，绝不炸，绝不伪造）
+  };
+  const exact = ask(s);
+  if (exact !== null) {
+    const rec: ProphecyRecord = { ...base, predictedType: exact.typeId, predictedVia: 'exact', outcome: 'pending' };
+    if (typeof exact.prob === 'number') rec.predictedProb = exact.prob;
+    return rec;
   }
-  const nextTypes = pred && Array.isArray((pred as TransitionPrediction).nextTypes)
-    ? (pred as TransitionPrediction).nextTypes
-    : [];
-  const top = nextTypes[0] as { typeId?: unknown; prob?: unknown } | undefined;
-  if (!top || !nonEmptyStr(top.typeId)) {
-    return { ...base, outcome: 'no-model' };
+  const coarse = coarseScreenType(s);
+  if (coarse !== s) {
+    const viaCoarse = ask(coarse);
+    if (viaCoarse !== null) {
+      const rec: ProphecyRecord = { ...base, predictedType: viaCoarse.typeId, predictedVia: 'coarse', outcome: 'pending' };
+      if (typeof viaCoarse.prob === 'number') rec.predictedProb = viaCoarse.prob;
+      return rec;
+    }
   }
-  const rec: ProphecyRecord = { ...base, predictedType: String(top.typeId), outcome: 'pending' };
-  if (typeof top.prob === 'number' && Number.isFinite(top.prob)) {
-    rec.predictedProb = Math.min(1, Math.max(0, top.prob));
-  }
-  return rec;
+  return { ...base, outcome: 'no-model' };
 }
 
 /**
@@ -289,17 +277,19 @@ export function prophecyJournalTag(record: ProphecyRecord): string {
   try {
     const cell = `${shortId(record.screenType)}|${record.actionKey}`;
     const to = nonEmptyStr(record.actualType) ? shortId(String(record.actualType)) : '?';
+    // D-G2：粗层回退铸出的预言在注记上如实标注（via 粗层）—— 精确层注记逐字节旧方言
+    const via = record.predictedVia === 'coarse' ? '，via 粗层' : '';
     if (record.outcome === 'hit') {
       const p = typeof record.predictedProb === 'number' && Number.isFinite(record.predictedProb)
         ? Math.round(record.predictedProb * 1000) / 1000
         : '?';
-      return `prophecy:hit（${cell} → ${to}，p=${p}）`;
+      return `prophecy:hit（${cell} → ${to}，p=${p}${via}）`;
     }
     if (record.outcome === 'miss') {
       const bits = typeof record.surpriseBits === 'number' && Number.isFinite(record.surpriseBits)
         ? Math.round(record.surpriseBits * 1000) / 1000
         : '?';
-      return `prophecy:miss（${cell} → ${to}，惊异 ${bits} bits）`;
+      return `prophecy:miss（${cell} → ${to}，惊异 ${bits} bits${via}）`;
     }
     return `prophecy:no-model（${cell} → ${to}，模型无知直通）`;
   } catch {
@@ -307,62 +297,53 @@ export function prophecyJournalTag(record: ProphecyRecord): string {
   }
 }
 
-// ─── 统计面（纯函数 + 引擎委托） ───
+// W6-2（doctor smell.over-engineering 清偿）：统计面已分区提取至 stats.ts（行为零变化）；
+// 导入面不变 —— 再分发。
+export { prophecyStats } from './stats';
+export { prophecyCalibration, prophecyPostmortem, prophecyPostmortemLines } from './stats';
+export type {
+  ProphecyCalibration, ProphecyCalibrationCell, ProphecyPostmortemCell,
+} from './stats';
+import { prophecyStats } from './stats';
+
+// ─── 惊异喂养通道（D-G2 细化：错题本的消费面 → EvolutionEngine） ───
+
+// 类型单进口（编译期擦除 —— 与 sleep/dreamReplay 的 DreamEvolutionLike 同律）：
+// EvolutionEngine 住在 autonomy 产权域（本批禁改），其 ingest 面经此结构子集
+// 被满足 —— 真引擎可直接接，测试桩只须实现同名一面。
+import type { RunRecord } from '../autonomy/evolutionEngine';
 
 /**
- * 错题本统计（纯函数，永不抛）：对已结算记录聚合。
- * 命中/失手率只以**有预言**的结算为分母（no-model 是无知不是错误 —— 掺水
- * 会让新模型看起来「永远全错」，不诚实）。topMisses 按失手计数降序、
- * (屏型|动作) 字典序破平 —— 全序确定，绝不掷硬币。
+ * 惊异喂养端口（结构性）：`{ ingest(run) }` —— EvolutionEngine.ingest 天然满足。
+ * 喂养方向是单向的（预言错题 → 进化史册）；端口故障由喂养面吞掉（旁路铁律）。
  */
-export function prophecyStats(records: ReadonlyArray<ProphecyRecord>, topK = DEFAULT_TOP_K): ProphecyStats {
+export interface SurpriseFeedTarget {
+  ingest(run: RunRecord): void;
+}
+
+/**
+ * 失手记录 → 惊异喂养记录（纯函数，永不抛）：只有 miss 有惊异可喂 ——
+ * hit / no-model 返回 null（命中不是教训、无知没有 bits —— 诚实 null，
+ * 绝不伪造喂养载荷）。方言对齐 RunRecord 必填面（goal/success/steps/
+ * durationMs/strategies），failureRootCause 携带失手注记（复盘线索）。
+ */
+export function surpriseRunRecord(rec: ProphecyRecord | null | undefined): RunRecord | null {
   try {
-    let hits = 0;
-    let misses = 0;
-    let noModel = 0;
-    let missBits = 0;
-    let missBitsN = 0;
-    const missCells = new Map<string, { screenType: string; actionKey: string; count: number }>();
-    for (const r of records) {
-      if (!r || typeof r !== 'object') continue;
-      if (r.outcome === 'hit') {
-        hits++;
-      } else if (r.outcome === 'miss') {
-        misses++;
-        if (typeof r.surpriseBits === 'number' && Number.isFinite(r.surpriseBits)) {
-          missBits += r.surpriseBits;
-          missBitsN++;
-        }
-        const key = `${String(r.screenType)}|${String(r.actionKey)}`;
-        const cell = missCells.get(key) ?? { screenType: String(r.screenType), actionKey: String(r.actionKey), count: 0 };
-        cell.count++;
-        missCells.set(key, cell);
-      } else if (r.outcome === 'no-model') {
-        noModel++;
-      } // pending / 垃圾值不入统计（账本不该有 pending —— 防御式忽略）
-    }
-    const denom = hits + misses;
-    const k = typeof topK === 'number' && Number.isFinite(topK) && topK >= 1 ? Math.floor(topK) : DEFAULT_TOP_K;
-    const topMisses = [...missCells.values()]
-      .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.screenType < b.screenType ? -1 : a.screenType > b.screenType ? 1 : a.actionKey < b.actionKey ? -1 : a.actionKey > b.actionKey ? 1 : 0))
-      .slice(0, k)
-      .map(c => ({ screenType: c.screenType, actionKey: c.actionKey, count: c.count }));
-    const round6 = (x: number): number => Math.round(x * 1e6) / 1e6;
+    if (!rec || typeof rec !== 'object' || rec.outcome !== 'miss') return null;
+    const bits = typeof rec.surpriseBits === 'number' && Number.isFinite(rec.surpriseBits)
+      ? Math.round(rec.surpriseBits * 1000) / 1000
+      : null;
     return {
-      settled: records.length,
-      hits,
-      misses,
-      noModel,
-      hitRate: denom > 0 ? round6(hits / denom) : 0,
-      missRate: denom > 0 ? round6(misses / denom) : 0,
-      avgMissSurpriseBits: missBitsN > 0 ? round6(missBits / missBitsN) : 0,
-      topMisses,
+      goal: `prophecy:miss ${shortId(rec.screenType)}|${rec.actionKey}`,
+      success: false,
+      steps: 1,
+      durationMs: 0,
+      strategies: [rec.actionKey],
+      failureRootCause: `prophecy-miss → ${nonEmptyStr(rec.actualType) ? shortId(String(rec.actualType)) : '?'}`
+        + (bits !== null ? `（惊异 ${bits} bits）` : '（惊异缺席）'),
     };
   } catch {
-    return {
-      settled: 0, hits: 0, misses: 0, noModel: 0,
-      hitRate: 0, missRate: 0, avgMissSurpriseBits: 0, topMisses: [],
-    }; // 统计绝不抛（运行层铁律）
+    return null; // 喂养载荷铸造绝不抛
   }
 }
 
@@ -380,6 +361,12 @@ export interface ProphecyEngineOptions {
   capacity?: number;
   /** 结算后回灌世界模型（observe —— Dyna 式学习；缺省 true；false ⇒ 纯只读审计） */
   learn?: boolean;
+  /**
+   * 惊异喂养通道（D-G2）：在场 ⇒ 每次结算入账后自动把新失手记录喂给
+   * target.ingest（EvolutionEngine 结构性满足）；缺席 ⇒ 零行为。喂养是
+   * 旁路仪式：端口任何故障只丢该条喂养，绝不炸环。
+   */
+  surpriseFeed?: SurpriseFeedTarget | null;
 }
 
 /**
@@ -397,12 +384,18 @@ export class ProphecyEngine implements ProphecyPort {
   private readonly pendingTtlMs: number;
   private readonly capacity: number;
   private readonly learn: boolean;
+  /** 惊异喂养通道（D-G2；缺席 ⇒ 零行为） */
+  private readonly surpriseFeedTarget: SurpriseFeedTarget | null;
   /** 环形账本（入账序；超容量逐出最旧） */
   private ledger: ProphecyRecord[] = [];
   /** 挂起中的预言（至多一条） */
   private pending: ProphecyRecord | null = null;
   /** 挂起作废累计（诚实计数 —— 取不到真实下一屏型的预言归宿） */
   private expiredCount = 0;
+  /** 已扫视入账总数（喂养水位线 —— 与 evictedTotal 的差即当前未扫视起点） */
+  private fedCursor = 0;
+  /** 环形逐出累计（水位线的驱逐补偿 —— 索引平移不改扫视史） */
+  private evictedTotal = 0;
 
   constructor(opts: ProphecyEngineOptions = {}) {
     this.worldModel = opts.worldModel ?? null;
@@ -416,6 +409,8 @@ export class ProphecyEngine implements ProphecyPort {
         ? Math.min(CAPACITY_MAX, Math.max(1, Math.floor(opts.capacity)))
         : LEDGER_CAPACITY;
     this.learn = opts.learn !== false;
+    this.surpriseFeedTarget =
+      opts.surpriseFeed && typeof opts.surpriseFeed.ingest === 'function' ? opts.surpriseFeed : null;
   }
 
   /** 挂起超时作废（内部件）：now − ts 越过 TTL ⇒ expired 计数 + 丢弃 */
@@ -452,24 +447,71 @@ export class ProphecyEngine implements ProphecyPort {
       if (!nonEmptyStr(actualType)) return null; // 见证缺席 ⇒ 挂起（60s 作废律收口）
       const settled = settleProphecy(pending, String(actualType), this.worldModel);
       // Dyna 回灌：真实转移喂模型（先 surprise 后 observe —— settleProphecy 已读
-      // 惊异，此处才入账学习；回灌故障吞掉 —— 审计绝不为学习停摆）
+      // 惊异，此处才入账学习；回灌故障吞掉 —— 审计绝不为学习停摆）。
+      // D-G2 粗层双写：from 侧粗化一格（coarseScreenType）、to 侧保持精细身份 ——
+      // 粗格汇聚抖动变体的出弧证据（回退铸造的证据源），目的地不粗化（结算
+      // 比对 fine↔fine，方言不串）。非 hex / 短屏型无粗格 ⇒ 双写天然跳过。
       if (this.learn && this.worldModel && typeof this.worldModel.observe === 'function') {
         try {
           this.worldModel.observe(
             settled.screenType, settled.actionKey,
             String(actualType), success !== false,
           );
+          const coarse = coarseScreenType(settled.screenType);
+          if (coarse !== settled.screenType) {
+            this.worldModel.observe(coarse, settled.actionKey, String(actualType), success !== false);
+          }
         } catch { /* 回灌故障吞掉 */ }
       }
       this.pending = null;
       this.ledger.push(settled);
       if (this.ledger.length > this.capacity) {
-        this.ledger.splice(0, this.ledger.length - this.capacity); // 环形逐出最旧
+        const evicted = this.ledger.length - this.capacity;
+        this.ledger.splice(0, evicted); // 环形逐出最旧
+        this.evictedTotal += evicted; // 水位线的驱逐补偿
+      }
+      if (this.surpriseFeedTarget !== null) {
+        this.feedSurprise(this.surpriseFeedTarget); // D-G2：新入账失手即喂（旁路吞错）
       }
       return settled;
     } catch {
       this.pending = null; // 结算故障吞掉 —— 丢预言不炸环
       return null;
+    }
+  }
+
+  /**
+   * 惊异喂养通道（D-G2；拉取面）：把水位线之后新入账的失手记录逐条喂给
+   * target.ingest，返回实喂条数。水位线 = 已扫视入账总数（环形驱逐由
+   * evictedTotal 补偿 —— 逐出只平移索引，不改扫视史）；重复调用零重喂。
+   * target 缺席/坏形状 ⇒ 0；单条 ingest 抛错 ⇒ 吞掉（该条计丢不计喂），
+   * 绝不炸环。命中/无知记录跳过但仍记扫视（surpriseRunRecord 的 null 面）。
+   * 永不抛。
+   */
+  feedSurprise(target: SurpriseFeedTarget | null | undefined): number {
+    try {
+      if (!target || typeof target.ingest !== 'function') return 0;
+      let fed = 0;
+      // 水位线是绝对入账位（自构造起单调）；当前索引 = 绝对位 − 累计逐出。
+      // 逐出先于扫视的记录已不在账上 —— 越过（诚实跳过：证据被环形律逐出，
+      // 喂养面不回捞磁盘外历史）。
+      let i = this.fedCursor - this.evictedTotal;
+      if (i < 0) {
+        this.fedCursor = this.evictedTotal;
+        i = 0;
+      }
+      for (; i < this.ledger.length; i++) {
+        this.fedCursor++; // 先记扫视（喂失败也不重扫 —— 旁路不重试）
+        const run = surpriseRunRecord(this.ledger[i]);
+        if (run === null) continue;
+        try {
+          target.ingest(run);
+          fed++;
+        } catch { /* 喂养通道故障吞掉 —— 绝不为喂养炸审计主体 */ }
+      }
+      return fed;
+    } catch {
+      return 0; // 喂养绝不抛（运行层铁律）
     }
   }
 
@@ -495,7 +537,7 @@ export class ProphecyEngine implements ProphecyPort {
     } catch {
       return {
         settled: 0, hits: 0, misses: 0, noModel: 0,
-        hitRate: 0, missRate: 0, avgMissSurpriseBits: 0, topMisses: [],
+        hitRate: 0, missRate: 0, avgMissSurpriseBits: 0, coarseAssisted: 0, topMisses: [],
         pending: 0, expired: 0, capacity: this.capacity,
       };
     }
@@ -538,6 +580,9 @@ export class ProphecyEngine implements ProphecyPort {
           ts: r.ts,
         };
         if (nonEmptyStr(r.predictedType)) rec.predictedType = String(r.predictedType);
+        if (r.predictedVia === 'exact' || r.predictedVia === 'coarse') {
+          rec.predictedVia = r.predictedVia; // D-G2：来源层白名单（域外值弃置）
+        }
         if (typeof r.predictedProb === 'number' && Number.isFinite(r.predictedProb)) {
           rec.predictedProb = Math.min(1, Math.max(0, r.predictedProb));
         }
@@ -552,6 +597,11 @@ export class ProphecyEngine implements ProphecyPort {
         this.expiredCount = Math.floor(s.expired);
       }
       this.pending = null; // 挂起不可序列化 —— 水合即清（诚实：跨进程的未验预言作废）
+      // D-G2：水合后喂养水位线直抵账尾（已在册记录视为已消化 —— 与「挂起不可
+      // 序列化 ⇒ 水合即清」同律：跨进程的喂养账不复存在，保守不重喂；重喂会使
+      // 进化侧失手双计。dump/restore 消费面如需重喂自可直调 surpriseRunRecord）。
+      this.fedCursor = this.ledger.length;
+      this.evictedTotal = 0;
     } catch { /* 水合绝不抛（运行层铁律） */ }
   }
 }

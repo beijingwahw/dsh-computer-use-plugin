@@ -8,6 +8,8 @@
 // 本工厂统一产出四件套：{ status, action, state_anchor, next_step }。
 // 与 resultContract（B-2）配套：工厂是唯一「写」方，解析器是唯一「读」方。
 // 禁止工具手写 JSON.stringify({status:...}) —— 格式演化只改这一处。
+// W8 变体面：toolOkNoAction 产出无 action 的同构 SUCCESS（历史无 action 回执
+// 的字节级形状铁律），见该函数注。
 /**
  * 成功结果：状态 + 动作描述 + 状态锚点 + 下一步指引
  * @param action    人类可读的动作描述（做了什么）
@@ -18,6 +20,22 @@ export function toolOk(action, anchor, nextStep) {
     return JSON.stringify({
         status: 'SUCCESS',
         action,
+        state_anchor: anchor,
+        next_step: nextStep,
+    }, null, 2);
+}
+/**
+ * 成功结果（无 action 变体，W8/B-4 迁移扩容）：与 toolOk 同一条 SUCCESS 产线，
+ * 但不携带 action 字段。迁移面：read_text / find_text / probe_interactivity /
+ * diff_view 的历史回执从未携带 action —— 字节级形状铁律（既有测试锁定形状）
+ * 下，工厂补齐同形产出，这些工具的格式演化从此也只改这一处，「禁止工具手写
+ * 四件套」的规约覆盖到它们。
+ * @param anchor    状态锚点：动作后的绝对世界状态
+ * @param nextStep  下一步验证逻辑：告诉模型如何确认此动作生效
+ */
+export function toolOkNoAction(anchor, nextStep) {
+    return JSON.stringify({
+        status: 'SUCCESS',
         state_anchor: anchor,
         next_step: nextStep,
     }, null, 2);

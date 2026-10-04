@@ -1,158 +1,33 @@
 import { onToolPre } from './hooks.js';
-import { adviseAction, costPriorOfCall } from '../autonomy/uncertainty.js';
-import { scoreOptions } from '../autonomy/counterfactual.js';
 import { similarity } from '../perceptualHash.js';
-import { matchesDangerPatterns } from '../riskGate.js';
 import { approval } from '../approval.js';
 import { telemetry } from '../telemetry.js';
 import { focusTracker } from '../focusTracker.js';
 import * as physicalBackend from '../physicalBackend.js';
 import { getPopupState } from './popupGuard.js';
-// ─── 契约类型 ───
-/** 受金丝雀约束的动作工具（与 actionGate 的 ActionKind 同一集合：直触物理世界且携带可判定语义面） */
-export const CANARY_ACTION_TOOLS = new Set(['click_mouse', 'type_text']);
-/** 探针预算缺省：每会话（≈每任务）最多试演 6 次 —— 增益有度，绝不喧宾夺主 */
-export const CANARY_PROBE_BUDGET_DEFAULT = 6;
-/** 复位通道地板：探针复原后区域相似度低于此 ⇒ 净变化 ⇒ 分歧（预测是「可复原」） */
-export const CANARY_RESTORE_FLOOR_DEFAULT = 0.9;
-// ─── 幂等词汇表（点击类可逆探针的准入判据） ───
-/**
- * 幂等切换词汇表（W2-7）：目标标签命中 ⇒ 点击+回点论证为可逆（展开/收起、
- * 菜单开合这类「再点一次就回去」的控件）。命中不了就没有可逆探针可言 ——
- * 「提交/发送」类一次性按钮点击两次比点一次更糟，绝不入选（且那类早已被
- * dangerPatterns 划入 destructive 豁免）。
- */
-const TOGGLE_LEXICON = /expand|collapse|toggle|dropdown|fold|unfold|chevron|more|less|menu|filter|show|hide|switch|options?|settings?|gear|展开|收起|折叠|切换|菜单|更多|更少|筛选|箭头|选项|设置|齿轮/i;
-/** 目标标签是否为幂等切换候选（纯函数：非字符串/空串 ⇒ false —— 无法论证可逆） */
-export function isIdempotentToggleLabel(label) {
-    if (typeof label !== 'string')
-        return false;
-    const t = label.trim();
-    if (t.length === 0 || t.length > 200)
-        return false;
-    return TOGGLE_LEXICON.test(t);
-}
-// ─── 纯函数：触发分类 ───
-/** 从工具参数提取字符串（类型收口：非字符串真值一律按缺席） */
-function strArg(v) {
-    return typeof v === 'string' && v.trim() !== '' ? v : undefined;
-}
-/**
- * 触发分类（纯函数，绝不抛异常）：一次工具调用是否需要金丝雀试演。
- *
- * 判序（依序短路）：
- *   1. 非 click_mouse / type_text ⇒ skip not-action-tool；
- *   2. approval_token 在场且已授予有效 ⇒ skip approval-present（人已裁决）；
- *   3. destructive：显式 risk_tier='destructive' 或 target_description /
- *      expected_text 命中 dangerPatterns ⇒ exempt-destructive（不试演，
- *      放行给既有审批闸门直接审批 —— 试演一次性按钮是二次伤害）；
- *   4. 探针预算耗尽 ⇒ skip budget-exhausted；
- *   5. costPriorOfCall 代价档非 high ⇒ skip low-cost（低危不触发）；
- *   6. adviseAction（confidence=args.confidence，缺省 0 —— 无自报置信认识论
- *      不会放行 high 档）未判 proceed ⇒ skip not-proceed；
- *   7. 探针计划：click 须有合法归一化坐标 + 幂等切换标签；type 恒有
- *      （单字符退格）。不可满足 ⇒ skip no-reversible-probe；
- *   8. predictedEffects 缺席 ⇒ skip prediction-unavailable（无比对基准）。
- */
-export function classifyCanaryTrigger(tool, args, opts = {}) {
-    const a = args !== null && typeof args === 'object' ? args : {};
-    if (!CANARY_ACTION_TOOLS.has(tool)) {
-        return { kind: 'skip', why: 'not-action-tool', note: '非动作类工具，与金丝雀无关' };
-    }
-    // 2. 人已裁决：已授予的有效令牌 ⇒ 让位（金丝雀不重复打扰）
-    const token = strArg(a.approval_token);
-    if (token) {
-        try {
-            if (approval.validate(token)) {
-                return { kind: 'skip', why: 'approval-present', note: '已持有效已授予审批令牌，人已裁决' };
-            }
-        }
-        catch {
-            /* 审批簿读失败按无令牌继续 —— 绝不因旁路异常拦截主路径 */
-        }
-    }
-    // 3. destructive 豁免：显式分层或危险词命中（J-14 双通道同律：description ∪ expected_text）
-    const desc = strArg(a.target_description);
-    const expectedText = strArg(a.expected_text);
-    const dangerHit = (desc !== undefined && matchesDangerPatterns(desc, opts.dangerPatterns ?? '')) ||
-        (expectedText !== undefined && matchesDangerPatterns(expectedText, opts.dangerPatterns ?? ''));
-    if (a.risk_tier === 'destructive' || dangerHit) {
-        return {
-            kind: 'exempt-destructive',
-            note: 'destructive 档豁免试演：直接放行给既有审批闸门（那类动作本就该直接审批）',
-        };
-    }
-    // 4. 预算封顶
-    const cap = typeof opts.probeBudgetCap === 'number' && Number.isFinite(opts.probeBudgetCap)
-        ? Math.max(0, Math.floor(opts.probeBudgetCap))
-        : CANARY_PROBE_BUDGET_DEFAULT;
-    const used = typeof opts.probeBudgetUsed === 'number' && Number.isFinite(opts.probeBudgetUsed)
-        ? Math.max(0, opts.probeBudgetUsed)
-        : 0;
-    if (used >= cap) {
-        return { kind: 'skip', why: 'budget-exhausted', note: `探针预算耗尽（${used}/${cap}），让位放行` };
-    }
-    // 5. 代价档：非 high 不触发（低危放行是认识论的裁定，金丝雀不加戏）
-    const consequenceDeclared = strArg(a.expected_change) !== undefined || strArg(a.expected_text) !== undefined;
-    const cost = costPriorOfCall(tool === 'click_mouse' ? 'click' : 'type', {
-        declaredTier: a.risk_tier,
-        consequenceDeclared,
-    });
-    if (cost !== 'high') {
-        return { kind: 'skip', why: 'low-cost', note: `错误代价 ${cost} 非 high，低危不试演` };
-    }
-    // 6. 认识论裁决：proceed × high 才是金丝雀的领地（出厂阈值下数学不可达 ⇒ 零回归）
-    const rawConf = typeof a.confidence === 'number' && Number.isFinite(a.confidence)
-        ? Math.min(1, Math.max(0, a.confidence))
-        : 0;
-    const report = adviseAction({
-        confidence: rawConf,
-        costOfError: cost,
-        vlmAvailable: false,
-        budgetRemainingPct: 100,
-    });
-    if (report.advise !== 'proceed') {
-        return { kind: 'skip', why: 'not-proceed', note: `认识论裁决 ${report.advise}，非 proceed 不试演` };
-    }
-    // 7. 可逆探针计划
-    let probe;
-    if (tool === 'click_mouse') {
-        const x = a.x;
-        const y = a.y;
-        const pointOk = typeof x === 'number' && typeof y === 'number' &&
-            Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1;
-        if (!pointOk || !isIdempotentToggleLabel(desc)) {
-            return {
-                kind: 'skip',
-                why: 'no-reversible-probe',
-                note: '点击目标无幂等切换标签（或坐标缺席），论证不出可逆探针，诚实跳过',
-            };
-        }
-        probe = { kind: 'click-toggle', point: { x: x, y: y }, char: 'x' };
-    }
-    else {
-        probe = { kind: 'type-char', point: null, char: 'x' };
-    }
-    // 8. 反事实预测（只读消费 counterfactual.predictedEffects）
-    const predictedEffects = predictedEffectsOf(tool, a);
-    if (predictedEffects === null) {
-        return { kind: 'skip', why: 'prediction-unavailable', note: '反事实预测缺席，无比对基准' };
-    }
-    return {
-        kind: 'rehearse',
-        probe,
-        predictedEffects,
-        report,
-        confidence: rawConf,
-    };
-}
-// ─── 纯函数：反事实预测（只读消费 counterfactual） ───
-/** 零证据空快照（counterfactual 同律：零证据不伪造 —— deriveEffects 只需动作形状） */
+// W6-1（doctor 债清偿·smell.over-engineering）：契约类型 + 幂等词汇表 + 触发分类 +
+// 反事实预测 + 预测-验证比对三个纯函数区逐字节搬至 ./canaryLogic —— 导入面不变
+// （本文件原位再导出全部公共面）。
+// W8-B4（tools↔autonomy 破环）：canaryLogic 对上游认识论器官的三张面改为端口注入，
+// 本文件是生产装配点 —— 模块装载即把真身（adviseAction / costPriorOfCall /
+// scoreOptions 包装）注册进 canaryLogic（同一函数、同一调用序，行为零变化；
+// 依赖边 guards→上游为单向合法边，canaryLogic 纯逻辑区不再反向牵动器官包）。
+import { adviseAction, costPriorOfCall } from '../autonomy/uncertainty.js';
+import { scoreOptions } from '../autonomy/counterfactual.js';
+export { CANARY_ACTION_TOOLS, CANARY_PROBE_BUDGET_DEFAULT, CANARY_RESTORE_FLOOR_DEFAULT, isIdempotentToggleLabel, classifyCanaryTrigger, compareCanaryObservation, } from './canaryLogic.js';
+export { bindCanaryEpistemicPorts, boundCanaryEpistemicPorts } from './canaryLogic.js';
+import { CANARY_PROBE_BUDGET_DEFAULT, CANARY_RESTORE_FLOOR_DEFAULT, classifyCanaryTrigger, compareCanaryObservation, bindCanaryEpistemicPorts, } from './canaryLogic.js';
+// ─── W8-B4：认识论端口的生产面（自 canaryLogic 回迁的三件套，逐字节同逻辑） ───
+/** 零证据空快照（上游 scoreOptions 同律：零证据不伪造 —— deriveEffects 只需动作形状） */
 const ZERO_SNAPSHOT = {
     takenAt: 0, width: 0, height: 0, dhash: null, elements: [], textDigest: '',
     popups: [], focusedRegion: null, sceneLabel: '', degraded: [],
 };
-/** 工具调用 → 合成 PolicyAction（counterfactual 的词汇面；只用于推导 predictedEffects） */
+/** 从工具参数提取字符串（与 canaryLogic 同律的类型收口：非字符串真值一律按缺席） */
+function strArg(v) {
+    return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
+/** 工具调用 → 合成 PolicyAction（上游器官的词汇面；只用于推导 predictedEffects） */
 function syntheticActionFor(tool, a) {
     const expectedEffect = strArg(a.expected_change) ?? strArg(a.expected_text) ?? '';
     if (tool === 'click_mouse') {
@@ -183,7 +58,7 @@ function syntheticActionFor(tool, a) {
     }
     return null;
 }
-/** 经 counterfactual.scoreOptions 推导 predictedEffects（null = 推导不出） */
+/** 经 scoreOptions 推导 predictedEffects（null = 推导不出）—— predictEffects 端口真身 */
 function predictedEffectsOf(tool, a) {
     const action = syntheticActionFor(tool, a);
     if (action === null)
@@ -194,60 +69,13 @@ function predictedEffectsOf(tool, a) {
     const effects = plan.chosen.predictedEffects.filter((e) => typeof e === 'string');
     return effects.length > 0 ? effects : null;
 }
-// ─── 纯函数：预测-验证比对 ───
-/** 数值防御：夹 [0,1]，非有限数按 null（通道缺席，不伪造观察） */
-function clamp01OrNull(v) {
-    if (typeof v !== 'number' || !Number.isFinite(v))
-        return null;
-    return Math.min(1, Math.max(0, v));
-}
-/**
- * 预测-验证比对（纯函数，绝不抛异常）。
- *
- * 预测主张映射（诚实声明的观察语义边界）：click/type 的 predictedEffects
- * （「激活元素…」/「向焦点元素输入文本」）在视觉域的共同可观察投影是
- * 「目标邻域对交互产生视觉响应」—— 本比对只核对这一主命题；「揭示新界面」
- * 「弹窗消失」等次级预言不在区域指纹的裁判域内（证据链如实记录预测原文）。
- *
- *   响应通道：expectsResponse 且 responseSimilarity 在场时，
- *     分歧度量 = responseSimilarity（无响应=1 全矛盾；剧变=0 无矛盾），
- *     越阈判据 = responseSimilarity ≥ responseCeiling（缺省 noopSimilarityThreshold
- *     0.97 —— 只有近-total 无响应才算分歧，轻微重绘绝不误拦）；
- *   复位通道：restoreSimilarity 在场时，分歧度量 = 1 − restoreSimilarity，
- *     越阈判据 = restoreSimilarity < restoreFloor（探针没能把世界复原 ——
- *     「这是幂等切换」的预测被世界否决）。
- *   divergence = 两通道最大者；两通道皆缺席 ⇒ divergence/diverged 双 null
- *   （诚实弃权，调用方降级放行）。
- */
-export function compareCanaryObservation(predictedEffects, obs, thresholds = {}) {
-    const notes = [];
-    const responseSim = clamp01OrNull(obs?.responseSimilarity);
-    const restoreSim = clamp01OrNull(obs?.restoreSimilarity);
-    const ceiling = clamp01OrNull(thresholds.responseCeiling) ?? 0.97;
-    const floor = clamp01OrNull(thresholds.restoreFloor) ?? CANARY_RESTORE_FLOOR_DEFAULT;
-    const expectsResponse = Array.isArray(predictedEffects) &&
-        predictedEffects.some(e => typeof e === 'string' && e.trim() !== '');
-    if (!expectsResponse)
-        notes.push('预测主张不含可观察响应，弃权');
-    const responseDivergence = expectsResponse && responseSim !== null ? responseSim : null;
-    const responseDiverged = responseDivergence !== null && responseDivergence >= ceiling;
-    const restoreDivergence = restoreSim !== null ? 1 - restoreSim : null;
-    const restoreDiverged = restoreSim !== null && restoreSim < floor;
-    if (responseDivergence !== null) {
-        notes.push(`响应通道：相似度 ${responseSim.toFixed(3)}（阈 ${ceiling}）${responseDiverged ? '⇒ 无响应分歧' : '⇒ 响应符合预测'}`);
-    }
-    if (restoreDivergence !== null) {
-        notes.push(`复位通道：相似度 ${restoreSim.toFixed(3)}（地板 ${floor}）${restoreDiverged ? '⇒ 未复原分歧' : '⇒ 复原完好'}`);
-    }
-    const parts = [responseDivergence, restoreDivergence].filter((v) => v !== null);
-    return {
-        divergence: parts.length > 0 ? Math.max(...parts) : null,
-        diverged: parts.length > 0 ? responseDiverged || restoreDiverged : null,
-        responseSimilarity: responseSim,
-        restoreSimilarity: restoreSim,
-        notes,
-    };
-}
+// W8-B4：生产装配 —— 模块装载即注册（本文件的任何导入方都带上生产面；与
+// canaryLogic 破环前的直接调用同一真身同一调用序，行为零变化）。
+bindCanaryEpistemicPorts({
+    adviseAction,
+    costPriorOfCall,
+    predictEffects: predictedEffectsOf,
+});
 // ─── 探针编排（防御式：一切端口异常收敛为状态，绝不抛、绝不悬挂） ───
 /** 端口调用包装：异常 / 非真值 ⇒ false（世界侧是否被触碰由调用序保证） */
 async function tryStep(name, fn, steps) {
@@ -429,7 +257,8 @@ export function resetCanaryGuard() {
 /**
  * 注册金丝雀试演守卫（W2-7）。ports 参数是注入缝 —— 测试注入假物理端口/
  * 假帧哈希（离线确定性）；缺省用生产端口（后端不在场时自动全降级，行为
- * 等价于纯旁路放行）。
+ * 等价于纯旁路放行）。W6R 例外：携带审批令牌的调用（审批域活口）在探针
+ * 缺席/失败时 fail-closed 拦截，除非逃生门 allowUnverifiedDangerous=true。
  */
 export function registerCanaryGuard(ctx, config, ports) {
     onToolPre(ctx, async (call, next) => {
@@ -472,15 +301,37 @@ export function registerCanaryGuard(ctx, config, ports) {
                 epistemics,
             });
             telemetry.note('canary:triggered', true);
+            // W6R（fail-closed 收口）：本调用是否走在审批令牌协议上（携带
+            // approval_token —— dangerous 分级动作走 beginAttempt/consume 的前件）。
+            // 触发分类上，危险词命中的动作已在第 3 步豁免直审批、已授予令牌的调用
+            // 已在第 2 步让位 —— 能进入试演的令牌调用只剩「持未授予/悬置令牌的高危
+            // 动作」；对这一活口，探针缺席/失败不再降级放行（见 degraded 分支执法）。
+            const tokenPath = typeof call.args?.approval_token === 'string' && call.args.approval_token !== '';
+            // 逃生门：部署显式接受未验证危险派发（与 clickMouse 的两处 fail-closed
+            // 同一把钥匙）；dry-run 豁免（无物理世界可探，拦截只会误杀模拟）。
+            const failClosed = tokenPath && config.dryRun !== true && config.allowUnverifiedDangerous !== true;
             const degraded = (why, notes) => {
                 recordEvent({
-                    at: Date.now(), tool: call.name, action: 'degraded', why,
+                    at: Date.now(), tool: call.name,
+                    action: failClosed ? 'blocked' : 'degraded',
+                    why: failClosed ? `${why} —— 审批令牌路径 fail-closed（W6R）：拒绝派发` : why,
                     probe: trigger.probe.kind, point: trigger.probe.point,
                     predictedEffects: trigger.predictedEffects, epistemics,
                     degradedNotes: notes,
                 });
-                telemetry.note('canary:degraded', false);
-                return next(); // 可用性优先：探针缺席/失败 ⇒ 放行原动作
+                telemetry.note(failClosed ? 'canary:blocked' : 'canary:degraded', failClosed);
+                if (failClosed) {
+                    // W6R：探针缺席/失败 + 令牌路径 ⇒ 拦截（不调 next 即短路）。不铸造
+                    // 审批令牌 —— 这是机器故障（防御栈缺席），不是需要人裁决的预测分歧。
+                    return (`[Guard Blocked][Canary]: 高风险动作的试演探针缺席/失败，且本调用携带审批令牌` +
+                        `（不可逆动作的 beginAttempt/consume 路径）—— fail-closed 拒绝派发。\n` +
+                        `  action: ${call.name} ${why}\n` +
+                        `  notes: ${notes.join('；')}\n` +
+                        `  出路：① 重试（物理服务/探针端口可能稍后可用）；② 开探针 —— 确保物理服务已存活、` +
+                        `探针端口已接线（生产组合根默认注入，测试经 CanaryProbePorts 注入缝）；` +
+                        `③ 部署显式逃生门：配置 allowUnverifiedDangerous=true（明确接受未验证危险派发）。`);
+                }
+                return next(); // 可用性优先：非令牌动作探针缺席/失败 ⇒ 放行原动作（旧行为不变）
             };
             // 弹窗期不试演（与 interactivityProbe 的 hoverGuardSkip 同律：隔着对话框动指针不安全）
             if (getPopupState())

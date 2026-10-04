@@ -1,4 +1,5 @@
 // src/physicalExecution/adapter.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：单一传输适配器类 —— capToken 鉴权/微取/生命周期共享同一 AdapterState 私有状态机；方法级拆分须跨模块外泄私有状态，安全面风险 > 拆分收益。
 // D-5 物理执行适配器 —— PhysicalExecutionAdapter 主类实现。
 //
 // 职责（造物主契约 Step 1）：

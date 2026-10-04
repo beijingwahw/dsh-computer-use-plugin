@@ -223,7 +223,7 @@ test('Ν-2b: 关开关 ⇒ 固定三通道降序逐字节旧行为（且不记�
     },
   });
   assert.ok(w.calls.includes('hit_test'));
-  assert.ok(!w.calls.includes('cursor_kind'), 'UIA 已判 ⇒ 旧行为不做悬停实验（无光标本体感觉）；原位复位照旧');
+  assert.ok(!w.calls.includes('cursor_kind'), 'UIA 已判 ⇒ 旧行为不做悬停实验（无光标本体感觉）；W8 起悬停准备（getCursor/moveMouse 复位）也整体缺席 —— 执法见 interactivityProbe.economy.test.ts');
   // 旧行为不产生账目（通道序测试不受历史探针污染）
   assert.ok(probeMemory.channelEconomics().every(e => e.trials === 0));
 });

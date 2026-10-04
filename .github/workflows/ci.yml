@@ -1,6 +1,14 @@
 # O 纪元（#2）：Linux CI —— POSIX shm 分支（/dev/shm）的真机执法位。
 # Windows 开发机只能测 mmap-file/base64；本 workflow 在 ubuntu 上跑全量套件，
 # shm 跨进程往返（physicalExecution.shmReader）在此平台真实执行。
+#
+# D-A7（DEBTS 闭账）：UDS 原生微服务的 Linux CI 缺席 —— 此前
+# physicalExecution.adapter.http.test.ts 的真服务路径（预起 8421 服务才实跑，
+# 未预起则整册 skip）在 CI 上从未执行过。本 workflow 预起 dsh_physical 后
+# 焦点跑该文件 + epochSigma.display.test.ts 的真端到端段，随后归还 8421 端口
+# （d7HostPort 套件在 npm test 里经 ServiceManager 缺省 8421 自起服务 —— 其
+# spawn 不再强制 DSH_PHYSICAL_PID_ATTESTATION=false，Linux 上按服务端缺省走
+# /proc/<pid>/exe 存在性证明，auth.py 头注的 Layer-2 在 CI 真机同步覆盖）。
 name: ci
 on:
   push:
@@ -20,11 +28,76 @@ jobs:
         run: npm ci
       - name: Install Python deps (service + test fixtures)
         run: pip install fastapi uvicorn numpy pillow
+      # D-A7：dsh_physical 以可编辑模式安装 —— 依赖（pydantic/pyautogui/
+      # python-xlib/rapidocr/opencv/pyserial/httpx…）全部按 pyproject.toml 声明
+      # 闭环安装；此后 `python -m dsh_physical` 从任意 cwd 可起（不再依赖
+      # cwd=python_service 的 sys.path 侥幸）。
+      - name: Install dsh_physical (editable, full declared deps)
+        run: pip install -e python_service
       - name: Typecheck
         run: npm run typecheck
+      - name: Verify gates (bug class lint + fatal fixes)
+        run: npm run verify
       - name: Python service compile gate
         run: python -m compileall python_service/dsh_physical
+      # D-A7：按 test/physicalExecution.adapter.http.test.ts 头部注释的自有配方
+      # 预起服务（该文件的 skip 逻辑是「服务未预起则跳」—— 预起后应实跑）：
+      #   tcp:8421 + TEST_SCREEN=1（无显示环境合成图）+ PID_ATTESTATION=false +
+      #   KEY_PATH=/tmp/dsh-test.key（与 Node 端共享 HMAC 密钥）。
+      # 两处 Linux 专属补笔（均锚定 python_service/dsh_physical/config.py 缺省）：
+      #   · DSH_PHYSICAL_TRANSPORT=tcp 显式覆盖 —— Linux 缺省 'uds'（服务会去绑
+      #     /var/run/dsh-physical.sock，HTTP 探测够不着 socket；Node 客户端半边
+      #     也尚不可达 —— 见 peercred.py 头注的诚实边界）；
+      #   · DSH_PHYSICAL_SHOT_TRANSPORT=mmap-file —— Linux 缺省 'shm'，而该测试
+      #     在 health 与 CapabilityCache 两处断言 screenshot_transport === 'mmap-file'。
+      - name: Pre-start dsh_physical on tcp:8421 (D-A7 real-service recipe)
+        run: |
+          head -c 32 /dev/urandom > /tmp/dsh-test.key
+          DSH_PHYSICAL_TRANSPORT=tcp \
+            DSH_PHYSICAL_TCP_HOST=127.0.0.1 \
+            DSH_PHYSICAL_TCP_PORT=8421 \
+            DSH_PHYSICAL_TEST_SCREEN=1 \
+            DSH_PHYSICAL_PID_ATTESTATION=false \
+            DSH_PHYSICAL_SHOT_TRANSPORT=mmap-file \
+            DSH_PHYSICAL_KEY_PATH=/tmp/dsh-test.key \
+            nohup python -m dsh_physical > /tmp/dsh-physical-ci.log 2>&1 &
+          echo $! > /tmp/dsh-physical-ci.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8421/v1/health > /tmp/dsh-health.json 2>/dev/null; then
+              echo "dsh_physical healthy after ${i} probe(s):"
+              cat /tmp/dsh-health.json
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::dsh_physical did not become healthy on tcp:8421 within 30s"
+          cat /tmp/dsh-physical-ci.log || true
+          exit 1
+      # D-A7 焦点执法：两文件的真服务段在 CI 真机实跑 ——
+      #   · physicalExecution.adapter.http.test.ts：探活闸（ensureServiceUp）见
+      #     预起服务 ⇒ skip=false，health/截屏 RAII/stream/transfer/CapabilityCache
+      #     全部走真 HTTP + 真 mmap-file 通道；
+      #   · epochSigma.display.test.ts：自起随机端口服务（tcp + base64 截图），
+      #     依赖就位 ⇒ E2E 段实跑（/displays、display 语义、region 基准）。
+      - name: Physical-service E2E (D-A7 - adapter.http + sigma.display real-service arms)
+        run: node --test --import ./test/register.mjs test/physicalExecution.adapter.http.test.ts test/epochSigma.display.test.ts
+      # 归还 tcp:8421：d7HostPort（下方 npm test 内）经 ServiceManager 缺省端口
+      # 自起服务 —— 预起服务若留活会被 probeHealth 判 port_squatted（拒收陌生
+      # 进程）⇒ 该套件 skip。焦点步后务必停掉，恢复 d7 的自起臂。
+      - name: Stop pre-started service (return tcp:8421 to d7HostPort self-spawn arm)
+        if: always()
+        run: |
+          if [ -f /tmp/dsh-physical-ci.pid ]; then
+            kill "$(cat /tmp/dsh-physical-ci.pid)" 2>/dev/null || true
+          fi
+          pkill -f 'python -m dsh_physical' 2>/dev/null || true
       - name: Full test suite (POSIX shm arm live on /dev/shm)
         run: npm test
+      - name: Build (compile artifacts only)
+        run: npm run build
       - name: Smoke import (all src modules)
         run: npm run smoke
+      # 诊断残留：焦点/全量任一失败时回显预起服务日志（启动即退/依赖缺失归因）
+      - name: Dump dsh_physical CI log (failure forensics)
+        if: failure()
+        run: cat /tmp/dsh-physical-ci.log || true

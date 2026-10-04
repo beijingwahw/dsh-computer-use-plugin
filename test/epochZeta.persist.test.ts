@@ -47,9 +47,11 @@ test('Ζ-1: 铸 selfModel 账（含衰减态）→ save → load ⇒ 逐字段�
   const HALF = 3_600_000; // halfLifeH=1 的一个半衰期（ms）
   selfModel.configure({ now: () => T0, halfLifeH: 1, minEvidence: 2 });
   // 铸账：click_mouse 单轴格 10 成 2 败 + 场景格 5 成（全部 @T0）
+  // （场景桶随 W8-B5 新粒度同步为 6 位十六进制 'f3a0c9' —— 4 位旧粗桶已不入账；
+  //   衰减数学与键结构逐位不变，仅键方言演进）
   for (let i = 0; i < 10; i++) selfModel.recordOutcome({ actionKind: 'click_mouse' }, true, T0);
   for (let i = 0; i < 2; i++) selfModel.recordOutcome({ actionKind: 'click_mouse' }, false, T0);
-  for (let i = 0; i < 5; i++) selfModel.recordOutcome({ actionKind: 'click_mouse', sceneBucket: 'f3a0' }, true, T0);
+  for (let i = 0; i < 5; i++) selfModel.recordOutcome({ actionKind: 'click_mouse', sceneBucket: 'f3a0c9' }, true, T0);
 
   const T1 = T0 + HALF;
   selfModel.configure({ now: () => T1 }); // 推进一个半衰期（部分覆盖语义：只换钟）
@@ -66,7 +68,7 @@ test('Ζ-1: 铸 selfModel 账（含衰减态）→ save → load ⇒ 逐字段�
   assert.equal(cellA.s, 5, '10 成 × 0.5');
   assert.equal(cellA.f, 1, '2 败 × 0.5');
   assert.equal(cellA.lastTs, T1);
-  const cellB = dumped.cells.find(c => c.key === 'click_mouse|f3a0')!;
+  const cellB = dumped.cells.find(c => c.key === 'click_mouse|f3a0c9')!; // W8-B5：新粒度键方言
   assert.equal(cellB.s, 2.5, '场景格同律衰减');
 
   // 模拟崩溃：账本归零（配置保留）⇒ 诚实冷启动
@@ -88,7 +90,7 @@ test('Ζ-1: 铸 selfModel 账（含衰减态）→ save → load ⇒ 逐字段�
   const advice = selfModel.adviseConfidence('click_mouse');
   assert.ok(advice && Math.abs(advice.confidence - 0.7) < 1e-9 && Math.abs(advice.n - 3) < 1e-9,
     '衰减后的经验置信照常进闸门建议面');
-  const scene = selfModel.competence({ actionKind: 'click_mouse', sceneBucket: 'f3a0' })!;
+  const scene = selfModel.competence({ actionKind: 'click_mouse', sceneBucket: 'f3a0c9' })!; // W8-B5：新粒度键方言
   assert.ok(Math.abs(scene.n - 1.25) < 1e-9, '场景格 2.5 × 0.5 = 1.25');
   assert.ok(Math.abs(scene.mean - (1.25 + 1) / (1.25 + 2)) < 1e-9);
 

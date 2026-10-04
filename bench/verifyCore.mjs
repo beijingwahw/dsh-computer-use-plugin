@@ -52,7 +52,7 @@ function decodeOem(x) {
 export const VERIFY_CHECK_KINDS = new Set([
   'fileExists', 'fileAbsent', 'dirExists',
   'processRunning', 'processAbsent',
-  'windowExists', 'windowAbsent',
+  'windowExists', 'windowAbsent', 'windowCount',
   'registryKey', 'registryValue',
   'envVar',
   'not', 'allOf', 'anyOf',
@@ -84,6 +84,18 @@ export function validateVerifyBlock(v) {
     if (c.kind === 'windowExists' || c.kind === 'windowAbsent') {
       if (!c.titleRegex) errors.push(`${where}: ${c.kind} 缺 titleRegex`);
       else { try { new RegExp(c.titleRegex, 'i'); } catch (e) { errors.push(`${where}: titleRegex 非法:${e.message}`); } }
+    }
+    // W8-B7:窗口计数谓词 —— titleRegex 必填(未过滤的顶层窗口总数含 Program Manager
+    // 等系统固有窗口,是无信息量的噪声;计数断言必须锚定目标窗口域),
+    // equals/gte/lte 至少一个、可组合(求值时全部合取),值须为非负整数。
+    if (c.kind === 'windowCount') {
+      if (!c.titleRegex) errors.push(`${where}: windowCount 缺 titleRegex(顶层窗口总数含系统固有窗口,恒噪声 —— 须用正则锚定目标窗口域)`);
+      else { try { new RegExp(c.titleRegex, 'i'); } catch (e) { errors.push(`${where}: titleRegex 非法:${e.message}`); } }
+      const ops = ['equals', 'gte', 'lte'].filter((k) => c[k] !== undefined);
+      if (ops.length === 0) errors.push(`${where}: windowCount 缺比较子(equals/gte/lte 至少给一个)`);
+      for (const k of ops) {
+        if (!Number.isInteger(c[k]) || c[k] < 0) errors.push(`${where}: windowCount.${k} 须为非负整数(得 ${JSON.stringify(c[k])})`);
+      }
     }
     if (c.kind === 'registryKey' || c.kind === 'registryValue') {
       if (!c.key) errors.push(`${where}: ${c.kind} 缺 key`);
@@ -288,6 +300,28 @@ async function evalWindow(index, check, world, want) {
   return finish(index, check, 'pass', want ? '窗口存在' : '窗口不存在', `命中:${hits.slice(0, 8).join(' | ')}`, r.raw);
 }
 
+/** W8-B7:窗口计数谓词 —— 与 windowExists 同通道(listWindowTitles,复用同一观察
+ *  命令,不另开旁路),对 titleRegex 过滤后的窗口数做 equals/gte/lte 断言
+ *  (比较子可组合,全部合取)。语义:「跑前跑后窗口数不变/归零」这类编排终态
+ *  契约的机器等价物 —— 终态计数是绝对值,套件状态机保证跑前的确定值。 */
+async function evalWindowCount(index, check, world) {
+  const r = await world.listWindowTitles();
+  const re = new RegExp(check.titleRegex, 'i');
+  const hits = r.titles.filter((t) => re.test(t));
+  const n = hits.length;
+  const want = [];
+  if (check.equals !== undefined) want.push(`=${check.equals}`);
+  if (check.gte !== undefined) want.push(`>=${check.gte}`);
+  if (check.lte !== undefined) want.push(`<=${check.lte}`);
+  const okCount = (check.equals === undefined || n === check.equals)
+    && (check.gte === undefined || n >= check.gte)
+    && (check.lte === undefined || n <= check.lte);
+  return finish(index, check, okCount ? 'pass' : 'fail',
+    `匹配 /${check.titleRegex}/i 的窗口数 ${want.join(' 且 ')}`,
+    `实测 ${n} 个(顶层标题共 ${r.titles.length} 个):${hits.slice(0, 8).join(' | ') || '(无命中)'}`,
+    r.raw);
+}
+
 const PREDICATE_EVALUATORS = {
   fileExists: (i, c, w) => evalFileLike(i, c, w, false),
   fileAbsent: async (i, c, w) => {
@@ -299,6 +333,7 @@ const PREDICATE_EVALUATORS = {
   processAbsent: (i, c, w) => evalProcess(i, c, w, false),
   windowExists: (i, c, w) => evalWindow(i, c, w, true),
   windowAbsent: (i, c, w) => evalWindow(i, c, w, false),
+  windowCount: (i, c, w) => evalWindowCount(i, c, w),
   registryKey: async (i, c, w) => {
     const r = await w.queryRegistry(c.hive ?? 'HKCU', c.key);
     const want = c.exists !== false; // 默认要求存在;c.exists=false 断言缺席

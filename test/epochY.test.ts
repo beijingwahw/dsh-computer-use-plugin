@@ -10,7 +10,7 @@ import { judgeTransport } from '../src/tools/dragMouse.ts';
 import { isDeadStep } from '../src/tools/replayActions.ts';
 import { judgePostcondition, POSTCONDITION_THRESHOLD } from '../src/tools/skillTools.ts';
 import { topoSortSubTasks, type SubTask } from '../src/planner.ts';
-import { TokenBucket, approval, approvalBudget, resetApproval } from '../src/approval.ts';
+import { TokenBucket, approval, approvalBudget, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { LANDMARK_HALF_LIFE_H } from '../src/uiMemory.ts';
 
 // ─── Y-2 金字塔停止法则 ───
@@ -232,10 +232,14 @@ test('Y-10 令牌桶：容量耗尽拒绝 + 回填恢复 + 桶满不累积', () 
 test('Y-10 集成：grant 消费令牌桶 —— 三次同意后第四次被速率闸门拒绝', () => {
   // 直接执法桶语义与 approval.grant 的耦合（默认桶 10min 周期内 4 次 grant 必然触发）
   resetApproval();
+  // W6R fail-closed：授予须带外码 —— 武装采集 sink（人类读码的视角）
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
   const grants: Array<[string, boolean]> = [];
   for (let i = 0; i < 4; i++) {
     const pa = approval.request(`op ${i}`);
-    grants.push([pa.token, approval.grant(pa.token, true)]);
+    const hit = sink.find(d => d.token === pa.token);
+    grants.push([pa.token, approval.grantDetailed(pa.token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok]);
   }
   // 前三次授予成功，第四次被令牌桶拒绝
   assert.deepEqual(grants.map(g => g[1]), [true, true, true, false]);

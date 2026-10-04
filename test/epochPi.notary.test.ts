@@ -25,6 +25,21 @@ import { doctor } from '../src/qualityDoctor.ts';
 /** 固定时钟（2025-01-01T00:00:00Z —— 锚记录时间戳确定性） */
 const fixedClock = (): number => 1735689600000;
 
+// ─── 事件循环保活（DEBTS D-G1 悬挂收口债）───
+// (c) 段「挂起不答」假 TSA 的等待，其结算依赖 AbortSignal.timeout 的内部定时器
+// （src/notary/rfc3161.ts requestRfc3161Timestamp —— Node 官方文档明示该定时器
+// unref、不保活事件循环；生产宿主恒有 stdio/服务器句柄在场，abort 照常触发）。
+// 裸 node:test 子进程里无其他 ref'd 句柄 ⇒ 事件循环先行排干 ⇒ 根测试收割在途
+// 用例（cancelledByParent："Promise resolution is still pending but the event
+// loop has already resolved"），其后排队用例（Π-4/Π-5）连带未跑。测试侧对策：
+// 等待期间持一枚 ref'd 保活定时器、finally 收口 —— 若产品真挂死，保活到期后
+// 循环照常排干、收割照常发生（防御不失守）。
+/** 持一枚 ref'd 保活定时器；返回收口函数（clearTimeout —— 调用方必须在 finally 里执行） */
+function keepEventLoopAlive(ms: number): () => void {
+  const t = setTimeout(() => { /* 保活哨：正常路径等不到这里触发 */ }, ms);
+  return () => clearTimeout(t);
+}
+
 /** 种子伪随机（仅测试 —— 生产 nonce 走 crypto.randomBytes；两实例同种子 ⇒ 同字节流） */
 function makeRandom(seed: number): (n: number) => Uint8Array {
   let s = seed >>> 0 || 1;
@@ -247,10 +262,19 @@ test('Π-3: 请求 DER 合法（sha256 OID+nonce 可解）/ Content-Type 正确 
       init?.signal?.addEventListener('abort', () => reject(new Error('aborted: tsa timeout')), { once: true });
     });
   }) as unknown as typeof fetch;
-  const c = await notary.anchorOnce({
-    endpoint: 'https://tsa.example/tsr', fetchImpl: fetchHang, timeoutMs: 40,
-    now: fixedClock, random: makeRandom(0x55),
-  });
+  // 收口债 D-G1：本段等待依赖 AbortSignal.timeout(40) 的内部 unref 定时器 ——
+  // 持保活定时器（宽放 1s）防裸测试进程事件循环先行排干；finally 收口，
+  // 断言失败也不残留句柄（见文件头工坊注释）。
+  const releaseLoop = keepEventLoopAlive(1_000);
+  let c: Awaited<ReturnType<typeof notary.anchorOnce>>;
+  try {
+    c = await notary.anchorOnce({
+      endpoint: 'https://tsa.example/tsr', fetchImpl: fetchHang, timeoutMs: 40,
+      now: fixedClock, random: makeRandom(0x55),
+    });
+  } finally {
+    releaseLoop();
+  }
   assert.ok(c);
   assert.equal(c.timestamp.source, 'local', '超时 ⇒ 本地回退');
   assert.match(c.timestamp.note ?? '', /aborted: tsa timeout/, '注记携带超时事实');

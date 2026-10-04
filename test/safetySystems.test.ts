@@ -2,7 +2,7 @@
 // 安全与自愈子系统：一次性审批令牌 / 失败记忆 / 振荡检测 / 风险词闸门。
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { failureMemory } from '../src/failureMemory.ts';
 import { oscillationTracker } from '../src/oscillationTracker.ts';
 import { matchesRiskPatterns, matchesDangerPatterns, parseRiskPatterns } from '../src/riskGate.ts';
@@ -15,13 +15,25 @@ beforeEach(() => {
   resetApproval();
 });
 
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手；
+ *  采集 sink 正是生产中人类读码的视角） */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function grantOob(token: string): boolean {
+  const hit = oobSink.find(d => d.token === token);
+  return approval.grantDetailed(token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok;
+}
+
 // ─── 一次性审批令牌 ───
 
 test('approval: 令牌一次性（用后即焚；J 纪元：须先 grant）', () => {
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('send email to Alice');
   assert.ok(pa.token.startsWith('APR-'));
   assert.equal(approval.validate(pa.token), false, '未授予的令牌不可放行（请求≠同意）');
-  approval.grant(pa.token, true);
+  assert.equal(grantOob(pa.token), true, '携码授予');
   assert.equal(approval.consume(pa.token), true);  // 第一次：有效
   assert.equal(approval.consume(pa.token), false); // 第二次：已焚毁
 });
@@ -39,8 +51,9 @@ test('approval: revoke 立即作废；伪造令牌一律拒绝', () => {
 // 新语义：未生效的尝试不消耗同意，令牌保留可重试；验收通过才焚毁。
 
 test('approval V: 验收失败保留令牌（同一次同意内免二次确认地重试）', () => {
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 发送 to submit the email');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   // 第一次点击落错窗口：世界没有变化 —— 令牌必须还在
   const r1 = approval.attemptFailed(pa.token, 'no-effect');
   assert.equal(r1.valid, true, '未生效的尝试不得消耗用户的同意');
@@ -56,8 +69,9 @@ test('approval V: 验收失败保留令牌（同一次同意内免二次确认�
 });
 
 test('approval V: 重试预算耗尽 ⇒ 焚毁并要求重新审批', () => {
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click Send', { maxAttempts: 2 });
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   assert.equal(approval.attemptFailed(pa.token, 'no-effect').valid, true);
   assert.equal(approval.attemptFailed(pa.token, 'no-effect').valid, true); // 第 2 次 = 上限
   const r3 = approval.attemptFailed(pa.token, 'no-effect');                // 第 3 次：超限
@@ -67,8 +81,9 @@ test('approval V: 重试预算耗尽 ⇒ 焚毁并要求重新审批', () => {
 });
 
 test('approval V: 验收失败续期 TTL，但不可越过生命周期硬顶', () => {
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 支付', { ttlMs: 60_000 }); // 硬顶 = 180s
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   const before = pa.expiresAt;
   approval.attemptFailed(pa.token, 'no-effect');
   assert.ok(pa.expiresAt >= before, '失败重试续期：有效期不缩短');
@@ -94,8 +109,9 @@ test('approval V: TTL / 重试预算可由部署配置注入（缺省 10min × 5
 });
 
 test('approval V: status 暴露剩余重试预算（锚点透明化）', () => {
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('click 发送');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   let st = approval.status(pa.token);
   assert.equal(st.remainingAttempts, 5);
   approval.attemptFailed(pa.token, 'no-effect');

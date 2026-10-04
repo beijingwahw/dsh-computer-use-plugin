@@ -5,7 +5,7 @@
 //      未配置端点时零网络请求直接降级。保留：Token 预算(slice 10) + 失败降级路由。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
-import { toolErr } from '../toolResult.js';
+import { toolErr, toolOk } from '../toolResult.js';
 export function createExtractUiVisionTool(config) {
     return defineTool({
         name: 'extract_ui_vision',
@@ -53,16 +53,12 @@ export function createExtractUiVisionTool(config) {
                     };
                 });
                 // 4. 状态锚点：只回传前 10 个关键元素 —— 返回值也做 Token 预算
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    action: `Extracted ${normalizedElements.length} element(s) via local vision model.`,
-                    state_anchor: {
-                        screen_resolution: `${size.width}x${size.height}`,
-                        extracted_count: normalizedElements.length,
-                        elements: normalizedElements.slice(0, 10),
-                    },
-                    next_step: "Review the extracted elements. If the target is found, use its 'center_normalized' to call 'click_mouse'.",
-                }, null, 2);
+                // W8/B-4：回执走工厂（toolOk —— 本工具历史形状含 action，逐字节同构）
+                return toolOk(`Extracted ${normalizedElements.length} element(s) via local vision model.`, {
+                    screen_resolution: `${size.width}x${size.height}`,
+                    extracted_count: normalizedElements.length,
+                    elements: normalizedElements.slice(0, 10),
+                }, "Review the extracted elements. If the target is found, use its 'center_normalized' to call 'click_mouse'.");
             }
             catch (error) {
                 // 失败路径即降级指南：错误消息里写好 Plan B

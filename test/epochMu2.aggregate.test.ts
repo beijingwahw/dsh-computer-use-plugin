@@ -17,12 +17,19 @@
 //        /aggregate 的 digest/quarantined/method 与 TS 核心 robustMergeDigests
 //        **逐字段等价**（双实现口径的漂移把守）；/health、413/400/405/404 协议
 //        执法；环境不支持子进程/环回监听 ⇒ 诚实 skip。
+//   Μ2-7 聚合端共享密钥认证（W6R-A5）：DSH_FEDERATION_TOKEN 设置 ⇒ /aggregate
+//        强制 HMAC-SHA256 请求签名（时间戳 ±5min 防重放）—— 无签名/坏签名/
+//        过期时间戳/篡改体（签名对原文、发送体被中间人替换）全部 401 且环不动；
+//        客户端 federationSync（authToken 注入 + 真全局 fetch 环回往返）签名
+//        被收 ⇒ 鲁棒臂吃 digests 数组照常掺入（认证是旁路：零配置语义不变）；
+//        open 模式 /health 明示 UNAUTHENTICATED（诚实声明面）。
 // 全程离线（fetch 全假件/仅环回 127.0.0.1）、确定性（钉死字面量摘要 / 注入时钟）、
 // 生产单例 try/finally 复位；Μ 既有测试（epochMu.federation）另行回归保绿。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createHmac } from 'node:crypto';
 
 import { EvidenceLedger } from '../src/kernel/registry.ts';
 import {
@@ -39,6 +46,9 @@ import {
   contributionCap,
   QUARANTINE_VOTES_PER_REGRESSED,
   DEFAULT_CONTRIBUTION_CAP_SHARE,
+  federationAuthHeaders,
+  FEDERATION_AUTH_TIMESTAMP_HEADER,
+  FEDERATION_AUTH_SIGNATURE_HEADER,
   type FederationFetch,
   type EvidenceDigest,
 } from '../src/federation/index.ts';
@@ -397,10 +407,15 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
 
 // ─── Μ2-6：参考聚合端（scripts/federation-server.mjs）── 双实现口径等价性 ───
 
-/** 起参考聚合端（--port 0 ⇒ 随机环回口；8s 监听 + 5s 就绪上界；失败抛错供调用方 skip） */
-async function startReferenceServer(): Promise<{ port: number; child: ChildProcess; stop: () => Promise<void> }> {
+/** 起参考聚合端（--port 0 ⇒ 随机环回口；env 可注入（W6R-A5 认证测试的 token 面）；8s 监听 + 5s 就绪上界；失败抛错供调用方 skip） */
+async function startReferenceServer(
+  env: Record<string, string> = {},
+): Promise<{ port: number; child: ChildProcess; stop: () => Promise<void> }> {
   const script = fileURLToPath(new URL('../scripts/federation-server.mjs', import.meta.url));
-  const child = spawn(process.execPath, [script, '--port', '0'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const child = spawn(process.execPath, [script, '--port', '0'], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: { ...process.env, ...env },
+  });
   const port = await new Promise<number>((resolve, reject) => {
     let buf = '';
     let settledFlag = false;
@@ -534,4 +549,154 @@ test('Μ2-6: 参考聚合端与 TS 核心逐字段等价；协议执法（health
   } finally {
     await srv.stop();
   }
+});
+
+// ─── Μ2-7：聚合端共享密钥认证（W6R-A5）── HMAC-SHA256 + 时间戳防重放 ───
+
+test('Μ2-7: token 模式强制验签（无签/坏签/过期/篡改体 ⇒ 401 且环不动）；客户端签名往返 200；open 模式明示未认证', async t => {
+  const SECRET = 'w6r-a5-test-shared-secret';
+  let srv: Awaited<ReturnType<typeof startReferenceServer>>;
+  try {
+    srv = await startReferenceServer({ DSH_FEDERATION_TOKEN: SECRET });
+  } catch (e) {
+    return t.skip(`环境不支持子进程/环回监听：认证测试诚实跳过（${(e as Error).message}）`);
+  }
+  const base = `http://127.0.0.1:${srv.port}`;
+  const health = async (): Promise<{ authMode: string; authNotice: string; buffered: number }> =>
+    (await (await fetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).json()) as never;
+  try {
+    // (a) /health 明示 token 模式（认证已上膛 —— 不假装 open）
+    const h0 = await health();
+    assert.equal(h0.authMode, 'token', 'health 报 token 模式');
+    assert.ok(h0.authNotice.includes('HMAC'), `认证指引在场（${h0.authNotice}）`);
+    assert.equal(h0.buffered, 0, '初起缓冲空');
+
+    // (b) 无签名 ⇒ 401 missing-signature-headers（环不动 —— 拒绝在解体之前）
+    const rNoSig = await fetch(`${base}/aggregate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(digestOf('fed.auth', uniformBins(10), 10, 1)), signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(rNoSig.status, 401, '无签名 ⇒ 401');
+    const jNoSig = (await rNoSig.json()) as { reason: string };
+    assert.equal(jNoSig.reason, 'missing-signature-headers', 'reason = 缺签名头');
+    assert.equal((await health()).buffered, 0, '401 不入环');
+
+    // (c) 坏签名（异密钥）⇒ 401 signature-mismatch
+    const body1 = JSON.stringify(digestOf('fed.auth', uniformBins(10), 10, 1));
+    const badSig = federationAuthHeaders(body1, 'wrong-secret', Date.now());
+    const rBadSig = await fetch(`${base}/aggregate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...badSig },
+      body: body1, signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(rBadSig.status, 401, '异密钥签名 ⇒ 401');
+    assert.equal(((await rBadSig.json()) as { reason: string }).reason, 'signature-mismatch', 'reason = 签名失配');
+
+    // (d) 过期时间戳（签名对 ts 自身有效，但 ts 超 ±5min 窗口）⇒ 401 stale-timestamp（防重放）
+    const staleSig = federationAuthHeaders(body1, SECRET, Date.now() - 10 * 60_000);
+    const rStale = await fetch(`${base}/aggregate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...staleSig },
+      body: body1, signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(rStale.status, 401, '过期时间戳 ⇒ 401（重放窗口外）');
+    assert.equal(((await rStale.json()) as { reason: string }).reason, 'stale-timestamp', 'reason = 时间戳过期');
+
+    // (e) 篡改体（中间人换体）：签名对原文、发送体不同 ⇒ 401（摘要替换攻击的正面粉碎）
+    const tampered = JSON.stringify(digestOf('fed.auth', uniformBins(999), 999, 1));
+    const sigForOriginal = federationAuthHeaders(body1, SECRET, Date.now());
+    const rTamper = await fetch(`${base}/aggregate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...sigForOriginal },
+      body: tampered, signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(rTamper.status, 401, '换体签名失配 ⇒ 401（毒摘要进不了环）');
+    assert.equal((await health()).buffered, 0, '全部 401 后环仍空');
+
+    // (f) 客户端端到端：federationSync（authToken 注入 + 真全局 fetch 环回）—— 签名被收、
+    //     响应 digests 回环、鲁棒臂掺入照常（认证是旁路：合法客户端语义零变化）
+    resetFederationRuntime();
+    try {
+      const K = 'fed.authsync';
+      const ledger = new EvidenceLedger();
+      for (let i = 0; i < 10; i++) ledger.record({ key: K, success: i % 2 === 0, margin: 0.1 * i - 0.5, ts: i });
+      const res = federationSync({
+        endpoint: `${base}/aggregate`,
+        ledger,
+        maxRemoteShare: 0.5,
+        robust: true,
+        authToken: SECRET,
+      });
+      assert.equal(res.network, 'fired', '签名请求已发');
+      await res.settled;
+      assert.equal(res.applied !== null, true, '验签通过 ⇒ 响应被消费（未掺入才是异常）');
+      assert.equal(res.applied!.applied, 5, '环内唯一源 = 自己的摘要 ⇒ 鲁棒 2 源均值、trust=1 ⇒ quota 5');
+      assert.equal(res.robust!.method, 'mean', 'local + 环内 1 份（自己）⇒ 2 源均值');
+      assert.equal(res.robust!.mergedFrom, 2, 'mergedFrom = 2');
+      assert.equal(ledger.stats(K).n, 15, '账本 10 → 15');
+      assert.equal((await health()).buffered, 1, '合法签名 ⇒ 入环');
+    } finally {
+      resetFederationRuntime();
+    }
+
+    // (g) open 模式（env 未设置）：零配置语义不变 + /health 明示 UNAUTHENTICATED（诚实声明）
+    let open: Awaited<ReturnType<typeof startReferenceServer>>;
+    try {
+      open = await startReferenceServer(); // 不注入 token ⇒ open
+    } catch (e) {
+      return t.skip(`open 参考端未就绪：诚实跳过（${(e as Error).message}）`);
+    }
+    try {
+      const oh = await (await fetch(`http://127.0.0.1:${open.port}/health`, { signal: AbortSignal.timeout(2_000) })).json() as
+        { authMode: string; authNotice: string };
+      assert.equal(oh.authMode, 'open', 'open 模式照旧可用');
+      assert.ok(oh.authNotice.includes('UNAUTHENTICATED'), `未认证明示在场（${oh.authNotice}）`);
+      assert.ok(oh.authNotice.includes('DSH_FEDERATION_TOKEN'), '指路 env 名');
+      const rOpen = await fetch(`http://127.0.0.1:${open.port}/aggregate`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: body1, signal: AbortSignal.timeout(5_000),
+      });
+      assert.equal(rOpen.status, 200, 'open 端点无签名照收（零配置环回现状保持）');
+    } finally {
+      await open.stop();
+    }
+  } finally {
+    await srv.stop();
+  }
+});
+
+// ─── Μ2-8：客户端签名头权威面（federationAuthHeaders）── 与服务端同协议的字面量契约 ───
+
+test('Μ2-8: federationAuthHeaders 纯函数 —— 空 token 零头/双头字面量/覆盖正文/密钥不入头', () => {
+  const body = JSON.stringify({ v: 1, mintedAt: 1, epsilon: 1, keys: [] });
+  // (a) 消毒臂：空/非字符串 token ⇒ 零头（open 客户端不惊扰 open 服务端）
+  assert.deepEqual(federationAuthHeaders(body, '', 1000), {}, '空串 ⇒ 零头');
+  assert.deepEqual(federationAuthHeaders(body, null, 1000), {}, 'null ⇒ 零头');
+  assert.deepEqual(federationAuthHeaders(body, undefined, 1000), {}, 'undefined ⇒ 零头');
+  assert.deepEqual(federationAuthHeaders(body, 42 as unknown, 1000), {}, '非字符串 ⇒ 零头（防御式消毒）');
+
+  // (b) 双头字面量：ts = 注入时钟（epoch ms）；sig = HMAC-SHA256(`${ts}.${body}`, token) hex
+  const h = federationAuthHeaders(body, 'k'.repeat(32), 42_000);
+  assert.equal(h[FEDERATION_AUTH_TIMESTAMP_HEADER], '42000', '时间戳头 = 注入时钟');
+  const expected = createHmac('sha256', 'k'.repeat(32)).update(`42000.${body}`).digest('hex');
+  assert.equal(h[FEDERATION_AUTH_SIGNATURE_HEADER], expected, '签名头 = 权威公式重算一致（双端口径）');
+  assert.ok(!JSON.stringify(h).includes('k'.repeat(32)), '密钥绝不进头值（密钥卫生）');
+
+  // (c) 正文覆盖：body 一字之差 / 异密钥 / 异时间戳 ⇒ 签名全部失配
+  assert.notEqual(
+    federationAuthHeaders(body + ' ', 'k'.repeat(32), 42_000)[FEDERATION_AUTH_SIGNATURE_HEADER],
+    expected, '正文变 ⇒ 签名变（中间人换体被拒）',
+  );
+  assert.notEqual(
+    federationAuthHeaders(body, 'j'.repeat(32), 42_000)[FEDERATION_AUTH_SIGNATURE_HEADER],
+    expected, '密钥变 ⇒ 签名变',
+  );
+  assert.notEqual(
+    federationAuthHeaders(body, 'k'.repeat(32), 42_001)[FEDERATION_AUTH_SIGNATURE_HEADER],
+    expected, '时间戳变 ⇒ 签名变（ts 在 MAC 输入里 —— 防重放的时间面）',
+  );
+
+  // (d) 容差常量与协议字面量锁定（服务端同值 —— 双实现漂移的测试把守）
+  assert.equal(FEDERATION_AUTH_TIMESTAMP_HEADER, 'x-dsh-fed-timestamp', '时间戳头名锁定');
+  assert.equal(FEDERATION_AUTH_SIGNATURE_HEADER, 'x-dsh-fed-signature', '签名头名锁定');
 });

@@ -1,6 +1,6 @@
 // test/realMachineWin.bench.ts
 // Windows 真机基准（O 纪元 #1）—— realMachine.bench.ts 的 Windows 孪生：
-//   感知 = D-5 服务真截屏（mmap-file）→ tesseract.js OCR（离线仓根语言包）
+//   感知 = D-5 服务真截屏（mmap-file）→ tesseract.js OCR（离线 fixtures 语言包）
 //   执行 = D-5 服务 /v1/click = 真 pyautogui（真鼠标）→ tkinter 回调真实触发
 //   裁决 = 应用状态文件（世界真相，非脚本裁决）
 // 实验（与 Linux 真机/stub 基准一一对应）：

@@ -1,4 +1,5 @@
 // src/tools/steerTools.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：steer 工具族 —— steer(k)/what_if/match_skill 三工具共享岔路卡/反事实/技能库的同一路由方言，拆分将复制消费面胶水。
 // W3-5（H2 活意图与漂移检测）：意图漂移的结构化单字符应答工具。
 //
 // 问题：自主环长跑时世界在变，goal 锚点不动 —— agent 可能在错误的方向上
@@ -654,3 +655,11 @@ export function createSteerAnswerTool(session) {
         },
     });
 }
+// ─── W8-B4（tools↔autonomy 破环）：steer 会话工厂的装配注册 ───
+// autoPilot 不再 import 本文件（autonomy 对 tools 零 import —— 包级单向），其
+// driveLoop 改经晚绑定注册器（bindSteerSessionFactory）消费会话工厂。此处装载
+// 即注册：任何导入本模块的进程（tools 桶 / 直接导入的测试）都把生产工厂喂进
+// 闭环 —— 行为与破环前的直接调用逐字节同源（同一 createSteerSession 真身）。
+// 注册方向的依赖边 tools → autonomy 为单向合法边（autonomy 不回指 tools）。
+import { bindSteerSessionFactory } from '../autonomy/autoPilot.js';
+bindSteerSessionFactory(createSteerSession);

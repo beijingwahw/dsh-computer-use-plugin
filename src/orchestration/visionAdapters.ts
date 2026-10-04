@@ -233,6 +233,41 @@ export interface SemanticAdapterOpts {
   somMarkers?: () => Promise<readonly SomMarkerSeed[]>;
   /** W5-4: 叠加事件遥测回调（每次 ground 至多一条；回调抛错被吞 —— 遥测面绝不毒化主管线） */
   onSomEvent?: (ev: SomPipelineEvent) => void;
+  /**
+   * W8-B2（verifyGate 预算消费面终态接线）：会话 id 供给 —— 复核预算作用域键的
+   * 原料。每次 ground 现取（适配器跨会话长存，键须随调用语境走）；供给在场且
+   * 非空 ⇒ groundElements 传 verifyTaskId: `session:<id>` —— 键的铸造律与宿主
+   * src/index.ts 用户回合边界的 resetVerifyGateBudget(`session:${Session.id}`)
+   * 同源同形（`session:` 前缀 + dsh-session Session.id 原值），use/reset 同键
+   * 闭环：会话内多回合共享同一份 8 次复核预算（单任务防雪崩），跨会话互不侵占
+   * （甲会话的回合清零不再抹掉乙会话在飞任务的复核额度）。
+   * 供给缺席/返回空/抛错 ⇒ 不传键 ⇒ 共用 grounding 模块缺省账本（历史行为，
+   * 逐字节一致 —— 注入面零行为红线）。防御式：供给故障绝不毒化 ground 主管线。
+   */
+  sessionId?: () => string | undefined;
+}
+
+// ─── W8-C1（会话键供电）：模块级会话 id 武装（setAccessibilityProvider 同款先例） ───
+
+/**
+ * W8-C1：进程级会话 id 供给槽 —— 宿主（src/index.ts 的 session/event 面）把
+ * 「当前会话 id」的现取闭包武装进来；适配器自铸点（orchestration/index.ts 的
+ * createSemanticFromVlm 调用）无需逐处传 sessionId 即得同源键。供给是闭包
+ * （每次 ground 现取 —— 适配器跨会话长存，键须随调用语境走，与
+ * SemanticAdapterOpts.sessionId 同律）。裁决序：显式入参 opts.sessionId >
+ * 本模块级武装 > 缺席（⇒ 缺省账本旧路径）。武装 null / 未武装 / 供给故障 ⇒
+ * 诚实缺席，绝不毒化 ground 主管线（防御式）。
+ */
+let armedSessionId: (() => string | undefined) | null = null;
+
+/**
+ * 武装/卸下进程级会话 id 供给（宿主组合根专用面）：
+ *  · setVisionSessionIdProvider(() => 'sess-42') —— 武装（供给现取）；
+ *  · setVisionSessionIdProvider(null) —— 卸下（供给缺席 ⇒ 缺省账本）。
+ * 供给闭包抛错/返回空串 ⇒ 键缺席（ground 内部吞掉，见 sessionKey 铸造处）。
+ */
+export function setVisionSessionIdProvider(fn: (() => string | undefined) | null | undefined): void {
+  armedSessionId = typeof fn === 'function' ? fn : null;
 }
 
 /**
@@ -379,8 +414,24 @@ export function createSemanticFromVlm(
       const groundBuffer = await applySparseSom(buffer, size, region, question);
       // 云脑接地：坐标语义 = width×height 屏幕像素系（groundElements 内部编码+规整+NMS）
       const { groundElements } = await import('../vlm/grounding');
+      // W8-B2：复核预算作用域键 —— 会话供给在场才铸键（`session:<id>` 与宿主回合
+      // 边界的 resetVerifyGateBudget 同键闭环，见 SemanticAdapterOpts.sessionId）；
+      // 缺席/脏值/供给抛错 ⇒ 键缺席 ⇒ 缺省账本（逐字节旧路径）。
+      // W8-C1（会话键供电）：裁决序 = 显式入参 opts.sessionId > 模块级武装
+      //（setVisionSessionIdProvider —— 宿主 session/event 面武装的当前会话现取
+      // 闭包，本适配器自铸点无需逐处传键）> 缺席。
+      const sessionKey = ((): string | undefined => {
+        try {
+          const supply = typeof opts.sessionId === 'function' ? opts.sessionId : armedSessionId;
+          const id = typeof supply === 'function' ? supply() : undefined;
+          return typeof id === 'string' && id.trim() !== '' ? `session:${id}` : undefined;
+        } catch {
+          return undefined; // 供给故障 ⇒ 诚实回落缺省账本，绝不毒化主管线
+        }
+      })();
       const result = await groundElements(groundBuffer, {
         width: size.width, height: size.height, question,
+        ...(sessionKey ? { verifyTaskId: sessionKey } : {}),
         ...(opts.client ? { client: opts.client } : {}),
         // W2-0（C 接线）：Zoom 复核端口（W1-8 P3）—— grounding.verifyZoom 内核键
         //（宿主以 config.vlmZoomVerify 铸入，缺省 1=开）控制；显式 verifyClient 优先，

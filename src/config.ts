@@ -103,6 +103,29 @@ export interface Config {
   approvalTokenTtlMs: number;
   /** 单令牌物理尝试次数上限：验收失败自动重试免二次确认，超限焚毁需重新审批 */
   approvalMaxAttempts: number;
+  // ─── W6R（安全收口）：危险令牌路径的验证旁路双重逃生门 ───
+  /**
+   * 【风险开关，缺省 false】允许 dangerous 分级（审批令牌 / beginAttempt-consume 路径）
+   * 的动作在「效果验证不可用 / 新鲜度探针缺席 / 金丝雀探针缺席」时仍然派发。
+   *
+   * 缺省 false 时的执法（fail-closed）：
+   *   · verifyActions=false 单独关闭 ⇒ dangerous 令牌动作在派发前被拒
+   *     （reason=effect-verification-required）—— 效果验证是 V 纪元验收式消费的
+   *     依据，不允许被总开关静默旁路成「令牌派发即焚」；
+   *   · 危险令牌动作派发前的接地新鲜度探针缺席/失败 ⇒ 拒绝派发
+   *     （reason=freshness-probe-unavailable）；
+   *   · 金丝雀试演在携带审批令牌的调用上探针缺席/失败 ⇒ 拦截该调用。
+   *
+   * true（显式逃生门）时的回退：上述三处恢复 degraded 放行 / 旧方言；且与
+   * verifyActions=false **同时**配置时，危险动作跳过效果验证（acceptance 回到
+   * unverified-dispatch-consumed 旧方言）。注意：单独 allowUnverifiedDangerous=true
+   * 而 verifyActions=true 时效果验证照常执行（双钥匙语义 —— 绕过验证必须两把
+   * 钥匙同时显式插入）；新鲜度 drifted（主动漂移证据）在任何配置下都照常拦截。
+   *
+   * 风险声明：true 意味着不可逆动作可能在未经验证 / 未探针的世界状态下执行，
+   * 仅供明确接受该风险的部署（离线演示、受控实验、无截图能力的降级环境）。
+   */
+  allowUnverifiedDangerous: boolean;
   // ─── 第七轮创新：工程卓越（可观测/可审计/可恢复） ───
   /** 启用遥测：per-tool 成败/noop 率/延迟分位 + 记忆命中率 + get_metrics/self_diagnose 工具 */
   enableTelemetry: boolean;
@@ -177,7 +200,16 @@ export interface Config {
   /** 进化记忆持久化路径（doctor-memory.json；跨会话的教训与基线） */
   doctorMemoryPath: string;
   // ─── 纪元 Ω（GLM-5.3-Flash 云脑皮层）───
-  /** GLM 视觉大模型 API Key（GLM_API_KEY/ZHIPUAI_API_KEY/ZAI_API_KEY 之上的配置层优先档）；空 = 走环境变量 */
+  /**
+   * GLM 视觉大模型 API Key（GLM_API_KEY/ZHIPUAI_API_KEY/ZAI_API_KEY 之上的配置层优先档）；空 = 走环境变量。
+   *
+   * W8-A2（密钥落盘边界·如实界定）：本字段所在配置文件的落盘由 cordis 宿主完成
+   * （宿主自有配置档），插件只读、绝不自写 —— 宿主侧档位权限不在插件管辖面。
+   * 插件侧唯一的明文密钥落盘写点是 vlm-connection.json（ConnectionStore.save，
+   * src/vlm/connection.ts），已由共享模块 src/filePerms.ts 加固（写时收紧 +
+   * 失败 insecure-perms 诚实降级 + 读时顺手收紧）；展示面统一走 maskKey 打码
+   * （src/vlm/connection.ts —— 本模块无自造打码，不重复造轮子）。
+   */
   vlmApiKey: string;
   /** GLM OpenAI 兼容基址；默认智谱开放平台 */
   vlmBaseUrl: string;
@@ -399,6 +431,8 @@ export const Config: Schema<Config> = Schema.object({
   dangerPatterns: Schema.string().default('send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,confirm,确认订单,format,格式化,erase,抹掉,uninstall,卸载,reset,重置,清空,withdraw,提现,transfer,转账').description('Comma-separated irreversible-action keywords triggering approval'),
   approvalTokenTtlMs: Schema.number().default(600000).description('Approval-token TTL (ms). ONE user consent covers the whole task retry window; each failed attempt re-arms it (capped at 3x TTL from mint)'),
   approvalMaxAttempts: Schema.number().default(5).description('Max physical attempts per approval token: failed (unverified) clicks retry under the same consent without re-asking; beyond this a fresh approval is required'),
+  // ─── W6R（安全收口）：危险令牌路径的验证旁路双重逃生门 ───
+  allowUnverifiedDangerous: Schema.boolean().default(false).description('DANGEROUS (risk flag, default false): allow dangerous (approval-token / beginAttempt-consume) actions to dispatch when effect verification is unavailable (verifyActions=false), the grounding freshness probe is absent/failed, or the canary probe is absent/failed on a token-bearing call. false (default) = fail-closed at all three points. true = explicit escape hatch restoring degraded pass-through / legacy unverified-dispatch-consumed dialect (verification bypass additionally requires verifyActions=false — two explicit keys). Irreversible actions may then execute unverified — only for deployments that explicitly accept that risk.'),
   enableTelemetry: Schema.boolean().default(true).description('Telemetry: per-tool success/no-op rates, latency percentiles, memory hit rates'),
   checkpointPath: Schema.string().default('').description('Cognitive-state checkpoint JSON (atomic). Auto-restore on start, auto-save on unload. Empty = disabled'),
   // ─── 创世纪（B-5~B-8） ───
@@ -439,6 +473,8 @@ export const Config: Schema<Config> = Schema.object({
   doctorStrict: Schema.boolean().default(false).description('Strict mode: genesis violations surface loudly (CLI exit code 1); never throws'),
   doctorMemoryPath: Schema.string().default('doctor-memory.json').description('Evolution-memory file for lessons and baselines (developer asset, not runtime cognition)'),
   // ─── 纪元 Ω（GLM-5.3-Flash 云脑皮层） ───
+  // W8-A2：配置档（含本字段）落盘归 cordis 宿主管辖，插件只读；插件侧密钥落盘唯一写点
+  // vlm-connection.json 已走 src/filePerms.ts 加固 —— 详见上方 interface 注释的边界界定
   vlmApiKey: Schema.string().default('').description('GLM vision-model API key; empty = fall back to env (GLM_API_KEY/ZHIPUAI_API_KEY/ZAI_API_KEY). Takes priority over env when set'),
   vlmBaseUrl: Schema.string().default('https://open.bigmodel.cn/api/paas/v4').description('GLM OpenAI-compatible base URL'),
   vlmModel: Schema.string().default('glm-5.3-flash').description('GLM vision model name'),

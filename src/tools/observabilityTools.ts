@@ -15,7 +15,7 @@ import { failureMemory } from '../failureMemory';
 import { saveCheckpoint } from '../checkpoint';
 import { system } from '../system';
 import { dhash } from '../perceptualHash';
-import { diagnose, bayesianBelief } from '../diagnosis';
+import { diagnose, bayesianBelief, LOOP_ENTROPY_MIN_ACTIONS, LOOP_PHRASE_MIN_ACTIONS } from '../diagnosis';
 import { fitReactPhases } from '../phaseHmm';
 import { reactTraceProperties, mineTraceProperties } from '../ltlf';
 import { Telemetry } from '../telemetry';
@@ -23,6 +23,11 @@ import { organCensus } from '../organCensus';
 // 纪元 Ι（自我模型）：经验胜任度后验单例 —— get_metrics 的自省面（路径显式指到
 // 桶文件，目录导入在 Node strip 装载器是 ERR_UNSUPPORTED_DIR_IMPORT，Λ-4 同律）。
 import { selfModel } from '../selfmodel/index';
+
+// W6-2（doctor smell.magic-number 清偿）：高 noop 洞见判据（数值逐位不变）
+// —— noop 率 ≥40% 且 ≥5 次调用的工具进入会诊信号（CognitionSignals 文档同源）。
+const NOOP_INSIGHT_RATE_PCT = 40;
+const NOOP_INSIGHT_MIN_CALLS = 5;
 
 export function createGetMetricsTool() {
   return defineTool({
@@ -50,12 +55,13 @@ export function createGetMetricsTool() {
           'follow a GPD shape — treat any p99.9 extrapolation skeptically until more samples arrive.');
       }
       // F-4 行为复杂度洞见：动作流近周期（屏幕可能不变而动作在转 —— 行为侧卡死签名）。
-      // 判据双臂：归一化熵率 ≤0.3（渐近域）或 短语数 ≤6 且样本 ≥20（短序列的
+      // 判据双臂：归一化熵率 ≤0.3（渐近域）或 短语数 ≤6 且样本 ≥LOOP_PHRASE_MIN_ACTIONS（短序列的
       // 倍增签名 —— 归一化在小 n 时通胀，短语绝对数不受此影响）
+      // W6-2：阈值具名自 diagnosis（与 isLoop 同律 —— 一处立法），数值逐位不变。
       const behav = journal.actionComplexity();
       const nearPeriodic =
-        (behav.normalized !== null && behav.normalized <= 0.3 && behav.length >= 24) ||
-        (behav.phrases <= 6 && behav.length >= 20);
+        (behav.normalized !== null && behav.normalized <= 0.3 && behav.length >= LOOP_ENTROPY_MIN_ACTIONS) ||
+        (behav.phrases <= 6 && behav.length >= LOOP_PHRASE_MIN_ACTIONS);
       if (nearPeriodic) {
         insights.push(`LOW BEHAVIORAL COMPLEXITY (${behav.phrases} phrases / ${behav.length} actions, ` +
           `entropy-rate ${behav.normalized}): your action stream is near-periodic — you are probably spinning. ` +
@@ -81,8 +87,9 @@ export function createGetMetricsTool() {
           'is MORE likely to fail too. Do not blind-retry: switch modality (press_hotkey), zoom_inspect, or recall_ui immediately.');
       }
       // H-4 联合诊断皮层：多引擎信号会诊（症候群 > 孤立异常 —— 规则可审计）
+      // W6-2：noop 洞见判据具名（CognitionSignals.highNoopTools 文档同源：≥40% 且 ≥5 调用）
       const highNoopTools = telemetry.snapshot().tools
-        .filter(t => t.noop_rate !== null && t.noop_rate >= 40 && t.calls >= 5)
+        .filter(t => t.noop_rate !== null && t.noop_rate >= NOOP_INSIGHT_RATE_PCT && t.calls >= NOOP_INSIGHT_MIN_CALLS)
         .map(t => t.tool);
       const dx = diagnose({
         regimeShiftTools: regimeShifts.filter(r => r.direction === 'up').map(r => r.tool),
@@ -100,7 +107,7 @@ export function createGetMetricsTool() {
         shifted: regimeShifts.length > 0,
         hurstHigh: H === null ? null : H > 0.6,
         loop: !!(behav && behav.normalized !== null &&
-          ((behav.normalized <= 0.3 && behav.length >= 24) || (behav.phrases <= 6 && behav.length >= 20))),
+          ((behav.normalized <= 0.3 && behav.length >= LOOP_ENTROPY_MIN_ACTIONS) || (behav.phrases <= 6 && behav.length >= LOOP_PHRASE_MIN_ACTIONS))),
         heavyTail: !!(tail && tail.xi >= 0.25),
         highNoop: highNoopTools.length > 0,
       });

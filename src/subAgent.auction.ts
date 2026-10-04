@@ -1,0 +1,180 @@
+// src/subAgent.auction.ts
+// W9-3（D-F4 拆分·拍卖分区）：自 subAgent.ts 低风险提取 —— W4-7（G5）步数拍卖
+// 市场（纯整数最大余数分配/边际进展评分/出价与轮账契约）。逐字节搬运（零逻辑
+// 变更）；subAgent.ts 原位再导出 —— 导入面不变（消费方零改动）。
+// W4-7（G5）：经验晶体收缩率只读消费 —— swarm.ts 是 W4-2 领地，本模块不写它，
+// 仅 import 其导出的纯函数 shrinkRate（结构化端口/只读消费律）。场景收敛先验的
+// 数学因此与晶体 counterfactual 单源同构，无本地漂移副本。
+import { shrinkRate } from './swarm';
+
+// ─── W4-7（G5）：步数拍卖市场 —— 全局步数池 + 每 K 步重拍卖 ───
+//
+// 哲学：maxSteps 出生即定是「计划经济」；拍卖市场让步数预算随边际进展流动 ——
+// 收敛快的场景多买步，收敛慢的场景省步数。三条铁律：
+//   * 确定性：分配走纯整数最大余数法（bids×1000 成整数），无 RNG、无时钟、
+//     无 Map 迭代序依赖 —— 同输入恒同输出（可重放、可审计、离线可测）。
+//   * 饿死防护：每代理每轮至少 1 步保底（除非已退场）；连续 M 轮低进展者
+//     降级为「提交部分发现优雅退场」（现有 report 通道 + retire 释放容量）。
+//   * 防御式绝不抛：端口炸了按零证据处理，拍卖炸了保留既有配额下轮重试。
+// 兼容律：拍卖默认关闭 —— 关闭时 chargeStep/spawn/report 走原路径逐字节一致
+// （现有 subAgent 测试零回归）；开启时 maxSteps 语义变为「共享池上限」并在
+// 拍卖账本（报告环）genesis 条目中显式说明。
+
+/** W4-7（G5）：重拍卖周期（每 K 个扣费动作步触发一次拍卖） */
+export const AUCTION_EPOCH_K = 10;
+/** W4-7（G5）：连续低进展降级阈值（连续 M 轮收缩先验 < 舰队基率 ⇒ 优雅退场） */
+export const AUCTION_DEMOTE_ROUNDS = 3;
+/** W4-7（G5）：拍卖账本（报告环）容量 —— 有界防漂移 */
+export const AUCTION_LEDGER_MAX = 32;
+/** W4-7（G5）：零证据时的舰队基率缺省（与晶体 counterfactual 的 0.5 同律） */
+export const AUCTION_DEFAULT_GLOBAL_RATE = 0.5;
+
+/** W4-7（G5）：代理场景收敛证据（成功/尝试计数 —— 晶体 successes/attempts 的同构面） */
+export interface ConvergenceEvidence {
+  successes: number;
+  attempts: number;
+}
+
+/**
+ * W4-7（G5）：场景收敛证据端口 —— 注入以便离线。
+ * 生产接线：从经验晶体按代理出生场景指纹聚合 (successes, attempts)；
+ * 端口缺席 / evidence 缺席 / 抛异常 ⇒ 零证据 —— 先验回退全局基率（诚实降级，
+ * 全员均匀分配，绝不猜）。协议本身与证据来源完全解耦（测试注入确定性 fixture）。
+ */
+export interface StepAuctionPort {
+  /** 每代理场景收敛证据；null/undefined/抛异常 = 零证据 */
+  evidence?(agentId: string): ConvergenceEvidence | null;
+}
+
+/** W4-7（G5）：拍卖开启选项（缺省 = 名册 Σ maxSteps 的推导池 + 零证据端口） */
+export interface StepAuctionOptions {
+  /** 全局池总预算（正有限数；缺省 = 各代理 maxSteps 之和 —— 总预算与现状等价） */
+  budget?: number;
+  /** 场景收敛证据端口（缺省零证据 ⇒ 均匀分配） */
+  port?: StepAuctionPort;
+}
+
+/** W4-7（G5）：单代理拍卖账目（出价 + 分得配额） */
+export interface AuctionBid {
+  agentId: string;
+  /** 场景收敛先验（shrinkRate 收缩成功率；零证据 = 舰队基率） */
+  prior: number;
+  /** 自报未完成度 0~1（缺省 1 = 全然未完成） */
+  incompleteness: number;
+  /** 边际进展分 = 先验 × 未完成度（竞标出价） */
+  bid: number;
+  /** 本轮分得配额（步） */
+  quota: number;
+  /** 连续低进展轮数（审计面；未连败缺席或 0） */
+  streak?: number;
+  /** 本轮被降级退场（连续 M 轮低进展 ⇒ 部分发现优雅退出） */
+  demoted?: boolean;
+}
+
+/** W4-7（G5）：一次拍卖的账面（报告环的单元 —— 账面透明律） */
+export interface AuctionRound {
+  /** 拍卖轮次（0 = genesis 开启记账；≥1 = 实际拍卖） */
+  round: number;
+  /** 拍卖时全局已扣费动作步数 */
+  atStep: number;
+  /** 各代理账目（名册序；降级者 quota=0 且 demoted=true） */
+  agents: AuctionBid[];
+  /** 拍卖后池余（步） */
+  poolRemaining: number;
+  /** 本轮分配总额（≤ K，≤ 池余） */
+  quotaTotal: number;
+  note?: string;
+}
+
+/** W4-7（G5）：拍卖市场状态视图（工具面/自省消费） */
+export interface AuctionStatus {
+  enabled: boolean;
+  /** 外注总预算（null = 名册 endowment 推导） */
+  budget: number | null;
+  poolRemaining: number;
+  poolCharged: number;
+  k: number;
+  demoteRounds: number;
+  /** 当前轮内已走步数（0..K） */
+  epochStep: number;
+  activeAgents: number;
+  /** maxSteps 语义说明（开启 = 池上限；关闭 = 各代理独立预算） */
+  note: string;
+}
+
+/** W4-7（G5）：三位小数舍入（先验/出价的账面精度 —— 与 shrinkRate 同律） */
+export const r3 = (x: number): number => Math.round(x * 1000) / 1000; // W9-3：协调器同律消费，升导出
+
+/**
+ * W4-7（G5）：边际进展分（纯函数，确定性）。
+ * bid = 场景收敛先验 × 自报未完成度：
+ *   * 先验 = shrinkRate(successes, attempts, globalRate) —— 晶体数学只读消费
+ *     （经验贝叶斯收缩：稀疏证据向舰队基率回撤，「2 次尝试 100% 成功」不是 1.0）；
+ *   * 零证据（attempts ≤ 0 / 缺席）⇒ 先验 = 舰队基率（无辜推定，均匀入场）；
+ *   * 未完成度钳制 [0,1]，非法值按 1（全然未完成）处理；基率非法回退 0.5。
+ * 语义：先验高（场景在收敛）× 未完成度高（多做一步的边际价值大）⇒ 值得多买步。
+ */
+export function marginalProgressScore(
+  evidence: ConvergenceEvidence | null | undefined,
+  incompleteness: number,
+  globalRate: number,
+): number {
+  const inc = typeof incompleteness === 'number' && Number.isFinite(incompleteness)
+    ? Math.max(0, Math.min(1, incompleteness)) : 1;
+  const g = typeof globalRate === 'number' && Number.isFinite(globalRate)
+    ? Math.max(0, Math.min(1, globalRate)) : AUCTION_DEFAULT_GLOBAL_RATE;
+  const attempts = evidence && Number.isFinite(evidence.attempts) ? Math.floor(evidence.attempts) : 0;
+  if (attempts <= 0) return r3(g * inc); // 零证据 ⇒ 先验回退基率（诚实降级）
+  const successes = Math.max(0, Math.min(attempts,
+    evidence && Number.isFinite(evidence.successes) ? Math.floor(evidence.successes) : 0));
+  return r3(shrinkRate(successes, attempts, g) * inc);
+}
+
+/**
+ * W4-7（G5）：配额分配（纯函数，确定性整数算法 —— 拍卖的心脏）。
+ * 输入出价数组（下标即代理序）与总额 T，输出各代理配额：
+ *   ① 饿死防护：T ≥ n 时每代理保底 1 步；T < n 时按代理序保底前 T 个（诚实降级）；
+ *   ② 剩余按出价比例分配：份额 = bid_i·rem/Σbid。整数律：bids×1000 成整数后
+ *     分子/分母全整数 —— floor 与小数部分（同分母的余数）可精确比较，零 FP 噪声；
+ *   ③ 最大余数法派发零头：小数部分大者先得，平手按代理序（下标升序）；
+ *   ④ 全零出价 ⇒ 均分（floor + 零头按代理序）—— 零证据市场的缺省公平。
+ */
+export function allocateQuotas(bids: number[], total: number): number[] {
+  const n = bids.length;
+  if (n === 0) return [];
+  const T = typeof total === 'number' && Number.isFinite(total) ? Math.max(0, Math.floor(total)) : 0;
+  const out = new Array<number>(n).fill(0);
+  if (T === 0) return out;
+  if (T < n) {
+    for (let i = 0; i < T; i++) out[i] = 1; // 池不足以全员保底：按代理序保底前 T 个
+    return out;
+  }
+  for (let i = 0; i < n; i++) out[i] = 1; // 饿死防护：每代理每轮至少 1 步
+  const rem = T - n;
+  if (rem === 0) return out;
+  const mBids = bids.map(b => Math.max(0, Math.round((typeof b === 'number' && Number.isFinite(b) ? b : 0) * 1000)));
+  const B = mBids.reduce((s, m) => s + m, 0);
+  if (B <= 0) {
+    // 全零出价 ⇒ 均分（floor + 零头按代理序 —— 平手按代理序的缺省体现）
+    const base = Math.floor(rem / n), extra = rem % n;
+    for (let i = 0; i < n; i++) out[i] += base + (i < extra ? 1 : 0);
+    return out;
+  }
+  const floors: number[] = [];
+  const fracNums: number[] = []; // 小数部分 × B（整数表示 —— 同分母可精确比较）
+  let allocated = 0;
+  for (let i = 0; i < n; i++) {
+    const num = mBids[i] * rem; // 份额分子（整数）：份额 = num / B
+    floors.push(Math.floor(num / B));
+    fracNums.push(num % B);
+    allocated += floors[i];
+  }
+  for (let i = 0; i < n; i++) out[i] += floors[i];
+  let leftover = rem - allocated;
+  const order = fracNums
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => b.f - a.f || a.i - b.i); // 小数大者先得；平手按代理序
+  for (let k = 0; k < order.length && leftover > 0; k++, leftover--) out[order[k].i] += 1;
+  return out;
+}
+

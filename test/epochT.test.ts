@@ -5,16 +5,25 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 // ─── T-1 行为层：量化相似签名（抖动循环不再逃逸）───
+// W6R-A9 修订：签名网格 0.01 → 0.001 收紧（微调不再 collapsing 同签逃逸），
+// 并新增轨迹级粗网格（0.05）近参数判等 —— 两者协作：细网格管原样重试，
+// 粗网格管微调循环。
 
-test('T-1: 量化签名 —— 坐标抖动同签；结构差异仍异签', async () => {
+test('T-1: 量化签名 —— 亚毫厘抖动同签；毫厘微调异签；结构差异异签', async () => {
   const src = readFileSync(new URL('../src/guards/repeatActionGuard.ts', import.meta.url), 'utf8');
-  assert.ok(src.includes('Math.round(v * 100) / 100'), '数值 0.01 网格量化在场');
-  // 原子验证：量化函数行为（从源内联同式）
-  const quant = (args: unknown) => JSON.stringify(args, (_k, v) =>
-    typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
-  assert.equal(quant({ x: 0.501, y: 0.5 }), quant({ x: 0.5, y: 0.5004 }), '抖动同签（同一意图）');
-  assert.notEqual(quant({ x: 0.5, y: 0.5 }), quant({ x: 0.62, y: 0.5 }), '真实位移异签');
-  assert.notEqual(quant({ x: 0.5 }), quant({ x: 0.5, text: 'a' }), '结构差异异签');
+  assert.ok(src.includes('Math.round(v * gridRecip) / gridRecip'), '网格量化器在场（W6R-A9 参数化）');
+  assert.ok(src.includes('const SIGNATURE_GRID = 1000'), '签名网格 0.001（旧 0.01 收紧十倍）');
+  assert.ok(src.includes('const TRAJECTORY_GRID = 20'), '轨迹级粗网格 0.05 在场');
+  // 原子验证：量化函数行为（与源内 quantizedSig 同式）
+  const quant = (args: unknown, gridRecip: number) => JSON.stringify(args, (_k, v) =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.round(v * gridRecip) / gridRecip : v);
+  assert.equal(quant({ x: 0.5004, y: 0.5 }, 1000), quant({ x: 0.5, y: 0.5002 }, 1000), '半格内抖动同签（同一意图）');
+  assert.notEqual(quant({ x: 0.501, y: 0.5 }, 1000), quant({ x: 0.5, y: 0.5 }, 1000), '毫厘微调异签（不再与原样重试同签逃逸）');
+  assert.notEqual(quant({ x: 0.5, y: 0.5 }, 1000), quant({ x: 0.62, y: 0.5 }, 1000), '真实位移异签');
+  assert.notEqual(quant({ x: 0.5 }, 1000), quant({ x: 0.5, text: 'a' }, 1000), '结构差异异签');
+  // 轨迹级粗网格：同控件级微调近参数同桶；跨控件位移异桶
+  assert.equal(quant({ x: 0.52 }, 20), quant({ x: 0.5 }, 20), '微调重试（≤半粗格）轨迹尺度同桶');
+  assert.notEqual(quant({ x: 0.62 }, 20), quant({ x: 0.5 }, 20), '跨控件换目标异桶');
 });
 
 // ─── T-2 认证：期望词表对称半边已在（不造轮子）───

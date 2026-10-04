@@ -19,6 +19,10 @@ import { dhash as dhashOfBuf } from '../perceptualHash.js';
 // elementTracker/failureMemory/riskGate 只读）。
 import { branchLedger as branchLedgerSingleton, generateBranchCard } from '../branchCards.js';
 import { ExplorationLedger } from './exploration.js';
+// W8-C1（惊异喂养生接线 · D-G2 清偿）：进化引擎（惊异消费面）—— 栈内 prophecy
+// 失手记录的喂养目标。EvolutionEngine 自 './evolutionEngine' 再分发（本桶已
+// export *，此处值引入供模块级单例铸造）。
+import { EvolutionEngine } from './evolutionEngine.js';
 // W5-0（A 接线 · W3-3/W4-1 增量账本）：总闸读取面 —— visualDiff.incremental
 // 内核键（index.ts 铸入，缺省 0=关）。只读消费零回路（runtime 已同路 import）。
 import { incrementalEncodingEnabled } from '../visualDiff.js';
@@ -153,6 +157,19 @@ function w4ExplorationFor(persistPath) {
     w4SharedExploration.beginSession(p !== '' ? 'restore' : 'reset');
     return w4SharedExploration;
 }
+// ─── W8-C1（惊异喂养生接线 · D-G2 清偿）：栈内 prophecy → EvolutionEngine ───
+/**
+ * W8-C1：惊异消费单例 —— 进程级共享的进化引擎（模块级单例，与
+ * tools/autonomousRun.ts 的 evolution 单例同律：跨栈跨 run 存活，喂养的失手
+ * 教训持续累积）。buildAutonomyStack 铸 ProphecyEngine 时以 surpriseFeed 构造
+ * 选项接通（prophecy/index.ts 备好的构造期通道）：栈内预言结算失手即自动喂
+ *（surpriseRunRecord 只喂失手 —— hit/no-model 不掺水；水位线零重喂）。
+ * 纯旁路：EvolutionEngine.ingest 内部绝不抛（w8.prophecy G2-3 已证真引擎直收），
+ * 喂养故障由 prophecy 侧吞掉（该条计丢不计喂），绝不炸环。
+ * 导出面：宿主/测试的观察位（history/heuristics 读数差分 —— 生接线冒烟的执法缝）。
+ */
+const surpriseEvolution = new EvolutionEngine();
+export { surpriseEvolution };
 /**
  * 宿主血脉接线：以插件 Config 铸造自主闭环栈（perceive / policy / constitution）。
  *
@@ -293,14 +310,19 @@ export function buildAutonomyStack(config, deps = {}) {
         // 动作后第一次感知到达时结算（hit/miss/no-model 三态入账，错题本自动生成）。
         // 纯旁路三铁律：绝不阻断动作、绝不改写 PilotResult 既有字段（至多一步
         // journal 注记）、任何故障只丢预言绝不炸环。世界模型用 prophecy 单例
-        // （进程内跨 run 存活 —— 结算回灌 observe 让模型逐步走出无知，Dyna 式）；
+        //（进程内跨 run 存活 —— 结算回灌 observe 让模型逐步走出无知，Dyna 式）；
         // 时钟透传注入钟（挂起作废律与账本 ts 同源）。enableProphecy === false ⇒
         // 字段缺席，闭环逐字节旧路径。
+        // W8-C1（惊异喂养生接线 · D-G2 清偿）：surpriseFeed 构造期通道接通 —— 结算
+        // 失手即自动喂惊异消费单例 surpriseEvolution（surpriseRunRecord 只喂失手、
+        // 水位线零重喂；w8.prophecy G2-3 已证真引擎结构直收）。纯旁路：喂养面由
+        // prophecy 侧防御吞错，绝不影响铸栈与闭环。
         ...(config?.enableProphecy !== false
             ? {
                 prophecy: new ProphecyEngine({
                     worldModel: prophecyWorldModel,
                     ...(deps.now ? { now: deps.now } : {}),
+                    surpriseFeed: surpriseEvolution,
                 }),
             }
             : {}),

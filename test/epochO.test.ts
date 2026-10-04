@@ -670,7 +670,9 @@ test('O-#17: set_contrast 不需要窗口 + HIGHCONTRAST 结构体 + 精确还�
   const { WindowsAdapter } = await import('../src/environmentShaper.ts');
   const scripts: string[] = [];
   const a = new WindowsAdapter({ probe: () => true, exec: async (_c: string, args: string[]) => {
-    scripts.push(String(args[args.length - 1]));
+    // W6R-A8：-EncodedCommand 载荷解码回脚本原文（假 exec 扮演 powershell 解码半边）
+    const last = String(args[args.length - 1]);
+    scripts.push(args.includes('-EncodedCommand') ? Buffer.from(last, 'base64').toString('utf16le') : last);
     return { stdout: '4\n' };
   } });
   const recipe = await a.apply({ kind: 'set_contrast' }); // 无 titleHint —— 旧实现此处 throw

@@ -17,93 +17,14 @@ import { embed, cosine } from './semanticHash.js';
 import { sequitur, expandSymbols } from './sequitur.js';
 import { kernelRegistry } from './kernel/registry.js';
 import { sanitizeActionShape } from './approval.js';
-/** 可重放的工具白名单：click_element 依赖运行时元素缓存，不进技能 */
-const REPLAYABLE = new Set([
-    'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
-    'drag_mouse', 'switch_tab', 'switch_window', 'dismiss_popup',
-]);
-const stepSignature = (steps) => steps.map(s => `${s.tool}:${JSON.stringify(s.args)}`).join('|');
-// ─── E-2 基因组组装（第五维·信息热力学）：OLC 重叠对齐 ───
-/** 单步签名（对齐原子）与序列签名（stepSignature 的切片版） */
-const stepSig1 = (s) => `${s.tool}:${JSON.stringify(s.args)}`;
-const stepsSig = (ss) => ss.map(stepSig1).join('|');
-/**
- * OLC（Overlap-Layout-Consensus）最长尾头重叠：求 merged 尾部与 next 头部的
- * 最长精确重叠 k（签名逐字节相等），返回 k。合成律：merged + next[k:] ——
- * 共享子序列只保留一份（基因组组装的 contig 缝合：粘性末端对齐后拼接）。
- * 保底约束：k ≤ next.length - 1（新基因必须贡献 ≥1 步新物质 —— 全包含基因
- * 是强化不是合成，走签名撞车路径）。精确匹配语义：确定性、可审计；
- * 模糊对齐（参数近似 + 场景指纹锚定）是留白。导出仅供测试（_forTest 先例）。
- */
-export function olcOverlap(merged, next) {
-    const maxK = Math.min(merged.length, next.length - 1);
-    for (let k = maxK; k > 0; k--) {
-        if (stepsSig(merged.slice(merged.length - k)) === stepsSig(next.slice(0, k)))
-            return k;
-    }
-    return 0;
-}
-// ─── E-5 贝叶斯可靠度（Beta-Bernoulli 共轭后验）───
-/** 后验可靠度：Beta(1,1) 均匀先验 + (s 胜 n 试) ⇒ Beta(s+1, n-s+1)。
- *  mean = (s+1)/(n+2) —— 与既有 Laplace 平滑逐字一致（零回归的结构保证）；
- *  hw = 1.96√(αβ/((α+β)²(α+β+1))) —— 95% 可信区间半宽，随证据量 n 收缩。
- *  导出纯函数：与 riskGate.matchesRiskPatterns 同律（数学原子的测试面）。 */
-export function betaReliability(successCount, attemptCount) {
-    const alpha = successCount + 1;
-    const beta = attemptCount - successCount + 1;
-    const mean = alpha / (alpha + beta);
-    const hw = 1.96 * Math.sqrt((alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1)));
-    return { mean, hw };
-}
-/** 递归键排序的稳定字符串化：replacer 数组只在顶层过滤键、嵌套对象的键
- *  会被整层丢弃（JSON.stringify({a:{x:1}}, ['a']) → {"a":{}}）——
- *  drag_mouse 这类嵌套 args 会全部坍缩成同一符号。排序保证键序无关性。 */
-function canonicalStringify(v) {
-    if (Array.isArray(v))
-        return `[${v.map(canonicalStringify).join(',')}]`;
-    if (v && typeof v === 'object') {
-        const keys = Object.keys(v).sort();
-        return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalStringify(v[k])}`).join(',')}}`;
-    }
-    return JSON.stringify(v) ?? 'null';
-}
-/** F-1 符号化：args → 稳定短哈希（FNV-1a —— semanticHash 同源密码学原语） */
-function hashArgs(args) {
-    let h = 0x811c9dc5;
-    const s = canonicalStringify(args);
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-    }
-    return (h >>> 0).toString(36);
-}
-// ─── G-3 模糊量化文法归纳（第七维·过程感知）───
-/** 量化网格：数值参数按 0.05 网格取整（坐标抖动 <0.025 ⇒ 同符号）。
- *  动机：同一工作流重做时坐标总有微差（0.50 vs 0.52）—— 精确签名下 SEQUITUR
- *  看不见重复。量化等价类让「同一个按钮，稍微偏一点」仍归同一符号。
- *  仅用于 mineMotifs（建议性）；OLC 重组合成（E-2）保持精确 ——
- *  建议可模糊，执行必须精确。 */
-const MOTIF_QUANT = 0.05;
-/** 深层数值量化（递归；数组与嵌套对象同律）—— 模糊符号化的铸造点 */
-function quantizeArgs(v) {
-    if (typeof v === 'number' && Number.isFinite(v)) {
-        return Math.round(v / MOTIF_QUANT) * MOTIF_QUANT;
-    }
-    if (Array.isArray(v))
-        return v.map(quantizeArgs);
-    if (v && typeof v === 'object') {
-        const out = {};
-        for (const k of Object.keys(v).sort()) {
-            out[k] = quantizeArgs(v[k]);
-        }
-        return out;
-    }
-    return v;
-}
-/** 模糊符号：量化后的 args 哈希（mineMotifs 专用） */
-function hashArgsFuzzy(args) {
-    return hashArgs(quantizeArgs(args));
-}
+// W9-3（D-F4 拆分）：检索/签名分区与模板/蒸馏分区已提取至卫星件 —— 本文件保留
+// 器官主体（SkillLibrary 类：归纳/匹配/重组/系谱/模板记账/休眠登记/示范蒸馏围绕
+// 同一私有账本）+ Τ 纪元示范蒸馏区；原公共面经再导出保持导入面不变（消费方零改动）。
+import { REPLAYABLE, stepSignature, olcOverlap, betaReliability, hashArgsFuzzy, hashArgsNumeric, DORMANT_CAPACITY, } from './skillLibrary.signatures.js';
+import { TEMPLATE_MAX_SKILLS, TEMPLATE_MIN_PARENTS, TEMPLATE_HOLE_POSTERIOR_GATE, TEMPLATE_CAPACITY, hashSkeleton, antiUnifyPair, valueMatchesHoleType, sweepHoleEvidence, } from './skillLibrary.templates.js';
+// W9-3：原导出面原位再导出（导入面稳定 —— 既有消费方零改动）。
+export { olcOverlap, betaReliability, DORMANT_CAPACITY, } from './skillLibrary.signatures.js';
+export { TEMPLATE_MIN_PARENTS, TEMPLATE_MIN_HOMOLOGS, TEMPLATE_MAX_ALIGN_COST_RATIO, TEMPLATE_HOLE_POSTERIOR_GATE, TEMPLATE_CAPACITY, TEMPLATE_MAX_SKILLS, hashSkeleton, dtwAlignTools, holeTypeOf, inferHoleSource, valueMatchesHoleType, antiUnifyPair, } from './skillLibrary.templates.js';
 // ─── Τ 纪元（干预即教育）：审批事件的蒸馏面（纯增量 —— 主路径零触碰） ───
 //
 // 审批事件是现成却全行业被扔掉的监督信号：验收式消费成功 = 用户亲自背书且
@@ -124,201 +45,6 @@ const AVOID_CAPACITY = 32;
 const shapeKey = (s) => typeof s.x === 'number' && typeof s.y === 'number'
     ? `${s.tool}@${s.x.toFixed(3)},${s.y.toFixed(3)}`
     : `${s.tool}#${s.text_length_bucket ?? '*'}`;
-// ─── W3-2：抗过拟合门限（模块常量 —— 一切数值在此审计，绝无内联魔数） ───
-/** 模板最低母体数：单母体永不产模板（结构前提 —— 一例观测不成规律） */
-export const TEMPLATE_MIN_PARENTS = 2;
-/** 最低同源步数：短于 2 步的模板不构成「技能」（与 motif minLength 同律） */
-export const TEMPLATE_MIN_HOMOLOGS = 2;
-/** DTW 对齐归一代价上限（cost / max(lenA,lenB)）：骨架差太远的对不参加反统一 */
-export const TEMPLATE_MAX_ALIGN_COST_RATIO = 0.35;
-/** 洞位跨母体 Beta 后验门：mean = (s+1)/(s+f+2) ≥ 0.75 ⇔ s ≥ 3f+2
- *  （f=0 时 s≥2 —— 与最低母体数自洽；一个反证母体即要求 5 个支撑母体） */
-export const TEMPLATE_HOLE_POSTERIOR_GATE = 0.75;
-/** 模板容量（可靠度×新近度驱逐，与技能容量驱逐同律） */
-export const TEMPLATE_CAPACITY = 16;
-/** 蒸馏预算护栏：参加配对的技能数上限（O(N²) 配对 × O(nm) DTW 的诚实上限） */
-export const TEMPLATE_MAX_SKILLS = 64;
-/** W3-2：工具骨架哈希（FNV-1a，hashArgs 同源密码学原语 —— 匹配粗筛键） */
-export function hashSkeleton(tools) {
-    let h = 0x811c9dc5;
-    const s = tools.join('\u0001');
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-    }
-    return (h >>> 0).toString(36);
-}
-/** W3-2：单步对齐代价（编辑距离风格）：同工具 0 / 异工具 1（缺口代价同 1） */
-const alignStepCost = (toolA, toolB) => (toolA === toolB ? 0 : 1);
-/**
- * W3-2：DTW 序列对齐（纯符号、确定性）。步标签 = 动作种类（tool 名），
- * dp[i][j] = 对齐 a[0..i) 与 b[0..j) 的最小总代价；回溯取对齐路径，
- * 平局裁决固定 diag > up > left（确定性铁律 —— 同输入逐位同路径）。
- * 返回 pairs：已对齐位 [i, j]（j=-1 / i=-1 为缺口列），cost 为总代价。
- * 导出纯函数：与 olcOverlap / betaReliability 同律（数学原子的测试面）。
- */
-export function dtwAlignTools(a, b) {
-    const n = a.length;
-    const m = b.length;
-    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(Infinity));
-    dp[0][0] = 0;
-    for (let i = 0; i <= n; i++) {
-        for (let j = 0; j <= m; j++) {
-            if (i === 0 && j === 0)
-                continue;
-            let best = Infinity;
-            if (i > 0 && j > 0)
-                best = Math.min(best, dp[i - 1][j - 1] + alignStepCost(a[i - 1], b[j - 1]));
-            if (i > 0)
-                best = Math.min(best, dp[i - 1][j] + 1); // 缺口（b 侧插入）
-            if (j > 0)
-                best = Math.min(best, dp[i][j - 1] + 1); // 缺口（a 侧插入）
-            dp[i][j] = best;
-        }
-    }
-    const pairs = [];
-    let i = n;
-    let j = m;
-    while (i > 0 || j > 0) {
-        if (i > 0 && j > 0 && dp[i][j] === dp[i - 1][j - 1] + alignStepCost(a[i - 1], b[j - 1])) {
-            pairs.push([i - 1, j - 1]);
-            i--;
-            j--;
-        }
-        else if (i > 0 && dp[i][j] === dp[i - 1][j] + 1) {
-            pairs.push([i - 1, -1]);
-            i--;
-        }
-        else if (j > 0 && dp[i][j] === dp[i][j - 1] + 1) {
-            pairs.push([-1, j - 1]);
-            j--;
-        }
-        else {
-            break; // 防御带（dp 构造保证不可达）
-        }
-    }
-    pairs.reverse();
-    return { pairs, cost: dp[n][m] };
-}
-/** W3-2：值的洞类型标注（number 须有限 —— NaN/Infinity 归 json 由绑定闸拒绝） */
-export function holeTypeOf(v) {
-    if (typeof v === 'number')
-        return Number.isFinite(v) ? 'number' : 'json';
-    if (typeof v === 'string')
-        return 'string';
-    if (typeof v === 'boolean')
-        return 'boolean';
-    return 'json';
-}
-/** W3-2：来源提示的键形判据（确定性正则 —— 绝无模型猜测） */
-const HOLE_COORD_KEY = /(^|_)(x|y|dx|dy)(_|$|\d)/i; // x / y / from_x / to_y2 …
-const HOLE_CLIP_KEY = /(url|link|site|domain|address|href|path)/i; // 长串惯走粘贴
-const HOLE_TEXT_KEY = /(text|content|desc|query|search|keyword|message|prompt|title|label|value|input|answer|reply)/i;
-/**
- * W3-2：洞的来源提示推断（纯函数，键形 + 类型 → 读取策略）：
- * 数值且坐标形键 → coordinate；字符串且 URL 形键 → clipboard；
- * 字符串且文本形键 → ocr（屏上读到的值）；其余 → user-input（问用户/任务上下文）。
- * 提示是给绑定 reader 的路由建议，不是断言 —— 绑定失败回退字面量技能。
- */
-export function inferHoleSource(key, type) {
-    if (type === 'number' && HOLE_COORD_KEY.test(key))
-        return 'coordinate';
-    if (type === 'string' && HOLE_CLIP_KEY.test(key))
-        return 'clipboard';
-    if (type === 'string' && HOLE_TEXT_KEY.test(key))
-        return 'ocr';
-    return 'user-input';
-}
-/** W3-2：绑定值的类型闸（洞类型 ↔ 运行时值的守卫 —— 类型不符即绑定失败） */
-export function valueMatchesHoleType(v, type) {
-    switch (type) {
-        case 'number': return typeof v === 'number' && Number.isFinite(v);
-        case 'string': return typeof v === 'string';
-        case 'boolean': return typeof v === 'boolean';
-        case 'json': return v !== null && typeof v === 'object';
-    }
-}
-/**
- * W3-2：DTW 对齐 + 参数槽反统一（纯函数，手算可回验）。
- * 步骤：① 工具骨架 DTW（归一代价过门）；② 同源步（同工具对齐位）逐槽比对 ——
- * 同值 → 常量槽、同型异值 → 洞槽（类型 + 来源提示 + 双母体实值绑定）；
- * 键集不一致或异型 ⇒ 该步结构分歧，弃置（保守：结构不稳的步不泛化）；
- * ③ 全常量（零洞）⇒ 拒绝 —— 那是字面量重复，不是泛化；④ 弃置后步数
- * < TEMPLATE_MIN_HOMOLOGS ⇒ 拒绝。洞槽的 posteriorMean 此处记 NaN 占位，
- * 由调用方（distillTemplates 的跨母体证据扫）回填真值。
- */
-export function antiUnifyPair(a, b) {
-    const { pairs, cost } = dtwAlignTools(a.steps.map(s => s.tool), b.steps.map(s => s.tool));
-    const maxLen = Math.max(1, Math.max(a.steps.length, b.steps.length));
-    const costRatio = cost / maxLen;
-    const homologPairs = pairs.filter(([i, j]) => i >= 0 && j >= 0 && a.steps[i].tool === b.steps[j].tool);
-    const alignment = { cost, costRatio: Math.round(costRatio * 1000) / 1000, homologs: homologPairs.length, droppedSteps: 0 };
-    if (costRatio > TEMPLATE_MAX_ALIGN_COST_RATIO) {
-        return { ok: false, reason: 'align-cost', detail: `costRatio=${alignment.costRatio}`, alignment };
-    }
-    if (homologPairs.length < TEMPLATE_MIN_HOMOLOGS) {
-        return { ok: false, reason: 'insufficient-homologs', detail: `homologs=${homologPairs.length}`, alignment };
-    }
-    const steps = [];
-    let holes = 0;
-    for (const [i, j] of homologPairs) {
-        const sa = a.steps[i];
-        const sb = b.steps[j];
-        const keysA = Object.keys(sa.args ?? {}).sort();
-        const keysB = Object.keys(sb.args ?? {}).sort();
-        if (JSON.stringify(keysA) !== JSON.stringify(keysB)) {
-            alignment.droppedSteps++; // 键集分歧：参数结构不稳，该步不泛化（保守）
-            continue;
-        }
-        const args = {};
-        let divergent = false;
-        for (const k of keysA) {
-            const va = sa.args[k];
-            const vb = sb.args[k];
-            if (canonicalStringify(va) === canonicalStringify(vb)) {
-                args[k] = { kind: 'const', value: va }; // 同值 → 常量
-                continue;
-            }
-            const ta = holeTypeOf(va);
-            const tb = holeTypeOf(vb);
-            if (ta !== tb || ta === 'json') {
-                divergent = true; // 异型（或双方皆非基元）⇒ 反统一非法 —— 弃置该步
-                break;
-            }
-            args[k] = {
-                kind: 'hole', type: ta, source: inferHoleSource(k, ta),
-                bindings: [{ skillId: a.id, value: va }, { skillId: b.id, value: vb }],
-                posteriorMean: Number.NaN, // 占位：跨母体证据扫回填（见 distillTemplates）
-                bindAttempts: 0, bindSuccesses: 0,
-            };
-            holes++;
-        }
-        if (divergent) {
-            alignment.droppedSteps++;
-            continue;
-        }
-        steps.push({ tool: sa.tool, args });
-    }
-    if (holes === 0) {
-        return { ok: false, reason: 'no-holes', detail: 'args 全同值 —— 字面量重复，非泛化', alignment };
-    }
-    if (steps.length < TEMPLATE_MIN_HOMOLOGS) {
-        return { ok: false, reason: 'too-few-steps', detail: `steps=${steps.length}`, alignment };
-    }
-    return { ok: true, steps, holes, alignment };
-}
-/** W4-1：args 的 FNV-1a 数值哈希（hashArgs 的数值形态 —— 摘要的铸造原子） */
-function hashArgsNumeric(args) {
-    let h = 0x811c9dc5;
-    const s = canonicalStringify(args);
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-    }
-    return h >>> 0;
-}
-/** W4-1：休眠段容量（外来技能的隔离登记区上限 —— FIFO 驱逐） */
-export const DORMANT_CAPACITY = 32;
 class SkillLibrary {
     skills = [];
     nextId = 1;
@@ -745,71 +471,6 @@ class SkillLibrary {
     }
     // ── W3-2（M2 参数化通用技能）：反统一蒸馏 / 模板召回 / 运行时绑定 ──
     /**
-     * W3-2：洞位证据扫（跨母体 Beta 门的证据源 —— 纯符号，确定性）。
-     * 证据池 = 全库能**完整实现**模板骨架的技能（DTW 对齐过门 + 每个模板步
-     *  都映射到同工具步；多余步是缺口、缺步即排除 —— 部分实现不构成反证源，
-     *  也不构成支撑源）。逐洞判定：键在且类型相符 ⇒ s（支撑证据）；键缺/异型
-     *  ⇒ f（反证 —— 同骨架的工作流在这个槽位上不守恒，洞就是过拟合）。
-     *  「每个洞位在各母体绑定成功才计证据」：只有全洞皆成的技能才入 supporters
-     *  —— 任何一洞失败即整技出局（单母体永不产模板的结构执法在 supporters
-     *  长度门）。返回值含逐洞后验均值 (s+1)/(s+f+2) 与支撑母体实值（审计面）。
-     */
-    sweepHoleEvidence(candSteps, pool) {
-        // 洞清单（步序 × 键字典序 —— 确定性枚举）
-        const holeList = [];
-        candSteps.forEach((st, si) => {
-            for (const k of Object.keys(st.args).sort()) {
-                const slot = st.args[k];
-                if (slot.kind === 'hole')
-                    holeList.push({ stepIndex: si, key: k, type: slot.type });
-            }
-        });
-        const stats = holeList.map(h => ({ stepIndex: h.stepIndex, key: h.key, s: 0, f: 0, posteriorMean: 0 }));
-        const supporterValues = new Map();
-        const supporters = [];
-        const candTools = candSteps.map(st => st.tool);
-        for (const sk of pool) {
-            const { pairs, cost } = dtwAlignTools(sk.steps.map(x => x.tool), candTools);
-            const ratio = cost / Math.max(1, Math.max(sk.steps.length, candTools.length));
-            if (ratio > TEMPLATE_MAX_ALIGN_COST_RATIO)
-                continue; // 骨架不同：既非证据亦非反证
-            // 模板步 → 技能步 的同源映射（缺口/异工具 ⇒ 缺映射）
-            const map = new Map();
-            for (const [j, i] of pairs) {
-                if (j >= 0 && i >= 0 && sk.steps[j].tool === candTools[i])
-                    map.set(i, j);
-            }
-            if (map.size < candSteps.length)
-                continue; // 未完整实现骨架 —— 不入证据池
-            let allBound = true;
-            holeList.forEach((h, hi) => {
-                const bound = map.get(h.stepIndex);
-                const v = bound !== undefined ? sk.steps[bound].args?.[h.key] : undefined;
-                if (bound === undefined || !(h.key in (sk.steps[bound].args ?? {})) || holeTypeOf(v) !== h.type) {
-                    stats[hi].f++; // 反证：同骨架在此槽位不守恒
-                    allBound = false;
-                }
-                else {
-                    stats[hi].s++; // 支撑：该母体在此洞位绑定成功
-                }
-            });
-            if (!allBound)
-                continue;
-            supporters.push(sk);
-            holeList.forEach((h, hi) => {
-                const bound = map.get(h.stepIndex);
-                const v = sk.steps[bound].args[h.key];
-                const mk = `${h.stepIndex}#${h.key}`;
-                const arr = supporterValues.get(mk) ?? [];
-                arr.push({ skillId: sk.id, value: v });
-                supporterValues.set(mk, arr);
-            });
-        }
-        for (const st of stats)
-            st.posteriorMean = (st.s + 1) / (st.s + st.f + 2);
-        return { supporters, holeStats: stats, supporterValues };
-    }
-    /**
      * W3-2：反统一蒸馏入口（纯符号 —— 无 LLM、无网络、无模型调用）。
      * 对库内字面量技能的两两组合（插入序、i<j —— 确定性）执行 DTW 对齐 +
      * 参数槽反统一（antiUnifyPair），候选再过跨母体证据扫（sweepHoleEvidence）
@@ -819,12 +480,25 @@ class SkillLibrary {
      *   · 骨架哈希去重（同骨架模板已存在 ⇒ 跳过，首酿优先）。
      * 拒绝判词全量返回（可审计）；created 非空才落盘（原子写）。
      * 消费面：sleep 第②幕蒸馏（SleepDeps.skillLibrary.distillTemplates 可选面）。
+     *
+     * W6-5：合并模式（opts.merge，缺省 false —— 旧行为逐字节不变）。W3-2 遗留
+     * 「骨架去重首酿优先：同骨架新证据不回流既有模板」的补全：merge 开启时撞
+     * 同骨架不再弃置，而是把**当前全库**当作新证据池对既有模板重跑洞证据扫——
+     *   · parents 集合并（新支撑母体回流在册；旧 parent 不删 —— 演进只增不减）；
+     *   · Beta 门重算（supporters ≥ 门限且逐洞后验 ≥ 门限才合并）；
+     *   · 自动安全：门不过 ⇒ 不合并（rejected 记 'merge-gate'），证据保留池
+     *     （字面量技能原样在库，后续蒸馏随证据积累可再试 —— 不销毁任何证据）；
+     *   · 模板版本号 +1（version；id 不变 ⇒ 旧绑定产物按 id 继续命中，不失效）；
+     *   · 幂等护栏：无新支撑母体 ⇒ 视同 skeleton-exists 拒绝（版本不动 ——
+     *     重复蒸馏不空转版本号）。
      */
-    distillTemplates(maxSkills = TEMPLATE_MAX_SKILLS) {
+    distillTemplates(maxSkills = TEMPLATE_MAX_SKILLS, opts = {}) {
         const created = [];
         const rejected = [];
+        const merged = [];
+        const merge = opts.merge === true;
         if (!this.enabled)
-            return { created, rejected };
+            return { created, rejected, merged };
         const pool = this.skills.filter(s => s.steps.length > 0).slice(0, maxSkills);
         for (let i = 0; i < pool.length; i++) {
             for (let j = i + 1; j < pool.length; j++) {
@@ -836,11 +510,57 @@ class SkillLibrary {
                     continue;
                 }
                 const skeletonHash = hashSkeleton(uni.steps.map(st => st.tool));
-                if (this.templates.some(t => t.skeletonHash === skeletonHash)) {
+                const existing = this.templates.find(t => t.skeletonHash === skeletonHash);
+                if (existing) {
+                    // W6-5：合并模式 —— 同骨架新证据回流既有模板（缺省关闭 = 旧行为原样）
+                    if (merge) {
+                        const ev = sweepHoleEvidence(existing.steps, pool);
+                        const worst = ev.holeStats.length > 0
+                            ? Math.min(...ev.holeStats.map(h => h.posteriorMean))
+                            : Infinity; // 防御带：零洞模板不存在于门内（holes=0 创建即拒）
+                        if (ev.supporters.length < TEMPLATE_MIN_PARENTS || worst < TEMPLATE_HOLE_POSTERIOR_GATE) {
+                            rejected.push({
+                                a: A.id, b: B.id, reason: 'merge-gate',
+                                detail: `gate 不过 ⇒ 不合并（证据保留池，后续蒸馏可再试）` +
+                                    ` supporters=${ev.supporters.length} worstPosterior=${Math.round(worst * 1000) / 1000}`,
+                            });
+                            continue;
+                        }
+                        const added = ev.supporters.map(s => s.id).filter(id => !existing.parents.includes(id));
+                        if (added.length === 0) {
+                            rejected.push({
+                                a: A.id, b: B.id, reason: 'skeleton-exists',
+                                detail: '同骨架模板已在册且无新支撑母体（幂等 —— 版本不动）',
+                            });
+                            continue;
+                        }
+                        // 回流三件套：parents 并 / 逐洞后验+绑定重算 / 版本+1（id 不变）
+                        existing.parents = [...existing.parents, ...added];
+                        for (const h of ev.holeStats) {
+                            const slot = existing.steps[h.stepIndex]?.args[h.key];
+                            if (!slot || slot.kind !== 'hole')
+                                continue; // 防御带（holeList 只收洞槽）
+                            slot.posteriorMean = Math.round(h.posteriorMean * 1000) / 1000;
+                            const vals = ev.supporterValues.get(`${h.stepIndex}#${h.key}`) ?? [];
+                            if (vals.length > 0)
+                                slot.bindings = vals.slice(0, 8); // 封顶 8 防膨胀（同律）
+                        }
+                        existing.generation = Math.max(existing.generation, 1 + Math.max(0, ...ev.supporters.map(s => s.generation ?? 0))); // 世代非降（母体集只增 ⇒ 深度只增不减）
+                        existing.version = (existing.version ?? 1) + 1;
+                        existing.revisedAt = Date.now();
+                        merged.push({
+                            templateId: existing.id,
+                            version: existing.version,
+                            addedParents: added,
+                            parents: [...existing.parents],
+                            worstPosterior: Math.round(worst * 1000) / 1000,
+                        });
+                        continue;
+                    }
                     rejected.push({ a: A.id, b: B.id, reason: 'skeleton-exists', detail: '同骨架模板已在册（首酿优先）' });
                     continue;
                 }
-                const ev = this.sweepHoleEvidence(uni.steps, pool);
+                const ev = sweepHoleEvidence(uni.steps, pool);
                 if (ev.supporters.length < TEMPLATE_MIN_PARENTS) {
                     rejected.push({ a: A.id, b: B.id, reason: 'insufficient-parents', detail: `supporters=${ev.supporters.length}` });
                     continue;
@@ -878,6 +598,7 @@ class SkillLibrary {
                     createdAt: Date.now(),
                     lastUsedAt: Date.now(),
                     alignment: uni.alignment,
+                    version: 1, // W6-5：首酿版本 1（后续同骨架证据回流合并 ⇒ +1）
                 };
                 this.templates.push(tpl);
                 created.push(tpl);
@@ -890,9 +611,9 @@ class SkillLibrary {
             this.templates.sort((x, y) => survival(y) - survival(x));
             this.templates = this.templates.slice(0, TEMPLATE_CAPACITY);
         }
-        if (created.length > 0)
-            this.save(); // 原子落盘（tmp+rename —— 蒸馏中途崩溃保旧档）
-        return { created, rejected };
+        if (created.length > 0 || merged.length > 0)
+            this.save(); // 原子落盘（tmp+rename —— 蒸馏/合并中途崩溃保旧档）
+        return { created, rejected, merged };
     }
     /**
      * W3-2：模板召回（骨架哈希 + 场景指纹 —— match 的非文本通道同律）。

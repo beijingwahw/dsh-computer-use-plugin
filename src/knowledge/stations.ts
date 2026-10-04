@@ -1,4 +1,5 @@
 // src/knowledge/stations.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：D-7 三工位（vision/decision/execution）实现 —— 工位构造器与工位视图按纪元成对演进，按工位拆三文件将撕裂 epoch 谱系注释与契约面。
 // D-7 三工位桩（Stub）—— 绝对专注的物理载体：
 //   视觉工位只描述不判断；决策工位是唯一大脑（唯一花钱处）；执行工位是零模型肌肉。
 // 零侵入红线：本文件不含真 OCR / 真坐标控制 / 真大模型调用 ——

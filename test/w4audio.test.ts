@@ -73,7 +73,7 @@ const H_UPGRADE = 'deadbeefdeadbeef';
 const H_RECHECK = 'cafebabecafebabe';
 const H_CAP = '02357bdfacec1357';
 const H_POS_BEFORE = '0123456789abcdef';
-const H_POS_AFTER = 'fedcba9876543210'; // 与前者汉明距离 20/64 ⇒ sim 0.6875 < 0.98 ⇒ detected=true
+const H_POS_AFTER = 'fedcba9876543210'; // 与前者逐位全异（互补指纹）⇒ 汉明距离 64/64、sim 0 < 0.98 ⇒ detected=true
 const H_ZERO = '0000000000000000';     // 归一化全零 ⇒ 指纹退化（Δ-7 zero 态）
 const H_DEFENSIVE = '13572468ace99bdf';
 

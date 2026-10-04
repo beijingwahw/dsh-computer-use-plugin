@@ -57,6 +57,20 @@ export interface Finding {
   location: { file: string; line: number; snippet: string };
   evidence: string;
   recommendation: string;
+  /** W7-1 官方豁免：命中中央豁免注册表时携带（registered-retention —— 仍可见、不扣分、不进手术提案）。
+   *  缺席 = 未豁免的普通 finding（老报告 JSON 无此字段，故可选）。 */
+  exempted?: { reason: string; epoch: string };
+}
+
+/** W7-1 中央豁免注册表条目：豁免必须显式登记 —— 文件 + 理由 + 纪元三要素齐全，
+ *  绝不静默跳过。理由必须溯源到源内 W6 注记或 DEBTS.md 在案条目（可审计）。 */
+export interface OverEngineeringExemption {
+  /** sourceRoot 相对路径（POSIX 分隔，与 finding.location.file 同键域） */
+  file: string;
+  /** 保留理由（非空；缺理由 = 静默豁免 = 禁止，装配即 fail-fast） */
+  reason: string;
+  /** 登记纪元（溯源到登记波次，如 'W6-1' / 'W6-2'） */
+  epoch: string;
 }
 
 export interface Trend {
@@ -77,6 +91,9 @@ export interface DiagnosisReport {
   warnings: string[];
   scannedFiles: number;
   chainAudited: boolean;
+  /** W7-1 豁免可观测：registered = 中央注册表条数；applied = 本次诊断实际命中降级数。
+   *  可选字段：老报告 JSON 与测试夹具构造的报告无此字段。 */
+  exemptions?: { registered: number; applied: number };
 }
 
 export interface FixProposal {

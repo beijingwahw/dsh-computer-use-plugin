@@ -463,8 +463,14 @@ async function gradientPng(width: number, height: number, vertical: boolean): Pr
 }
 
 const PNG = await gradientPng(512, 384, false);
+// W9-1（D-G9 收口适配）：世界标签由「开门标记」改为「开门标牌」—— 判据「关门
+// 标记」对「开门标记」编辑距离 1 ≤ ⌈4/6⌉，runtime 换用 evaluateCriteria 肯定面
+// fuzzy 后即命中 met（D-G9 立法意图），缝3「双判据缺一 ⇒ aborted 铸卡」的夹具
+// 前提被翻转。加区分字后：判据「开门标记」对「开门标牌」距 1 仍 fuzzy 命中
+//（缺省达成用例零回归），判据「关门标记」距 2 > 容差严格不命中（严格例保留），
+// 与元素「开门标牌」的 2-gram 候选动态（判据匹配点击）完整保真。
 const WORDS_ALIGNED = [
-  { label: '开门标记', bbox: { x0: 100, y0: 100, x1: 200, y1: 140 }, confidence: 0.9 },
+  { label: '开门标牌', bbox: { x0: 100, y0: 100, x1: 200, y1: 140 }, confidence: 0.9 },
   { label: '任务界面', bbox: { x0: 300, y0: 300, x1: 420, y1: 340 }, confidence: 0.8 },
 ];
 
@@ -642,6 +648,8 @@ test('W5-5 缝3: 全链换支 —— 失败铸卡注入会话 → 应答换支 �
   };
 
   // 第 1 环：steer 点亮（对齐世界不出题）+ 岔路账在场 → 步保险丝 aborted ⇒ 铸卡注入会话
+  //（W9-1：判据保持「开门标记/关门标记」，世界标签已改「开门标牌」—— 判据
+  //「关门标记」对世界语料距 2 > ⌈4/6⌉ 严格不命中，双判据缺一的夹具前提保真）
   const run1 = await runPilot({
     goal: '开关门流程演示', criteria: ['开门标记', '关门标记'], maxSteps: 2,
     configOver: { autonomySteerEnabled: true },
@@ -673,6 +681,7 @@ test('W5-5 缝3: 全链换支 —— 失败铸卡注入会话 → 应答换支 �
   assert.deepEqual(ans.branch!.bias.preferredActionKeys, [chosen.signature]);
 
   // 第 2 环：runPilotLoop 重入消费偏置 —— ③¼ 落账 ctx 带 preferredActionKeys
+  //（W9-1：判据同第 1 环原对不变 —— 同 goal 同判据重入，场景一致）
   const stub = recStub();
   await runPilot({
     goal: '开关门流程演示', criteria: ['开门标记', '关门标记'], maxSteps: 2,

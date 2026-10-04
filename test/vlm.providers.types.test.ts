@@ -70,10 +70,11 @@ const OPTS_TIMEOUT = 500; // 测试统一短超时（假 fetch 立即返回，�
 
 // ─── Ψ-1a 导出面契约 ───
 
-test('Ψ-1: 导出面契约 —— 六个具名函数、无 default、类型经 import type 可引用', () => {
+test('Ψ-1: 导出面契约 —— 七个具名函数、无 default、类型经 import type 可引用', () => {
   assert.deepEqual(
     Object.keys(vpt).sort(),
-    ['buildDataUrl', 'extractProviderJson', 'fetchWithRetry', 'isLocalBaseUrl', 'jitterDelayMs', 'sanitizeError'],
+    // W8-A6（D-G3）：新增 maskBaseUrl —— baseUrl 暴露面的端点脱敏（host 保留、路径/查询打码）
+    ['buildDataUrl', 'extractProviderJson', 'fetchWithRetry', 'isLocalBaseUrl', 'jitterDelayMs', 'maskBaseUrl', 'sanitizeError'],
   );
   assert.equal((vpt as { default?: unknown }).default, undefined);
 });

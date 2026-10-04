@@ -1,4 +1,7 @@
 // src/autonomy/runtime.ts
+// W6-1 结构性保留登记（smell.over-engineering）：createExecute 是单一 900+ 行的
+// 执行铸造厂闭包（宏重放/抽查节奏/验证判据全部以环内状态就地织成），拆分须重构
+// 闭包状态为参数传递 —— 属逻辑重构，违反「行为零变化」红线，故登记保留不强拆。
 // 纪元 Φ（真实运行时适配层）：把十器官的纯决策世界接到真实躯体 —— 截屏、指纹、
 // OCR、云脑接地、system 键鼠。Φ-4 闭环只消费 perceive/execute 两个函数面，
 // 本模块就是这两个函数面的铸造厂：
@@ -9,430 +12,41 @@
 // OCR、vlm/grounding 云脑接地、system 键鼠）。
 // 铁律：具名导出、绝不抛异常（一切失败收敛为 error 结局或降级记 degraded）、
 // system 调用方式逐字模仿 clickMouse.ts / typeText.ts（像素/归一化换算同律）。
+//
+// W8-B2（doctor smell.over-engineering 清偿 · D-F2 千行文件群）：低风险分区已
+// 拆至兄弟文件（actionVerifier W6-2 先例 —— 纯类型/纯函数/自包含铸造厂整体
+// 搬迁，本文件以再导出保持导入面不变，消费方零改动、行为零漂移）：
+//   · runtime.types.ts    契约类型区（宏动作方言 / RuntimeWord / ExecOutcome 等）
+//   · runtime.deps.ts     RuntimeDeps 依赖注入契约（W8-B2 新增 verifyTaskId 注入位）
+//   · runtime.tuning.ts   W1-1 执行层节奏与阈值参数面（W1ExecTuning / W1_EXEC_TUNING）
+//   · runtime.verdict.ts  W1-1 纯函数工具区（汉明距离/落点/网格步进/ROI 三区判决）
+//   · runtime.perceive.ts 感知铸造厂（createPerceive + 缺省 OCR/云脑接地工厂）
+//   · runtime.utils.ts    内部纯工具（异常归因/夹取/折叠/note 截断 —— 家族内部面）
+// createExecute 依 W6-1 登记整段留守本文件（闭包状态织成，强拆即逻辑重构）。
 import * as backend from '../physicalBackend.js';
 import { system } from '../system.js';
 import { getSharp } from '../_legacyDeps.js';
-import { dhash, hammingDistance, normalizeHash } from '../perceptualHash.js';
-import { readText } from '../textReader.js';
+import { dhash } from '../perceptualHash.js';
 import { skillLibrary } from '../skillLibrary.js';
 import { getGlmClient, isGlmConfigured } from '../vlm/glmClient.js';
-import { groundElements } from '../vlm/grounding.js';
 import { encodeForVlm, VlmBudget } from '../vlm/codec.js';
 import { composeSnapshot, snapshotChanged } from './worldSnapshot.js';
-import { SceneSemanticsCache } from './sceneSemantics.js';
 import { estimateRowShift, stillTranslating } from '../motionEstimator.js';
 import { kernelRegistry } from '../kernel/registry.js';
 import { contextManager } from '../contextManager.js';
 // W4-1（A1 技能宏重放执行接线）：宏执行器 —— 解析/排练门禁/重锚定/抽查节奏
 import { executeMacro, macroTraceSummary, } from '../macroExecutor.js';
-// W4-1（顺带接线）：增量账本消费 —— ScreenStateLedger.ingest → deliverIncremental
-import { ScreenStateLedger, incrementalEncodingEnabled } from '../visualDiff.js';
-import { deliverIncremental } from '../imageDelivery.js';
-// ─── 内部纯工具（零异常） ───
-/** 异常归因为安全字符串（绝不二次抛出） */
-function errText(err) {
-    if (err instanceof Error)
-        return err.message;
-    try {
-        const text = String(err);
-        return text === '' ? '未知异常' : text;
-    }
-    catch {
-        return '未知异常';
-    }
-}
-/** 数字夹 [0,1]；非有限数按 0 记（归一化坐标卫兵） */
-function clamp01(v) {
-    const n = typeof v === 'number' && Number.isFinite(v) ? v : 0;
-    return Math.min(1, Math.max(0, n));
-}
-/** 大小写 + 空白折叠（判据子串匹配的统一前置） */
-function foldText(s) {
-    return typeof s === 'string' ? s.toLowerCase().replace(/\s+/g, ' ').trim() : '';
-}
-/** note 预算：附注截 500 字（Token 纪律 —— 记事本不是转录本） */
-const NOTE_MAX = 500;
-function clipNote(s) {
-    return s.length > NOTE_MAX ? `${s.slice(0, NOTE_MAX)}…[截断]` : s;
-}
-/** 判据抽查周期：每 3 个已验证步抽查一次（成本克制） */
-const CRITERIA_SPOT_PERIOD = 3;
-/** 缺省滚动行数（与 scrollPage 工具缺省同律） */
-const DEFAULT_SCROLL_AMOUNT = 5;
-/** W1-1：缺省参数（128px ROI / 汉明 2 / 150ms 轮询 / 2s 强制放行 / 8 邻位重试） */
-export const W1_EXEC_TUNING = {
-    roiRadiusPx: 128,
-    roiHammingTolerance: 2,
-    focusShortcutRadius: 0.01,
-    largeBboxPx: 96,
-    smallBboxPx: 24,
-    smallShrinkRatio: 0.2,
-    wordMaxAreaRatio: 0.6,
-    clickRetryMax: 8,
-    gridStepRatio: 0.25,
-    gridStepMinPx: 4,
-    gridStepMaxPx: 40,
-    steadyPollMs: 150,
-    steadyTimeoutMs: 2000,
-    steadyHamming: 2,
-    rowMeansGrid: 64,
-    rowShiftSearchRange: 16,
-};
-// ─── W1-1：执行层纯函数工具（零异常、零依赖 —— 可离线单测的确定性事实源） ───
-/** 数字卫兵：非有限数 ⇒ null（W1 各判决的统一前置） */
-const finiteOrNull = (v) => typeof v === 'number' && Number.isFinite(v) ? v : null;
-/**
- * W1-1（A2/A5）：两枚指纹（服务端 hex / 本地位串混布）的汉明距离。
- * 任一无效（缺席/空串）、长度不可比或解析异常 ⇒ null（诚实缺席，绝不猜距离）。
- */
-export function w1HashDistance(a, b) {
-    const sa = typeof a === 'string' && a.trim() !== '' ? a : null;
-    const sb = typeof b === 'string' && b.trim() !== '' ? b : null;
-    if (sa === null || sb === null)
-        return null;
-    try {
-        const ba = normalizeHash(sa);
-        const bb = normalizeHash(sb);
-        if (ba.length === 0 || ba.length !== bb.length)
-            return null;
-        return hammingDistance(ba, bb);
-    }
-    catch {
-        return null;
-    }
-}
-/**
- * W1-1（A4）：bbox 不确定性感知落点（纯函数、绝不抛异常）。
- *   · 大框（长边 ≥ largeBboxPx）：以框内词级元素（快照 localElements 的文字
- *     重心）按置信度加权质心替代几何中心 —— 避开图标区/边框/大容器的死中心；
- *     与目标自身近同尺寸（面积 > wordMaxAreaRatio×目标）或中心不在内缩 10%
- *     安全带内的元素不入词集；
- *   · 小框（短边 < smallBboxPx）：落点向几何中心收缩 smallShrinkRatio
- *     （20%）—— 抗小框坐标抖动溢出；
- *   · 无合法框 ⇒ 中心直通；中心缺席 ⇒ 框中点；落点最终夹回框内（防御脏 center）。
- */
-export function pickClickPoint(target, elements, t = W1_EXEC_TUNING) {
-    const b = target && typeof target === 'object' ? target.bbox : undefined;
-    const x0 = finiteOrNull(b?.x0);
-    const y0 = finiteOrNull(b?.y0);
-    const x1 = finiteOrNull(b?.x1);
-    const y1 = finiteOrNull(b?.y1);
-    const cx = finiteOrNull(target?.center?.x);
-    const cy = finiteOrNull(target?.center?.y);
-    if (x0 === null || y0 === null || x1 === null || y1 === null) {
-        // 无合法框 ⇒ 中心直通（质心/收缩均无从谈起）；中心也脏 ⇒ (0,0) 兜底
-        return { x: cx ?? 0, y: cy ?? 0, via: 'center', words: 0 };
-    }
-    const bx0 = Math.min(x0, x1), bx1 = Math.max(x0, x1);
-    const by0 = Math.min(y0, y1), by1 = Math.max(y0, y1);
-    const bw = bx1 - bx0, bh = by1 - by0;
-    const midX = (bx0 + bx1) / 2, midY = (by0 + by1) / 2;
-    let px = cx !== null ? cx : midX;
-    let py = cy !== null ? cy : midY;
-    let via = 'center';
-    let words = 0;
-    // 大框 ⇒ 文字重心：框内词级元素的置信度加权重心
-    if (Math.max(bw, bh) >= t.largeBboxPx) {
-        const areaT = Math.max(bw * bh, 1e-9);
-        const marginX = bw * 0.1, marginY = bh * 0.1; // 内缩 10% 安全带（避边框伪词）
-        let sw = 0, sx = 0, sy = 0;
-        for (const el of Array.isArray(elements) ? elements : []) {
-            if (!el || typeof el !== 'object')
-                continue;
-            if (typeof el.label !== 'string' || el.label.trim() === '')
-                continue;
-            const ex0 = finiteOrNull(el.bbox?.x0);
-            const ey0 = finiteOrNull(el.bbox?.y0);
-            const ex1 = finiteOrNull(el.bbox?.x1);
-            const ey1 = finiteOrNull(el.bbox?.y1);
-            if (ex0 === null || ey0 === null || ex1 === null || ey1 === null)
-                continue;
-            const ew = Math.abs(ex1 - ex0), eh = Math.abs(ey1 - ey0);
-            if (ew * eh > t.wordMaxAreaRatio * areaT)
-                continue; // 近自尺寸（含目标镜像）不入词集
-            const ecx = (Math.min(ex0, ex1) + Math.max(ex0, ex1)) / 2;
-            const ecy = (Math.min(ey0, ey1) + Math.max(ey0, ey1)) / 2;
-            if (ecx < bx0 + marginX || ecx > bx1 - marginX || ecy < by0 + marginY || ecy > by1 - marginY)
-                continue;
-            const conf = finiteOrNull(el.confidence);
-            const weight = Math.max(conf !== null ? conf : 0, 0.05);
-            sw += weight;
-            sx += ecx * weight;
-            sy += ecy * weight;
-            words++;
-        }
-        if (sw > 0) {
-            px = sx / sw;
-            py = sy / sw;
-            via = 'word-centroid';
-        }
-    }
-    // 小框 ⇒ 落点向几何中心收缩（坐标各向同性收缩 —— 中心点恒等，仅偏移点被拉回）
-    const shortSide = Math.min(bw, bh);
-    if (shortSide > 0 && shortSide < t.smallBboxPx) {
-        px = px + (midX - px) * t.smallShrinkRatio;
-        py = py + (midY - py) * t.smallShrinkRatio;
-        if (via === 'center')
-            via = 'shrunk';
-    }
-    // 夹回框内（质心/收缩数学上已在内 —— 浮点误差与脏 center 的最后一道闸）
-    px = Math.min(bx1, Math.max(bx0, px));
-    py = Math.min(by1, Math.max(by0, py));
-    return { x: px, y: py, via, words };
-}
-/**
- * W1-1（A4）：3×3 去中心网格步进序 —— 4 邻（上下左右）先、4 角后（贴近原意图
- * 的位置先试），确定性次序，共 8 邻位（中心位是已失败的首发点，不重复）。
- */
-export function gridRetryOffsets() {
-    return [
-        { dx: 0, dy: -1 }, { dx: -1, dy: 0 }, { dx: 1, dy: 0 }, { dx: 0, dy: 1 },
-        { dx: -1, dy: -1 }, { dx: 1, dy: -1 }, { dx: 1, dy: 1 }, { dx: -1, dy: 1 },
-    ];
-}
-/**
- * W1-1（A2）：三区判决合成（纯函数 —— 判决矩阵的确定性事实源）。
- *   · ROI 证据链缺席 ⇒ 降级全屏判决（degraded 记 'roi'，行为与接线前一致）；
- *   · ROI 三证（区域指纹/预期区域交叠/ROI 内 OCR 词）任一判变 ⇒ progress；
- *   · 三证皆无而全屏变 ⇒ no_effect + noise=true（噪声判决）；
- *   · 三证皆无且全屏未变（或全屏证据也缺席）⇒ 平凡 no_effect。
- */
-export function combineRoiVerdict(v) {
-    if (!v.roiCapability) {
-        return {
-            outcome: v.fullscreenChanged === true ? 'progress' : 'no_effect',
-            noise: false,
-            degraded: ['roi'],
-        };
-    }
-    if (v.roiChanged === true || v.expectedHit === true || v.roiOcrChanged === true) {
-        return { outcome: 'progress', noise: false, degraded: [] };
-    }
-    if (v.fullscreenChanged === true) {
-        return { outcome: 'no_effect', noise: true, degraded: [] };
-    }
-    return { outcome: 'no_effect', noise: false, degraded: [] };
-}
-/**
- * W1-1（A2③）：ROI 内 OCR 词级标签集的前后对照（纯函数）。
- * before 侧用快照元素（词级 bbox 的 localElements）、after 侧用验证帧 OCR 词，
- * 双方中心点归一化后落 ROI 框内才入集。任一侧无词 ⇒ null（OCR 失败/空 ROI
- * 都不构成判变证据 —— 宁缺毋错）。
- */
-function judgeRoiOcr(before, afterWords, roi, afterDims) {
-    if (!before)
-        return null;
-    const rx0 = roi.x - roi.r, rx1 = roi.x + roi.r;
-    const ry0 = roi.y - roi.r, ry1 = roi.y + roi.r;
-    const inRoi = (nx, ny) => nx > rx0 && nx < rx1 && ny > ry0 && ny < ry1;
-    const beforeLabels = new Set();
-    const bw = before.width > 0 ? before.width : 1;
-    const bh = before.height > 0 ? before.height : 1;
-    for (const el of Array.isArray(before.elements) ? before.elements : []) {
-        if (!el || typeof el.label !== 'string' || el.label.trim() === '')
-            continue;
-        const nx = finiteOrNull(el.center?.x);
-        const ny = finiteOrNull(el.center?.y);
-        if (nx === null || ny === null)
-            continue;
-        if (inRoi(nx / bw, ny / bh))
-            beforeLabels.add(foldText(el.label));
-    }
-    const afterLabels = new Set();
-    const aw = afterDims.width > 0 ? afterDims.width : 1;
-    const ah = afterDims.height > 0 ? afterDims.height : 1;
-    for (const w of Array.isArray(afterWords) ? afterWords : []) {
-        if (!w || typeof w.label !== 'string' || w.label.trim() === '')
-            continue;
-        const wx0 = finiteOrNull(w.bbox?.x0);
-        const wy0 = finiteOrNull(w.bbox?.y0);
-        const wx1 = finiteOrNull(w.bbox?.x1);
-        const wy1 = finiteOrNull(w.bbox?.y1);
-        if (wx0 === null || wy0 === null || wx1 === null || wy1 === null)
-            continue;
-        if (inRoi(((wx0 + wx1) / 2) / aw, ((wy0 + wy1) / 2) / ah))
-            afterLabels.add(foldText(w.label));
-    }
-    if (beforeLabels.size === 0 || afterLabels.size === 0)
-        return null;
-    if (beforeLabels.size !== afterLabels.size)
-        return true;
-    for (const l of beforeLabels)
-        if (!afterLabels.has(l))
-            return true;
-    return false;
-}
-// ─── 感知铸造厂 ───
-/**
- * 铸造 perceive()：截屏 → (宽高, dhash, OCR 词, VLM 元素可选) → composeSnapshot。
- *
- * 纪元 Η（Η-5）：云脑在场且 dhash 指纹在场时，另经 Φ-6 SceneSemanticsCache 读屏
- * 认场景（dhash+question 组合键、TTL 30s、LRU-16 —— 同屏零重拨），非降级读数的
- * sceneLabel 透传进快照；离线/指纹缺席 ⇒ 零网络零编码，行为与接线前一致。
- *
- * 分工律：capture 失败 ⇒ 原样上抛（闭环记 error 步 —— 感知失败是诚实错误，
- * 不是降级）；dhash/OCR/VLM 接地/场景语义失败 ⇒ 各自降级（快照 degraded 记账），
- * 绝不让次级传感器的故障拖垮主感知。合成后的快照写入 lastSnapshotRef
- * （在场时）供 execute 做变化判决的 before 帧。
- */
-export function createPerceive(deps = {}) {
-    const capture = deps.capture ?? (() => backend.captureCleanPng());
-    const imageSize = deps.imageSize ??
-        (async (buf) => {
-            const sharp = await getSharp();
-            const meta = await sharp(buf).metadata();
-            return { width: meta.width ?? 0, height: meta.height ?? 0 };
-        });
-    const dhashOf = deps.dhashOf ??
-        (async (buf) => {
-            try {
-                return await dhash(buf);
-            }
-            catch {
-                return null; // 指纹失败 = 无指纹（快照 degraded 记 'dhash'）
-            }
-        });
-    const readWords = deps.readWords ?? makeDefaultReadWords(deps.ocrLang);
-    const groundVlm = deps.groundVlm ?? makeDefaultGroundVlm(deps.client);
-    const now = deps.now ?? (() => Date.now());
-    // 纪元 Η（Η-5 感知缓存接线）：Φ-6 场景语义读屏缓存 —— dhash 相同（汉明距离 ≤ 容差）
-    // 的屏在 TTL 内零重拨（内建 LRU-16）。离线（未注入 client 且未配置 GLM）时 read
-    // 立即诚实降级：零网络、零编码、sceneLabel 保持 ''，与接线前逐字节同行为。
-    const sceneCache = new SceneSemanticsCache({
-        ...(deps.client ? { client: deps.client } : {}),
-        ...(deps.now ? { now: deps.now } : {}),
-    });
-    // W4-1（顺带接线）：屏幕状态账本 —— perceive 生命周期内持有（任务级状态机：
-    // 关键帧代际 + 累计脏掩码跨帧记账）。prevDhash 是惊异信号的源（与本帧指纹
-    // 的汉明距离 —— 与 contextManager 页面级跳变判据同律）。
-    const incrementalLedger = new ScreenStateLedger({}, {});
-    let prevIncrementalDhash = null;
-    // W4-1：惊异信号（前帧 vs 本帧 dhash 的汉明距离；证据缺席 ⇒ 0 —— 不伪报惊异）
-    const surpriseBitsOf = (fingerprint) => {
-        if (!prevIncrementalDhash || !fingerprint)
-            return 0;
-        const d = w1HashDistance(prevIncrementalDhash, fingerprint);
-        return d === null ? 0 : d;
-    };
-    return async () => {
-        const buf = await capture(); // 失败上抛 —— 闭环收敛为 error 步
-        const { width, height } = await imageSize(buf);
-        // 次级传感器：指纹 / OCR / 云脑接地（各自降级，互不拖垮）
-        const fingerprint = await dhashOf(buf).catch(() => null);
-        const words = await readWords(buf).catch(() => []);
-        const vlmElements = await groundVlm(buf).catch(() => []);
-        // 纪元 Η（Η-5）：同屏语义复用 —— 指纹在场才读（无键不读，dhash 相同直接命中
-        // 缓存语义）；失败/降级零影响（sceneLabel 维持缺省 ''）
-        let sceneLabel = '';
-        if (typeof fingerprint === 'string' && fingerprint.trim() !== '') {
-            try {
-                const scene = await sceneCache.read(buf, fingerprint);
-                if (scene && scene.degraded === false && scene.reading &&
-                    typeof scene.reading.sceneLabel === 'string') {
-                    sceneLabel = scene.reading.sceneLabel;
-                }
-            }
-            catch { /* 场景语义是次级传感器 —— 失败绝不拖垮主感知 */ }
-        }
-        const localElements = words
-            .filter(w => w && typeof w.label === 'string' && w.label.trim() !== '')
-            .map(w => ({
-            label: w.label,
-            bbox: w.bbox && typeof w.bbox === 'object'
-                ? {
-                    x0: typeof w.bbox.x0 === 'number' && Number.isFinite(w.bbox.x0) ? w.bbox.x0 : 0,
-                    y0: typeof w.bbox.y0 === 'number' && Number.isFinite(w.bbox.y0) ? w.bbox.y0 : 0,
-                    x1: typeof w.bbox.x1 === 'number' && Number.isFinite(w.bbox.x1) ? w.bbox.x1 : 0,
-                    y1: typeof w.bbox.y1 === 'number' && Number.isFinite(w.bbox.y1) ? w.bbox.y1 : 0,
-                }
-                : { x0: 0, y0: 0, x1: 0, y1: 0 },
-            confidence: clamp01(w.confidence),
-        }));
-        const ocrText = words.map(w => (typeof w.label === 'string' ? w.label : '')).filter(Boolean).join(' ');
-        const snap = composeSnapshot({
-            image: buf,
-            width,
-            height,
-            dhash: fingerprint,
-            vlmElements,
-            localElements,
-            ocrText,
-            ...(sceneLabel !== '' ? { sceneLabel } : {}),
-            now: now(),
-        });
-        // W4-1（顺带接线 · 增量账本消费）：总闸 incrementalEncodingEnabled() 缺省关
-        // ⇒ 本段整跳过，感知行为与接线前逐字节一致（零回归）。开 ⇒ 每帧入账
-        // （惊异 = 前帧与本帧 dhash 的汉明距离）→ deliverIncremental 出投递产物；
-        // 账本/投递/观察面任一失败 ⇒ 旁路吞掉（增量是增益不是依赖，绝不带崩感知）。
-        if (incrementalEncodingEnabled()) {
-            try {
-                const verdict = await incrementalLedger.ingest(buf, {
-                    surpriseBits: surpriseBitsOf(fingerprint),
-                });
-                let delivery = null;
-                try {
-                    delivery = await deliverIncremental(verdict, buf); // 附件服务缺席 ⇒ null（诚实降级）
-                }
-                catch {
-                    delivery = null;
-                }
-                if (deps.incrementalObserver)
-                    deps.incrementalObserver.current = { verdict, delivery };
-            }
-            catch { /* 旁路义务：账本/投递失败绝不拖垮主感知 */ }
-        }
-        prevIncrementalDhash = typeof fingerprint === 'string' && fingerprint !== '' ? fingerprint : prevIncrementalDhash;
-        if (deps.lastSnapshotRef)
-            deps.lastSnapshotRef.current = snap;
-        return snap;
-    };
-}
-/** 缺省词级 OCR：textReader.readText（归一化 bbox → 像素换算，confidence/100 夹 [0,1]） */
-function makeDefaultReadWords(lang) {
-    return async (buf) => {
-        const result = await readText(buf, typeof lang === 'string' && lang.trim() !== '' ? lang : 'eng');
-        const meta = await (async () => {
-            const sharp = await getSharp();
-            const m = await sharp(buf).metadata();
-            return { width: m.width ?? 0, height: m.height ?? 0 };
-        })();
-        const W = meta.width > 0 ? meta.width : 1;
-        const H = meta.height > 0 ? meta.height : 1;
-        return result.words.map(w => {
-            const b = w.bbox_normalized ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
-            return {
-                label: w.text,
-                bbox: {
-                    x0: Math.round(clamp01(b.x0) * W),
-                    y0: Math.round(clamp01(b.y0) * H),
-                    x1: Math.round(clamp01(b.x1) * W),
-                    y1: Math.round(clamp01(b.y1) * H),
-                },
-                confidence: clamp01((typeof w.confidence === 'number' && Number.isFinite(w.confidence) ? w.confidence : 0) / 100),
-            };
-        });
-    };
-}
-/** 缺省云脑接地：注入 client 优先；否则 isGlmConfigured() 时 groundElements，否则零网络 [] */
-function makeDefaultGroundVlm(client) {
-    return async (buf, question) => {
-        if (!client && !isGlmConfigured())
-            return []; // 未配置 ⇒ 零网络降级
-        const result = await groundElements(buf, {
-            ...(client ? { client } : {}),
-            ...(typeof question === 'string' && question.trim() !== '' ? { question } : {}),
-            // W2-0（C 接线）：Zoom 复核端口（W1-8 P3）—— grounding.verifyZoom 内核键
-            //（宿主 index.ts 以 config.vlmZoomVerify 铸入，缺省 1=开）控制；端口取注入
-            // client 或已配置单例（同一颗脑自任第二意见 —— 复核流量仍走独立预算闸，
-            // grounding.verifyBudget 任务级 8 次封顶）。关 ⇒ 端口缺席，触发事件以
-            // port-absent 诚实放行原值。
-            ...(kernelRegistry.getOrDefault('grounding.verifyZoom', 1) > 0.5
-                ? { verifyClient: client ?? getGlmClient() }
-                : {}),
-        });
-        return result.ok ? result.elements : [];
-    };
-}
+export { W1_EXEC_TUNING } from './runtime.tuning.js';
+export { w1HashDistance, pickClickPoint, gridRetryOffsets, combineRoiVerdict } from './runtime.verdict.js';
+export { createPerceive } from './runtime.perceive.js';
+// 家族内部面（拆分前为模块私有 —— 不进公共导出，公共面零漂移）
+import { errText, clamp01, clipNote, CRITERIA_SPOT_PERIOD, DEFAULT_SCROLL_AMOUNT } from './runtime.utils.js';
+// W9-1（D-G9 收口）：判据核对单一器官 —— runtime 主路径整体换用 criteriaEval
+//（肯定面 fuzzy 容错 + 否定面证伪 + 语料缺席诚实降级，全走同一 DSL 同一器官）
+import { evaluateCriteria, buildCriteriaPairs } from './criteriaEval.js';
+import { finiteOrNull, w1HashDistance, pickClickPoint, gridRetryOffsets, combineRoiVerdict, judgeRoiOcr } from './runtime.verdict.js';
+import { makeDefaultReadWords } from './runtime.perceive.js';
+import { W1_EXEC_TUNING } from './runtime.tuning.js';
 // ─── 执行铸造厂 ───
 /**
  * 铸造 execute(action)：动作映射律 + 执行后验证 + 判据抽查。
@@ -470,10 +84,13 @@ function makeDefaultGroundVlm(client) {
  * 或全屏 snapshotChanged（降级）⇒ progress / no_effect；异常 ⇒ error。
  * before 帧取 lastSnapshotRef（感知快照）；槽缺席时现场补拍（独立使用亦正确）。
  *
- * 判据抽查（成本克制）：OCR 全文（readWords 拼接）对 spec.successCriteria 做
- * 大小写 + 空白折叠子串匹配（命中 ⇒ met）—— 仅 declare 步（用感知快照的
- * textDigest，零额外截屏）与每 3 个已验证步（用验证帧的 OCR）抽查；
- * 失败不产生 violated（宁缺毋错 —— 子串匹配只适合证真，不适合证伪）。
+ * 判据抽查（成本克制）：OCR 全文（readWords 拼接）对 spec.successCriteria 走
+ * criteriaEval.evaluateCriteria 单一器官（W9-1 · D-G9 收口）—— 肯定判据
+ * 精确 ∪ fuzzy（⌈m/6⌉ 容错、<3 字符短模式只走精确）命中 ⇒ met；否定判据
+ * （mustNotAppear:/不得出现： 前缀）命中禁词 ⇒ violated、在场未命中 ⇒ met；
+ * 语料缺席 ⇒ 诚实降级零证据。仅 declare 步（用感知快照的 textDigest，零额外
+ * 截屏）与每 3 个已验证步（用验证帧的 OCR）抽查；肯定判据未命中不产生
+ * violated（宁缺毋错 ——「没找到」不是「被证伪」）。
  */
 export function createExecute(deps) {
     const capture = deps.capture ?? (() => backend.captureCleanPng());
@@ -514,33 +131,34 @@ export function createExecute(deps) {
         set: () => { },
     };
     // 判据对（原文 + 原始下标）：下标锚定 spec.successCriteria 原位（recordCriterion
-    // 按原数组回填）—— 过滤掉非法判据不得平移后续判据的证据下标
-    const criteria = [];
-    if (Array.isArray(spec.successCriteria)) {
-        spec.successCriteria.forEach((c, index) => {
-            if (typeof c === 'string' && c.trim() !== '')
-                criteria.push({ text: c, index });
-        });
-    }
+    // 按原数组回填）—— 过滤掉非法判据不得平移后续判据的证据下标。
+    // W9-1（D-G9 收口）：判据对铸造也走单一器官（buildCriteriaPairs —— 原内联
+    // 铸造的逐字节同律搬迁：非数组 ⇒ 空账；非法条目剔除但下标不平移）
+    const criteria = buildCriteriaPairs(spec.successCriteria);
     /** 已验证步计数（每 3 步抽查判据的节拍器） */
     let verifiedCount = 0;
     // W2-0（D 接线）：任务级视觉预算（W1-9 C4）—— createExecute 每次铸造（runPilotLoop
     // 每 run 一 execute = 任务级生命周期）。只消费 requote 的**建议性**分档（original
     // 档不显式传参 ⇒ 缺省路径编码参数逐字节不变），绝不接 check/commit 的强制闸语义。
     const vlmBudget = new VlmBudget();
-    /** 判据核对：OCR 全文对 successCriteria 折叠子串匹配（命中 ⇒ met；证伪不做） */
+    /**
+     * W9-1（D-G9 收口 · 判据证伪·极性分工红线）：判据核对整体换用
+     * criteriaEval.evaluateCriteria —— 折叠子串匹配方言就此退役，判据解析
+     * （mustNotAppear:/不得出现： 否定前缀）、肯定面 fuzzy 容错（fuzzy.ts
+     * ⌈m/6⌉ 六字符容一错；<3 字符短模式只走精确匹配的 actionGate 同律护栏）、
+     * 否定面证伪（命中禁词 ⇒ violated）、OCR 语料缺席诚实降级（零证据、
+     * 否定判据绝不因「看不见」自动为真），四语义全走单一器官 —— 绝不两套
+     * 方言并存（runtime 是判据核对的唯一权威器官）。
+     * 行为变更面（D-G9 立法意图，显式论证）：肯定判据在 OCR 距 ≤ ⌈m/6⌉ 时也判
+     * met（精确子串命中是 fuzzy 命中的真子集 —— 既有精确命中用例零回归；短模式
+     * 护栏保持精确，既有严格例不弱化）；否定判据经 execute 通道也能产出 violated
+     * （与 autoPilot ⑧′ 否定面复核同器官同律 —— 环内消费不改，口径差见其注释）。
+     */
     const checkCriteria = (ocrText) => {
-        const folded = foldText(ocrText);
-        if (folded.length === 0)
-            return [];
-        const evidence = [];
-        criteria.forEach(({ text, index }) => {
-            const needle = foldText(text);
-            if (needle.length > 0 && folded.includes(needle)) {
-                evidence.push({ index, status: 'met' });
-            }
-        });
-        return evidence;
+        const out = evaluateCriteria(criteria, ocrText);
+        // degraded ⇒ 器官已返零证据；ExecOutcome 契约只载 index+status（polarity
+        // 随行字段是器官审计面，此处投影剥离 —— 消费方 autoPilot ⑧ 按状态回填）
+        return out.evidence.map(({ index, status }) => ({ index, status }));
     };
     // ─── W1-1 内部工具（全部零异常；探针失败 ⇒ null 降级，绝不阻塞主路径） ───
     /** 探针帧采样（meta-only + 可选区域指纹/keepFrame）；失败 ⇒ null */
@@ -998,7 +616,8 @@ export function createExecute(deps) {
                     const focusDist = Math.hypot(focusPt.x - firstPt.nx, focusPt.y - firstPt.ny);
                     if (focusPt.x >= 0 && focusPt.y >= 0 && Number.isFinite(focusDist) && focusDist <= T.focusShortcutRadius) {
                         // W2-0（D 补线）：短路免截屏，但判据核对零成本不豁免 —— 与 declare 同律
-                        //（用感知快照 textDigest 做折叠子串匹配，零额外截屏零 OCR）。旧路径的
+                        //（W9-1：用感知快照 textDigest 走 evaluateCriteria 单一器官，零额外截屏
+                        // 零 OCR）。旧路径的
                         // 判据证据搭验证帧 OCR 便车（每 3 步抽查）；短路步无验证帧，若不补此
                         // 免费通道，「目标字面早已在屏」的达成会被短路推迟到保险丝之后。
                         const shortcutEvidence = checkCriteria(deps.lastSnapshotRef?.current?.textDigest ?? '');

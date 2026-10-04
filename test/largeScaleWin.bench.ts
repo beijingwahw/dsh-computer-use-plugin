@@ -1,7 +1,7 @@
 // test/largeScaleWin.bench.ts
 // 大规模真机验证（Windows）—— 在本地 DeepSeek Harness 物理链路上以大量实际
 // 复杂任务验证方案准确性：
-//   感知 = D-5 服务真截屏（mmap-file）→ tesseract.js OCR（离线仓根语言包）
+//   感知 = D-5 服务真截屏（mmap-file）→ tesseract.js OCR（离线 fixtures 语言包）
 //   决策 = ReflexiveDecisionStation 四层脑（免疫压制 / 脊髓反射 / 前额叶仿真）
 //   执行 = D-5 服务 /v1/click = 真 pyautogui（真鼠标）→ tkinter 回调真实触发
 //   裁决 = 应用状态文件（世界真相，非脚本裁决）

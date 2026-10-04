@@ -2,7 +2,8 @@
 // D-2 工具面：shape_environment —— 模型先看再动（capabilities），动必留痕（undoToken），
 // 离开必复原（restore）。Agent 从被动适应 UI 升级为主动整理工作台的造物主。
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { shaper, ShaperActionKind } from '../environmentShaper';
+import { shaper } from '../environmentShaper';
+import type { ShaperActionKind } from '../environmentShaper';
 import { toolOk, toolErr } from '../toolResult';
 
 export function createShapeEnvironmentTool() {

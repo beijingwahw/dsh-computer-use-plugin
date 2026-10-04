@@ -1,4 +1,5 @@
 // src/vlm/onboarding.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：Λ onboarding 状态机 —— 引导阶段/连接体检/平台巡检按状态机转移同表演进，拆分将拆散转移矩阵。
 // 纪元 Λ（Λ-2 开箱即亮）：连接向导 HTTP 服务器与页面 —— 无视觉模型时弹出的
 // 本机连接向导。宿主检测到「一颗脑都没接上」时 startOnboarding() 起一个只绑
 // 回环的小 HTTP 服务，自动拉起浏览器（或宿主内嵌 webview）打开向导页；用户在

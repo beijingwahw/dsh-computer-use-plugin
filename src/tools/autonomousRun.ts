@@ -1,4 +1,5 @@
 // src/tools/autonomousRun.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：autonomous_run 单工具面 —— 参数 schema/发射/遥测记录/结果铸造同链路内聚，拆分收益低于工具面碎片化代价。
 // 纪元 Φ（自主智能环工具面）：autonomous_run 元工具 —— 让「自主识别 → 自主判断
 // → 自主执行」成为一次调用的产品能力。铸 GoalSpec → buildAutonomyStack 组装
 // 十器官栈 → runAutonomousLoop 跑环 → auditTrajectory 自审 → EvolutionEngine
@@ -207,7 +208,24 @@ export async function runPilotLoop(opts: PilotLoopOptions): Promise<string> {
   // 回合内多次 autonomous_run 会共享同一份 8 次复核预算（先到的 run 吃光额度，
   // 后到的 run 复核闸全数 budget-exhausted）。挂点在本脊梁（runPilotLoop）⇒
   // autonomy_resume 同律受益（续跑亦视为新任务）。旁路义务：异常吞。
-  try { resetVerifyGateBudget(); } catch { /* 预算复位是旁路义务 */ }
+  // W6R-B2（预算作用域化）：清零带任务作用域键 —— 键 = 本轮档案 token
+  //（'AUTO-'+8hex，跑环出生时铸成、全局唯一；resume 续用原 token ⇒ 续跑先清
+  // 同键账本再累计，恰为「续跑亦新任务」）。作用域化后并发跑环互不侵占：
+  // 甲跑环的边界清零只动甲的账本，不再抹掉乙在飞跑环的复核额度。消费面同键：
+  // groundElements opts.verifyTaskId 传 `pilot:<token>` 即与本边界闭环。
+  try { resetVerifyGateBudget(`pilot:${token}`); } catch { /* 预算复位是旁路义务 */ }
+
+  // W8-C1（pilot 键消费面终态接线 · 收口件）：跑环主权键注入 —— deps.verifyTaskId
+  // 就地铸 `pilot:<token>`，环内 perceive 的缺省云脑接地面（makeDefaultGroundVlm
+  // 经 createPerceive 透传，见 runtime.perceive.ts）自此把复核预算记到本任务键
+  // 账本：与上方边界 resetVerifyGateBudget(`pilot:${token}`) use/reset 同键闭环
+  //（起点清的账本 = 环内消费的账本 —— 缺此注入则环内消费落共用缺省账本，任务
+  // 清零形同虚设）。跑环主权：本键恒由脊梁铸造（外部若注入他键会让 reset/use
+  // 分家 —— 清 A 账本、消费 B 账本，预算反而永不清零；测试注入同形键
+  // `pilot:<token>`（w3wire W3-B②② 先例）与本注入等价无冲突）。防御式：就地
+  // 赋值不涉外部 IO，绝不抛；只辖制缺省接地面，注入 groundVlm 的调用方自带
+  // 预算主权（runtime.deps.ts 同律，本键不越权）。
+  deps.verifyTaskId = `pilot:${token}`;
 
   // 组装闭环栈：perceive/policy/constitution 由 buildAutonomyStack 铸造
   //（deps.lastSnapshotRef 就地补挂 —— 同一 deps 对象随后铸 execute，感知/执行共享 before 帧）

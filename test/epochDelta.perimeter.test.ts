@@ -16,7 +16,7 @@ import { join, resolve } from 'node:path';
 import type { Config } from '../src/config.ts';
 import { system } from '../src/system.ts';
 import { telemetry } from '../src/telemetry.ts';
-import { approval, approvalBudget, resetApproval } from '../src/approval.ts';
+import { approval, approvalBudget, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { doctor } from '../src/qualityDoctor.ts';
 import { matchesDangerPatterns, matchesRiskPatterns, riskPatternCacheSize } from '../src/riskGate.ts';
 import { classifyResult, isFailure, isSuccess } from '../src/resultContract.ts';
@@ -50,6 +50,16 @@ afterEach(() => {
 });
 
 type Executable = { execute: (a: unknown) => Promise<string> };
+
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手） */
+const oobSink: ConfirmCodeDelivery[] = [];
+function armOob(): void {
+  setConfirmCodeChannel(d => { oobSink.push({ ...d }); });
+}
+function grantOob(token: string): boolean {
+  const hit = oobSink.find(d => d.token === token);
+  return approval.grantDetailed(token, true, hit ? { confirmCode: hit.confirmCode } : {}).ok;
+}
 
 // ─── P-1 riskGate：全角折叠对称性（不动点迭代） ───
 
@@ -208,14 +218,15 @@ test('P-4: 状态登记 —— PARTIAL_FAILURE 计失败（熔断可见），GRA
 
 test('P-4b: grant 限流拒绝 —— 契约层透出真实成因 rateLimited（invalid-or-expired-token 字面失实）', () => {
   resetApproval();
+  armOob(); // W6R：授予须带外码（限流语义测试前提：先耗干桶再验证拒绝成因）
   // Y-10 令牌桶：容量 3 —— 三次授予耗尽同意预算（冷静期 10min，测试内不可回填）
   for (let i = 0; i < 3; i++) {
     const d = approval.request(`drain-${i}`);
-    assert.equal(approval.grant(d.token, true), true);
+    assert.equal(grantOob(d.token), true);
   }
   assert.equal(approvalBudget(), 0, '测试前提：桶空');
   const pa = approval.request('click 发送');
-  assert.equal(approval.grant(pa.token, true), false, '限流拒绝（令牌留在簿上、未授予、未过期）');
+  assert.equal(grantOob(pa.token), false, '限流拒绝（令牌留在簿上、未授予、未过期）');
 
   // approvalTools 的失败字面（写侧归别簇所有，保持原样输入）
   const raw = JSON.stringify({
@@ -306,8 +317,9 @@ test('P-6: 危险目的地 drag 被拦（无令牌/伪令牌归因分叉），�
   assert.equal(drags, 0);
 
   // 有效令牌：request → grant → 放行；一次性令牌律（派发即消费）
+  armOob(); // W6R：授予须带外码
   const pa = approval.request('drag report.doc onto the delete zone');
-  approval.grant(pa.token, true);
+  grantOob(pa.token);
   const ok = JSON.parse(await (tool as Executable).execute({
     startX: 0.1, startY: 0.1, endX: 0.5, endY: 0.5,
     target_description: '拖到 删除 zone', approval_token: pa.token,

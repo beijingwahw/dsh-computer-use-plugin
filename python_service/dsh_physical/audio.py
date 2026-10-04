@@ -923,9 +923,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="W4-8 L4 声学证据通道（非语义物理证据）")
     parser.add_argument("--selftest", action="store_true",
                         help="合成波形（mock 注入）断言 5 类事件分类正确")
+    parser.add_argument("--selftest-real", action="store_true",
+                        help="W9-4 真机实证：WASAPI 真建链 + 真播放→回环→分类（委托 real_probe.py）")
     args = parser.parse_args(argv)
     if args.selftest:
         return run_selftest()
+    if args.selftest_real:
+        # W9-4 真机实证探针入口：本模块逻辑零侵入，委托 real_probe.py
+        import pathlib as _pl
+
+        _svc_root = _pl.Path(__file__).resolve().parent.parent
+        if str(_svc_root) not in sys.path:
+            sys.path.insert(0, str(_svc_root))
+        from real_probe import run_debt_probe
+
+        return run_debt_probe("D-A4")
     parser.print_help()
     return 0
 

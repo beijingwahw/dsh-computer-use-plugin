@@ -134,9 +134,12 @@ test('H4-1: 超时入队与降级路径 —— 通道缺席维持阻塞审批；
   const refused = approvalQueue.stageAction({ token: pa.token, description: 'send email to Bob' });
   assert.equal(refused.ok, false);
   assert.equal(!refused.ok && refused.reason, 'channel-absent', '宿主缺席 ⇒ 不入暂存模式（保守方向）');
-  // 阻塞审批照常：request → grant → consume 全链路零回归
-  assert.equal(approval.grant(pa.token, true), true);
-  assert.equal(approval.consume(pa.token), true);
+  // W6R fail-closed：通道缺席 ⇒ grant 同样拒绝（无码同意已废除 —— 令牌记
+  // degraded，grantDetailed 返 confirm-channel-absent；用户须经宿主 UI 完成人证）
+  assert.equal(approval.grant(pa.token, true), false, '无码 grant 已废除（fail-closed）');
+  assert.deepEqual(approval.grantDetailed(pa.token, true), { ok: false, reason: 'confirm-channel-absent' });
+  // 拒绝路径（否决）无需人证 —— 恒可行
+  assert.equal(approval.grant(pa.token, false), true);
 
   // 通道在场：未到超时 ⇒ 拒绝（retryInMs 透明）
   armChannel();

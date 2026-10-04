@@ -1,4 +1,5 @@
 // src/vlm/codec.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：视觉编码器 —— 编码/中央凹/预算账本/质量闸门/注视路由围绕同一 Token 经济学（预算与画质互为约束），5 纪元 40+ 测试锁定其数值面；1420 行中过半是逐键注释的算法证据，强拆将拆散闸门与账本的耦合不变量。
 // 纪元 Ω（Ω-2）：GLM-5.3-Flash 云脑皮层 —— VLM 图像编码 / 任务级配额 / 视觉 Token 估算。
 // 纪元 Γ（注视经济）：坐标反算基准（mapEncodedToOriginal / encodeForVlmMeta）+
 // 中央凹加权编码（foveatedEncoding：中央原生、外围低清 —— 单位 VLM token 的
@@ -42,6 +43,8 @@ import { kernelRegistry } from '../kernel/registry.js';
 const DEFAULT_MAX_DIMENSION = 1568;
 /** JPEG 默认质量（80：UI 文字边缘清晰且体积可控） */
 const DEFAULT_QUALITY = 80;
+/** W6-2（doctor smell.magic-number 清偿）：JPEG 质量合法上界（1–100 域的 100），数值逐位不变 */
+const QUALITY_CEILING = 100;
 /** 任务级默认配额：200 张 / 512MB（云脑单任务的视觉预算上限） */
 const DEFAULT_MAX_IMAGES = 200;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
@@ -851,6 +854,16 @@ export async function encodePatchForVlm(frame, rect, opts) {
         return { ok: false, error: `encodePatchForVlm failed: ${e?.message ?? String(e)}` };
     }
 }
+// ─── W1-9（C4 预算弹性调度）：requote 建议档 + 防抖 ───
+/** W7:原始入参的安全描述（Symbol 等不可字符串化值不抛,诚实标注类型——绝不抛纪律) */
+function describeRawInput(x) {
+    try {
+        return String(x);
+    }
+    catch {
+        return `<${typeof x}:unstringifiable>`;
+    }
+}
 /** W1-9：无记账历史时的单帧字节估计（1568 带宽 JPEG q80 典型值 ~300KB —— 经验常数，仅建议档的粗估尺） */
 const REQUOTE_DEFAULT_BYTES = 300 * 1024;
 /** W1-9：quality 每降 20 点的字节收益锚（80→60 ≈ ×0.7 —— JPEG 质量步进的线性化锚点） */
@@ -976,7 +989,7 @@ export class VlmBudget {
     requote(remainingSteps, opts) {
         // 基线档体检：脏值回声 codec 缺省（q80/d1568）
         const rawQ = opts?.current?.quality;
-        const curQ = typeof rawQ === 'number' && Number.isFinite(rawQ) && rawQ >= 1 && rawQ <= 100
+        const curQ = typeof rawQ === 'number' && Number.isFinite(rawQ) && rawQ >= 1 && rawQ <= QUALITY_CEILING
             ? Math.round(rawQ)
             : DEFAULT_QUALITY;
         const rawD = opts?.current?.maxDimension;
@@ -1014,7 +1027,7 @@ export class VlmBudget {
         let reason;
         if (!stepsOk) {
             rawTier = 'original';
-            reason = `W1-9 requote: remainingSteps 不可用(${String(remainingSteps)})—— 维持生效档`;
+            reason = `W1-9 requote: remainingSteps 不可用(${describeRawInput(remainingSteps)})—— 维持生效档`;
         }
         else if (perStepBytes >= estO) {
             rawTier = 'original';

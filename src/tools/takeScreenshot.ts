@@ -299,11 +299,14 @@ export function createTakeScreenshotTool(config: Config) {
   });
 }
 
+/** W6-2（doctor smell.magic-number 清偿）：64 位 dHash 的 hex 编码长度（服务端 gate 比对域），数值逐位不变 */
+const HASH_HEX_LEN = 16;
+
 /** 位串 → hex（服务端 gate 比对域）。已是 hex 则透传。 */
 function lastHashBitsToHex(bits: string): string {
-  if (/^[0-9a-f]+$/i.test(bits) && bits.length === 16) return bits;
+  if (/^[0-9a-f]+$/i.test(bits) && bits.length === HASH_HEX_LEN) return bits;
   try {
-    return BigInt(`0b${bits}`).toString(16).padStart(16, '0');
+    return BigInt(`0b${bits}`).toString(16).padStart(HASH_HEX_LEN, '0');
   } catch {
     return '';
   }

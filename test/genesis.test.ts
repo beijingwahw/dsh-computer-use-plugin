@@ -5,7 +5,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyResult } from '../src/resultContract.ts';
-import { approval } from '../src/approval.ts';
+import { approval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { toolOk, toolErr } from '../src/toolResult.ts';
 import { contextManager } from '../src/contextManager.ts';
 import { journal } from '../src/journal.ts';
@@ -52,11 +52,22 @@ test('B-2: 前缀协议回退 —— 历史工具格式与非法输入', () => {
 
 // ─── B-3：两阶段审批令牌 ───
 
+/** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除） */
+function grantCoded(description: string): string {
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
+  const pa = approval.request(description);
+  assert.equal(approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode }).ok, true);
+  return pa.token;
+}
+
 test('B-3: validate 不消费 —— 闸门检查可重复，失败重试不烧令牌（J 纪元：须先 grant）', () => {
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); }); // W6R：授予须带外码
   const pa = approval.request('send payment of $100');
   // J 纪元协议升级：请求 ≠ 同意 —— 未 grant 的令牌不可通过任何阶段
   assert.equal(approval.validate(pa.token), false, '未授予的令牌不得放行');
-  assert.equal(approval.grant(pa.token, true), true);
+  assert.equal(approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode }).ok, true);
   // 阶段一可反复校验（pre-action gate 每次进入都查）
   assert.equal(approval.validate(pa.token), true);
   assert.equal(approval.validate(pa.token), true);
@@ -66,10 +77,11 @@ test('B-3: validate 不消费 —— 闸门检查可重复，失败重试不烧�
 
 test('B-3: consume 用后即焚 —— 一次性语义（grant=true 前置）', () => {
   const pa = approval.request('delete all records');
-  approval.grant(pa.token, true);
-  assert.equal(approval.consume(pa.token), true);
-  assert.equal(approval.consume(pa.token), false); // 第二次必败
-  assert.equal(approval.validate(pa.token), false);
+  assert.equal(approval.grant(pa.token, true), false, 'W6R：无码 grant 已废除（fail-closed 基线）');
+  const token = grantCoded('delete all records');
+  assert.equal(approval.consume(token), true);
+  assert.equal(approval.consume(token), false); // 第二次必败
+  assert.equal(approval.validate(token), false);
 });
 
 test('B-3: revoke 立即作废；垃圾令牌恒 false', () => {

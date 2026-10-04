@@ -79,8 +79,9 @@ export type UrlRefusal = { kind: 'refused'; reason: string };
 /**
  * URL 候选归一与安检（纯函数）。
  * 输入：单个候选子串（可带尾随标点/包裹空白）。
- * 拒绝通道（全部结构化）：scheme 白名单外、无点主机、含空白/引号、超长、
- * URL 构造失败。精确性优先：宁可拒绝让模型看清楚，不要错 URL 落壳层。
+ * 拒绝通道（全部结构化，按第一性拒因排序）：scheme 白名单外 → 含空白/引号 →
+ * 无点主机 → 超长 → URL 构造失败。精确性优先：宁可拒绝让模型看清楚，不要
+ * 错 URL 落壳层。
  */
 export function normalizeUrlCandidate(raw: string): UrlVerdict | UrlRefusal {
   let s = raw.trim();
@@ -92,11 +93,24 @@ export function normalizeUrlCandidate(raw: string): UrlVerdict | UrlRefusal {
   while (s.length > 0 && LEADING_WRAPPER.includes(s[0])) s = s.slice(1);
   s = stripTrailingPunct(s);
   if (!s) return { kind: 'refused', reason: 'candidate is pure punctuation' };
+  // W8 归因精确性：scheme 归因前移到字符安检之前。data:text/html,<script>…
+  // 这类候选同时命中两个拒绝通道（scheme 白名单外 + 含尖括号/空白），旧行为
+  // 字符安检在先 ⇒ 拒绝原因报「字符噪声」，模型拿到错误的改正方向（清洗字符
+  // 救不了 data:，协议被拒才是第一性拒因——scheme 不在白名单的候选无论字符
+  // 多脏都该拒）。带合法 scheme 前缀但字符非法的（https://… 带空格）仍如实
+  // 报字符原因。scheme 前缀正则与下方 www. 补全分支同源（复用捕获结果）。
+  const schemeMatch = /^([a-z][a-z0-9+.-]*:)/i.exec(s);
+  if (schemeMatch && !ALLOWED_SCHEMES.has(schemeMatch[1].toLowerCase())) {
+    return {
+      kind: 'refused',
+      reason: `scheme '${schemeMatch[1].toLowerCase()}' outside allowlist [http, https] — this engine jumps to web pages only`,
+    };
+  }
   if (/[\s"'<>]/.test(s)) {
     return { kind: 'refused', reason: 'URL contains whitespace/quotes (text noise, not a link)' };
   }
   // www. 前缀补全：唯一被授权的猜测（www. 是显式的网页自声明）
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(s)) {
+  if (!schemeMatch) {
     if (s.toLowerCase().startsWith('www.')) {
       s = `https://${s}`;
     } else {
@@ -109,7 +123,9 @@ export function normalizeUrlCandidate(raw: string): UrlVerdict | UrlRefusal {
   } catch {
     return { kind: 'refused', reason: 'not a parseable URL' };
   }
-  // scheme 白名单：大小写归一后核对（HTTP:// 的 host 解析会小写化，scheme 不会）
+  // scheme 白名单：大小写归一后核对（HTTP:// 的 host 解析会小写化，scheme 不会）。
+  // 前置归因已拦下显式非白名单 scheme，此处是解析归一后的纵深防御（零信任
+  // 前缀正则与 URL 解析器的一致性）。
   if (!ALLOWED_SCHEMES.has(parsed.protocol.toLowerCase())) {
     return { kind: 'refused', reason: `scheme '${parsed.protocol}' outside allowlist [http, https] — this engine jumps to web pages only` };
   }

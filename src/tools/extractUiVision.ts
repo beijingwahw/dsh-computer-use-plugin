@@ -6,7 +6,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { toolErr } from '../toolResult';
+import { toolErr, toolOk } from '../toolResult';
 
 export function createExtractUiVisionTool(config: Config) {
   return defineTool({
@@ -63,16 +63,16 @@ export function createExtractUiVisionTool(config: Config) {
           });
 
         // 4. 状态锚点：只回传前 10 个关键元素 —— 返回值也做 Token 预算
-        return JSON.stringify({
-          status: 'SUCCESS',
-          action: `Extracted ${normalizedElements.length} element(s) via local vision model.`,
-          state_anchor: {
+        // W8/B-4：回执走工厂（toolOk —— 本工具历史形状含 action，逐字节同构）
+        return toolOk(
+          `Extracted ${normalizedElements.length} element(s) via local vision model.`,
+          {
             screen_resolution: `${size.width}x${size.height}`,
             extracted_count: normalizedElements.length,
             elements: normalizedElements.slice(0, 10),
           },
-          next_step: "Review the extracted elements. If the target is found, use its 'center_normalized' to call 'click_mouse'.",
-        }, null, 2);
+          "Review the extracted elements. If the target is found, use its 'center_normalized' to call 'click_mouse'.",
+        );
 
       } catch (error: any) {
         // 失败路径即降级指南：错误消息里写好 Plan B

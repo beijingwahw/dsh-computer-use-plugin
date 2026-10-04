@@ -20,8 +20,9 @@
 //   ⑦  编排注入缝 —— barrier 步先于 actor 执行 + [Barrier] 审计行、超时
 //       诚实失败走 Σ-4 脊梁、缺省零回归（含 marker 任务逐字节一致）、
 //       barrierOf 覆写 + 并行波内 barrier（写通道之外等待）；
-//   ⑧  真 server 冒烟 —— federation-server.mjs 环回起服：脚本序列与 TS 核心
-//       逐字段等价（双实现口径）、双 HTTP 客户端 barrier 往返、协议执法
+//   ⑧  真 server 冒烟 —— federation-server.mjs 环回起服（W8-A7 单源化后经
+//       dist/crossMachine.js 直连核心）：脚本序列与 TS 源核心逐字段对账
+//       （把守 src↔dist 构建滞后）、双 HTTP 客户端 barrier 往返、协议执法
 //       （405/400/404）、向后兼容（/aggregate 与 /health 旧字段不动）；
 //   ⑨  HTTP 壳离线 —— URL/体方言、坏载荷 ⇒ transport 诚实失败；
 //   ⑩  立法在源 —— 常量与端口签名源级锁定。
@@ -391,7 +392,7 @@ async function verify(beforeHash: string, afterHash: string, extra?: Partial<Set
 
 // unique 哈希对（视觉阳性：sim < 0.98；避开振荡检测器跨测试耦合）
 const P_BEFORE1 = '0123456789abcdef';
-const P_AFTER1 = 'fedcba9876543210';  // 汉明 20/64 ⇒ sim 0.6875
+const P_AFTER1 = 'fedcba9876543210';  // 与前者逐位全异（互补指纹）⇒ 汉明 64/64、sim 0
 const P_BEFORE2 = 'a1b2c3d4e5f60718';
 const P_AFTER2 = '5e4d3c2b1a09f8e7';
 const P_BEFORE3 = '13579bdf2468ace0';
@@ -713,8 +714,10 @@ test('W5-3⑧: 真 server 冒烟 —— 等价/往返/协议执法/向后兼容'
     assert.equal(rStatusGet.status, 200);
     assert.equal(((await rStatusGet.json()) as { ok: boolean; reason: string }).reason, 'unknown-barrier', 'GET status 只读面');
 
-    // (c) 双实现口径等价：脚本序列 → TS 核心 vs 真 server，视图逐字段一致
-    //（releasedAt 除外 —— 时钟源不同；脚本覆盖幂等/冲突/两阶段/退休/重放全分支）
+    // (c) 单源对账闸（W8-A7：server 经 dist 直连 TS 核心）：脚本序列 → TS 源核心
+    //（本测试直连 src/*.ts）vs HTTP server（经 dist 构建产物），视图逐字段一致
+    //（releasedAt 除外 —— 时钟源不同；dist 构建滞后于 src ⇒ 此闸红 —— 重建即绿）。
+    // 脚本覆盖幂等/冲突/两阶段/退休/重放全分支
     const script: BarrierRequest[] = [
       { op: 'allocate', name: 'eq', peer: 'A', n: 2 },
       { op: 'allocate', name: 'eq', peer: 'A', n: 2 },
@@ -736,7 +739,7 @@ test('W5-3⑧: 真 server 冒烟 —— 等价/往返/协议执法/向后兼容'
     for (const req of script) {
       const fromTs = strip(tsCore.apply(req));
       const fromHttp = strip(await httpT(req));
-      assert.deepStrictEqual(fromHttp, fromTs, `脚本步 ${req.op}:${req.peer} 双实现视图漂移`);
+      assert.deepStrictEqual(fromHttp, fromTs, `脚本步 ${req.op}:${req.peer} src↔dist 视图漂移（构建滞后？npm run build）`);
     }
 
     // (d) 双 HTTP 客户端 barrier 往返（真 fetch —— A 拨号 B 接听）
@@ -826,5 +829,9 @@ test('W5-3⑩: 立法在源 —— 常量与端口签名源级锁定', () => {
   const orch = readFileSync(new URL('../src/orchestrator.ts', import.meta.url), 'utf8');
   assert.match(orch, /crossMachine\?: CrossMachineSeam/, '编排注入缝字段锁定');
   const srv = readFileSync(new URL('../scripts/federation-server.mjs', import.meta.url), 'utf8');
-  assert.match(srv, /barrierApplyJS/, '服务器 JS 移植在场（双实现口径）');
+  // W8-A7（D-F3 闭）单源口径：server 直连 dist 的 createBarrierCore —— 第二份
+  // 状态机（手工移植）不得复活（单源化前由等价断言把守漂移，现由结构断言锁死）
+  assert.match(srv, /from '\.\.\/dist\/crossMachine\.js'/, '服务器单源消费 dist 的 crossMachine（W8-A7 双实现退役）');
+  assert.match(srv, /createBarrierCore\(\)/, '服务器持有 dist 核心的模块级单例（单一 barrier 世界）');
+  assert.doesNotMatch(srv, /function barrierApplyJS/, 'barrier JS 手工移植不得复活（单源铁律）');
 });

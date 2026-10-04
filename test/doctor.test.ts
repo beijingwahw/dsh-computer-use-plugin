@@ -313,8 +313,8 @@ test('D-4 金丝雀: 手术锁守卫存在于 heal 写盘路径（规则对医�
   assert.equal(out.length, 0);
 });
 
-test('D-4 规则统计: 13 条抗体覆盖四大类目与六条铁律', () => {
-  assert.equal(DOCTOR_RULES.length, 13);
+test('D-4 规则统计: 20 条抗体覆盖四大类目与六条铁律（13 既有 + W6R-B9 七条安全不变量）', () => {
+  assert.equal(DOCTOR_RULES.length, 20);
   const cats = new Set(DOCTOR_RULES.map(r => r.category));
   for (const c of ['genesis', 'smell', 'security', 'chain'] as const) assert.ok(cats.has(c));
   const laws = new Set(DOCTOR_RULES.flatMap(r => r.laws));

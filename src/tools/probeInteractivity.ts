@@ -11,6 +11,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { probeInteractivity } from '../interactivityProbe';
+import { toolOkNoAction } from '../toolResult';
 
 export function createProbeInteractivityTool(config: Config) {
   return defineTool({
@@ -56,9 +57,9 @@ export function createProbeInteractivityTool(config: Config) {
             spent_ms: r.economics.spent_ms,
           },
         } : {};
-        return JSON.stringify({
-          status: 'SUCCESS',
-          state_anchor: {
+        // W8/B-4：回执走工厂（toolOkNoAction —— 历史无 action 形状，逐字节同构）
+        return toolOkNoAction(
+          {
             probed_point: `(${args.x}, ${args.y})`,
             verdict: r.verdict,
             confidence: r.confidence,
@@ -66,8 +67,8 @@ export function createProbeInteractivityTool(config: Config) {
             ...(r.note ? { note: r.note } : {}),
             ...economicsNote,
           },
-          next_step: explain[r.verdict],
-        }, null, 2);
+          explain[r.verdict],
+        );
       } catch (error: any) {
         return `[Error]: Probe failed (${error.message}). The physical service may be an older version without /move_mouse and /cursor_kind — restart it, or fall back to zoom_inspect for visual affordance.`;
       }

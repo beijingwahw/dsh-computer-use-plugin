@@ -23,42 +23,75 @@ function misalignError(a, b, s) {
     return n > 0 ? err / n : Infinity;
 }
 /**
- * 估计前后帧行亮度序列的竖直位移（亚行精度）。
- * rowsA = before，rowsB = after；searchRange 行内搜索。
+ * W6-5：一维相位相关核（行/列共用 —— 纯数学，与轴无关）。原 estimateRowShift
+ * 主体原样上提：搜索 [-r, r] 最小错位误差 → 尺度归一残差 → 三点抛物线亚单位
+ * 细化（顶点位移 s* + (E(s*-1)-E(s*+1)) / (2(E(s*-1)-2E(s*)+E(s*+1)))）。
+ * 逐字节不变量的结构保证：estimateRowShift 委托本核，同一输入同一输出。
  */
-export function estimateRowShift(rowsA, rowsB, searchRange = 16) {
-    const n = Math.min(rowsA.length, rowsB.length);
+function phaseCorrelate1D(a, b, searchRange) {
+    const n = Math.min(a.length, b.length);
     if (n < 4)
         return { shift: 0, residual: 1, bestInteger: 0 };
     let bestS = 0, bestE = Infinity;
     for (let s = -searchRange; s <= searchRange; s++) {
-        const e = misalignError(rowsA, rowsB, s);
+        const e = misalignError(a, b, s);
         if (e < bestE) {
             bestE = e;
             bestS = s;
         }
     }
-    // 尺度归一：行亮度均值的平均量级（避免残差依赖画面明暗）
-    const scale = (avg(rowsA) + avg(rowsB)) / 2 || 1;
+    // 尺度归一：亮度均值的平均量级（避免残差依赖画面明暗）
+    const scale = (avg(a) + avg(b)) / 2 || 1;
     const residual = Math.min(1, bestE / scale);
-    // 三点抛物线亚行细化（顶点位移）
-    const eM = misalignError(rowsA, rowsB, bestS - 1);
-    const eP = misalignError(rowsA, rowsB, bestS + 1);
+    // 三点抛物线亚单位细化（顶点位移）
+    const eM = misalignError(a, b, bestS - 1);
+    const eP = misalignError(a, b, bestS + 1);
     const denom = eM - 2 * bestE + eP;
     const frac = Math.abs(denom) < 1e-9 ? 0 : Math.max(-0.5, Math.min(0.5, (eM - eP) / (2 * denom)));
     const shift = bestS + (Number.isFinite(frac) ? frac : 0);
     return { shift: Math.round(shift * 100) / 100, residual: Math.round(residual * 1000) / 1000, bestInteger: bestS };
 }
-export function judgeScroll(est, direction) {
+/**
+ * 估计前后帧行亮度序列的竖直位移（亚行精度）。
+ * rowsA = before，rowsB = after；searchRange 行内搜索。
+ */
+export function estimateRowShift(rowsA, rowsB, searchRange = 16) {
+    return phaseCorrelate1D(rowsA, rowsB, searchRange);
+}
+/**
+ * W6-5：估计前后帧列亮度序列的水平位移（亚列精度，estimateRowShift 的横向同构）。
+ * colsA = before，colsB = after；searchRange 列内搜索。
+ * shift > 0 = after 内容相对 before 右移（纵向约定「>0 = 下移」的水平对偶）。
+ */
+export function estimateColShift(colsA, colsB, searchRange = 16) {
+    return phaseCorrelate1D(colsA, colsB, searchRange);
+}
+export function judgeScroll(est, direction, 
+/** W6-5：水平方向的列亮度证据（可选注入 —— 缺席 ⇒ 水平判决保持旧行为） */
+colEst) {
     const vertical = direction === 'up' || direction === 'down';
     if (!vertical) {
-        // 水平滚动暂无列亮度序列 —— 只有「动没动」事实，方向一致性诚实缺席
+        // W6-5：列亮度证据在场 ⇒ 水平方向一致性可判（纵向同律的对偶执法）。
+        // 约定：scroll right（向右滚动）⇒ 内容整体左移 ⇒ after 相对 before shift < 0。
+        // 防御：脏证据（NaN/Infinity）视同缺席 —— 回落旧行为，绝不抛。
+        if (colEst && typeof colEst === 'object'
+            && Number.isFinite(colEst.shift) && Number.isFinite(colEst.residual)) {
+            const expectedSign = direction === 'right' ? -1 : 1;
+            const moved = Math.abs(colEst.shift) >= 1 && colEst.residual < 0.5;
+            return {
+                effective: moved,
+                directionConsistent: moved ? Math.sign(colEst.bestInteger) === expectedSign : null,
+                atBoundary: colEst.residual < 0.35 && Math.abs(colEst.shift) < 0.5,
+            };
+        }
+        // 列证据缺席（旧行为，逐字节不变）：只有「动没动」事实，方向一致性诚实缺席
         return {
             effective: Math.abs(est.shift) >= 1 && est.residual < 0.5,
             directionConsistent: null,
             atBoundary: est.residual < 0.35 && Math.abs(est.shift) < 0.5,
         };
     }
+    // 纵向（旧行为，逐字节不变；colEst 不参与 —— 纵向判决只认行证据）
     // 约定：scroll down（滚轮向下）⇒ 内容整体上移 ⇒ after 相对 before shift < 0
     const expectedSign = direction === 'down' ? -1 : 1;
     const moved = Math.abs(est.shift) >= 1 && est.residual < 0.5;
@@ -72,6 +105,8 @@ export function judgeScroll(est, direction) {
  * W1-1（A5 稳态门控）：内容是否仍在平移 —— 稳态判定的运动维度一步判决。
  * 与 judgeScroll 的 effective 同尺（|shift| ≥ 1 行且平移假设成立），但方向无关：
  * 稳态只问「还在动吗」，不问往哪动。脏输入（NaN/Infinity）一律 false。
+ * W6-5：轴无关纯判（只读 shift/residual 数值）—— 行移/列移（ColShiftEstimate）
+ * 估计皆可入参（横向平移的稳态判定同律消费，无需另造平行函数）。
  */
 export function stillTranslating(est) {
     if (!est || typeof est !== 'object')

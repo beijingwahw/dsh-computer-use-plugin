@@ -700,13 +700,30 @@ class HidController:
         return {
             "platform": sys.platform,
             "protocol": "ch9329",
-            "transport": self._transport.describe(),
+            "transport": self.transport_info(),
             "target": {
                 "width": self.cfg.target_width, "height": self.cfg.target_height,
                 "os": self.cfg.target_os,
             },
             "frames_sent": self._frames_sent,
         }
+
+    def transport_info(self) -> dict:
+        """串口 transport 只读描述(公有面 —— 外层不得摸 ``_transport`` 私有属性,
+        W6-R-A3 封装修复:server.py 曾直接 ``hid_ctrl._transport.describe()``/
+        ``.close()`` 越权穿刺,现由控制器自持该信息)。"""
+        return self._transport.describe()
+
+    async def close(self) -> dict:
+        """串口句柄优雅收口(公有面;线程池内执行,与 UvcController.close 同方言)。
+
+        未写过帧 ⇒ 串口从未打开 ⇒ close 为无害 no-op(W6-R-A3:server.py 的
+        lifespan 收口从私有属性穿刺改走本门面)。
+        运行层方法:失败不抛错之外的最佳努力由调用方兜底 try/except。
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._transport.close)
+        return {"closed": True, "transport": self.transport_info()}
 
 
 # ─── 自测入口(W4-6):python -m dsh_physical.hid --selftest ───
@@ -922,5 +939,16 @@ def _run_selftest() -> int:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         raise SystemExit(_run_selftest())
-    print("usage: python -m dsh_physical.hid --selftest")
+    if "--selftest-real" in sys.argv:
+        # W9-4 真机实证探针入口:本模块逻辑零侵入,委托 real_probe.py
+        # (COM 口枚举 + CH9329 帧经 pyserial loop:// 真序列化回读,证据落 JSON)。
+        import pathlib as _pl
+
+        _svc_root = _pl.Path(__file__).resolve().parent.parent
+        if str(_svc_root) not in sys.path:
+            sys.path.insert(0, str(_svc_root))
+        from real_probe import run_debt_probe
+
+        raise SystemExit(run_debt_probe("D-A2"))
+    print("usage: python -m dsh_physical.hid --selftest | --selftest-real")
     raise SystemExit(2)

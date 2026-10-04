@@ -34,11 +34,12 @@
 //   放行；transport 故障 ⇒ 'transport'（poll 即重试，deadline 内不放弃）。
 //   运行层永不抛异常（federation 同律：跨机是旁路协同，不是主路债主）。
 //
-// 分层：纯逻辑核心（createBarrierCore，可注入时钟/容量/TTL，双实现口径的
-// TS 权威源）+ 传输方言（BarrierTransport）+ 客户端等待循环
+// 分层：纯逻辑核心（createBarrierCore，可注入时钟/容量/TTL，分布式 barrier
+// 的唯一权威源）+ 传输方言（BarrierTransport）+ 客户端等待循环
 // （arriveAndWaitBarrier）+ HTTP 客户端壳（makeHttpBarrierTransport /
-// createBarrierClient）。scripts/federation-server.mjs 是核心的等价 JS 移植
-// （.mjs 不能 import TS），漂移由 test/w5cross.test.ts 的端到端等价断言把守。
+// createBarrierClient）。scripts/federation-server.mjs 经 dist 构建产物直连
+// 本核心（W8-A7 单源化：JS 手工移植已退役 —— dist 是纯 ESM，.mjs 原生可
+// import）；src↔dist 构建滞后由 test/w5cross.test.ts 的端到端逐字段对账把守。
 // ─── 立法常量（算法形状字面量 —— 非旋钮）───
 /** W5-3：单 barrier 最大参与方数（名册上界 —— 有界状态的每 generation 维度） */
 export const BARRIER_MAX_PARTICIPANTS = 64;
@@ -61,14 +62,16 @@ export const BARRIER_FETCH_TIMEOUT_MS = 5_000;
 /** W5-3：barrier 步声明方言 —— action 文本内嵌 `barrier:<name>#<n>`（planner 冻结，
  *  声明走文本约定 + 注入覆写双通道；n 钳 [1, BARRIER_MAX_PARTICIPANTS]） */
 export const BARRIER_STEP_RE = /barrier:([A-Za-z0-9._-]{1,64})#(\d{1,3})/;
+export * from './crossMachine.dialect.js';
 /** 数值护栏：整数 ∈ [min, max]，非法 ⇒ 缺省（federation numOr 同律） */
 function intOr(x, dflt, min, max) {
     return typeof x === 'number' && Number.isFinite(x) && x >= min && x <= max ? Math.floor(x) : dflt;
 }
 /**
- * W5-3：创建 barrier 纯核心（状态机、同步、绝不抛）。双实现口径的 TS 权威源
- * —— scripts/federation-server.mjs 的 barrierApplyJS 是本函数语义的逐分支
- * JS 移植（等价性由 test/w5cross.test.ts 的脚本序列逐字段断言把守）。
+ * W5-3：创建 barrier 纯核心（状态机、同步、绝不抛）。分布式 barrier 的唯一
+ * 权威源 —— scripts/federation-server.mjs 经 dist 构建产物直连消费本函数
+ * （W8-A7 单源化：等价 JS 手工移植已退役）；test/w5cross.test.ts 的脚本
+ * 序列逐字段对账在场，把守面 = src↔dist 构建滞后（dist 过期即闸红）。
  */
 export function createBarrierCore(opts) {
     const now = typeof opts?.now === 'function' ? opts.now : Date.now;
@@ -167,7 +170,8 @@ export function createBarrierCore(opts) {
             let g = live.get(name);
             if (g && g.phase === 'committed' && g.acked.size >= g.expected) {
                 // 防御臂：满确认却仍驻留（理论不可达 —— 退休在最后一次 ack 原地完成；
-                // JS/TS 双实现漂移时这层兜底保证 allocate 不会误入已完结轮次）
+                // 旧 JS/TS 双实现时代的漂移兜底，W8-A7 单源化后动因消失但防御式
+                // 纪律留驻 —— 这层兜底保证 allocate 不会误入已完结轮次）
                 entomb(name, g.seq);
                 live.delete(name);
                 g = undefined;

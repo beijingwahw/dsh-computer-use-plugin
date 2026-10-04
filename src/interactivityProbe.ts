@@ -1,4 +1,5 @@
 // src/interactivityProbe.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：Z-1 交互性探针 —— 光标/结构/视觉三通道判决围绕同一探测会话态内聚，通道拆分会复制探测时序契约。
 // ─── Z 纪元（Z-1 世界行动引擎）：交互性探针 ───
 //
 // 对症失败模式：「对话文本被误识别为可点击的入口」。聊天记录里写着
@@ -369,8 +370,10 @@ export async function probePoints(
 }
 
 /**
- * Z 纪元固定序路径（enableProbeEconomy=false / 关闭经济）：三遍架构逐字节
- * 保留——第一遍全员 UIA，第二遍残余点悬停实验。零回归基线。
+ * Z 纪元固定序路径（enableProbeEconomy=false / 关闭经济）：三遍架构保留——
+ * 第一遍全员 UIA，第二遍残余点悬停实验。回执与判决语义零回归基线（W8 起
+ * 残余点为空时第二遍整体缺席，省去悬停准备的两次只读往返与一次 no-op 复位
+ * 移动——见函数内注）。
  */
 async function probeLegacy(
   config: Config,
@@ -406,6 +409,12 @@ async function probeLegacy(
 
   // ── 第二遍：悬停实验（仅残余点）──
   const pending = points.map((p, i) => ({ p, i })).filter(({ i }) => results[i] === null);
+  // W8 探针经济：UIA 第一遍已全判决（pending 为空）⇒ 第二遍整体缺席。旧行为
+  // 在此仍无条件 getCursor+getScreenSize 存档原位、finally 复位 moveMouse ——
+  // 对纯 UIA 判决白付两次只读往返 + 一次 no-op 移动（移动还是可观察的物理
+  // 副作用）。判决语义零变化：pending 为空时悬停准备只服务于空循环，无任何
+  // 结果可写（与经济路径 probeEconomic 的同位早退同律）。
+  if (pending.length === 0) return;
   const skip = hoverGuardSkip(config);
   if (skip) {
     for (const { p, i } of pending) {

@@ -19,7 +19,7 @@ import {
   runOrchestrator, createActor, actorChannelWeights, resetChannelArbitration,
 } from '../src/orchestrator.ts';
 import { uiMemory, LANDMARK_HALF_LIFE_H, type Landmark } from '../src/uiMemory.ts';
-import { approval, resetApproval } from '../src/approval.ts';
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { system } from '../src/system.ts';
 import { setAccessibilityProvider, extractInteractiveElements } from '../src/uiExtractor.ts';
 import { createClickElementTool, elementVerify } from '../src/tools/clickElement.ts';
@@ -236,10 +236,13 @@ async function elId(name: string): Promise<number> {
   return hit.id;
 }
 
-/** 铸一枚已授予的令牌（Y-10 桶在 resetApproval 后满格） */
+/** 铸一枚已授予的令牌（Y-10 桶在 resetApproval 后满格）。
+ *  W6R fail-closed：授予须带外码 —— 内联武装采集 sink（人类读码的视角）。 */
 function grantedToken(desc: string): string {
+  const sink: ConfirmCodeDelivery[] = [];
+  setConfirmCodeChannel(d => { sink.push({ ...d }); });
   const pa = approval.request(desc);
-  assert.equal(approval.grant(pa.token, true), true, '令牌授予');
+  assert.equal(approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode }).ok, true, '令牌授予');
   return pa.token;
 }
 

@@ -3,70 +3,25 @@
 //
 // 本文件是 Ψ 纪元的宪法石碑：所有兄弟适配器（openai / anthropic / gemini …）
 // 一字不差地依赖这里的接口与工具函数。因此本模块：
-//   1. 零依赖 —— 不 import 任何兄弟模块（叶子模块，杜绝环引）
+//   1. 零兄弟依赖 —— 不 import 任何兄弟适配器（杜绝环引）；唯一依赖是同为
+//      零依赖叶子的 internalUtils（W6R-A4 工具去重：stripFences / scanBalanced /
+//      传输小件 / 状态常量收拢为单一实现，叶子链不可能成环）
 //   2. 永不抛异常 —— 一切失败以返回值 ok:false / undefined 表达（与 glmClient 同律）
 //   3. 密钥卫生 —— 错误串化面绝不泄漏 apiKey 值（sanitizeError 强制剔除）
 //   4. 行为基调继承 Ω-1（glmClient）：degraded 降级律 / JSON 剥壳律 /
 //      全抖动指数退避（500·2^n 封顶 8s，仅 429/5xx/网络错可重试，超时不重试）
 //
 // 适配器实现 VisionProvider 接口；registry（Ψ-2+）按 ProviderOptions 装配。
-// ─── JSON 剥壳律（与 glmClient.extractGlmJson 同律，独立自实现保持叶子性） ───
-/** 剥 Markdown 围栏 —— ```json\n{...}\n``` → {...（仅当整体被围栏包裹时） */
-function stripFences(s) {
-    const m = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```$/.exec(s.trim());
-    return m ? m[1].trim() : s.trim();
-}
-/** 从文本中取首个平衡的 {...} / [...] 片段 —— 字符串感知（跳过引号内的括号
- *  与转义），返回切出的原文片段；无平衡片段返回 null。 */
-function scanBalanced(s) {
-    const start = s.search(/[{[]/);
-    if (start < 0)
-        return null;
-    const open = s[start];
-    const close = open === '{' ? '}' : ']';
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < s.length; i++) {
-        const ch = s[i];
-        if (inStr) {
-            if (esc)
-                esc = false;
-            else if (ch === '\\')
-                esc = true;
-            else if (ch === '"')
-                inStr = false;
-            continue;
-        }
-        if (ch === '"') {
-            inStr = true;
-            continue;
-        }
-        if (ch === open)
-            depth++;
-        else if (ch === close) {
-            depth--;
-            if (depth === 0)
-                return s.slice(start, i + 1);
-        }
-    }
-    return null;
-}
+import { extractBalancedJson, HTTP_STATUS_SERVER_ERROR_FLOOR, HTTP_STATUS_TOO_MANY_REQUESTS, isAbortError, safeBodyText, sleep, timeoutSignal, } from '../internalUtils.js';
+// ─── JSON 剥壳律（W6R-A4：单一实现收拢于 internalUtils.extractBalancedJson，
+//     本导出名保留为消费面兼容的薄委托 —— 与 glmClient.extractGlmJson 同源同律） ───
 /**
  * 健壮 JSON 提取（JSON 剥壳律）：剥 ```json 围栏 → 取首个平衡 {...}/[...] → parse。
  * 成功返回解析值（可为 null/false 等合法 JSON 值）；失败返回 undefined。
  * 永不抛异常 —— 入参为 null/undefined 等脏值同样安静返回 undefined。
  */
 export function extractProviderJson(text) {
-    try {
-        const candidate = scanBalanced(stripFences(text));
-        if (candidate === null)
-            return undefined;
-        return JSON.parse(candidate);
-    }
-    catch {
-        return undefined;
-    }
+    return extractBalancedJson(text);
 }
 // ─── 图像 data URL ───
 /**
@@ -176,6 +131,34 @@ export function sanitizeError(err, providerId) {
     return body === '' ? `${pid} unknown error` : `${pid} ${body}`;
 }
 // ─── 基址判别 ───
+/**
+ * W8-A6（D-G3 baseUrl 暴露的打码纪律）：端点脱敏 —— 展示面（日志/UI/遥测）
+ * 输出 provider.baseUrl 前必须经过本函数（参照 sanitizeError/maskKey 的纪律：
+ * 值可以丢细节，不可以泄凭据）。规则：
+ *  - host（含端口、IPv6 方括号形态）保留 —— 归因与排障需要「哪台端点」
+ *    （同平台不同端点的判别面恰好只剩 host 也够用）；
+ *  - 路径 / 查询串 / userinfo 一律打码为 `/***` —— 路径可能嵌端点 ID/租户段
+ *    （如方舟 ep-2024xxxx），查询可能带 ?key= 密钥（Gemini 方言），userinfo
+ *    本身就是凭据。协议与 host 之外的任何原文绝不外泄；
+ *  - 脏值（空串/非 URL/非字符串/解析故障）⇒ 安静返回 '(unknown endpoint)'
+ *    （不抛、不回显原文 —— 宁可丢展示，不可泄端点细节）。
+ * 绝不抛异常；输出恒可安全落日志。
+ */
+export function maskBaseUrl(raw) {
+    try {
+        const s = typeof raw === 'string' ? raw.trim() : '';
+        if (s === '')
+            return '(unknown endpoint)';
+        const u = new URL(s);
+        // u.host 已归一小写、含端口与 IPv6 方括号、且天然不含 userinfo 凭据
+        if (u.host === '')
+            return '(unknown endpoint)';
+        return `${u.protocol}//${u.host}/***`;
+    }
+    catch {
+        return '(unknown endpoint)';
+    }
+}
 /** 本机回环主机集合（小写、去 IPv6 方括号后比对） */
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 /**
@@ -194,6 +177,9 @@ export function isLocalBaseUrl(url) {
     }
 }
 // ─── 退避与重试 ───
+// W6-2（doctor smell.magic-number 清偿）：可重试 HTTP 状态域常量与传输小件
+// （sleep/timeoutSignal/isAbortError/safeBodyText）已收拢 internalUtils 单一
+// 实现（W6R-A4 去重）—— 本文件顶部 import，此处不再各持拷贝。
 /**
  * 全抖动指数退避延迟 —— uniform(0, min(capMs, baseMs·2^attempt))，默认 500/8000。
  * 入参脏值（负/非有限）安静钳到安全域；上限恒不为负 —— 返回值总在 [0, ceiling)。
@@ -213,37 +199,6 @@ export function jitterDelayMs(attempt, baseMs = 500, capMs = 8000) {
         return 0;
     return Math.floor(Math.random() * ceiling);
 }
-/** sleep Promise —— 退避专用 */
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-/** 构造超时信号 —— AbortSignal.timeout 主路径 + 旧运行时 AbortController 兜底
- *  （与 glmClient 同款：timer unref 不阻进程退出） */
-function timeoutSignal(timeoutMs) {
-    try {
-        return AbortSignal.timeout(timeoutMs);
-    }
-    catch {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), timeoutMs);
-        t.unref?.();
-        return ctrl.signal;
-    }
-}
-/** 判超时/中止异常 —— AbortSignal.timeout 抛 TimeoutError，手动 abort 抛 AbortError */
-function isAbortError(e) {
-    const name = e?.name;
-    return name === 'TimeoutError' || name === 'AbortError';
-}
-/** 安全读响应正文 —— body 读失败（连接已断）返回空串，绝不抛 */
-async function safeBodyText(resp) {
-    try {
-        return await resp.text();
-    }
-    catch {
-        return '';
-    }
-}
 /**
  * 带重试的 fetch（全适配器共享的传输底座 —— 重试律的唯一定义点）：
  *  - 仅 429/5xx/网络异常可重试；AbortError/TimeoutError（超时止损）不重试
@@ -261,7 +216,7 @@ export async function fetchWithRetry(opts) {
     try {
         const doFetch = typeof opts?.doFetch === 'function' ? opts.doFetch : undefined;
         if (!doFetch) {
-            return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0 };
+            return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0 }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
         }
         let url;
         try {
@@ -311,7 +266,7 @@ export async function fetchWithRetry(opts) {
             }
             // 非 2xx：429/5xx 可重试，其余 4xx 立即失败（请求本身有病，重试无义）
             const status = typeof resp?.status === 'number' ? resp.status : 0;
-            const retryable = status === 429 || status >= 500;
+            const retryable = status === HTTP_STATUS_TOO_MANY_REQUESTS || status >= HTTP_STATUS_SERVER_ERROR_FLOOR;
             if (retryable && attempt < maxRetries) {
                 await safeBodyText(resp); // 排干 body 再退避（连接复用礼貌）
                 safeNotify(onRetry, attempt, `http ${status}`);

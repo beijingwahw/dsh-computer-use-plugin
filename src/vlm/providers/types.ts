@@ -3,13 +3,25 @@
 //
 // 本文件是 Ψ 纪元的宪法石碑：所有兄弟适配器（openai / anthropic / gemini …）
 // 一字不差地依赖这里的接口与工具函数。因此本模块：
-//   1. 零依赖 —— 不 import 任何兄弟模块（叶子模块，杜绝环引）
+//   1. 零兄弟依赖 —— 不 import 任何兄弟适配器（杜绝环引）；唯一依赖是同为
+//      零依赖叶子的 internalUtils（W6R-A4 工具去重：stripFences / scanBalanced /
+//      传输小件 / 状态常量收拢为单一实现，叶子链不可能成环）
 //   2. 永不抛异常 —— 一切失败以返回值 ok:false / undefined 表达（与 glmClient 同律）
 //   3. 密钥卫生 —— 错误串化面绝不泄漏 apiKey 值（sanitizeError 强制剔除）
 //   4. 行为基调继承 Ω-1（glmClient）：degraded 降级律 / JSON 剥壳律 /
 //      全抖动指数退避（500·2^n 封顶 8s，仅 429/5xx/网络错可重试，超时不重试）
 //
 // 适配器实现 VisionProvider 接口；registry（Ψ-2+）按 ProviderOptions 装配。
+
+import {
+  extractBalancedJson,
+  HTTP_STATUS_SERVER_ERROR_FLOOR,
+  HTTP_STATUS_TOO_MANY_REQUESTS,
+  isAbortError,
+  safeBodyText,
+  sleep,
+  timeoutSignal,
+} from '../internalUtils';
 
 // ─── 协议与请求/结果类型 ───
 
@@ -93,6 +105,17 @@ export interface ProviderMeterRecord {
   error?: string;
 }
 
+/** chatJson 的回执形状 —— 万脑插头与窄端口（StructuredVisionPort）的公共货币 */
+export interface VisionJsonReply<T> {
+  ok: boolean;
+  /** 成功时的解析值（jsonMode 强制 + 健壮 JSON 提取之后） */
+  value?: T;
+  /** 失败原因（ok:false 时可有；已经 sanitizeError 密钥卫生处理） */
+  error?: string;
+  /** 模型回复原文（成败皆在 —— 调用方可落日志/回退解析） */
+  raw: string;
+}
+
 /** 视觉供应方统一接口 —— 一切兄弟适配器实现此契约（Ψ 的万脑插头） */
 export interface VisionProvider {
   /** 供应方标识（小写短名，如 'glm'/'qwen'/'openai' —— 归因与遥测主键） */
@@ -101,6 +124,17 @@ export interface VisionProvider {
   readonly protocol: ProviderProtocol;
   /** 实际使用的模型名 */
   readonly model: string;
+  /**
+   * W8-A6（DEBTS D-G3）：服务端点只读暴露 —— 同平台不同端点的判别面。
+   * 「两颗脑都说 openai 方言」不等于同源：自建网关 / 备选池 / 合议庭里
+   * 同平台不同 baseUrl 的脑必须可区分（反驳法院剔同源脑时就靠本字段）。
+   * 值为装配期定格的服务基址（绝对 URL，尾斜杠归一），与实际拨号端点一致。
+   * 可选字段：尚未回填端点的适配器合法缺席（undefined ⇒ 不臆造端点），消费面
+   * 回退 registry 预设缺省端点（registry.effectiveBaseUrl）。
+   * 打码纪律：展示面（日志/UI/遥测）绝不直出本值 —— 必须经 maskBaseUrl
+   * （host 保留、路径/查询/凭据段打码），参照 sanitizeError 的错误面纪律。
+   */
+  readonly baseUrl?: string;
   /** 是否已配置（缺 apiKey 等 ⇒ false，chat 走 degraded 降级臂） */
   readonly configured: boolean;
   /**
@@ -116,7 +150,31 @@ export interface VisionProvider {
    * 成功：{ ok:true, value, raw }；失败：{ ok:false, error, raw } —— raw 恒为
    * 模型回复原文（成功也是），调用方可落日志/回退解析。
    */
-  chatJson<T>(req: VisionChatRequest): Promise<{ ok: boolean; value?: T; error?: string; raw: string }>;
+  chatJson<T>(req: VisionChatRequest): Promise<VisionJsonReply<T>>;
+}
+
+/**
+ * W8-A6（VLM 架构债 · 依赖倒置最小形态）：结构化视觉对话的窄端口 ——
+ * grounding / vlmOcr / verdict 三器官的云端依赖面。
+ *
+ * 此前三处点名 GlmClient 具体类，多供应商（备选池 failover / 合议庭 ensemble /
+ * 复核第二意见脑）必须经 glmClient 委托壳间接达成；现降为依赖本端口 ——
+ * 任何结构满足者皆可直入：
+ *   · GlmClient 天然满足（结构化兼容即可，不强行 implements —— 传入处零改动）；
+ *   · VisionProvider（三厂适配器 / ensemble / failover 铸件）天然满足
+ *     （多供应商直用面：备选脑不再需要包一层委托壳）；
+ *   · 测试假端口只需 configured + chatJson 两件。
+ * 端口面刻意收窄：只声明三器官真实消费的最小面（configured 配置哨兵 +
+ * chatJson 结构化对话）；chat / 计量 / 重试等实现细节一律不进端口 ——
+ * 依赖面越小，换脑越自由。请求形状 = VisionChatRequest（与 GlmVisionRequest
+ * 结构同一，glmClient 侧零适配）。不改变任何运行时行为（现网仍传 GlmClient
+ * 实例）。
+ */
+export interface StructuredVisionPort {
+  /** 配置哨兵 —— false 时调用方走零网络降级臂（grounding 配置哨兵消费） */
+  readonly configured: boolean;
+  /** 结构化视觉对话 —— 永不抛（失败以 ok:false 表达）；回执形状与万脑插头同一 */
+  chatJson<T>(req: VisionChatRequest): Promise<VisionJsonReply<T>>;
 }
 
 /** 供应方装配选项 —— 一切可注入（测试的假 fetch / 宿主的 meter 都从这里进） */
@@ -137,41 +195,8 @@ export interface ProviderOptions {
   extraHeaders?: Record<string, string>;
 }
 
-// ─── JSON 剥壳律（与 glmClient.extractGlmJson 同律，独立自实现保持叶子性） ───
-
-/** 剥 Markdown 围栏 —— ```json\n{...}\n``` → {...（仅当整体被围栏包裹时） */
-function stripFences(s: string): string {
-  const m = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```$/.exec(s.trim());
-  return m ? m[1].trim() : s.trim();
-}
-
-/** 从文本中取首个平衡的 {...} / [...] 片段 —— 字符串感知（跳过引号内的括号
- *  与转义），返回切出的原文片段；无平衡片段返回 null。 */
-function scanBalanced(s: string): string | null {
-  const start = s.search(/[{[]/);
-  if (start < 0) return null;
-  const open = s[start]!;
-  const close = open === '{' ? '}' : ']';
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const ch = s[i]!;
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === '\\') esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') { inStr = true; continue; }
-    if (ch === open) depth++;
-    else if (ch === close) {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
+// ─── JSON 剥壳律（W6R-A4：单一实现收拢于 internalUtils.extractBalancedJson，
+//     本导出名保留为消费面兼容的薄委托 —— 与 glmClient.extractGlmJson 同源同律） ───
 
 /**
  * 健壮 JSON 提取（JSON 剥壳律）：剥 ```json 围栏 → 取首个平衡 {...}/[...] → parse。
@@ -179,13 +204,7 @@ function scanBalanced(s: string): string | null {
  * 永不抛异常 —— 入参为 null/undefined 等脏值同样安静返回 undefined。
  */
 export function extractProviderJson(text: string): unknown | undefined {
-  try {
-    const candidate = scanBalanced(stripFences(text));
-    if (candidate === null) return undefined;
-    return JSON.parse(candidate);
-  } catch {
-    return undefined;
-  }
+  return extractBalancedJson(text);
 }
 
 // ─── 图像 data URL ───
@@ -288,6 +307,33 @@ export function sanitizeError(err: unknown, providerId: string): string {
 
 // ─── 基址判别 ───
 
+/**
+ * W8-A6（D-G3 baseUrl 暴露的打码纪律）：端点脱敏 —— 展示面（日志/UI/遥测）
+ * 输出 provider.baseUrl 前必须经过本函数（参照 sanitizeError/maskKey 的纪律：
+ * 值可以丢细节，不可以泄凭据）。规则：
+ *  - host（含端口、IPv6 方括号形态）保留 —— 归因与排障需要「哪台端点」
+ *    （同平台不同端点的判别面恰好只剩 host 也够用）；
+ *  - 路径 / 查询串 / userinfo 一律打码为 `/***` —— 路径可能嵌端点 ID/租户段
+ *    （如方舟 ep-2024xxxx），查询可能带 ?key= 密钥（Gemini 方言），userinfo
+ *    本身就是凭据。协议与 host 之外的任何原文绝不外泄；
+ *  - 脏值（空串/非 URL/非字符串/解析故障）⇒ 安静返回 '(unknown endpoint)'
+ *    （不抛、不回显原文 —— 宁可丢展示，不可泄端点细节）。
+ * 绝不抛异常；输出恒可安全落日志。
+ */
+export function maskBaseUrl(raw: unknown): string {
+  try {
+    const s = typeof raw === 'string' ? raw.trim() : '';
+    if (s === '') return '(unknown endpoint)';
+    const u = new URL(s);
+    // u.host 已归一小写、含端口与 IPv6 方括号、且天然不含 userinfo 凭据
+    if (u.host === '') return '(unknown endpoint)';
+    return `${u.protocol}//${u.host}/***`;
+  } catch {
+    return '(unknown endpoint)';
+  }
+}
+
+
 /** 本机回环主机集合（小写、去 IPv6 方括号后比对） */
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
@@ -308,6 +354,10 @@ export function isLocalBaseUrl(url: string): boolean {
 
 // ─── 退避与重试 ───
 
+// W6-2（doctor smell.magic-number 清偿）：可重试 HTTP 状态域常量与传输小件
+// （sleep/timeoutSignal/isAbortError/safeBodyText）已收拢 internalUtils 单一
+// 实现（W6R-A4 去重）—— 本文件顶部 import，此处不再各持拷贝。
+
 /**
  * 全抖动指数退避延迟 —— uniform(0, min(capMs, baseMs·2^attempt))，默认 500/8000。
  * 入参脏值（负/非有限）安静钳到安全域；上限恒不为负 —— 返回值总在 [0, ceiling)。
@@ -324,39 +374,6 @@ export function jitterDelayMs(attempt: number, baseMs = 500, capMs = 8000): numb
   }
   if (!Number.isFinite(ceiling) || ceiling <= 0) return 0;
   return Math.floor(Math.random() * ceiling);
-}
-
-/** sleep Promise —— 退避专用 */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/** 构造超时信号 —— AbortSignal.timeout 主路径 + 旧运行时 AbortController 兜底
- *  （与 glmClient 同款：timer unref 不阻进程退出） */
-function timeoutSignal(timeoutMs: number): AbortSignal {
-  try {
-    return AbortSignal.timeout(timeoutMs);
-  } catch {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    t.unref?.();
-    return ctrl.signal;
-  }
-}
-
-/** 判超时/中止异常 —— AbortSignal.timeout 抛 TimeoutError，手动 abort 抛 AbortError */
-function isAbortError(e: unknown): boolean {
-  const name = (e as { name?: string } | null)?.name;
-  return name === 'TimeoutError' || name === 'AbortError';
-}
-
-/** 安全读响应正文 —— body 读失败（连接已断）返回空串，绝不抛 */
-async function safeBodyText(resp: Response): Promise<string> {
-  try {
-    return await resp.text();
-  } catch {
-    return '';
-  }
 }
 
 /**
@@ -383,7 +400,7 @@ export async function fetchWithRetry(opts: {
   try {
     const doFetch = typeof opts?.doFetch === 'function' ? opts.doFetch : undefined;
     if (!doFetch) {
-      return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0 };
+      return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0 }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
     }
     let url: string;
     try {
@@ -433,7 +450,7 @@ export async function fetchWithRetry(opts: {
 
       // 非 2xx：429/5xx 可重试，其余 4xx 立即失败（请求本身有病，重试无义）
       const status = typeof resp?.status === 'number' ? resp.status : 0;
-      const retryable = status === 429 || status >= 500;
+      const retryable = status === HTTP_STATUS_TOO_MANY_REQUESTS || status >= HTTP_STATUS_SERVER_ERROR_FLOOR;
       if (retryable && attempt < maxRetries) {
         await safeBodyText(resp); // 排干 body 再退避（连接复用礼貌）
         safeNotify(onRetry, attempt, `http ${status}`);

@@ -10,10 +10,20 @@
 //   - 网络错误 / DNS 失败 / 连接拒绝 → ``transport_error``（D-5 host-error 路径）
 //   - AbortController 超时 → ``client_timeout``（D-7 timeout 路径）
 //   - Python 端返回的失败信封 → 透传 ``error.kind`` 字段
+//   - HTTP 401（Python 端认证失败自 200 改 401，错误信封 JSON 结构不变）→
+//     ``unauthorized`` —— 与密钥/时钟偏移相关的客户端侧可修问题，区别于
+//     传输层异常（transport_error）与服务内部错误（5xx 仍是 transport_error 归因）
+//
+// 防重放配套（W6R-A6）：本模块是 Node → Python 的统一请求入口 —— 每个请求
+// 自动携带 X-Request-Id（crypto.randomUUID()），缺席才注入、在场不覆盖
+// （adapter 的 buildAuthHeadersSync 用 mintNonce() 提供的值优先）。Python 端
+// 将 X-Request-Id 作强制 nonce 校验（缺失即 401），覆盖面 = 所有 microFetch
+// 调用点（enableAuth=false 的诊断路径、health 探活、业务端点一视同仁）。
 //
 // Node 18+ 内置 fetch + AbortSignal.timeout（无外部依赖）
 // O 纪元（#16）：UDS 客户端半兑现 —— http+unix:// 经 undici Agent(socketPath)
 // dispatcher 传输（全局 fetch 即 undici，init.dispatcher 是其原生扩展）。
+import { randomUUID } from 'node:crypto';
 import type { MicroResponse, PhysicalError } from './contracts.js';
 import { PhysicalErrorKind } from './contracts.js';
 
@@ -40,6 +50,11 @@ export function parseUnixBaseUrl(baseUrl: string): { socketPath: string; urlPath
 
 /** UDS dispatcher 缓存（每 socket 一个 Agent —— 连接池复用；模块级单例） */
 const udsAgents = new Map<string, unknown>();
+
+/** HTTP 401 Unauthorized：Python 端认证失败的信号位（HMAC 密钥两端不一致、
+ *  Cap Token 过期、X-Request-Id nonce 重放或本机时钟偏移 —— 客户端侧可修）。
+ *  是 unauthorized 与 transport_error 的分流判据，具名以脱离「裸状态码」面。 */
+const HTTP_STATUS_UNAUTHORIZED = 401;
 
 /** 获取/铸造 UDS dispatcher（undici Agent）。不可用（非 Node undici 环境）⇒ null。 */
 function udsDispatcher(socketPath: string): unknown | null {
@@ -134,12 +149,20 @@ export async function microFetch<T>(
   }
 
   // 构造请求头
+  // 防重放配套：X-Request-Id 缺席才注入（randomUUID），在场不覆盖 ——
+  // adapter 鉴权路径经 headers 回调提供的 mintNonce() 优先（同一契约，同随机器）。
+  // 注意 headers 对象大小写敏感合并：HTTP 头本应不区分大小写，但此处三个来源
+  // （缺省/回调/extra）都是本模块与 adapter 自家代码，约定统一用 'X-Request-Id'
+  // 拼写 ⇒ 直接判 in 即可，无需大小写折叠扫描。
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
     ...(config.headers?.() ?? {}),
     ...(options.extraHeaders ?? {}),
   };
+  if (!('X-Request-Id' in headers) || !headers['X-Request-Id']) {
+    headers['X-Request-Id'] = randomUUID();
+  }
 
   // AbortSignal.timeout —— Node 18+ 原生支持；外部止损信号在场时手动组合
   //（Node 18 无 AbortSignal.any）：外部 abort 或内部超时任一触发即断流
@@ -206,13 +229,37 @@ export async function microFetch<T>(
     if (cleanupComposed) cleanupComposed();
   }
 
-  // HTTP 状态检查 —— Python 端铁律恒 200；非 200 即传输层异常
+  // HTTP 状态检查 —— Python 端认证失败以 401 如实表达（错误信封 JSON 结构不变）；
+  // 其余非 2xx 仍按传输层异常归因（服务崩溃 / 代理干预 / 协议漂移）
   if (!resp.ok) {
     let bodyText = '';
     try {
       bodyText = await resp.text();
     } catch {
       // body 读失败 → 无能为力，记空串
+    }
+    // 401 识别：认证失败 ⇒ unauthorized（客户端侧可修），与密钥/时钟偏移相关。
+    // 错误信封结构不变（{status:'failure', error:{kind, detail}}）⇒ 尽力解析
+    // 透传 Python 端给出的具体 reason；解析失败退回原文截断。
+    if (resp.status === HTTP_STATUS_UNAUTHORIZED) {
+      let envelopeKind = '';
+      let envelopeDetail = '';
+      try {
+        const parsed = JSON.parse(bodyText) as { error?: { kind?: unknown; detail?: unknown } };
+        if (typeof parsed?.error?.detail === 'string') envelopeDetail = parsed.error.detail;
+        if (typeof parsed?.error?.kind === 'string') envelopeKind = parsed.error.kind;
+      } catch { /* 非 JSON 信封：用原文 */ }
+      const reason = envelopeDetail || bodyText.slice(0, 500) || resp.statusText || 'no body';
+      return {
+        ok: false,
+        error: {
+          kind: PhysicalErrorKind.UNAUTHORIZED,
+          detail: `HTTP 401 Unauthorized for ${method} ${path}: ${reason}` +
+            ' — 属密钥/时钟偏移类问题（HMAC 密钥两端不一致、Cap Token 过期或本机' +
+            '时钟偏移超出 TTL 窗、X-Request-Id nonce 重放）；不是服务内部错误' +
+            '（那类故障不会以 401 表达）' + (envelopeKind ? `（服务端 kind=${envelopeKind}）` : ''),
+        },
+      };
     }
     return {
       ok: false,

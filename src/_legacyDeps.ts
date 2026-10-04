@@ -33,7 +33,8 @@ function legacyError(pkg: 'sharp' | 'tesseract.js', hint?: string): Error {
 // ─── sharp 懒加载（缓存 + 错误记忆）───────────────────────────────
 
 export type SharpLike = (
-  input?: Buffer | string | Uint8Array,
+  // 对象输入形式对齐 sharp 官方 SharpInput（{ create } 造图 / { raw } 裸像素 / { text } 文本图）
+  input?: Buffer | string | Uint8Array | { create?: { width: number; height: number; channels: number; background?: string }; text?: unknown; raw?: unknown; [k: string]: any },
   options?: { raw?: { width: number; height: number; channels: number }; density?: number; [k: string]: any },
 ) => SharpChainLike;
 

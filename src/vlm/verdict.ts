@@ -7,10 +7,14 @@
 // fuseWithPixelEvidence 再把云判决与 L1/L2 像素证据做纯函数双脑融合（一致加成 /
 // 分歧降级），供仲裁层消费。铁律：具名导出、零新增依赖、绝不抛异常 —— 一切失败以
 // { ok:false, degraded:true, error } 表达，云脑缺席不致命，调用方降级回本地栈。
+// W8-A6（VLM 架构债 · 依赖倒置最小形态）：云端依赖面自 GlmClient 具体类降为
+// StructuredVisionPort 窄端口（configured + chatJson）—— 多供应商（备选池/
+// 合议庭脑）可直入；GlmClient 结构天然满足（传入处零改动），运行时行为不变。
 import {
   getGlmClient, isGlmConfigured,
-  type GlmClient, type GlmImageInput,
+  type GlmImageInput,
 } from './glmClient';
+import type { StructuredVisionPort } from './providers/types';
 import { encodeForVlm, type Bbox } from './codec';
 import { buildVerdictPrompt } from './som';
 import { kernelRegistry } from '../kernel/registry';
@@ -111,8 +115,9 @@ export async function judgeEffect(
   opts?: {
     /** 可选：只关心该区域（如焦点邻域）—— 两图裁同一块再编码 */
     region?: Bbox;
-    /** 可选：注入 GlmClient（测试注假 client / 宿主直连；缺省走全局单例） */
-    client?: GlmClient;
+    /** 可选：注入云脑端口（W8-A6：自 GlmClient 降为 StructuredVisionPort ——
+     *  测试注假端口 / 宿主直连备选脑；GlmClient 结构天然满足；缺省走全局单例） */
+    client?: StructuredVisionPort;
   },
 ): Promise<VlmEffectVerdict> {
   const startedAt = Date.now();

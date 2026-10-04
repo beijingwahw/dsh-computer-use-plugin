@@ -64,7 +64,13 @@ export function onToolPre(ctx, handler) {
 export function onToolPost(ctx, handler) {
     ctx.on('tools/post-execute', async (exec, result, next) => {
         const call = normalizeExec(exec);
-        const out = await handler(call, extractResultValue(result), () => next());
+        // W6-3：透传 next 实参。旧包装 `() => next()` 丢弃守卫递给 next 的改写值
+        // （circuitBreaker 第 1/2 败的 appendHint 递进提示经 next(改写值) 回传宿主，
+        // 实参被丢 ⇒ 改写值永不可达 —— w2recovery 接线节注登记的遗留）。透传后：
+        // 守卫 next(v) ⇒ 宿主 next(v)；守卫无参 next() ⇒ 宿主收 undefined
+        // （诚实缺省，零伪造）。pre 包装维持原样：现有 pre 守卫全部无参调用 next
+        // （bounds/popup/audit/canary/repeatAction 遍历验证），不构成实害，最小变更。
+        const out = await handler(call, extractResultValue(result), (value) => next(value));
         return toPostDecision(out);
     });
 }

@@ -297,6 +297,12 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
     id: providerId,
     protocol: 'gemini',
     model,
+    // W8-A6（D-G3）baseUrl 回填（D-A6 遗留闭账）：装配期定格的服务基址只读
+    // 暴露 —— 配置自报（config.baseUrl）> 平台预设缺省（config.defaultBaseUrl
+    // —— glmClient.castDelegate 传预设处）> Generative Language 官方云。与实际
+    // 拨号端点同一常量（`${baseUrl}/models/{model}:generateContent`），尾斜杠
+    // 已归一；消费面回退 registry.effectiveBaseUrl，展示面必经 maskBaseUrl。
+    baseUrl,
     configured,
     chat,
     chatJson,

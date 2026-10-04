@@ -3,6 +3,9 @@
 造物主契约（Step 1 §3）：
   - Python 端捕获所有底层异常，封装为 ``{ status:'failure', error:{kind, detail} }`` 返回
   - HTTP 恒 200，业务成败由 body 中的 ``status`` 判定
+    （W6-R-A3 澄清：本「恒 200」契约约束**业务层**失败；auth_middleware 的
+    认证拒绝是传输/安全层判决，返回 HTTP 401 + 同款 failure 信封 —— 见
+    server.py；信封 JSON 结构两处一致，仅 status_code 不同）
   - 绝不抛出未捕获异常（含 500）
 
 设计：

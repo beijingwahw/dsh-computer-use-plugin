@@ -1,4 +1,5 @@
 // src/sandbox/engine.ts
+// W6-2 结构性保留（doctor smell.over-engineering 登记）：D-5 确定性沙箱引擎单职责 —— 动作解释/帧缓存/回归判定围绕同一引擎态高度内聚，强拆将拆散状态机不变量。
 // D-5 沙箱执行引擎 —— 契约实现。
 // 灵魂三条反射的代码化：
 //   THE HOST IS SACRED    → replayOnHost 四重门禁（令牌/医生/可靠度/指纹），缺证即拒

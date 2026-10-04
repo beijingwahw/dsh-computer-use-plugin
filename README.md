@@ -247,6 +247,21 @@ swarm 跨会话重复入账以**持久化消费水位**根除（restore 后跳�
 - **W-2 真机审判**：器官时代后首次重跑 Windows 真机基准——**4/4 全绿**（真 OCR 感知 / 真鼠标物理点击闭环 / 陷阱改道 / 学习曲线）：六纪元改造后真截屏→离线 OCR→真 pyautogui→tkinter 世界翻转全链无恙。
 - **W-3 创世总账**（[GENESIS.md](GENESIS.md)）：30+ 器官一行一件（数学根基/执法册/审判数字），七击可导航。
 
+## 纪元 X：笔迹纪元 —— 反射纪元大脑的运动反射弧
+
+反射纪元的决策大脑对世界只会一件事：点击。本纪元给它一套**运动词汇表** —— `type_text` / `scroll_page` / `press_hotkey` —— 零 LLM，经 `src/intentGrammar.ts`（纯函数意图文法）与 `ReflexiveDecisionStation` 中的运动弧落地：
+
+- **引号锚定载荷提取（构造性无损）**：待打文本必须由可逆编码携带 —— 引号区间（`"…"` / `'…'` / `「…」` / `『…』` / `“…”` / `‘…’`）逐字节精确提取（编辑距离 0）。自由文本提取是有损猜测 —— 密码打错与没打一样糟 —— 一律拒绝（精确性优先）。执法自身抓到一只真缺陷：缩写撇号（`don't`）与后文单引号载荷配对时会静默腐蚀载荷；单引号开启符现已带词界门。
+- **运动序法则（先取落点，再落笔）**：依赖 DAG `{target → text}` 按拓扑序执行 —— `type "gamma" into the server field` 先对字段发*点击*（夺取焦点），焦点在手后才落笔。同一条法则也保护 `press the big red button` 不被误路由进热键弧。
+- **载荷剥夺**：残差（意图 − 动词 − 引号区间）才是对*落点*投票的一方 —— 载荷词永远不投落点票，运动弧与前额叶深思（deliberation）的词法通道两处同律。
+- **生而自证的反射（L4 自锚）**：引号锚一物两用，兼作 `expectedText` —— 反射第一次*知道自己的成功长什么样*（点击预言不了像素；载荷预言得了文本）。基准的执行站拿它对照世界真值执法。
+- **运动学域**：滚动量必须落在 `[1,20]`（域外拒绝，绝不钳位 —— 钳位会把 `scroll 999` 静默改写成 20）；热键和弦归一键名别名（`control→ctrl`、`escape→esc`）并封顶 4 键。
+- **层级不破**：Tier-0 免疫抑制照旧门控每一类运动；知识教「哪里」（残差上的 workflow 升益），文法教「什么」（载荷）；`disableMotorArc` 消融证明贡献（打字意图退化为诚实零动作接地）。
+
+执法：`test/epochX.test.ts`（14 项，X-1..X-9 —— 提取表、弧选择表、L4 达标的虚拟屏排练、消融、压制优先级）。真机审判：大规模 Data Console 基准长出第六页（`editor`：三个带焦点真值的文本字段）与 `typing` 类别 —— 真 pyautogui **键盘击键**落进 tkinter entry，由逐键世界状态裁决。
+
+战役本身根除两只真机缺陷：(1) `pyautogui.typewrite` 穿过活动输入法（`alpha.local` → `alpha。local`、`ada` → `阿达`）—— D-5 服务在 Windows 上改走 `SendInput` + `KEYEVENTF_UNICODE`，唯一与输入法正交的确定性文本注入；(2) 同基线导航/内容词污染 tesseract 行切分（`settings` + `format disk` 同排 ⇒ `setines`，conf 0）—— 感知改跑**条带 OCR**（导航条带 | 内容条带分开识别，跨列行混合在构造上不可能），导航不变量收紧为六词（files/network/reports/settings/archive/editor）全在场。
+
 ## 第二十纪元（Z）：世界行动引擎 —— 交互性探针
 
 **对症失败模式**：「对话文本被误识别为可点击的入口」。聊天记录里写着「点击登录按钮」的消息、文档中引用的菜单名、渲染在屏幕上的任务指令 —— 它们与真按钮在像素层**完全等价**，任何视觉分类器（包括大模型自己）都只能猜。
@@ -566,6 +581,68 @@ config:
 
 审判数字：纪元 Λ 新增 46 测试（vlm.connection 16 / vlm.onboarding 15 / vlm.tools 7 / epochLambda.onboarding 8）0 败；新工具 `switch_vision_model` / `vlm_wizard`；新配置 `vlmAutoAdoptLocal`（true）/ `vlmOnboardingEnabled`（true）/ `vlmOnboardingPort`（18432）。
 
+## 世界性创新纪元潮（Ρ·Γ·Υ·Η·Κ·Π·Μ 及续笔）
+
+Λ 之后项目对准业界三大未解之痛——**注入不可防（Ρ/Π/Β）、token 太贵（Γ/Γ2）、agent 不长进（Υ/Κ/Μ/Η/Ι/Τ/Ε/Ν）**——按既有纪元文化（设计 + 接线 + 执法测试 + 报告）发起一整代创新施工：四波共落地十七项，新增 163 项执法（并入全库 1295/0）、六个新模块（`src/sleep` / `src/notary` / `src/federation` / `src/selfmodel` / `src/prophecy` / `src/vlm/refute`）、新工具 `federation_sync`、新配置 25 键。蓝图与实施总账见 [INNOVATION.md](INNOVATION.md) 与 [GENESIS.md](GENESIS.md)，此处一行一件：
+
+| 纪元 | 机制 | 解决的问题 |
+| --- | --- | --- |
+| **P1 地基速修** | ioMutex 排队超时（队列不毒化）、沙箱重放令牌换 CSPRNG、系统级热键黑名单（win/meta 别名折叠、和弦排序无关匹配） | 创新潮前置的真实缺陷清障 |
+| **Ρ 双钥公证锁**（默认开） | 不可逆动作放行前的四通道语义公证：模型自述 ∪ OCR 实读 ∪ UIA 控件名，全过 normalizeForRisk 不动点归一（leet/同形字免疫）后 fail-heavy 取最重；语义握手 fuzzyIncludes 双向（描述与实读不符 ⇒ 拒绝并要求重述）；click_element 安全洼地收编同闸 | 提示注入下的不可逆操作防护——注入可骗模型，骗不了屏幕实渲染的像素与控件名 |
+| **Γ/Γ2 注视经济** | 编码坐标→源图坐标反算纯函数（往返 ≤1px）+ 中央凹合成编码（中央原生/外围降采样、sharp 缺席诚实回退）；Γ2 inset 主图降采样 + 中央原生凹窗 + 分段反算——bench 实测 token −75.00% / JPEG 字节 −67.8%，凹窗保真 ≤JPEG 级容差 | 单位 VLM token 的期望信息增益最大化：屏幕信息密度高度不均，整图等分辨率编码是浪费 |
+| **Υ 认知睡眠**（默认关） | 六幕离线整合（回放结算→技能蒸馏→免疫整合→内核校准→轨迹审计→晨报）+ 幂等水位线（同状态二睡六幕全 noop）+ 逐幕预算宁短勿挂 | agent 的记忆/技能/参数获得系统性离线巩固阶段——睡一觉，自带报告 |
+| **Η 认识论闭环**（默认开） | adviseAction 四维裁决（错误代价 × Beta 校准置信 × 云脑在否 × 预算余量）插宪法之前；Φ-9 效用分破平；感知接场景语义同屏缓存 | agent 在数学上该问人的时刻问人——弃权（abstention）成为一等公民动作 |
+| **Κ 惊异课程**（默认关） | 生产转移表惊讶按屏型聚合出谱 + 软最大加权采样 P(type)∝exp(β·surprise)——在哪跌倒就在哪加练 | 部署端惊异谱反哺课程生成：「生产→课程→进化→生产」外循环 |
+| **Π 行为公证** | 锚自链 sha256(canonical 含 prevAnchorHash) + 零依赖 DER/RFC3161 时间戳客户端（信封/物证双核验）+ verifyNotary 四绿章（链完整/MMR 在册/时间戳锚/重放一致）+ `quality_checkup` 第五动作 `notarize` | 企业合规：「这段自动化操作未被篡改且可复现验证」的密码学证明 |
+| **Μ/Μ2 万脑联邦** | EvidenceLedger 每 key 铸 Laplace(1/ε) 噪声直方图摘要 + 三道闸掺入（本地零证据不掺/份额上限/信任折减——远端证据只喂账本不直写值）；Μ2 拜占庭鲁棒聚合（k≥3 逐格中位数 + 离群检疫喂信任账） | 器官参数的差分隐私联邦进化：单宿主经验太少，跨宿主共享又过不了隐私墙 |
+| **Ι 自我模型**（默认开） | （动作类×场景桶）衰减 Beta 胜任度后验（半衰期 168h、冷启动诚实 null），认识论闸门换装经验校准置信 | agent 在自己历史上反复失败的格子前真正知道怕 |
+| **Τ 干预即教育**（默认开） | 验收式消费成功 = 特权正示范（用户背书 × 世界验证双证据）；用户拒绝 = 负示范（回避清单降档）；隐私铁律：type_text 只记长度桶 | 人类审批从闸门升格为教材 |
+| **Χ 沙箱重放证词** | 虚拟屏确定性重放逐位比对指纹序列——绿 = 可复现、红 = 首分歧步精确定位、真机段恒诚实 n/a | Π 公证的第四绿章从 n/a 转绿 |
+| **Ε 预言引擎**（默认开，纯审计旁路） | 动作前经世界模型铸预言（期望屏型 + 概率），动作后首帧感知对账三态落账（hit/miss/no-model）；环形 500 错题本 + 结算回灌世界模型 | agent 的世界观第一次有了考试（Dyna 式） |
+| **Β 反驳法院**（默认开，单脑诚实缺席） | 不可逆动作派发前请异构第二脑「请反驳」：refuted 即拦（令牌不烧）、upheld 放行注记、uncertain 缺席审判零行为 | 注入须同时骗过主脑 + 像素公证 + 异构反驳脑三道防线 |
+| **Ν 探索经济学**（默认开） | 探针通道按学习到的 bitsPerMs 后验择序 + 累积熵减 ≥0.5 bits 即停（数学上永不砍掉还能改写判决的通道） | 实验预算按信息价值分配，判决语义零变化 |
+| **Ζ/PyS 收尾** | checkpoint 加性 selfModel 段 + 睡眠④幕标定建议书（「睡眠出建议、白天做决定」）；Python UIElement 增 score 真值字段、TS 双态语义（真值在场无 assumed 标记 / 缺席旧方言逐字节） | 持久化闭环 + OCR 置信从「假设值」升格「测量值」 |
+
+## 器官潮 W1–W5：韧性 · 自律 · 活意图 · 身体外延 · 收官过秤
+
+创新潮之后连续五批器官潮（多器官并行交付 + 专属集成接线，执法册全部在 [GENESIS.md](GENESIS.md) 登记），把旗舰命题推向执行层、离线安全、长跑自纠偏与物理外延的深水区。W5 收官口径：全量 2018 用例、typecheck 0 错、242 模块烟测干净（1 例环境暴露 fail 如实登记，见 DEBTS）。
+
+- **W1 执行与感知韧性（九器官 + 集成接线，执法 169/0）**：执行层四连改（ROI 三区判决 / UIA 动作前预检 × 焦点短路 / 词级质心 + 网格重试 / 稳态门）、**带外确认码**（CSPRNG 6 位 + 恒定时间比较——模型可见面绝无码，用户不在场即无法伪造同意）、免看门控（dHash 未变跳过重型感知，实测跳过率 50%）、噪声诊所（四维感知噪声注入）、EXP4 上下文老虎机、失败根因归因链（三类根因鉴别试验）、稀疏 SoM + 抗遮挡标签、Zoom 复核（低置信/小目标/拥挤三触发 + 8 次任务级预算）、视觉经济（三路注视路由 + requote 预算弹性）。
+- **W2 离线韧性与成本自律（九器官 + 集成接线，执法 173/0）**：离线批准队列（用户离开 ⇒ 不可逆动作连同证据链入暂存队列，晨报列清单 + `adjudicate_approval_queue` 批注式批量裁决）、审计 fail-closed × 探针 fail-open 的刻意不对称 + 新鲜度探针、bench 可信度（契约核查器 + 方差感知 SPRT 回归门）、租约黑板 + 实证仲裁、恢复疗效账本（(症候×根因×动作) Beta 后验）、记忆操作老虎机（分类级 Thompson 采样）、金丝雀试演（高风险链前可逆微探针先演后 commit）、成本级联路由（三因子分诊 + 便宜臂确定性校验，实测节省率 0.55）。
+- **W3 活意图与自纠偏（九器官 + 集成接线，执法 155/0）**：逆转托管（动作级 WAL + 补偿预案，无预案 fail-closed 拒派）、参数化通用技能（DTW 对齐 + 反统一归纳出参数洞）、脏矩形增量编码（视频 P 帧式感知，实测 token −74.6%）、DAG 就绪层流水线（读写分离三防线 + takeGranted 续跑）、活意图漂移（`steer_choice` / `steer_answer`——屏幕离目标太远时把 A/B/C 单键题交回用户）、反事实岔路卡（失败终局相铸三候选卡换支重放）、探索前沿（UCB 择路，只在恢复态出手）、过程评分器（步级四通道 credit assignment）。
+- **W4 第四批器官潮（九器官 + 收官接线，执法 133/0 + Python 自测 58 断言）**：宏重放（kind:'macro' 扩展字 + 低可靠度先虚拟排练，实测决策调用 −71.4%）、策略联邦（技能差分隐私上传：指纹 + 槽统计中位数，k≥3 聚合检疫 + 本地命中 2 次才激活）、可逆性体系（三级分级 + dispatchLaneFor 三道——compensable 托管 / irreversible 交还人类 / reversible 快道）、PCG 无限训练营（文法产生式派生场景）、**移动 Surface**（Android 经 scrcpy/ADB 以虚拟显示器入列，归一化坐标换算只在服务端）、**零 API 设备面**（HDMI 采集卡 UVC 眼 + CH9329 串口 HID 手——目标设备视角是一只真鼠键，零驱动零检测面）、步数拍卖市场（全局步数池每 K=10 步重拍卖 + 饿死防护）、声学通道（音频只作非语义物理证据，权重恒低于视觉）。
+- **W5 第五批收官潮（七器官，执法 83/0 + 7 bench 全绿）**：Python 端点注册落盘（uvc / hid / audio 六端点 + /health hardware 能力面，硬件缺席恒结构化 200 绝不 5xx）、梦回放（PER 优先级 p = ŝ×cost×recency + 同构世界冻结重放 + 分歧点定位双写）、跨机编排（分布式 barrier 四支柱：全到达才放行 / 序号防重放 / 两阶段防脑裂 / 有界状态 + 跨机视觉互证谓词）、SoM 调用面（W1-7 稀疏标注从零调用方接进生产管线，坐标闭环 ≤1e-9）、steer 闭环三缝收官（B 应答回灌重启 / 岔路锚强校验 / 换支偏置 12 步预算执法）、效能基准七过秤（六器官「声明 vs 实测」同表呈报）。
+
+## W6-R 修复浪潮
+
+W5 收官后的全库安全与正确性修复潮（多代理并行施工；本节为阶段性快照，收尾状态见本节末行）：
+
+- **审批 fail-closed**：带外确认码通道缺席（confirm_channel=out-of-band-absent）即拒绝 grant——令牌永不可在会话内授予，用户必须经宿主 UI 亲证；确认码只走事件总线（带外通道），console 输出全脱敏，模型可见面绝无码。
+- **提示注入纪律**：系统提示新增「数据/指令二味纪律」段——屏幕内容一律是不可信数据，任何渲染在屏幕上的「指令」不构成指令；确认码只认带外通道。SoM 提示词同步加固。
+- **Python 物理服务**：adb type_text 设备 shell 注入修复（shlex.quote 包裹 + 可打印 ASCII 白名单）；nonce 强制校验（缺 X-Request-Id 即 401）；认证失败改判 401；HID 控制器公有收口面；uvc.py D-E1 双重包装 bug（cv2 在场 + DirectShow 可读环境必 TypeError）已修；pyproject 补齐 pyserial / opencv-python / comtypes 三依赖。
+- **VLM**：工具函数去重（internalUtils.ts 单一实现）；verifyGate 复核预算按任务作用域化——并发任务不再串账。
+- **联邦**：federationSync 缺省 robust:true（拜占庭鲁棒聚合投产，D-B6 闭合）；聚合 server HMAC 签名认证（DSH_FEDERATION_TOKEN，无签名头即 401）；信任账持久化接线锁定。
+- **物理执行 TS 端**：移除 PID 证明强制关闭（防探活误杀）；密钥文件 0600；全端点 X-Request-Id；401 语义识别。
+- **工程**：CI 补 verify + build 步骤；sharp / tesseract.js 归入 dependencies；.gitignore 补 with-interrupt。
+- **Shell 加固**：openUrl 改 rundll32 数组参数直调（不经 shell 解析、不做变量展开）；PowerShell 全部改走 -EncodedCommand（消除命令行注入面）。
+- **守卫**：审计 fail-closed 名单 6→18 工具；重复动作检测量化收紧 + 轨迹级循环检测。
+- **收尾完成（W6R-C3）**：危险动作探针 fail-closed（canaryGuard 令牌路径收口，w2canary 测试锁定）、VLM 密钥静态保护（maskKey 打码纪律全落点）、全量回归（typecheck 0 错；node --test 2350 例 0 fail；verify 23/23；doctor 85.5 分、sec.\* 零命中；dist 与 src 同步）——三项均已落地。
+
+## W8 世界创新修复潮
+
+W6-R 之后「已造未通电」器官接线与结构性债的清偿潮（2 批 18 修复代理 + 2 收尾复核，执法册 w8.\* 11 册 96/96）：
+
+- **巨文件拆分**：gym.ts 3377→1557+6 卫星件、approval.ts 1584→97 桶+9 卫星件、autonomy/runtime.ts 1581→989+6 卫星件（导入面零改动，执法册锚定面不动）。
+- **判据证伪**：criteriaEval 器官在同一判据 DSL 上长出否定判据（`mustNotAppear:` /「不得出现：」前缀，OCR 命中禁词 ⇒ violated ⇒ 终局 failed）+ fuzzy 容错（⌈m/6⌉ 六字符容一错）+ OCR 缺席诚实降级；autoPilot 环内只执法否定面，肯定面归 execute 通道（极性分工红线）。
+- **循环破除**：autonomy↔tools 包级循环断开——canaryLogic 对 autonomy 零 import、autoPilot 对 tools 零 import，依赖方向恒 tools/guards→autonomy 单向。
+- **记忆升级**：failureMemory 显著性感知淘汰（新近性/去重命中/根因拥挤罚 + 独苗保护硬配额，记录五元组零改动）；selfmodel 24bit 两段式场景桶（16bit 粗段旧桶逐位同律 + 8bit 细段密度位图，旧桶键诚实迁移）。
+- **预言与公证**：prophecy 粗层屏型桥（精确键查无 ⇒ dhash 粗格回退一问，predictedVia:'coarse' 诚实标注）+ 惊异喂养通道生接线（结算失手自动喂进化引擎）；重放公证 replayWitness（replay_actions / run_skill 双接线——步指纹 + 三态结局 + 整体成败铸入 notary 锚，公证缺席诚实降级）。
+- **单源化**：federation-server.mjs 薄 re-export `dist/crossMachine.js`（barrier 状态机唯一权威源，双实现口径债消解）。
+- **CI Linux**：物理服务 e2e 步骤落地（ubuntu 可编辑安装 dsh_physical → 预起 tcp:8421 → adapter 真服务路径 + /dev/shm 真机执法——待首次 push 验证）。
+- **bench 谓词**：`windowCount` 窗口计数谓词（titleRegex 锚定目标窗口域 + equals/gte/lte 可组合合取——「跑前跑后窗口数不变/归零」的机器等价物）。
+- **接线收口与修法**：SoM 种子供源 / 梦失败源 dreamFeed / 增量编码消费方（contextManager，缺省关）三线通电；悬挂测试根治（全量 cancelled 首次归零）；repeatActionGuard 叶级数值距离（半格悬崖收口）+ auditGuard 只读子动作分流。
+- **全量回归（W8-C2 实测）**：2472 用例 / 2467 通过 / 0 fail / 0 cancelled / 5 skip（环境守卫）；verify 23/23 + BC 零命中；compileall 0 错；doctor 90.5（crit/major/minor 0/0/0，info 40 = 21 豁免 + 19 未豁免，sec.\* 零命中）；dist 272 件与 src 对齐；tsc 0 错。DEBTS 43→47 条（翻案闭环 11 / 部分闭环 2 / 半闭 1 / 新增 4）。
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
@@ -596,6 +673,16 @@ config:
 | `remember_ui` / `recall_ui` | 场景式 UI 记忆写入 / 自然语言召回 | `description`,`x`,`y` / `query` |
 | `replay_actions` | 重放日志中的动作序列（宏） | `confirm`, `from_step?`, `to_step?` |
 | `save_skill` / `match_skill` / `run_skill` | 技能沉淀 / 可靠度匹配 / 一键执行（成败回写可靠度） | `description` / `query` / `id`,`confirm` |
+| `request_approval` / `grant_approval` | 人机协同审批闸门（需 `enableApprovalGate`）：不可逆动作先铸令牌（一次同意覆盖整任务重试窗口；用户离开可 stage 入离线队列）；grant 需用户带外 6 位确认码（W1-2），带外通道缺席即 fail-closed 拒绝 | `description`,`consequence?`,`stage?` / `token`,`grant`,`confirm_code?`,`note?` |
+| `adjudicate_approval_queue` | 离线批准队列批量裁决（W2-1）：晨报列出暂存的不可逆动作，用户一次批注式裁决多项（grant 复用 amendment 协议、过期保守拒绝、已裁决拒翻案） | `ids?`, `grant`, `note?` |
+| `what_if` / `swarm_report` | 反事实推理（换条路好多少——Laplace 路线率 + Cohen's h）/ 群体智慧报告（需 `enableJournal`） | `scenario` / 无 |
+| `quality_checkup` | 质量医生门诊（D-4 + 纪元 Π）：诊断代码基因与因果链、显式授权下的机械修复、教训与自审；第五动作 `notarize` 出公证四绿章报告（需 `enableQualityDoctor`） | `action`, `files?`, `authorize?`, `max_risk?`, `dry_run?` |
+| `swarm_dispatch` | 多智能体协同（一台躯体多重心智，需 `enableSubAgents`）：按角色孵化子代理 → 以在场者行动 → 汇报 → 仲裁交叉验证结论；开市后附步数拍卖摘要面（W4-7） | `action`, `specs?`, `findings?`, `confidence?` |
+| `shape_environment` | 环境重塑（需 `enableEnvironmentShaper`）：raise / maximize / move / set_zoom / set_contrast，严格 LIFO undo 账本；能力探测先行、`restore` 复原 | `action`, `kind?`, `title_hint?`, `x?`, `y?`, `level?` |
+| `get_metrics` / `verify_journal` / `self_diagnose` | 工程卓越三件套（需 `enableTelemetry`）：运行时遥测分位与洞见 / 行动日志哈希链审计（防篡改）/ 全子系统活体健康检查 | 无 / `from_step?` / 无 |
+| `save_checkpoint` | 认知状态全量快照（UI 记忆/技能/失败记忆/journal 链/遥测，原子写；需 `checkpointPath`） | 无 |
+| `federation_sync` | 万脑联邦（纪元 Μ，需 `kernelEvolutionEnabled` 或 `federationEndpoint`）：铸造差分隐私证据摘要、可选上行聚合端、远端证据只喂本地账本（绝不直写参数值）；缺省 robust 拜占庭聚合、endpoint 空 = 零网络；`DSH_FEDERATION_TOKEN` 在场自动 HMAC 签名 | `action?`（digest/sync/status）, `robust?` |
+| `steer_choice` / `steer_answer` | 活意图漂移检查对（W3-5，需 `autonomyEnabled`）：屏幕离目标太远时出 A 继续 / B 修判据 / C 终止的单键题；应答经 `steer_answer` 结算（垃圾输入原题重问绝不猜；持卡时 "2"/"B2" 换支重放） | `step_index`, `entropy?` / `answer` |
 
 ## 快速开始
 
@@ -876,6 +963,59 @@ Theta built the evolution infrastructure and wired the first 18 keys; Xi sweeps 
 
 Psi made thirteen brains selectable; Lambda makes the fresh install glow — a five-level resolution chain lights the first lamp it can: explicit config > saved connection (`~/.dsh/vlm-connection.json`, `DSH_VLM_CONNECTION` overridable; restart resumes whatever the user last chose) > env auto-detection > **local auto-adopt** (a loopback knock on Ollama 11434 / LM Studio 1234 / vLLM 8000 `/models` — serial, no auth header, 1.5s budget each — picking a vision-named model first: zero keys, zero config, archived `via:'auto-adopt'`) > **wizard popup** (`startOnboarding` loopback HTTP server + `system.openUrl`; fire-and-forget, never blocking plugin load). The wizard is an offline single-file Chinese page: 13 platform cards, key input (local platforms keyless), test-connect probe, model-list discovery, save-and-enable (archive + hot apply + **late registration** of `ask_screen`), disconnect — under the security laws: loopback-only bind, keys echoed only in masked form, 32KB body cap, port fallback +1..+8 from 18432, 30-minute idle auto-shutdown. Two always-registered tools — `switch_vision_model(platform, api_key?, base_url?, model?)` (probe first, persist `via:'tool'`, then re-mint the client hot: every VLM organ re-fetches `getGlmClient`, so the whole stack follows the new brain immediately) and `vlm_wizard()` (reopen the wizard anytime); `ask_screen`'s degraded `next_step` now points to it. New configs `vlmAutoAdoptLocal` (true) / `vlmOnboardingEnabled` (true) / `vlmOnboardingPort` (18432). Judgment numbers: 46 Lambda tests, 0 failures (vlm.connection 16 / vlm.onboarding 15 / vlm.tools 7 / epochLambda.onboarding 8).
 
+## The World-Class Innovation Wave (Epochs Ρ·Γ·Υ·Η·Κ·Π·Μ and sequels)
+
+After Lambda, the project took aim at the industry's three unsolved pains — **injection cannot be prevented (Ρ/Π/Β), tokens cost too much (Γ/Γ2), agents do not improve (Υ/Κ/Μ/Η/Ι/Τ/Ε/Ν)** — in four construction waves landing seventeen epochs: 163 new enforcement tests (merged into the 1295/0 suite), six new modules (`sleep` / `notary` / `federation` / `selfmodel` / `prophecy` / `vlm/refute`), the new tool `federation_sync`, and 25 new config keys. Full ledger in [GENESIS.md](GENESIS.md) and [INNOVATION.md](INNOVATION.md); one line each:
+
+- **Ρ two-key notarization lock** (on by default): irreversible actions require multi-channel semantic notarization — model self-report ∪ OCR ground truth ∪ UIA control names, each normalized to a fixed point (leet/homoglyph immune) and adjudicated fail-heavy; a semantic handshake rejects descriptions that contradict what the screen actually reads. Injection can fool the model; it cannot fool the rendered pixels and control names.
+- **Γ/Γ2 gaze economy**: foveated encoding (native-resolution center, downsampled periphery) with exact coordinate round-trips (≤1px) — measured **token −75% / JPEG bytes −67.8%** at JPEG-level fovea fidelity, peripheral loss honestly reported.
+- **Υ cognitive sleep** (off by default): a six-act offline consolidation cycle (replay → distill → immunize → calibrate → audit → morning report) with idempotent watermarks and per-act budgets.
+- **Η epistemic closure** (on by default): a four-factor gate (error cost × Beta-calibrated confidence × cloud availability × budget headroom) inserted ahead of the constitution check — the agent asks the human exactly when the math says it should; abstention is a first-class action.
+- **Κ surprise curriculum** (off by default): production surprise spectra drive a softmax-weighted synthetic-world sampler, P(world) ∝ exp(β·surprise) — train more where you failed more.
+- **Π notarized behavior ledger**: self-chained anchors (sha256 over canonical records) + a zero-dependency DER/RFC3161 timestamp client + four-green-seal verification exposed as `quality_checkup`'s fifth action `notarize` — cryptographic proof that the recorded automation is untampered and reproducible.
+- **Μ/Μ2 federation of brains**: differentially-private Laplace-noise evidence digests merged via Byzantine-robust per-cell medians (k≥3, 50% crash tolerance) with outlier quarantine feeding a trust ledger — remote evidence feeds the local ledger only; parameter values still move solely through the local evidence gate.
+- **Sequels**: Ι **self-model** (decaying Beta competence posteriors per action×scene cell — the epistemic gate learns to fear cells where the agent historically fails), Τ **intervention-as-education** (granted approvals become privileged positive demonstrations; refusals become avoidance lists; type_text logs only length buckets), Χ **sandbox replay testimony** (deterministic re-runs pinpoint the first divergent step), Ε **prophecy engine** (Dyna-style pre-action predictions reconciled hit/miss/no-model, feeding back into the world model), Β **refute court** (a heterogeneous second brain is asked to *refute* irreversible actions — injection must now fool the primary brain, the pixel notary, and the adversarial refuter), Ν **probe economics** (probe channels ordered by learned bits/ms, stopping at ≥0.5 bits of entropy reduction), Ζ/PyS **persistence & OCR ground truth** (checkpoint self-model segments; sleep-driven calibration advice; Python OCR word-level confidence scores cross the wire as measured values).
+
+## The W1–W5 Organ Waves: Resilience · Discipline · Intent · Embodiment · Final Audit
+
+Five consecutive organ waves followed (each delivering multiple organs in parallel plus dedicated integration wiring, all enforced and registered in [GENESIS.md](GENESIS.md)), pushing the flagship themes into execution, offline safety, long-run self-correction, and physical embodiment. At the W5 close: **2018 total tests, typecheck clean, 242 modules importing clean** (one environment-exposed failure honestly logged; see DEBTS).
+
+- **W1 execution & perception resilience** (9 organs + integration wiring, 169/0): execution-layer quadruple fix (ROI three-evidence verdict / UIA precheck × focus short-circuit / word-centroid landing points / settle gate), **out-of-band confirm codes** (CSPRNG 6-digit with constant-time compare — the code never appears on any model-visible surface, so an absent user cannot be impersonated), perception gating (skip heavy perception when the dHash is unchanged — measured 50% skip rate), a noise clinic, EXP4 contextual bandits, root-cause attribution chains, sparse SoM with occlusion-avoiding labels, zoom re-verification (three triggers, 8-per-task budget), and visual economy (three-way gaze routing + budget-aware re-encoding).
+- **W2 offline resilience & cost discipline** (9 organs + integration wiring, 173/0): an offline approval queue (staged irreversible actions adjudicated in one annotated batch from the morning report via `adjudicate_approval_queue`), the deliberate audit-fail-closed × probe-fail-open asymmetry with freshness probes, bench trustworthiness (contract checker + variance-aware SPRT regression gate), lease blackboard + evidence-based arbitration, a recovery-efficacy Beta ledger, memory-ops bandits, canary rehearsals, and cost-cascade routing (measured savings rate 0.55).
+- **W3 living intent & self-correction** (9 organs + integration wiring, 155/0): reversal escrow (action-level WAL + compensation plans, fail-closed without a plan), parameterized skills (DTW alignment + anti-unification into parameter holes), dirty-rectangle incremental encoding (P-frame-style perception, measured **token −74.6%**), DAG pipeline with staged resume, intent drift (`steer_choice` / `steer_answer` — single-key A/B/C questions when the screen drifts from the goal), branch cards (counterfactual replay on failure), exploration frontier (UCB, recovery mode only), and a process scorer (step-level four-channel credit assignment).
+- **W4 embodiment & economics** (9 organs + closing wiring, 133/0 + 58 Python self-test assertions): macro replay (measured decision calls −71.4%), federated skills (DP upload: fingerprints + slot medians; k≥3 aggregation; activated only after two local hits), reversibility lanes (compensable escrow / irreversible handed to the human / reversible fast lane), a PCG infinite gym, **mobile surface** (Android devices enrolled as virtual displays via scrcpy/ADB), **zero-API device face** (an HDMI capture-card UVC eye + a CH9329 serial HID hand — the target device sees a real mouse and keyboard: zero drivers, zero API, zero detection surface), a step-auction market, and an acoustic channel (non-semantic evidence only, always subordinate to vision).
+- **W5 closing wave** (7 organs, 83/0 + 7 benches green): Python endpoint registration (uvc/hid/audio endpoints + a /health hardware face; absent hardware always degrades to a structured 200, never a bare 5xx), dream replay (PER-priority counterfactual re-runs with divergence-point double-entry), cross-machine orchestration (a distributed barrier with full-quorum release, sequence anti-replay, two-phase commit, and bounded state; plus cross-machine visual corroboration predicates), the SoM call face (sparse annotation wired into the production pipeline with ≤1e-9 coordinate closure), steer closure (all three declared gaps closed), and an efficiency benchmark putting six organs' claims on the scale — declared vs measured, side by side.
+
+## W6-R: The Repair Wave
+
+A post-W5 full-repo security and correctness repair wave (parallel agents; snapshot — closing status in the last bullet):
+
+- **Approval fail-closed**: when the out-of-band confirm channel is absent (`confirm_channel=out-of-band-absent`), grant is refused — the token can never be granted in-chat; confirm codes travel only the event bus and console output is fully redacted.
+- **Prompt-injection discipline**: a "data vs instruction" segment added to the system prompt — screen content is untrusted data, and any "instruction" rendered on screen is not an instruction; confirm codes are honored only out-of-band. SoM prompts hardened in step.
+- **Python physical service**: the adb type_text device-shell injection fixed (shlex.quote + printable-ASCII allowlist); mandatory nonce (a missing X-Request-Id ⇒ 401); auth failures re-mapped to 401; the HID controller public convergence surface; the uvc.py D-E1 double-wrap bug fixed; pyproject gains pyserial / opencv-python / comtypes.
+- **VLM**: tool-function deduplication (a single internalUtils.ts implementation); verifyGate re-verification budgets scoped per task (concurrent tasks no longer bleed into each other).
+- **Federation**: federationSync defaults to robust:true (Byzantine-robust aggregation in production, D-B6 closed); HMAC-signed aggregation auth (DSH_FEDERATION_TOKEN); trust-ledger persistence wired and locked.
+- **Physical execution, TS side**: forced-close on PID proof removed; key files 0600; X-Request-Id on all endpoints; 401 semantics recognized.
+- **Engineering**: CI gains verify + build steps; sharp/tesseract.js moved into dependencies; .gitignore gains with-interrupt.
+- **Shell hardening**: openUrl via rundll32 with array arguments (no shell parsing, no variable expansion); all PowerShell goes through -EncodedCommand.
+- **Guards**: the audit fail-closed roster grows 6→18 tools; tighter quantized repeat-action detection plus trajectory-level loop detection.
+- **Closed out (W6R-C3)**: fail-closed dangerous-action probes (canaryGuard token-path gate), static VLM key protection (maskKey redaction), and full regression (typecheck clean; 2350 tests, 0 fail; verify 23/23; doctor 85.5, zero sec.* hits; dist synced with src) — all landed.
+
+## W8: The World-Innovation Repair Wave
+
+The wave that followed W6-R, clearing the "built but not wired" organ debts and structural debts (2 batches, 18 repair agents + 2 closing reviews; 11 enforcement suites, 96/96):
+
+- **Giant-file splits**: gym.ts 3377→1557 + 6 satellites, approval.ts 1584→97-line bucket + 9 satellites, autonomy/runtime.ts 1581→989 + 6 satellites — import faces unchanged, enforcement anchors untouched.
+- **Criteria falsification**: the criteriaEval organ grows negative criteria on the same DSL (`mustNotAppear:` prefix — an OCR hit on the forbidden phrase ⇒ violated ⇒ final failed), fuzzy tolerance (one error per six characters), and honest degradation when OCR is absent; the pilot loop enforces only the negative side (polarity red line — the positive side stays with the execute channel).
+- **Cycle breaking**: the autonomy↔tools package cycle severed (canaryLogic imports nothing from autonomy; autoPilot imports nothing from tools — dependency direction is strictly tools/guards → autonomy).
+- **Memory upgrades**: failureMemory gains salience-aware eviction (recency / dedup hits / root-cause crowding penalty + sole-survivor quota); selfmodel moves to 24-bit two-stage scene buckets with honest migration from old 16-bit keys.
+- **Prophecy & notarization**: a coarse screen-type bridge (exact-key miss ⇒ coarse dhash fallback, honestly labeled `predictedVia:'coarse'`) plus the surprise-feed live wiring into the evolution engine; replayWitness notarizes replay trajectories (replay_actions / run_skill dual wiring — step fingerprints + three-state outcomes anchored into the notary chain, degrading honestly when the notary is absent).
+- **Single-sourcing**: federation-server.mjs becomes a thin re-export of `dist/crossMachine.js` (one authoritative barrier state machine).
+- **CI on Linux**: a physical-service e2e step lands (ubuntu installs dsh_physical editable, pre-starts tcp:8421, runs the adapter real-service path plus the /dev/shm branch — awaiting first push validation).
+- **Bench predicate**: a `windowCount` check (titleRegex-anchored window counting with combinable equals/gte/lte — the machine equivalent of "the window count is unchanged/zero afterwards").
+- **Wiring closeout & guard fixes**: SoM seed supply, dream failure feed, and the incremental-encoding consumer (contextManager, off by default) all wired; the hanging-test debt eradicated (suite-wide cancellations reach zero for the first time); repeatActionGuard gains leaf-level numeric distance and auditGuard splits read-only sub-actions.
+- **Full regression (W8-C2, measured)**: 2472 tests / 2467 pass / 0 fail / 0 cancelled / 5 skipped (environment guards); verify 23/23 with zero BC hits; compileall clean; doctor 90.5 (0/0/0 across crit/major/minor, 40 info = 21 exempted + 19 unexempted, zero sec.* hits); dist at 272 files in sync with src; tsc clean. DEBTS ledger 43→47 (11 flipped closed / 2 partial / 1 semi-closed / 4 new).
+
 ## Epoch Φ (Phi): The Autonomy Loop
 
 The local stack could by now "see precisely and click correctly" — but every step was still model-driven. This epoch forges the **four-ring loop**: the machine takes its own world snapshot (perceive), decides its own next step (judge), executes and verifies by itself (execute), and after the run audits itself and evolves its strategy weights (evolve). The precondition of high autonomy is legislation — ten organs + a constitution + runtime adaptation (`src/autonomy/`).
@@ -1106,7 +1246,7 @@ Every remaining item from the post-campaign ledger, delivered in recommended ord
 
 | Tool | Description | Key parameters |
 | --- | --- | --- |
-| `take_screenshot` | Capture + SoM overlay + compression + sliding window + popup sensing + change gating | `region`, `force?` |
+| `take_screenshot` | Capture + SoM overlay + compression + sliding window + popup sensing + change gating + multi-display awareness (Epoch Σ-5) | `region`, `force?`, `display?` |
 | `click_mouse` | Normalized-coordinate click with built-in dHash effect verification + auto memory + Z-2 interactivity gate (left-clicks on static text are structurally refused) | `x`, `y`, `button`, `confidence?`, `target_description?`, `allow_text_click?` |
 | `type_text` | Type text at the focus; cross-platform clear-first | `text`, `clearFirst` |
 | `scroll_page` | Four-direction scrolling | `direction`, `amount` |
@@ -1130,7 +1270,14 @@ Every remaining item from the post-campaign ledger, delivered in recommended ord
 | `remember_ui` / `recall_ui` | Scene-based UI memory write / natural-language recall | `description`, `x`, `y` / `query` |
 | `replay_actions` | Replay an action sequence from the journal (macro) | `confirm`, `from_step?`, `to_step?` |
 | `save_skill` / `match_skill` / `run_skill` | Skill persistence / reliability matching / one-click execution (outcomes write back reliability) | `description` / `query` / `id`, `confirm` |
-| `quality_checkup` | The Quality Doctor's clinic (D-4): diagnose code genes & causal chains, heal mechanical fixes under explicit authorization, lessons, self-audit | `action`, `files?`, `authorize?`, `max_risk?`, `dry_run?` |
+| `quality_checkup` | The Quality Doctor's clinic (D-4): diagnose code genes & causal chains, heal mechanical fixes under explicit authorization, lessons, self-audit; fifth action `notarize` emits the four-green-seal notary report (Epoch Π) | `action`, `files?`, `authorize?`, `max_risk?`, `dry_run?` |
+| `request_approval` / `grant_approval` | Human-in-the-loop approval gate (needs `enableApprovalGate`): mint a one-consent token for irreversible actions (one consent covers the whole task's retry window; stage into the offline queue when the user is away); grant requires the user's out-of-band 6-digit confirm code (W1-2) and fails closed when the out-of-band channel is absent | `description`, `consequence?`, `stage?` / `token`, `grant`, `confirm_code?`, `note?` |
+| `adjudicate_approval_queue` | Batch adjudication of the offline staging queue (W2-1): the morning report lists staged irreversible actions; the user rules once with annotations (grants reuse the amendment protocol; expired items conservatively refused; no re-deciding) | `ids?`, `grant`, `note?` |
+| `what_if` / `swarm_report` | Counterfactual reasoning (how much better the alternative route is — Laplace route rates + Cohen's h) / swarm wisdom report (needs `enableJournal`) | `scenario` / none |
+| `get_metrics` / `verify_journal` / `self_diagnose` | Engineering-excellence trio (needs `enableTelemetry`): runtime telemetry percentiles & insights / action-journal hash-chain audit (tamper-evident) / live health checks of all subsystems | none / `from_step?` / none |
+| `save_checkpoint` | Full cognitive-state snapshot (UI memory / skills / failure memory / journal chain / metrics; atomic write; needs `checkpointPath`) | none |
+| `federation_sync` | Federation of brains (Epoch Μ, needs `kernelEvolutionEnabled` or `federationEndpoint`): mint differentially-private evidence digests, optionally POST to an aggregation endpoint, and blend returned digests into the LOCAL LEDGER ONLY; robust Byzantine aggregation by default, zero network with an empty endpoint; HMAC-signed when `DSH_FEDERATION_TOKEN` is set | `action?` (digest/sync/status), `robust?` |
+| `steer_choice` / `steer_answer` | Intent-drift check pair (W3-5, needs `autonomyEnabled`): when the screen drifts too far from the goal, issue a single-key A/B/C question (continue / amend criterion / terminate); answers settle via `steer_answer` (garbage input re-asks, never guesses; a held branch card makes "2"/"B2" switch branches) | `step_index`, `entropy?` / `answer` |
 
 ## Quick Start
 
