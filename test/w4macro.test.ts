@@ -25,6 +25,9 @@
 // 键鼠、注入时钟零真睡；sharp 现场生成真 PNG（增量账本分析管线）。
 import { test, beforeEach, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { default as sharp } from 'sharp';
 import { system } from '../src/system.ts';
 import { kernelRegistry } from '../src/kernel/registry.ts';
@@ -40,8 +43,15 @@ import {
   MacroRehearsalGate, resetMacroRehearsalGate, translateToSandboxActions,
   buildVirtualScene, MACRO_REHEARSAL_GATE,
 } from '../src/sandbox/macroRehearsal.ts';
+// ΑΩ-R20：排练门禁登记归一 —— 引擎侧共享持久 MuscleMemoryStore 的执法册物料
+import { MuscleMemoryStore, sharedMuscleMemoryStore } from '../src/sandbox/memory.ts';
+// ΝΩ-30：词表扩展/签名深键序的执法物料
+import { VirtualScreen } from '../src/sandbox/virtualScreen.ts';
+import { muscleReliability } from '../src/sandbox/types.ts';
 import { deterministicReplay } from '../src/sandbox/engine.ts';
 import { createMatchSkillTool, createRunSkillTool } from '../src/tools/skillTools.ts';
+// ΝΩ-5：run_skill 令牌通道测试物料（授予须带外码 —— W6R fail-closed）
+import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { createPerceive, createExecute } from '../src/autonomy/runtime.ts';
 import type { RuntimeDeps } from '../src/autonomy/runtime.ts';
 import type { WorldSnapshot } from '../src/autonomy/worldSnapshot.ts';
@@ -403,6 +413,172 @@ test('M-5f: 宏链 → SandboxAction 翻译与场景铸造（确定性 + 畸形�
   // deterministicReplay 出口消费宏链（sandbox 引擎的 replay 面吃宏方言）
   const replay = deterministicReplay(actions.slice(0, 1), { scene });
   assert.equal(replay.verdict, 'passed');
+});
+
+// ─── ΝΩ-30：排练门禁词表扩展 + 签名深键序（证据强度六件之两件）───
+
+test('ΝΩ-30e: 词表扩展 —— click_element→坐标寻址；热键完整和弦映射；词表外诚实标注 unsupported', () => {
+  // click_element（元素 ID 寻址）→ click_mouse 坐标寻址：空间参数透传，
+  // 缓存通道方言（id/approval_token）剥除 —— 沙箱无运行时元素缓存世界
+  const ce = translateToSandboxActions([
+    { tool: 'click_element', args: { id: 5, x: 0.4, y: 0.4, approval_token: 'T', target_description: 'OK' } },
+  ]);
+  assert.equal(ce[0].kind, 'click_mouse', 'click_element 翻译为坐标寻址点击');
+  assert.equal(ce[0].args.x, 0.4);
+  assert.equal(ce[0].args.target_description, 'OK');
+  assert.equal(ce[0].args.id, undefined, 'ID 缓存方言不入沙箱');
+  assert.equal(ce[0].args.approval_token, undefined, '令牌方言不入沙箱');
+  // 无坐标的 click_element：翻译成立（非 noop）—— 证据缺席归因于坐标缺席
+  const ce2 = translateToSandboxActions([{ tool: 'click_element', args: { id: 9 } }]);
+  assert.equal(ce2[0].kind, 'click_mouse');
+  // 热键完整键和弦：esc 原样；ctrl+tab → 切签 next；ctrl+shift+tab → previous；他弦 unsupported
+  assert.equal(translateToSandboxActions([{ tool: 'press_hotkey', args: { keys: ['esc'] } }])[0].kind, 'press_hotkey');
+  const next = translateToSandboxActions([{ tool: 'press_hotkey', args: { keys: ['ctrl', 'tab'] } }]);
+  assert.equal(next[0].kind, 'switch_tab');
+  assert.equal(next[0].args.direction, 'next');
+  const prev = translateToSandboxActions([{ tool: 'press_hotkey', args: { keys: ['Ctrl', 'Shift', 'Tab'] } }]);
+  assert.equal(prev[0].kind, 'switch_tab');
+  assert.equal(prev[0].args.direction, 'previous', '大小写归一');
+  const w = translateToSandboxActions([{ tool: 'press_hotkey', args: { keys: ['ctrl', 'w'] } }]);
+  assert.equal(w[0].kind, 'noop');
+  assert.equal(w[0].args.unsupported_tool, 'press_hotkey', '无键盘模型的和弦 = 诚实 unsupported');
+  // 词表外宿主工具：noop + unsupported_tool 点名（不再冒充元动作缺席）
+  const unk = translateToSandboxActions([{ tool: 'take_screenshot', args: {} }]);
+  assert.equal(unk[0].kind, 'noop');
+  assert.equal(unk[0].args.unsupported_tool, 'take_screenshot');
+  // VirtualScreen 的 unsupported 注点名工具（诚实标注的观测面）
+  const vs = new VirtualScreen([{ role: 'button', name: 'b', rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 } }]);
+  const ev = vs.applyAction(unk[0]);
+  assert.equal(ev.effectDetected, null, '零证据（诚实缺席）');
+  assert.ok(ev.note.includes('take_screenshot'), `注点名词表外工具：${ev.note}`);
+});
+
+test('ΝΩ-30f: 含 click_element / ctrl+tab 的低可靠宏 —— 翻译后在场景上排练通过（不再结构性 degraded）', () => {
+  const gate = new MacroRehearsalGate();
+  // 旧词表：click_element ⇒ noop ⇒ 零证据 ⇒ degraded ⇒ 低可靠技能永久被拒
+  const v = gate.gate({
+    reliability: 0.2,
+    steps: [{ tool: 'click_element', args: { id: 3, x: 0.5, y: 0.5 } }],
+    scene: [{ label: 'Go', bbox: { x0: 0.45, y0: 0.45, x1: 0.55, y1: 0.55 } }],
+  });
+  assert.equal(v.verdict, 'passed', `元素点击步翻译后可排练：${v.note}`);
+  assert.ok(v.muscleEntryId, '登记面在场');
+  // 热键切签和弦：两标签场景（role 方言透传）上排练通过
+  const v2 = gate.gate({
+    reliability: 0.2,
+    steps: [{ tool: 'press_hotkey', args: { keys: ['ctrl', 'tab'] } }],
+    scene: [
+      { label: 'Tab A', bbox: { x0: 0.05, y0: 0.05, x1: 0.15, y1: 0.09 }, role: 'tab' },
+      { label: 'Tab B', bbox: { x0: 0.2, y0: 0.05, x1: 0.3, y1: 0.09 }, role: 'tab' },
+    ],
+  });
+  assert.equal(v2.verdict, 'passed', `和弦翻译为切签后可排练：${v2.note}`);
+});
+
+test('ΝΩ-30g: 词表外工具链 —— degraded 且注点名词表外步数（诚实归因，不冒充 noop）', () => {
+  const gate = new MacroRehearsalGate();
+  const v = gate.gate({
+    reliability: 0.2,
+    steps: [{ tool: 'find_text', args: { query: 'x' } }, { tool: 'take_screenshot', args: {} }],
+    scene: [{ label: 'Go', bbox: { x0: 0.45, y0: 0.45, x1: 0.55, y1: 0.55 } }],
+  });
+  assert.equal(v.verdict, 'degraded', '全词表外 ⇒ 零证据诚实拒绝');
+  assert.equal(v.allowed, false);
+  assert.equal(v.unsupportedSteps, 2, 'unsupported 步数观测面');
+  assert.ok(v.note.includes('unsupported'), `归因在场：${v.note}`);
+});
+
+test('ΝΩ-30h: stepSignature 深键序 —— 嵌套键序无关（去重不误判）；环形 args 不击穿', async () => {
+  const { stepSignature } = await import('../src/sandbox/memory.ts');
+  type SA = import('../src/sandbox/types.ts').SandboxAction;
+  // 嵌套键序不同 = 同一动作序列（旧 replacer 只排顶层键 —— 嵌套键序不同即误判新技能）
+  const a = [{ kind: 'drag_mouse', args: { start: { x: 0.1, y: 0.2 }, end: { x: 0.3, y: 0.4 } } }] as SA[];
+  const b = [{ kind: 'drag_mouse', args: { end: { y: 0.4, x: 0.3 }, start: { y: 0.2, x: 0.1 } } }] as SA[];
+  assert.equal(stepSignature(a), stepSignature(b), '深排序 ⇒ 键序无关');
+  // 嵌套值不同 = 新技能（旧实现的白名单坍缩会让不同嵌套参数同签 —— 修复面）
+  const c = [{ kind: 'drag_mouse', args: { start: { x: 0.9, y: 0.9 }, end: { x: 0.3, y: 0.4 } } }] as SA[];
+  assert.notEqual(stepSignature(a), stepSignature(c), '嵌套值域入签');
+  // 平铺 args 签名字面与旧实现逐字节一致（零回归）
+  assert.equal(stepSignature([{ kind: 'click_mouse', args: { y: 0.5, x: 0.25 } }] as SA[]), 'click_mouse:{"x":0.25,"y":0.5}');
+  // args 缺席 = 'undefined' 字面（load() 脏步方言不变）
+  assert.equal(stepSignature([{ kind: 'noop', args: undefined as never }] as SA[]), 'noop:undefined');
+  // 环形 args：签名收敛哨兵（旧实现 JSON.stringify 抛 RangeError —— 运行层铁律修复面）
+  const cyc: Record<string, unknown> = { x: 1 };
+  cyc.self = cyc;
+  const sig = stepSignature([{ kind: 'type_text', args: cyc as never }] as SA[]);
+  assert.ok(typeof sig === 'string' && sig.includes('<cycle>'), `环形哨兵：${sig}`);
+  // 行为面：深键序不同的同动作链 consolidate 去重强化（不重铸新条目）
+  const store = new MuscleMemoryStore();
+  const gate = new MacroRehearsalGate(store);
+  const mk = (point: Record<string, unknown>): SkillStep[] =>
+    [click(0.5, 0.5, { point })];
+  const v1 = gate.gate({ reliability: 0.2, steps: mk({ x: 0.3, y: 0.4 }), scene: r20Scene });
+  assert.equal(v1.verdict, 'passed', `排练通过：${v1.note}`);
+  const v2 = gate.gate({ reliability: 0.2, steps: mk({ y: 0.4, x: 0.3 }), scene: r20Scene });
+  assert.equal(v2.muscleEntryId, v1.muscleEntryId, '嵌套键序同动作 ⇒ 同签名去重强化（不误铸新技能）');
+  assert.equal(store.get(v2.muscleEntryId!)!.rehearsalPassCount, 2, '强化计数延续');
+});
+
+
+// ─── M-5（ΑΩ-R20）：排练门禁登记与引擎侧持久 MuscleMemoryStore 归一 ───
+
+const r20Scene = [{ label: 'OK', bbox: { x0: 0.4, y0: 0.4, x1: 0.6, y1: 0.6 } }];
+
+test('M-5g: 排练通过 ⇒ 引擎侧共享持久 store 可见（无第二份会话级账）', () => {
+  const g1 = new MacroRehearsalGate();
+  const g2 = new MacroRehearsalGate();
+  const v = g1.gate({ reliability: 0.4, steps: [click(0.5, 0.5)], scene: r20Scene });
+  assert.equal(v.verdict, 'passed', `应排练通过：${v.note}`);
+  assert.ok(v.muscleEntryId, '排练通过 ⇒ 登记面在场');
+  // 归一铁证一：门禁实例间同账本（缺省构造不再各自造第二份存储）
+  assert.equal(g2.registeredEntries(), 1, '另一门禁实例同账可见（不复制第二份存储）');
+  // 归一铁证二：memory.ts 的引擎侧共享单例直接可查（登记/查询同源）
+  const entry = sharedMuscleMemoryStore.get(v.muscleEntryId!);
+  assert.ok(entry, '登记在引擎侧 sharedMuscleMemoryStore 直接可查');
+  assert.equal(entry!.rehearsalPassCount, 1, '排练计数起步 = 1（可靠度计数不动）');
+});
+
+test('M-5h: 排练登记跨会话存活（落盘 → 新 store 载入 ⇒ 仍在且计数延续）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w4macro-r20-'));
+  try {
+    const persistent = new MuscleMemoryStore();
+    persistent.configure(join(dir, 'muscle.json'));
+    const gate = new MacroRehearsalGate(persistent);
+    const v = gate.gate({
+      reliability: 0.4, steps: [click(0.5, 0.5)], scene: r20Scene, trigger: '跨会话排练',
+    });
+    assert.equal(v.verdict, 'passed', `应排练通过：${v.note}`);
+    // 新会话：全新 store 同路径载入（引擎侧 configure+load 生命周期；防御式恢复）
+    const nextSession = new MuscleMemoryStore();
+    nextSession.configure(join(dir, 'muscle.json'));
+    assert.equal(nextSession.load(), 1, '登记跨会话恢复（防御式载入不连坐）');
+    assert.ok(nextSession.get(v.muscleEntryId!), '排练登记新会话仍在');
+    // 同签名再排练 ⇒ 去重强化（计数延续而非重铸新条目）
+    const gate2 = new MacroRehearsalGate(nextSession);
+    const v2 = gate2.gate({
+      reliability: 0.4, steps: [click(0.5, 0.5)], scene: r20Scene, trigger: '跨会话排练',
+    });
+    assert.equal(v2.muscleEntryId, v.muscleEntryId, '同签名去重 —— 恢复后的条目被强化');
+    assert.equal(nextSession.get(v.muscleEntryId!)!.rehearsalPassCount, 2, '排练计数跨会话延续');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('M-5i: 两处计数同源 —— 门禁登记与引擎侧宿主重放回写同账互见', () => {
+  const store = new MuscleMemoryStore();
+  const gate = new MacroRehearsalGate(store);
+  const v = gate.gate({ reliability: 0.4, steps: [click(0.5, 0.5)], scene: r20Scene });
+  assert.equal(v.verdict, 'passed', `应排练通过：${v.note}`);
+  const id = v.muscleEntryId!;
+  assert.equal(muscleReliability(store.get(id)!), 0.5, '零宿主重放 = Laplace 先验 0.5');
+  // 引擎侧同账本回写宿主重放结局（可靠度唯一事实源）
+  assert.ok(store.recordHostReplay(id, true), '回写命中门禁登记的同一条目');
+  assert.ok(store.recordHostReplay(id, true));
+  const after = store.get(id)!;
+  assert.equal(after.hostReplayCount, 2);
+  assert.equal(muscleReliability(after), (2 + 1) / (2 + 2), '宿主重放计数同账积累 —— 不再恒卡 0.5');
+  assert.equal(gate.registeredEntries(), 1, '回写不铸新条目（改一处另一处可见 —— 同一存储）');
 });
 
 /** 造纯 string 洞模板：坐标同值（常量槽）+ 仅 text 异 ⇒ 唯一洞是文本 */
@@ -804,6 +980,46 @@ test('M-6f: run_skill 模板绑定失败 ⇒ 回退母体技能执行（W3-2 语
     assert.equal(out.macro_trace.rehearsal_gate.verdict, 'not-required', '母体可靠度过闸');
   } finally {
     restore();
+  }
+});
+
+// ─── ΝΩ-5：run_skill 的 approval_token 令牌通道（危险步重放的法律通道） ───
+
+test('M-6g: run_skill 危险步 —— 新令牌透传过闸 + 步终 consume；无令牌诚实拒绝', async () => {
+  resetApproval(); // 审批簿记隔离（本册 beforeEach 不含审批面）
+  let clicks = 0;
+  const restore = patchSystem({
+    getScreenSize: async () => ({ width: 1920, height: 1080 }),
+    clickMouse: async () => { clicks++; },
+    typeText: async () => { /* noop */ },
+  });
+  const gatedCfg = {
+    ...toolCfg, enableApprovalGate: true, dangerPatterns: 'send,发送',
+  } as unknown as Config;
+  try {
+    // 技能录制时携带旧令牌（一次性 + TTL ⇒ 重放时刻必失效 —— 旧缺陷：结构性永远失败）
+    const s = skillLibrary.induce('发送周报', [
+      click(0.5, 0.5, { target_description: '发送周报', approval_token: 'APR-STALE-RECORDED' }),
+    ])!;
+    // ① 无 approval_token 参数：steps 里的旧令牌失效 ⇒ 危险步诚实拒绝、零派发
+    const denied = await runJson(createRunSkillTool(gatedCfg), { id: s.id, confirm: true });
+    assert.equal(denied.status, 'PARTIAL_FAILURE');
+    assert.equal(denied.state_anchor.steps_failed, 1);
+    assert.ok(denied.execution_log.includes('token-not-granted-or-expired'), '拒绝归因：旧令牌失效');
+    assert.equal(clicks, 0, '诚实拒绝：物理零派发');
+    // ② 带新铸已授予令牌（W6R：授予须带外码 —— 内联武装采集 sink）
+    const sink: ConfirmCodeDelivery[] = [];
+    setConfirmCodeChannel(d => { sink.push({ ...d }); });
+    const pa = approval.request('重放技能「发送周报」的危险步');
+    assert.equal(approval.grantDetailed(pa.token, true, { confirmCode: sink[0]?.confirmCode }).ok, true, '令牌授予');
+    const ok = await runJson(createRunSkillTool(gatedCfg), { id: s.id, confirm: true, approval_token: pa.token });
+    assert.equal(ok.state_anchor.steps_failed, 0, '新令牌覆盖危险步令牌槽 ⇒ 过闸执行');
+    assert.ok(ok.execution_log.includes('clicked'), '步回执为动作方言');
+    assert.equal(clicks, 1);
+    assert.equal(approval.validate(pa.token), false, '步终 consume：新令牌验收式焚毁（预留不悬账）');
+  } finally {
+    restore();
+    setConfirmCodeChannel(null);
   }
 });
 

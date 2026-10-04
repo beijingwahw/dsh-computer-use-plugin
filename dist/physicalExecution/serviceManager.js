@@ -21,8 +21,32 @@ import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { resolvePythonBin } from './pythonBin.js';
-import { ensureKey } from './capToken.js';
+import { ensureKey, mintToken } from './capToken.js';
+import { ALL_CAPS } from './contracts.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// ─── ΑΩ-R27 端口策略单源 —— 全库唯一的 D-5 微服务 TCP 端口/跨度事实源 ───
+// 双策略有意并存（不合并 —— 消费场景与密钥形态不同，统一即回归，证据见表下）：
+//
+//   消费方                          | 端口策略                         | 密钥形态
+//   --------------------------------+----------------------------------+------------------------
+//   PhysicalServiceManager 本模块   | 单端口 PHYSICAL_TCP_BASE_PORT，  | 每回合随机临时密钥
+//   （D7PhysicalHostPort / 集成测试 | 无自动重试；占坑 ⇒ 如实快报      | （createTempKey）
+//   经 opts 走此路）                | port_squatted / startup_timeout  |
+//   physicalBackend（D-1 工具层，   | BASE..BASE+SPAN-1 逐端口扫描     | 稳定密钥 ~/.dsh/physical.key
+//   经 import 引用本常量）          | （PHYSICAL_TCP_PORT_SPAN）+      | （插件重载后 HMAC 令牌
+//                                  | 同密钥收养（adoptExisting）      | 互通 ⇒ 收养可能成立）
+//
+// 为什么不同（= 「不可安全统一」的证据）：
+//   - manager 场景每回合 spawn 配新随机密钥 ⇒ 别端口上的任何存活服务都过不了
+//     Σ 纪元 nonce 质询（无共享密钥）—— 收养扫描对它永远空手而归；且「占坑者
+//     如实快报」是 Δ 纪元契约（epochDelta.infra 执法在册），把扫描重试搬进来
+//     会把「配错端口/陌生占坑」静默吞掉，属行为回归。
+//   - backend 场景插件热重载后旧服务仍持同一稳定密钥活着 ⇒ 收养是唯一正确动作
+//     （省一次 spawn + 15-20s 探活）；仅当端口被外部实例（密钥不通）占据时才
+//     顺延下一端口。
+export const PHYSICAL_TCP_BASE_PORT = 8421;
+/** D-1 physicalBackend 的逐端口扫描跨度：探测范围 = BASE .. BASE+SPAN-1（8421..8428） */
+export const PHYSICAL_TCP_PORT_SPAN = 8;
 /** 计算 Python 服务根目录（从本文件物理路径相对推导） */
 function defaultPythonRoot() {
     // src/physicalExecution/serviceManager.ts → ../../python_service
@@ -167,6 +191,58 @@ async function probeHealth(baseUrl, timeoutMs, child, key, spawnFailed) {
     }
     return { ok: false, detail: `health probe timed out after ${timeoutMs}ms` };
 }
+// ─── ΝΩ-27：优雅关停序列（HTTP shutdown 优先，信号链兜底）───
+/** HTTP /v1/shutdown 请求超时（ms）—— 端点应答是快路径（置位即回）；
+ *  卡死服务不必等满。 */
+export const SHUTDOWN_HTTP_TIMEOUT_MS = 1_500;
+/** HTTP ack 后的自退宽限（ms）—— 覆盖服务侧排空上限（3s）+ uvicorn 关停/
+ *  lifespan 清理余量。宽限内不发任何信号：Windows 上 SIGTERM 即
+ * TerminateProcess 硬杀，ack 后立即发信号会把服务侧排空窗打回原形。 */
+export const SHUTDOWN_GRACE_MS = 3_500;
+/**
+ * ΝΩ-27：关停序列编排（导出：测试面）——
+ *   1. 先 HTTP 优雅关停（requestGracefulShutdown ⇒ 是否 ack）；
+ *   2. ack ⇒ 宽限窗（graceMs）等自退 —— 期内不发信号；
+ *   3. 无 ack / 宽限到期仍未退 ⇒ 既有 SIGTERM → sigkillMs → SIGKILL 链
+ *      （未 ack 时 graceMs=0，SIGTERM 即发 + 3s 后 SIGKILL —— 与旧
+ *      _killProcess 行为逐字节等价，零回归）。
+ * 前置同旧律：pid 缺席（spawn 未成）或进程已退（exitCode/signalCode 在场）
+ * ⇒ 无可杀进程，直接返回。永不抛错；'exit' 一到即清计时器 resolve
+ * （不对可能被复用的 pid 补发信号）。
+ */
+export async function stopChildProcess(child, requestGracefulShutdown, timings = {}) {
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null)
+        return;
+    let acked = false;
+    try {
+        acked = await requestGracefulShutdown();
+    }
+    catch { /* HTTP 关停失败不阻断 —— 退化信号链 */ }
+    const graceMs = acked ? (timings.graceMs ?? SHUTDOWN_GRACE_MS) : 0;
+    const sigkillMs = timings.sigkillMs ?? 3_000;
+    await new Promise((resolve) => {
+        const sigterm = setTimeout(() => {
+            try {
+                child.kill('SIGTERM');
+            }
+            catch { /* noop */ }
+        }, graceMs);
+        sigterm.unref?.();
+        const killer = setTimeout(() => {
+            try {
+                child.kill('SIGKILL');
+            }
+            catch { /* noop */ }
+            resolve();
+        }, graceMs + sigkillMs);
+        killer.unref?.();
+        child.once('exit', () => {
+            clearTimeout(sigterm); // 进程已退：不得再对可能被复用的 pid 补发信号
+            clearTimeout(killer);
+            resolve();
+        });
+    });
+}
 /**
  * PhysicalServiceManager —— Python 微服务生命周期的唯一管理者。
  *
@@ -264,8 +340,9 @@ export class PhysicalServiceManager {
         else {
             this._mmapDir = mkdtempSync(join(tmpdir(), 'dsh-physical-mmap-'));
         }
-        // 3. 端口（单一端口，无自动重试 —— 占用时由探活超时如实暴露）
-        const port = this.opts.tcpPort ?? 8421;
+        // 3. 端口（单一端口，无自动重试 —— 占用时如实快报；缺省值单源于
+        //    ΑΩ-R27 端口策略常量，策略对照见文件头注释块）
+        const port = this.opts.tcpPort ?? PHYSICAL_TCP_BASE_PORT;
         const transport = this.opts.screenshotTransport ?? 'mmap-file';
         const pythonRoot = this.opts.pythonServiceRoot ?? defaultPythonRoot();
         // 4. spawn
@@ -359,7 +436,8 @@ export class PhysicalServiceManager {
         };
     }
     /**
-     * 优雅关停：SIGTERM → 等 3s → SIGKILL，清理临时密钥。
+     * 优雅关停：ΝΩ-27 —— 先 HTTP ``POST /v1/shutdown``（服务自排空在途 ≤3s +
+     * lifespan 清理后自退），再退化为既有 SIGTERM → 3s → SIGKILL 链。
      * dispose 是幂等的（多次调用安全）。
      */
     async dispose() {
@@ -372,30 +450,43 @@ export class PhysicalServiceManager {
     async _killProcess() {
         const p = this.proc;
         this.proc = null;
-        // 信号致死（exitCode=null / signalCode≠null）同样视为已退出 —— 否则对已死
-        // 进程注册的 'exit' 监听永不触发，dispose 白等满 3s SIGKILL 超时。
-        // pid===undefined ⇒ spawn 从未成功（'error' 已发、'exit' 永不发）—— 没有
-        // 可杀的进程，kill() 只会再 emit 一次 'error'，直接返回
-        if (!p || p.pid === undefined || p.exitCode !== null || p.signalCode !== null)
+        if (!p)
             return;
-        await new Promise((resolve) => {
-            const killer = setTimeout(() => {
-                try {
-                    p.kill('SIGKILL');
-                }
-                catch { /* noop */ }
-                resolve();
-            }, 3000);
-            killer.unref();
-            p.once('exit', () => {
-                clearTimeout(killer); // 进程已退：不得再对可能被复用的 pid 补发 SIGKILL
-                resolve();
+        // ΝΩ-27：关停序列单源（stopChildProcess）—— HTTP 优雅 ack ⇒ 宽限窗等
+        // 自退（Windows 上 SIGTERM 即 TerminateProcess 硬杀，ack 后立即发信号
+        // 会把服务侧 3s 排空窗打回原形）；无 ack/宽限超时 ⇒ 既有信号链
+        // （graceMs=0 时与旧实现行为等价：SIGTERM 即发，3s 后 SIGKILL）。
+        await stopChildProcess(p, () => this._requestShutdown());
+    }
+    /** ΝΩ-27：HTTP 优雅关停请求（best-effort，永不抛错）—— POST /v1/shutdown
+     *  携带自铸 Cap Token + X-Request-Id nonce（服务端管理面强制头）。
+     *  ack（2xx）⇒ true；baseUrl 缺席/密钥不可读/连接拒绝/超时/非 2xx ⇒ false
+     *  （调用方退化信号链 —— 诚实降级，绝不静默把关停失败当成功）。 */
+    async _requestShutdown() {
+        if (!this._baseUrl)
+            return false;
+        let headers = { 'X-Request-Id': randomUUID() };
+        try {
+            // 与 Python 端同一密钥文件自铸全能力 token（/v1/shutdown 不在
+            // ENDPOINT_CAPABILITY ⇒ 不要求特定位图，密钥持有者即可关停）
+            const key = await ensureKey(this._keyPath);
+            headers = {
+                'X-Request-Id': randomUUID(),
+                'X-Cap-Token': mintToken(key, process.pid, ALL_CAPS, 60),
+            };
+        }
+        catch { /* 密钥不可读：裸发（服务端 401 ⇒ 走信号链） */ }
+        try {
+            const resp = await fetch(`${this._baseUrl}/shutdown`, {
+                method: 'POST',
+                headers,
+                signal: AbortSignal.timeout(SHUTDOWN_HTTP_TIMEOUT_MS),
             });
-            try {
-                p.kill('SIGTERM');
-            }
-            catch { /* noop */ }
-        });
+            return resp.ok;
+        }
+        catch {
+            return false; // 连接拒绝 / 超时 / 中止 —— 服务不可达 ⇒ 信号链
+        }
     }
     _cleanupLocal() {
         if (this._keyCleanup) {

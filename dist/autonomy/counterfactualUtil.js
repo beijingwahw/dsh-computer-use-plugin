@@ -1,3 +1,5 @@
+import { tokenizeText } from '../dialects/tokenizer.js';
+import { kernelRegistry } from '../kernel/registry.js';
 // ─── 常量（随工具区同迁 —— 仅被本区函数消费） ───
 /** 效用权重缺省：进展 0.5 / 信息 0.3 / 风险 0.2（推进为主、信息次之、风险惩罚必在） */
 export const DEFAULT_WEIGHTS = { progress: 0.5, info: 0.3, risk: 0.2 };
@@ -5,18 +7,9 @@ export const DEFAULT_WEIGHTS = { progress: 0.5, info: 0.3, risk: 0.2 };
 export const RISK_SCORES = { benign: 0.05, sensitive: 0.5, destructive: 1 };
 /** 未知风险分层的保守记法（证据不足按需留意档） */
 export const RISK_UNKNOWN = 0.5;
-/** 中日韩统一表意字符（含扩展 A / 兼容区）—— 2-gram 切分对象（自带副本，不 import policyEngine） */
-export const CJK_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
-/** 双语停用词（精简副本）—— 关键词重合打分的功能词滤除（判定性弱、误匹配率高） */
-export const STOPWORDS = new Set([
-    '的', '了', '和', '与', '及', '或', '在', '是', '对', '从', '被', '把', '这', '那',
-    '也', '又', '就', '都', '而', '则', '请', '不', '无', '于', '以', '为', '有', '个',
-    '中', '并', '其', '之', '该', '当', '至', '给', '它', '你', '我',
-    'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'at', 'by',
-    'is', 'are', 'be', 'been', 'was', 'were', 'this', 'that', 'these', 'those',
-    'it', 'its', 'as', 'from', 'into', 'if', 'then', 'when', 'than', 'so', 'not',
-    'no', 'yes', 'all', 'any', 'must', 'should', 'will', 'can',
-]);
+/** 中日韩统一表意字符（含扩展 A / 兼容区）—— 2-gram 切分对象。
+ *  ΑΩ-R10：本体已单源化至 ../dialects/tokenizer —— 此处原位再导出，导入面不变。 */
+export { CJK_RE, STOPWORDS } from '../dialects/tokenizer.js';
 // ─── 内部纯函数工具（零副作用、零异常） ───
 /** 空白折叠 + 小写化 —— 一切文本匹配/签名的前置归一 */
 export function normalizeText(s) {
@@ -32,61 +25,13 @@ export function round2(v) {
     return Math.round(v * 100) / 100;
 }
 /**
- * 轻量分词（自带，禁运行时 import policyEngine 的实现）：
- * 中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字切开取词；
- * 滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
+ * 轻量分词：中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字
+ * 切开取词；滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
+ * ΑΩ-R10：实现已单源化至 ../dialects/tokenizer 的 tokenizeText —— 本名保留为
+ * 薄委托（导入面不变），行为与迁移前逐字节等价。
  */
 export function tokenize(text) {
-    const norm = normalizeText(text);
-    if (!norm)
-        return [];
-    const tokens = [];
-    const push = (t) => {
-        if (t.length === 0)
-            return;
-        if (/^\d+$/.test(t))
-            return; // 纯数字：坐标/序号噪声
-        if (STOPWORDS.has(t))
-            return; // 停用词
-        if (!CJK_RE.test(t) && t.length < 2)
-            return; // 单个英文字母噪声
-        tokens.push(t);
-    };
-    let cjkRun = '';
-    let wordRun = '';
-    const flushCjk = () => {
-        if (!cjkRun)
-            return;
-        if (cjkRun.length === 1)
-            push(cjkRun);
-        else
-            for (let i = 0; i + 1 < cjkRun.length; i += 1)
-                push(cjkRun.slice(i, i + 2));
-        cjkRun = '';
-    };
-    const flushWord = () => {
-        if (wordRun) {
-            push(wordRun);
-            wordRun = '';
-        }
-    };
-    for (const ch of norm) {
-        if (CJK_RE.test(ch)) {
-            flushWord();
-            cjkRun += ch;
-        }
-        else if (/[a-z0-9]/.test(ch)) {
-            flushCjk();
-            wordRun += ch;
-        }
-        else {
-            flushCjk();
-            flushWord();
-        } // 空白/标点皆切段
-    }
-    flushCjk();
-    flushWord();
-    return tokens;
+    return tokenizeText(text);
 }
 /**
  * 目标关键词重合率 = |目标词 ∩ 动作词| / |目标词|（目标词为空 ⇒ 0）。
@@ -227,16 +172,98 @@ export function deriveEffects(action, snapshot) {
     }
     return effects;
 }
+// ─── ΝΩ-46（model-based 反事实）：与 prophecy 单源对齐的同律量化小函数 ───
+//
+// 单源纪律：本区两函数与 prophecy 的方言铸造律逐字节同律（同屏必须同键——否则
+// 世界模型按 (量化屏型 × 动作键) 积累的真实转移分布对不上号，只读旁路读不到
+// 证据）。autonomy 器官不 import prophecy（跨层依赖破环——prophecy 侧另有对
+// autonomy/evolutionEngine 的类型引用），故在此镜像实现；**两侧方言任何改动须
+// 同步改**（prophecy/internal.ts 的 quantizedScreenType 与 prophecy/index.ts 的
+// prophecyActionKey 是对侧真身），autonomy.counterfactual 测试以「同屏同键」
+// 断言钉死对齐。
+/** ΝΩ-46：闭环 dhash 方言长度（hex 字 = 64 位）—— 与 prophecy 同律（镜像常量） */
+const WM_DHASH_HEX_LEN = 16;
+/** ΝΩ-46：量化档位缺省（hex 字，上 48 位 = 屏上 3/4）—— prophecy QUANT_KEEP_HEX 镜像 */
+const WM_QUANT_KEEP_HEX = 12;
+/** ΝΩ-46：量化档位下界（不得粗于粗层）—— prophecy QUANT_MIN_KEEP_HEX 镜像 */
+const WM_QUANT_MIN_KEEP_HEX = 8;
+/** ΝΩ-46：量化档位上界（16 = 不量化，旧行为逃生门）—— prophecy QUANT_MAX_KEEP_HEX 镜像 */
+const WM_QUANT_MAX_KEEP_HEX = 16;
+/**
+ * ΝΩ-46：量化档位内核键 —— **字符串字面镜像** prophecy/internal.ts 的
+ * PROPHECY_QUANT_KERNEL_KEY（同名同缺省同区间）。经同一内核键读档 ⇒ 档位旋钮
+ * 拧动时两侧同格（读侧就地夹取，未注册 ⇒ getOrDefault 回声缺省 —— 零漂移）。
+ */
+const WM_QUANT_KERNEL_KEY = 'prophecy.quantKeepHex';
+/**
+ * ΝΩ-46：量化屏型（纯函数、绝不抛）—— prophecy/internal.ts quantizedScreenType
+ * 的同律镜像：恰 16 hex 字的闭环 dhash ⇒ 保留上 keep（缺省 12）字、低位**掩没
+ * 为 '0'**（长度保持，掩没不是截断）；其余一切（非 hex / 非 16 字）⇒ 原样返回。
+ * 世界模型转移表的 from 侧主键正是量化身份（prophecy 结算回灌按 {原始, 量化,
+ * 粗格} 三写）—— 本量化读的是其中「量化格」通道，与其余两通道同表不串键。
+ */
+export function quantizedScreenTypeOf(dhash) {
+    try {
+        const s = typeof dhash === 'string' ? dhash : '';
+        if (s.length !== WM_DHASH_HEX_LEN || !/^[0-9a-f]+$/i.test(s))
+            return s;
+        const raw = kernelRegistry.getOrDefault(WM_QUANT_KERNEL_KEY, WM_QUANT_KEEP_HEX);
+        const keep = Math.min(WM_QUANT_MAX_KEEP_HEX, Math.max(WM_QUANT_MIN_KEEP_HEX, Math.round(raw)));
+        if (keep >= WM_DHASH_HEX_LEN)
+            return s;
+        return s.slice(0, keep) + '0'.repeat(WM_DHASH_HEX_LEN - keep);
+    }
+    catch {
+        return typeof dhash === 'string' ? dhash : ''; // 量化绝不抛（运行层铁律）
+    }
+}
+/**
+ * ΝΩ-46：转移动作键（纯函数、绝不抛）—— prophecy/index.ts prophecyActionKey
+ * 的同律镜像：指针动作（target.center 有限数 + 参考宽高有限正数）⇒ kind + 4×4
+ * 量化区域（'click@22'，落点先按参考宽高折算归一——闭环坐标是像素，量化在此
+ * 收口）；无落点/坏几何 ⇒ kind 本身。与 worldModel.transitionActionKey 的
+ * TYPE_QUANTIZE=4 共用同一坐标方言（「在什么样的屏上点哪个区」）。
+ */
+export function transitionActionKeyOf(action, refWidth, refHeight) {
+    try {
+        const kind = action && typeof action === 'object' && typeof action.kind === 'string' && action.kind !== ''
+            ? String(action.kind)
+            : 'unknown';
+        const target = action && typeof action === 'object' ? action.target : null;
+        const center = target && typeof target === 'object' ? target.center : null;
+        const cx = center && typeof center === 'object' ? center.x : undefined;
+        const cy = center && typeof center === 'object' ? center.y : undefined;
+        const hasGeom = typeof refWidth === 'number' && Number.isFinite(refWidth) && refWidth > 0 &&
+            typeof refHeight === 'number' && Number.isFinite(refHeight) && refHeight > 0;
+        if (typeof cx === 'number' && Number.isFinite(cx) && typeof cy === 'number' && Number.isFinite(cy) && hasGeom) {
+            const nx = Math.min(1, Math.max(0, cx / refWidth));
+            const ny = Math.min(1, Math.max(0, cy / refHeight));
+            const qx = Math.min(3, Math.max(0, Math.floor(nx * 4)));
+            const qy = Math.min(3, Math.max(0, Math.floor(ny * 4)));
+            return `${kind}@${qx}${qy}`;
+        }
+        return kind;
+    }
+    catch {
+        return 'unknown'; // 键铸造绝不抛
+    }
+}
 /** 权重卫兵：逐项取有限数并夹 [0,1]（负权重按 0 计——负效用权重会把「推进目标」
  *  变成惩罚项、把「风险」变成奖励项，属调用方脏值；>1 压回 1）；缺席/非法 ⇒ 缺省
  *  0.5/0.3/0.2；三项夹取后全零 ⇒ 整组回退缺省（全零效用恒 0，择优退化为输入序
- *  ——纪元 Δ 设防）。 */
+ *  ——纪元 Δ 设防）。
+ *  ΝΩ-10（效用权重可调）：缺省三值不再直取字面量，改读内核注册表
+ *  policy.progressWeight / policy.infoWeight / policy.riskWeight（与 policy.tieGap
+ *  同律：未注册 ⇒ getOrDefault 回声现行字面量，行为逐字节零漂移；已注册 ⇒ 每次
+ *  评分单次读取，set 即时生效）。优先序不变：调用方显式 ctx.weights > 内核键 >
+ *  模块字面量；全零回退仍锚定模块字面量三元组（内核被三键全置 0 时兜住「择优
+ *  退化成输入序」的纪元 Δ 设防，不随内核漂移）。 */
 export function resolveWeights(w) {
     const src = (w && typeof w === 'object' ? w : {});
     const pick = (v, d) => typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : d;
-    const progress = pick(src.progress, DEFAULT_WEIGHTS.progress);
-    const info = pick(src.info, DEFAULT_WEIGHTS.info);
-    const risk = pick(src.risk, DEFAULT_WEIGHTS.risk);
+    const progress = pick(src.progress, kernelRegistry.getOrDefault('policy.progressWeight', DEFAULT_WEIGHTS.progress));
+    const info = pick(src.info, kernelRegistry.getOrDefault('policy.infoWeight', DEFAULT_WEIGHTS.info));
+    const risk = pick(src.risk, kernelRegistry.getOrDefault('policy.riskWeight', DEFAULT_WEIGHTS.risk));
     if (progress === 0 && info === 0 && risk === 0) {
         return { progress: DEFAULT_WEIGHTS.progress, info: DEFAULT_WEIGHTS.info, risk: DEFAULT_WEIGHTS.risk };
     }

@@ -1,9 +1,12 @@
 // src/sleep/sleepActs.ts
 // W6-1（doctor 债清偿·smell.over-engineering）：从 sleep/index.ts 提取的六幕执法区 ——
 // 纯工具（errText/safeNow/numOr0）、水位线（computeWatermark/readTail/appendLine）、
-// ①回放（含 W5-2 梦旁挂）②蒸馏③免疫⑤审计幕与晨报幕的用量/待批清单净化。
+// ①回放②蒸馏③免疫⑤审计幕与晨报幕的用量/待批清单净化。
 // 逐字节搬运（零逻辑变更；仅供本包内消费的函数加 export 供编排器与校准幕复用，
 // 包外公共面不变）。index.ts 保留编排（runSleepCycle）。
+// ΝΩ-34（梦回放移序立法）：①回放幕回归轻本体（journal 冲账，梦迁出）；梦旁挂
+// （dreamSidecar）改由 deferredDreamSidecar 在 audit 之后 report 之前的迟到梦幕
+// 演出 —— 账面归属不变（梦 counts/detail 仍并回第①幕条目）。
 import { appendFileSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import type { JournalEntry } from '../journal';
@@ -118,13 +121,15 @@ export function appendLine(filePath: string, line: string, healNewline: boolean)
 // ─── 六幕执法（每幕独立 try/catch —— 单幕故障不毒化他幕） ───
 
 /**
- * W5-2（M4 梦回放旁挂）：第①幕的梦面 —— 失败轨迹源 → dreamTrajectories 净化
- * → runDreamReplay 编排（PER 排序 / 同构世界 / 冻结输入重放 / 分歧点双写 /
+ * W5-2（M4 梦回放旁挂 → ΝΩ-34 移序）：梦面 —— 失败轨迹源 → dreamTrajectories
+ * 净化 → runDreamReplay 编排（PER 排序 / 同构世界 / 冻结输入重放 / 分歧点双写 /
  * 反事实教训）。旁路律：梦 dep 缺席 ⇒ 零行为变化（不装载梦模块）；任何故障
- * ⇒ 注记吸收（绝不炸回放幕的既有产出）。同步性不变量的 W5-2 修正案：梦是
- * 第一个异步消化面（sharp 合成帧）—— 仅当梦 dep 在场才发生真实挂起，且
- * 逐梦实读睡眠预算（overBudget 条间执法，宁短勿挂）；全部既有 deps 路径
- * 仍为纯同步（零漂移）。梦摘要经 out 旁车带给晨报顶层（approvalQueue 同律）。
+ * ⇒ 注记吸收（绝不炸睡眠）。同步性不变量的 W5-2 修正案：梦是第一个异步消化面
+ * （sharp 合成帧）—— 仅当梦 dep 在场才发生真实挂起，且逐梦实读睡眠预算
+ * （overBudget 条间执法，宁短勿挂）；全部既有 deps 路径仍为纯同步（零漂移）。
+ * ΝΩ-34：演出位从第①幕复合幕迁至 audit 之后 report 之前的迟到梦幕（本函数
+ * 幕位无关 —— 由 deferredDreamSidecar 包装执法）。梦摘要经 out 旁车带给晨报
+ * 顶层（approvalQueue 同律）。
  */
 async function dreamSidecar(
   deps: SleepDeps,
@@ -158,22 +163,54 @@ async function dreamSidecar(
   out.dream = handle.report;
 }
 
-/** ① 回放幕（W5-2 复合幕：回放 + 梦回放）：journal 冲账/结算（链校验 + 决策点
- * 分析 + 可选验收冲账）+ 高优先失败轨迹的 PCG 同构世界梦回放 */
-export async function actReplay(
+/**
+ * ΝΩ-34（梦回放移序立法）：迟到梦幕 —— audit 之后 report 之前演出（编排器
+ * 调用；不是第七幕，六幕形状/幕序/超时执法逐字节保持）。立法理由：梦回放是
+ * 六幕里最贵的消化面（AutonomyGym + 合成帧），2s 预算下若寄居第①幕先行吃满，
+ * 维护四幕（蒸馏/免疫/校准/审计）恒 timeout 饿死 —— 移序后维护四幕先吃预算，
+ * 梦在剩余预算内工作（R40 自适应选梦照常条间执法）。账面归属不变：梦
+ * counts/detail 并回第①幕条目（dreams/dreamAttempted/… 既有晨报消费面零漂移）；
+ * 梦摘要照常经旁车带晨报顶层。绝不抛（旁挂故障只注记）；timeout 条目的 counts
+ * 立法为恒空 —— 预算饿死的回放幕条目不并梦账（梦战况由晨报顶层 sidecars.dream
+ * 汇报，两个诚实面分离）。
+ */
+export async function deferredDreamSidecar(
   deps: SleepDeps,
   cfg: { now: () => number; overBudget: () => boolean; priorDreamWatermark: string | null },
   out: { dream?: DreamReplayReport },
-): Promise<SleepActReport> {
+  replayAct: SleepActReport | undefined,
+): Promise<void> {
+  try {
+    await dreamSidecar(deps, cfg, out);
+  } catch (e) {
+    if (replayAct && replayAct.status !== 'timeout') {
+      const note = `梦回放旁挂故障（旁路吸收）：${errText(e)}`;
+      replayAct.detail = replayAct.detail ? `${replayAct.detail}；${note}` : note;
+    }
+    return;
+  }
+  const d = out.dream;
+  if (!d || !replayAct || replayAct.status === 'timeout') return;
+  mergeDreamCounts(d, replayAct.counts);
+  const head = `梦回放：${d.replayed}/${d.attempted} 条重放（分歧 ${d.divergences}、成功 ${d.successes}、反事实教训 ${d.lessons.length}）`;
+  const tail: string[] = [];
+  if (d.note) tail.push(d.note);
+  if (!d.note && d.budget.truncated) tail.push(`预算截断（${d.budget.reason}）`);
+  const note = tail.length > 0 ? `${head} —— ${tail.join('；')}` : head;
+  replayAct.detail = replayAct.detail ? `${replayAct.detail}；${note}` : note;
+}
+
+/**
+ * ① 回放幕（ΝΩ-34 后回归轻本体）：journal 冲账/结算 —— 哈希链 verify（B-1）+
+ * 决策点分析（C-3）+ 可选验收冲账（D-7）。梦回放已迁至迟到梦幕
+ * （deferredDreamSidecar，audit 之后 —— 见 index.ts 编排），账面仍并回本幕。
+ */
+export function actReplay(deps: SleepDeps): SleepActReport {
   const j = deps.journal;
   if (!j || typeof j.list !== 'function' || typeof j.verify !== 'function') {
-    // journal 缺席：回放本体 skipped —— 但梦回放不依赖 journal（失败记忆是独立源），
-    // 照常演出（梦旁挂的诚实独立面；journal 缺席只跳过冲账本体）
-    const counts: Record<string, number> = {};
-    const notes: string[] = ['journal 缺席 —— 回放幕本体跳过'];
-    await dreamSidecar(deps, cfg, out).catch(() => { notes.push('梦回放旁挂故障（旁路吸收）'); });
-    if (out.dream) mergeDreamCounts(out.dream, counts);
-    return { name: 'replay', status: 'skipped', counts, detail: notes.join('；') };
+    // journal 缺席：回放幕本体 skipped —— 梦回放不依赖 journal（失败记忆是独立
+    // 源），迟到梦幕照常演出（梦旁挂的诚实独立面）
+    return { name: 'replay', status: 'skipped', counts: {}, detail: 'journal 缺席 —— 回放幕本体跳过' };
   }
   const counts: Record<string, number> = {};
   const notes: string[] = [];
@@ -189,21 +226,6 @@ export async function actReplay(
   if (bridge && typeof bridge.settleAll === 'function') { // 可选：D-7 等待室终局冲账
     const settled = bridge.settleAll();
     counts.settled = Array.isArray(settled) ? settled.length : 0;
-  }
-  // W5-2：梦回放旁挂（复合幕的第二半）—— 故障只注记，不毒化冲账本体产出
-  try {
-    await dreamSidecar(deps, cfg, out);
-    if (out.dream) {
-      mergeDreamCounts(out.dream, counts);
-      const d = out.dream;
-      const head = `梦回放：${d.replayed}/${d.attempted} 条重放（分歧 ${d.divergences}、成功 ${d.successes}、反事实教训 ${d.lessons.length}）`;
-      const tail: string[] = [];
-      if (d.note) tail.push(d.note);
-      if (!d.note && d.budget.truncated) tail.push(`预算截断（${d.budget.reason}）`);
-      notes.push(tail.length > 0 ? `${head} —— ${tail.join('；')}` : head);
-    }
-  } catch (e) {
-    notes.push(`梦回放旁挂故障（旁路吸收）：${errText(e)}`);
   }
   return { name: 'replay', status: 'ok', counts, detail: notes.join('；') || undefined };
 }

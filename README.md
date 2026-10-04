@@ -643,6 +643,25 @@ W6-R 之后「已造未通电」器官接线与结构性债的清偿潮（2 批 
 - **接线收口与修法**：SoM 种子供源 / 梦失败源 dreamFeed / 增量编码消费方（contextManager，缺省关）三线通电；悬挂测试根治（全量 cancelled 首次归零）；repeatActionGuard 叶级数值距离（半格悬崖收口）+ auditGuard 只读子动作分流。
 - **全量回归（W8-C2 实测）**：2472 用例 / 2467 通过 / 0 fail / 0 cancelled / 5 skip（环境守卫）；verify 23/23 + BC 零命中；compileall 0 错；doctor 90.5（crit/major/minor 0/0/0，info 40 = 21 豁免 + 19 未豁免，sec.\* 零命中）；dist 272 件与 src 对齐；tsc 0 错。DEBTS 43→47 条（翻案闭环 11 / 部分闭环 2 / 半闭 1 / 新增 4）。
 
+## ΑΩ 隐患清账战役
+
+W8 之后对全库遗留隐患的总清账（46 项隐患 · 5 个批次 · 44 编号工单 R1-R46，每批收稿即全量回归、0 失败才放行）：
+
+- **安全与隐私**：TSA 时间戳签名离线验签（RSA/ECDSA——公证回执身份可本地核验）；连接存档密钥静态加密选项（AES-256-GCM + scrypt，设 `DSH_VLM_STORE_PASSPHRASE` 即启用，缺席明文现状不变）；onboarding 密钥不再出现在 URL；联邦 Sybil 试用期（初见源 trust 封顶 0.35、3 次干净合并缓升）。
+- **能力面透明**：仪表盘对 OFF/DEFAULT 开关如实呈报（缺省关的能力不再被展示为在册）；沙箱新增宿主执行器端口（`enableHostReplayExecution`，缺省关）；内核训练数据真标签溯源（`labelSource`）。
+- **工程纪律**：方言单源（`src/dialects/`）、clickMouse/runtime/driveLoop 巨件阶段化拆分、Python unittest 套件（72 例）与 dist 冒烟（280 模块）、smoke_imports 假绿修复（285 模块真导入）；audio.py WASAPI py3.14 实坏修复（raw-vtable 移植，本机 Python 3.14.6 真硬件冒烟通过——DEBTS D-E2 闭环）。
+- **收官口径**：全量测试 2503 → **2613 用例 / 0 失败**（+110：新执法册 `aor5.tsaSignature` / `r14.gymDialect` / `r18.prophecy` / `r29.dialectCensus` + 既有册扩展）；genesis_audit --check 通过。总账见 [GENESIS.md](GENESIS.md) 与 [DEBTS.md](DEBTS.md)。
+
+## ΝΩ 前沿升级战役
+
+ΑΩ 之后的体检驱动总升级（54 项工单 ΝΩ-1..54 · 6 批次，每批零回归闸门）：
+
+- **安全与信任**：沙箱宿主重放执行器接入宿主安全链五门+审计存证+指纹位宽域 [32,256]；AbortSignal 贯穿执行链；联邦 Ed25519 逐源签名（聚合端原样中继、各端逐源验签剔除）；RDP 预算会计（Σε≤10）+ 掺入抖动；riskGate 升级 Aho-Corasick 词边界匹配（拉丁硬边界 + 免边界族双轨制）。
+- **感知与决策**：世界模型在线聚类/合并/软量化并接进反事实（转移置信折扣）；决策站级联仲裁（反射先行 LLM 断后）；grounding maxTokens 自适应+NMS containment+同屏缓存；反驳法院合议庭点亮（quorum 多数票 + census 透明 + 置信带）；中英 375 对词表桥（跨语系 cosine 0 死角恢复）。
+- **工程与质量**：CI 双 OS 矩阵五闸（typecheck/verify/compile/全量+bench/genesis_audit+smoke，Linux 臂物理服务 E2E）；AST 变异器量化测试执法力（自检 91.3% vs 0%）；Tarjan cycle_lint 依赖环执法（5 value 环登记为债待拆）；dist SBOM 清单（287 模块 sha256）；三厂结构化输出约束解码（json_schema / tool_use / responseSchema，opt-in）；journal 组提交 + rotation（WAL 同步不变）。
+- **物理层**：DXGI 可选捕获后端（`backend: "dxgi"` opt-in，缺省 gdi 零变化）；scrcpy 控制通道复用（活跃流 tap/drag/scroll/key <10ms）；RawInput 事件驱动光标镜像（`DSH_PHYSICAL_RAW_INPUT=1` 显式开启）；UIA/AT-SPI 深度遍历同律单源。
+- **收官口径**：全量测试 2613 → **2963 用例**（node v24.19.0 收官窗实跑——除 1 例 node v24/Windows libuv 退出竞态环境暴露[w9real，DEBTS D-E3 在册，纯净树复现非回归]外 0 失败）；python 96 → 152；genesis_audit --check 通过。总账见 [GENESIS.md](GENESIS.md) 与 [DEBTS.md](DEBTS.md)。
+
 ## 工具列表
 
 | 工具名称 | 描述 | 核心参数 |
@@ -1015,6 +1034,14 @@ The wave that followed W6-R, clearing the "built but not wired" organ debts and 
 - **Bench predicate**: a `windowCount` check (titleRegex-anchored window counting with combinable equals/gte/lte — the machine equivalent of "the window count is unchanged/zero afterwards").
 - **Wiring closeout & guard fixes**: SoM seed supply, dream failure feed, and the incremental-encoding consumer (contextManager, off by default) all wired; the hanging-test debt eradicated (suite-wide cancellations reach zero for the first time); repeatActionGuard gains leaf-level numeric distance and auditGuard splits read-only sub-actions.
 - **Full regression (W8-C2, measured)**: 2472 tests / 2467 pass / 0 fail / 0 cancelled / 5 skipped (environment guards); verify 23/23 with zero BC hits; compileall clean; doctor 90.5 (0/0/0 across crit/major/minor, 40 info = 21 exempted + 19 unexempted, zero sec.* hits); dist at 272 files in sync with src; tsc clean. DEBTS ledger 43→47 (11 flipped closed / 2 partial / 1 semi-closed / 4 new).
+
+## ΑΩ: The Hazard-Cleanup Campaign
+
+After W8, a final sweep of every remaining latent hazard (46 hazards · 5 batches · 44 numbered tickets R1-R46; each batch shipped only behind a full-suite zero-regression gate). Security & privacy: offline TSA timestamp-signature verification (RSA/ECDSA), an at-rest key-encryption option for the connection archive (AES-256-GCM + scrypt, enabled by setting `DSH_VLM_STORE_PASSPHRASE`), keys kept out of onboarding URLs, and a federation Sybil probation (new sources' trust capped at 0.35 until three clean merges). Transparency: the dashboard reports OFF/DEFAULT switches honestly, the sandbox gains a host replay-executor port (`enableHostReplayExecution`, off by default), and kernel training data carries a true `labelSource` label. Engineering discipline: single-source dialects (`src/dialects/`), phase-splitting of the clickMouse/runtime/driveLoop giants, a Python unittest suite (72 cases) with a dist smoke check (280 modules), and a fixed green-by-default smoke_imports (285 modules actually imported). The audio.py WASAPI py3.14 breakage was fixed via a raw-vtable port (smoke-tested on real hardware under Python 3.14.6 — DEBTS D-E2 closed). Closing numbers: the full suite grew 2503 → **2613 tests / 0 failures** (+110: four new enforcement suites plus extensions), and genesis_audit --check passes. Full ledger in [GENESIS.md](GENESIS.md) and [DEBTS.md](DEBTS.md).
+
+## ΝΩ: The Frontier-Upgrade Campaign
+
+After ΑΩ, an audit-driven upgrade wave (54 tickets ΝΩ-1..54 · 6 batches, each behind a zero-regression gate). Security & trust: the sandbox replay executor joins the host security chain (five gates + per-step audit attestation + fingerprint bit-width domain [32,256]); AbortSignal threads through the execution chain; federation digests gain per-source Ed25519 signatures (the aggregator relays verbatim — every client verifies each source and drops failures); RDP budget accounting (Σε≤10) with injection jitter; riskGate upgrades to Aho-Corasick with word-boundary awareness (hard boundaries for Latin, boundary-free families for CJK). Perception & decisions: the world model gains online clustering/merging/soft quantization and feeds counterfactual scoring (transition-confidence discount); cascade arbitration per decision station (reflex first, LLM last); grounding gains adaptive maxTokens, NMS containment, and same-screen result caching; the refute court lights up the ensemble quorum (majority vote + per-juror census + confidence band); a 375-pair bilingual bridge fixes the cross-script cosine-0 blind spot. Engineering: a dual-OS CI matrix with five gates (incl. the Linux physical-service E2E), an AST mutation linter quantifying test enforcement power (self-check 91.3% vs 0%), a Tarjan cycle_lint (5 runtime value cycles registered as debt), a dist SBOM (287 modules, sha256), opt-in structured-output constrained decoding across three vendors (json_schema / tool_use / responseSchema), and journal group commit + rotation (WAL sync semantics unchanged). Physical layer: an optional DXGI capture backend (`backend:"dxgi"`, gdi default unchanged), scrcpy control-channel reuse for taps/drags (<10 ms), and a RawInput event-driven cursor mirror (`DSH_PHYSICAL_RAW_INPUT=1`, off by default). Closing numbers: the full suite grew 2613 → **2963 tests** (final window measured under node v24.19.0 — all green except one environment-exposed node v24/Windows libuv exit race on a pre-existing test, reproduced identically on a pristine HEAD tree and registered as DEBTS D-E3); python 96 → 152; genesis_audit --check passes. Full ledger in [GENESIS.md](GENESIS.md) and [DEBTS.md](DEBTS.md).
 
 ## Epoch Φ (Phi): The Autonomy Loop
 

@@ -5,6 +5,8 @@
 //   2. region.id 铸造权：网格分区 'g{col}x{row}' / 自定义分区 'c{n}'（contracts 身份方案）
 //   3. 失败路由：cancelled 不入重试（路由铁律）；七态 verdict 每态独立终止路径
 //   4. 时间治理：attempt（杀一刀）/ perception（产 fault 补丁）/ intent（杀流水线）三层
+//      ΝΩ-8：attempt 层从被动 race 升级为止损 abort —— ExecutionOrder.signal
+//      随指令单下发，超时/外部取消沿执行链断流，消灭「超时后幽灵动作落地」
 // 与器官咬合（事件总线，零直接调用）：
 //   D-5 沙箱 —— 执行工位经 SandboxStationView 预演；账本复用 sandboxLog（独立 D-6 链段）
 //   D-4 医生 —— 发射 sandbox/rehearsal-end 等价事件后订阅 doctor/verdict 回执（AttemptRecord）
@@ -24,9 +26,12 @@ import { createDefaultIdGenerator, type IdGenerator } from '../sandbox/types';
 
 // W6-2（doctor smell.over-engineering 清偿）：事件常量/工位接口/网格铸造/超时包裹/
 // 沙箱链入账/grounding 预算已分区提取至 pipeline.helpers.ts（行为零变化）；导入面不变。
+// ΝΩ-26（编排调度四修）：帧复用窗口 / 分区内容指纹（dhash）/ 消耗探针读数
+// 同源于 helpers —— 脏区跳过与 tokenBudget 扣减制的共用面。
 import {
   EVT_PIPELINE_RUN_END, EVT_PIPELINE_ATTEMPT, EVT_PIPELINE_GROUNDING, MAX_GROUNDING_APPROVALS_PER_RUN,
   gridRegions, withAttemptTimeout, logPipeline,
+  SCENE_REUSE_TTL_MS, sceneDhash, readUsageProbe,
 } from './pipeline.helpers';
 import type { PipelineStations } from './pipeline.helpers';
 export type { PipelineStations } from './pipeline.helpers';
@@ -39,6 +44,10 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
   private stations: PipelineStations | null = null;
   private reportDir = '';
   private reportCounter = 0; // 报告文件名防碰撞序号（同 intent 同毫秒不互相覆盖）
+  /** ΝΩ-26（四修之四）：终局回收钩子（index.ts 注入 reconcileVerdicts）——
+   *  在 persistReport 之前对内存报告做 D-4 判决回收，报告一次成稿（盘上/内存
+   *  同一副面孔）。缺席 = 无回收面（直连测试的旧路径）。 */
+  private reconcileReport: ((report: PipelineReport) => void) | null = null;
 
   /**
    * 运行层可重配方法（P0-1：《异常诚实分层契约》D-7 修正案对齐）—— Result 降级，严禁 throw。
@@ -85,7 +94,10 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
   }
 
   /** 工位注入（index.ts 接线；构造器加载层方言 —— 站点缺席即拒绝出生） */
-  wire(stations: PipelineStations, opts?: { idGenerator?: IdGenerator; reportDir?: string }): void {
+  wire(
+    stations: PipelineStations,
+    opts?: { idGenerator?: IdGenerator; reportDir?: string; reconcileReport?: (report: PipelineReport) => void },
+  ): void {
     if (!this.cfg) throw new Error('[PipelineOrchestrator] configure() must precede wire()');
     if (!stations.vision || !stations.decision || !stations.execution) {
       throw new Error('[PipelineOrchestrator] all three stations are required');
@@ -93,18 +105,43 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     this.stations = stations;
     if (opts?.idGenerator) this.idGen = opts.idGenerator;
     this.reportDir = opts?.reportDir ?? '';
+    this.reconcileReport = opts?.reconcileReport ?? null;
   }
 
   /** 运行层入口（契约第二条：永不抛错）。try 包裹整环 —— 任何意外 = verdict='failed' 落盘 */
-  async run(intent: IntentPayload, opts?: { snapshotId?: string }): Promise<PipelineReport> {
+  async run(intent: IntentPayload, opts?: { snapshotId?: string; signal?: AbortSignal }): Promise<PipelineReport> {
     const startedAt = Date.now();
     if (!this.cfg || !this.stations) {
       return this.finalReport(intent, 'failed', 'orchestrator not configured/wired', [], startedAt);
     }
+    // ΝΩ-8：run 级外部终止信号（造物主取消/宿主关停）—— 防御性收窄
+    // （garbage 输入按缺席处理，同 httpClient microFetch 的 instanceof 方言）
+    const runSignal = opts?.signal instanceof AbortSignal ? opts.signal : undefined;
     const cfg = this.cfg;
     const stations = this.stations;
     const attempts: AttemptRecord[] = [];
     const tokenUsage = { vision: 0, decision: 0, execution: 0 };
+
+    // ── ΝΩ-26（四修之一）：L1 帧缓存的管线侧孪生 —— 脏区跳过账本 ──
+    // sceneCache：上轮 fault-free 分区补丁（复用候选；capturedAt 即陈旧度申报）。
+    // dirtyRegions：疑脏分区集（我们动过世界的落区 / 反馈指认的过时区 / L3 批准区）
+    // —— 只有因果上有理由怀疑的分区才重扫，其余在复用窗口内免扫。
+    const sceneCache = new Map<string, ScenePatch>();
+    const dirtyRegions = new Set<string>();
+
+    // ── ΝΩ-26（四修之三）：tokenBudget 扣减制 ──
+    // 余额 = 配置预算 − 工位自报消耗（usageMeter 探针是累计读数 ⇒ 每 run 快照
+    // 基线取差值；探针缺席 ⇒ 消耗 0 ⇒ 余额 = 配置预算 —— 未计量不猜测，旧路径
+    // 逐字节保持）。余额不足 ⇒ 强制降级：vision 降 L2（L3 花钱权冻结）、
+    // decision 入 need-grounding（不再调用工位烧无计量 token）。
+    const meter = stations.usageMeter;
+    const meterBase = {
+      vision: readUsageProbe(meter?.vision),
+      decision: readUsageProbe(meter?.decision),
+      execution: readUsageProbe(meter?.execution),
+    };
+    const remainingTokens = (st: 'vision' | 'decision'): number =>
+      Math.max(0, cfg.stationTokenBudgets[st] - Math.max(0, readUsageProbe(meter?.[st]) - meterBase[st]));
 
     try {
       let scene: ScenePatch[] = [];
@@ -121,53 +158,104 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
           verdict = 'timeout';
           break;
         }
+        // ΝΩ-8：外部终止已在场 ⇒ 直达 aborted —— 取消后继续烧感知/决策是无意义开销
+        //（cancelled 路由铁律的前移执法：终止的回声不进入任何后续工位）
+        if (runSignal?.aborted) {
+          verdict = 'aborted';
+          break;
+        }
 
         // ── 感知（信封铸造权：视觉工位只拿 PerceptionRequest，拿不到 intent）──
+        // ΝΩ-26：反馈指认的过时区入疑脏集（点击落空区的旧视野作废）
+        if (feedback?.staleRegionId) dirtyRegions.add(feedback.staleRegionId);
         const regions = this.regionsFor(scene);
-        const perceiveEnv: AttentionEnvelope<'vision', PerceptionRequest> = {
-          station: 'vision',
-          payload: {
-            intentRef: intent.id,
-            regions,
-            funnelCeiling: 'L2', // 缺省授权 L2；L3 仅经 NeedGrounding → 本中枢显式批准
-            deadlineMs: cfg.perceptionDeadlineMs,
-          },
-          tokenBudget: cfg.stationTokenBudgets.vision,
-        };
-        tokenUsage.vision += perceiveEnv.tokenBudget;
-        scene = [];
-        try {
-          for await (const patch of stations.vision.perceive(perceiveEnv)) {
-            scene.push(patch);
-            // 阶段重叠的骨架实现：视觉每产出一区即入场景池（决策在循环尾消费全部；
-            // 真重叠纪元由 pipeline 消费侧并行 —— 骨架诚实标注，不伪造并发）
+        // ΝΩ-26（脏区跳过）：上轮 fault-free、未被动作/反馈/L3 批准污染、且窗龄
+        // 内的分区复用缓存补丁（capturedAt 原样随行 —— 陈旧度是申报出来的，不是
+        // 藏起来的）；疑脏分区才进感知请求。首轮缓存空 ⇒ 全请求（零回归）。
+        const nowMs = Date.now();
+        const requestRegions: RegionSpec[] = [];
+        const reusedPatches: ScenePatch[] = [];
+        for (const region of regions) {
+          const cached = sceneCache.get(region.id);
+          if (cached && !cached.fault && !dirtyRegions.has(region.id) &&
+              nowMs - cached.capturedAt <= SCENE_REUSE_TTL_MS) {
+            reusedPatches.push(cached);
+          } else {
+            requestRegions.push(region);
           }
-        } catch (e: any) {
-          // Never-reject 违约的纵深防御：意外拒绝 ⇒ fault 补丁 + 违约记录入链
-          scene.push({
-            region: regions[0] ?? { id: 'c0', x: 0, y: 0, width: 1, height: 1 },
-            elements: [], funnelDepth: 'empty',
-            fault: { source: 'L1', detail: `vision station contract breach (rejected stream): ${e?.message ?? 'unknown'}` },
-            capturedAt: Date.now(),
-          });
-          await logPipeline('pipeline-vision-breach', { intentRef: intent.id, detail: e?.message });
         }
+        // dhash 复用律（诚实方言的核心）：被重扫的分区若内容指纹未变且缓存
+        // fault-free ⇒ 交还旧补丁 —— capturedAt 继续申报真实的数据年龄（「这区
+        // 自 t0 起未变」是真话）；指纹已变/无缓存/缓存带 fault ⇒ 采纳新补丁入账。
+        const mergePatch = (fresh: ScenePatch): ScenePatch => {
+          const cached = sceneCache.get(fresh.region.id);
+          if (cached && !cached.fault && sceneDhash(cached) === sceneDhash(fresh)) return cached;
+          sceneCache.set(fresh.region.id, fresh);
+          return fresh;
+        };
+        scene = reusedPatches;
+        if (requestRegions.length > 0) {
+          const perceiveEnv: AttentionEnvelope<'vision', PerceptionRequest> = {
+            station: 'vision',
+            payload: {
+              intentRef: intent.id,
+              regions: requestRegions,
+              funnelCeiling: 'L2', // 缺省授权 L2；L3 仅经 NeedGrounding → 本中枢显式批准
+              deadlineMs: cfg.perceptionDeadlineMs,
+            },
+            tokenBudget: remainingTokens('vision'), // ΝΩ-26：扣减制 —— 余额随自报消耗递减
+          };
+          tokenUsage.vision += perceiveEnv.tokenBudget;
+          try {
+            for await (const patch of stations.vision.perceive(perceiveEnv)) {
+              scene.push(mergePatch(patch));
+              // 阶段重叠的骨架实现：视觉每产出一区即入场景池（决策在循环尾消费全部；
+              // 真重叠纪元由 pipeline 消费侧并行 —— 骨架诚实标注，不伪造并发）
+            }
+          } catch (e: any) {
+            // Never-reject 违约的纵深防御：意外拒绝 ⇒ fault 补丁 + 违约记录入链
+            scene.push({
+              region: requestRegions[0] ?? regions[0] ?? { id: 'c0', x: 0, y: 0, width: 1, height: 1 },
+              elements: [], funnelDepth: 'empty',
+              fault: { source: 'L1', detail: `vision station contract breach (rejected stream): ${e?.message ?? 'unknown'}` },
+              capturedAt: Date.now(),
+            });
+            await logPipeline('pipeline-vision-breach', { intentRef: intent.id, detail: e?.message });
+          }
+        }
+        // requestRegions 为空 = 全部分区复用 ⇒ 视觉工位本轮零调用、零预算授予
+        //（脏区跳过的省钱面；PerceptionRequest.regions=[] 契约上是全屏网格，
+        //  绝不能拿空数组当「无事可做」—— 直接跳过整次感知才是诚实形态）。
 
         // ── 决策（信封铸造权：决策工位只拿 intent + ScenePatch，无截图字节）──
         const decisionCtx: DecisionContext = { intent, scene };
-        const decisionEnv: AttentionEnvelope<'decision', DecisionContext> = {
-          station: 'decision',
-          payload: decisionCtx,
-          tokenBudget: cfg.stationTokenBudgets.decision,
-        };
-        tokenUsage.decision += decisionEnv.tokenBudget;
-
         let output: DecisionOutput;
-        output = await withAttemptTimeout(
-          stations.decision.decide(decisionEnv, feedback),
-          cfg.attemptTimeoutMs,
-          { kind: 'need-grounding', question: `decision attempt timeout after ${cfg.attemptTimeoutMs}ms` },
-        );
+        // ΝΩ-26（四修之三）：决策余额耗尽 ⇒ 强制降级 —— 不再调用工位（无计量
+        // 烧钱是预算制的反面），need-grounding 的 question 即诚实降级注记
+        //（沿 NeedGrounding 路由进 L3 授权链 ⇒ 入审计账本；批准预算熔断后
+        //  诚实 escalated 终局，绝不谎称任务失败）。
+        const decisionRemaining = remainingTokens('decision');
+        if (decisionRemaining <= 0) {
+          output = {
+            kind: 'need-grounding',
+            question: 'decision token budget exhausted — forced degradation (decision station not called)',
+          };
+        } else {
+          const decisionEnv: AttentionEnvelope<'decision', DecisionContext> = {
+            station: 'decision',
+            payload: decisionCtx,
+            tokenBudget: decisionRemaining, // ΝΩ-26：扣减制 —— 余额随自报消耗递减
+          };
+          tokenUsage.decision += decisionEnv.tokenBudget;
+          output = await withAttemptTimeout(
+            // ΝΩ-8：D-6 决策方言无 signal 通道（decide 契约未开口子）—— 工厂不吃信号，
+            // 外部取消仍经 abort 联动到下一工位；决策超时语义与旧路径逐字节一致
+            () => stations.decision.decide(decisionEnv, feedback),
+            cfg.attemptTimeoutMs,
+            { kind: 'need-grounding', question: `decision attempt timeout after ${cfg.attemptTimeoutMs}ms` },
+            runSignal,
+          );
+        }
 
         // NeedGrounding 路由：L3 花钱权裁决（中枢主权 —— 视觉工位无权自启）
         if ('kind' in output && output.kind === 'need-grounding') {
@@ -185,29 +273,41 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
             break;
           }
           groundingApprovals += 1;
-          const approved = await this.approveGrounding(intent.id, output.regionId, output.question, scene);
+          const approved = await this.approveGrounding(
+            intent.id, output.regionId, output.question, scene, remainingTokens('vision'),
+          );
           if (approved.approved) {
-            await logPipeline('pipeline-grounding', { intentRef: intent.id, regionId: output.regionId, regions: approved.regions.length, question: output.question });
+            // ΝΩ-26：L3 批准区入疑脏集 —— 决策已宣告该区语义不足，缓存补丁作废
+            for (const r of approved.regions) dirtyRegions.add(r.id);
+            await logPipeline('pipeline-grounding', {
+              intentRef: intent.id, regionId: output.regionId, regions: approved.regions.length,
+              question: output.question, ceiling: approved.ceiling,
+            });
             stations.emit?.(EVT_PIPELINE_GROUNDING, { intentRef: intent.id, question: output.question });
-            // 重扫获批分区，ceiling='L3' + l3Reason 回执 —— 下轮循环执行。
+            // 重扫获批分区，ceiling 由裁决给出 + l3Reason 回执 —— 下轮循环执行。
             // J 纪元修正：L3 结果**并入**既有场景（获批分区替换，其余分区保留）——
             // 旧实现 scene = [] 后只填 L3 补丁，下轮 regionsFor 恒返回 [目标区]，
             // 决策从此只见屏幕一角且永不回全屏网格。
             const merged = scene.filter(p => !approved.regions.some(r => r.id === p.region.id));
+            const ceilingDowngraded = approved.ceiling === 'L2';
             const perceiveL3: AttentionEnvelope<'vision', PerceptionRequest> = {
               station: 'vision',
               payload: {
                 intentRef: intent.id,
                 regions: approved.regions,
-                funnelCeiling: 'L3',
-                l3Reason: output.question,
+                funnelCeiling: approved.ceiling,
+                // ΝΩ-26：视觉余额耗尽的降格注记随授权依据入链（诚实方言 ——
+                // 补丁的漏斗深度会如实停在 L2，归因在这里先说清为什么）
+                l3Reason: ceilingDowngraded
+                  ? `${output.question} [degraded: vision token budget exhausted — L3 denied, L2 rescan]`.slice(0, 120)
+                  : output.question,
                 deadlineMs: cfg.perceptionDeadlineMs,
               },
-              tokenBudget: cfg.stationTokenBudgets.vision,
+              tokenBudget: remainingTokens('vision'), // ΝΩ-26：扣减制余额
             };
             tokenUsage.vision += perceiveL3.tokenBudget;
             try {
-              for await (const patch of stations.vision.perceive(perceiveL3)) merged.push(patch);
+              for await (const patch of stations.vision.perceive(perceiveL3)) merged.push(mergePatch(patch));
             } catch (e: any) {
               // Never-reject 纵深防御：保留旧分区继续（决策下轮再要兜底）—— 违约仍须入链可审计
               await logPipeline('pipeline-vision-breach', { intentRef: intent.id, detail: `L3 rescan rejected stream: ${e?.message ?? 'unknown'}` });
@@ -226,21 +326,30 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         const action = output as AtomicAction;
         seq += 1;
         const order: ExecutionOrder = { seq, intentRef: intent.id, action: { kind: action.kind, args: action.args, expect: action.expect } };
-        const execEnv: AttentionEnvelope<'execution', ExecutionOrder> = {
-          station: 'execution',
-          payload: order,
-          tokenBudget: 0, // 零模型肌肉的类型层执法
-        };
 
+        // ΝΩ-8：止损信号随指令单下发 —— attemptTimeoutMs 越限/外部取消即 abort，
+        // 沿执行链直达 HTTP 层断流（microFetch 组合超时 → Python 断连即中断）。
+        // 旧实现超时后原 execute promise 继续飞行：迟到的真实点击仍会落地
+        // （不可逆世界污染）；工位不消费 signal 时该字段是无害数据（旧路径）。
         let result: ExecutionResult = await withAttemptTimeout(
-          stations.execution.execute(execEnv),
+          (signal) => stations.execution.execute({
+            station: 'execution',
+            payload: { ...order, signal },
+            tokenBudget: 0, // 零模型肌肉的类型层执法
+          }),
           cfg.attemptTimeoutMs,
           { seq, effectDetected: null, latencyMs: cfg.attemptTimeoutMs, rehearsed: false,
-            failure: { kind: 'timeout', detail: `execution attempt timeout after ${cfg.attemptTimeoutMs}ms` } },
+            failure: { kind: 'timeout-aborted', detail: `execution attempt timeout after ${cfg.attemptTimeoutMs}ms (abort signal fired)` } },
+          runSignal,
         );
 
         const record: AttemptRecord = { seq, attempt: retryCount + 1, action, result, feedback };
         attempts.push(record);
+        // ΝΩ-26：动作落点区入疑脏集 —— 我们动过世界，该区旧视野作废（下轮必重扫；
+        // 坐标缺席的动作无法定位 ⇒ 交给 1500ms 复用窗口兜底有界陈旧）。与
+        // guessStaleRegion 同一落区几何（反馈指认与脏区判定不漂移）。
+        const touchedRegion = this.guessStaleRegion(action, scene);
+        if (touchedRegion) dirtyRegions.add(touchedRegion);
         await logPipeline('pipeline-attempt', {
           intentRef: intent.id, seq, attempt: record.attempt,
           kind: action.kind, effectDetected: result.effectDetected,
@@ -251,6 +360,13 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         // ── 失败路由（路由铁律：cancelled 直达终局，绝不入重试循环）──
         if (result.failure) {
           const { kind, detail } = result.failure;
+          // ΝΩ-8：外部取消的回声 —— run 级 signal 已 abort 后的失败不论工位归因
+          // （timeout/host-error/…）都是终止的回声而非世界回击 ⇒ 直达 aborted，
+          // 绝不入重试（给已终止的尝试做重规划是无意义烧钱）
+          if (runSignal?.aborted) {
+            verdict = 'aborted';
+            break;
+          }
           if (kind === 'cancelled') {
             verdict = 'aborted';
             break;
@@ -357,28 +473,33 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
    *    - regionId 在场且在当前场景中存在、且该分区 funnelDepth 未达 L3 ⇒ 批准重扫该区；
    *    - regionId 在场但不在场景/网格中（模型幻觉 id）⇒ 拒绝并归因；
    *    - regionId 缺席（「整屏语义不足」）⇒ 批准**全网格** L3 重扫 ——
-   *      旧实现静默回退 full[0]（左上象限），“整屏不足”却只重扫 1/4 屏。 */
+   *      旧实现静默回退 full[0]（左上象限），“整屏不足”却只重扫 1/4 屏。
+   *  ΝΩ-26（四修之三）：视觉余额耗尽 ⇒ 批准仍在但 ceiling 降格 'L2'（L3 是唯一
+   *  烧 token 的视觉层 —— L1/L2 是本地肌肉；降格注记进 ruling 审计，绝不静默）。 */
   private async approveGrounding(
     intentRef: string, regionId: string | undefined, question: string, scene: ScenePatch[],
-  ): Promise<{ approved: boolean; regions: RegionSpec[]; reason?: string }> {
+    visionRemaining: number,
+  ): Promise<{ approved: boolean; regions: RegionSpec[]; ceiling: 'L2' | 'L3'; reason?: string }> {
     const full = gridRegions(this.cfg!.regionGrid);
+    const ceiling: 'L2' | 'L3' = visionRemaining > 0 ? 'L3' : 'L2';
+    const downgradeNote = ceiling === 'L2' ? ' — L3 downgraded to L2 (vision token budget exhausted)' : '';
     if (regionId) {
       const patch = scene.find(p => p.region.id === regionId) ?? undefined;
       const gridRegion = full.find(r => r.id === regionId);
       if (!patch && !gridRegion) {
         await logPipeline('pipeline-grounding-review', { intentRef, regionId, question, ruling: 'denied: unknown region id' });
-        return { approved: false, regions: [], reason: `regionId '${regionId}' not in current scene or grid (hallucinated id?)` };
+        return { approved: false, regions: [], ceiling: 'L2', reason: `regionId '${regionId}' not in current scene or grid (hallucinated id?)` };
       }
       if (patch && patch.funnelDepth === 'L3') {
         await logPipeline('pipeline-grounding-review', { intentRef, regionId, question, ruling: 'denied: already at L3' });
-        return { approved: false, regions: [], reason: `region '${regionId}' already scanned at L3 — re-spend denied` };
+        return { approved: false, regions: [], ceiling: 'L2', reason: `region '${regionId}' already scanned at L3 — re-spend denied` };
       }
       const target = patch?.region ?? gridRegion!;
-      await logPipeline('pipeline-grounding-review', { intentRef, regionId: target.id, question, ruling: 'approved: single region' });
-      return { approved: true, regions: [target] };
+      await logPipeline('pipeline-grounding-review', { intentRef, regionId: target.id, question, ruling: `approved: single region${downgradeNote}` });
+      return { approved: true, regions: [target], ceiling };
     }
-    await logPipeline('pipeline-grounding-review', { intentRef, regionId: null, question, ruling: 'approved: full grid' });
-    return { approved: true, regions: full };
+    await logPipeline('pipeline-grounding-review', { intentRef, regionId: null, question, ruling: `approved: full grid${downgradeNote}` });
+    return { approved: true, regions: full, ceiling };
   }
 
   /** 点击落空时的过时区推断（FailureFeedback.staleRegionId 的启发式铸造） */
@@ -417,27 +538,11 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     const chainTip = sandboxLog.tip;
     const usage = budgetsGranted ?? { vision: 0, decision: 0, execution: 0 };
     // O 纪元（#8）：实际消耗计量 —— 工位自报探针（缺席 ⇒ 0 = 未计量，非未消耗）
-    const probe = (p?: () => number): number => {
-      try {
-        const v = p?.();
-        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
-      } catch { return 0; }
-    };
     const tokenUsageReported = {
-      vision: probe(this.stations?.usageMeter?.vision),
-      decision: probe(this.stations?.usageMeter?.decision),
-      execution: probe(this.stations?.usageMeter?.execution),
+      vision: readUsageProbe(this.stations?.usageMeter?.vision),
+      decision: readUsageProbe(this.stations?.usageMeter?.decision),
+      execution: readUsageProbe(this.stations?.usageMeter?.execution),
     };
-    // J 纪元修正：落盘报告补齐 terminalReason / chainTip / 授予预算 ——
-    // 旧实现只写 {intentId, verdict, attempts, snapshotId, startedAt}，
-    // 磁盘报告缺终局归因与审计锚，与内存报告两副面孔。
-    const reportPath = this.persistReport(intent.id, verdict, {
-      attempts, snapshotId, startedAt,
-      terminalReason: terminalReason.slice(0, 120),
-      chainTip,
-      tokenBudgetsGranted: usage,
-      tokenUsageReported,
-    });
     const report: PipelineReport = {
       intentRef: intent.id,
       verdict,
@@ -446,26 +551,50 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
       tokenBudgetsGranted: usage,
       tokenUsageReported,
       chainTip,
-      reportPath,
+      reportPath: '', // 落盘后回填（一次成稿 —— 见下方 ΝΩ-26 内联回收）
     };
+    // ΝΩ-26（四修之四）：D-4 判决回收内联于落盘**之前** —— 报告一次成稿，盘上/
+    // 内存同一副面孔。旧序：persistReport 先写盘、reconcileVerdicts 在 run 返回
+    // 后才改内存 verdict ⇒ 盘上终局停旧（两副面孔）。回收面故障 ⇒ 吞掉
+    //（旁路义务绝不毒化终局报告 —— 防御式）。
+    if (this.reconcileReport) {
+      try { this.reconcileReport(report); } catch { /* 回收面故障 = 旁路义务 */ }
+    }
+    report.reportPath = this.persistReport(intent.id, report, { snapshotId, startedAt });
     void logPipeline('pipeline-run-end', {
-      intentRef: intent.id, verdict, attempts: attempts.length, chainTip: report.chainTip,
+      intentRef: intent.id, verdict: report.verdict, attempts: attempts.length, chainTip: report.chainTip,
     });
     this.stations?.emit?.(EVT_PIPELINE_RUN_END, {
-      intentRef: intent.id, verdict, attempts: attempts.length, reportPath: report.reportPath,
+      intentRef: intent.id, verdict: report.verdict, attempts: attempts.length, reportPath: report.reportPath,
     });
     return report;
   }
 
   /** 结构化落盘（Token 纪律：对话流只回句柄；失败降级 'in-memory' 并 warn）。
-   *  文件名带进程内序号（风险加固）：同 intent 同毫秒的并发报告不互相覆盖。 */
-  private persistReport(intentId: string, verdict: string, extra: Record<string, unknown>): string {
+   *  文件名带进程内序号（风险加固）：同 intent 同毫秒的并发报告不互相覆盖。
+   *  ΝΩ-26：入参改为报告本体（post-reconcile 状态）—— 写盘的是回收后的
+   *  终局 verdict/terminalReason/attempts，与内存报告同源同刻。 */
+  private persistReport(
+    intentId: string,
+    report: PipelineReport,
+    extra: { snapshotId?: string; startedAt: number },
+  ): string {
     if (!this.reportDir) return 'in-memory';
     try {
       mkdirSync(this.reportDir, { recursive: true });
       this.reportCounter += 1;
       const full = join(this.reportDir, `pipeline-${intentId}-${Date.now()}-${this.reportCounter}.json`);
-      writeFileSync(full, JSON.stringify({ intentId, verdict, ...extra }, null, 2), 'utf8');
+      writeFileSync(full, JSON.stringify({
+        intentId,
+        verdict: report.verdict,
+        terminalReason: report.terminalReason,
+        attempts: report.attempts,
+        tokenBudgetsGranted: report.tokenBudgetsGranted,
+        tokenUsageReported: report.tokenUsageReported,
+        chainTip: report.chainTip,
+        snapshotId: extra.snapshotId,
+        startedAt: extra.startedAt,
+      }, null, 2), 'utf8');
       return full;
     } catch (e: any) {
       console.warn(`[Pipeline] report persist failed: ${e.message}`);

@@ -144,10 +144,11 @@ async function getWordWorker(): Promise<OcrWorker> {
   if (!wordWorkerPromise) {
     wordWorkerPromise = (async () => {
       const tesseract = await import('tesseract.js');
-      // 离线语言包：test/fixtures/eng.traineddata（langPath 指 fixtures —— 零网络下载）。
+      // 离线语言包：仓库根 eng.traineddata（langPath 指根 —— 零网络下载；该副本
+      // 同时是 bare createWorker('eng') 的 cwd 缓存缺省位，全仓唯一一份）。
       // gzip:false = 读裸 .traineddata（仓库不带 .gz）；cacheMethod:'none' =
       // 不读也不写 cwd 缓存副本（否则 tesseract 会把 5MB 模型落回运行目录）。
-      const langPath = join(import.meta.dirname, 'fixtures');
+      const langPath = join(import.meta.dirname, '..');
       const createWorker = (tesseract as any).createWorker as
         (l?: string, oem?: number, opts?: Record<string, unknown>) => Promise<OcrWorker>;
       return await createWorker('eng', 1, { langPath, gzip: false, cacheMethod: 'none' });

@@ -26,6 +26,9 @@ import { InMemoryWorldModel, transitionActionKey } from './worldModel';
 import { InMemoryKnowledgeBase } from './knowledgeBase';
 import { KnowledgePersistence } from './persistence';
 import { MetricsLedger, type RunMetricRecord } from './metrics';
+// ΝΩ-28 任务1（M5 奖励接线）：run-end 收割逐类别记忆操作成败 → insert 臂记账
+//（memoryOps.ts 的老虎机反馈通道 —— 此前全库零生产调用，本线接通闭环）。
+import { harvestMemoryOpRewards, applyHarvestedRewards } from './memoryOps';
 import {
   emitKnowledgeAttempt, emitKnowledgeLearned, emitKnowledgeRunEnd,
   type KnowledgeAttemptPayload, type KnowledgeLearnedPayload,
@@ -507,6 +510,11 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
    * run-end 检查点（证据先于修辞的落账面）：
    *   1. 仪表盘：一行 RunMetricRecord 追加 JSONL（旁路义务）
    *   2. 反遗忘：两器官原子落盘（旁路义务 —— 落盘失败绝不击穿 run 报告）
+   *   3. ΝΩ-28 任务1（M5 奖励接线）：库存快照 + 仪表盘窗口 → 逐类别成败收割 →
+   *      insert 臂记账（条目在场 = 入库操作的产物 —— applyHarvestedRewards 缺省臂）。
+   *      旁路义务：收割/记账永不抛；仪表盘缺席 ⇒ 无反馈源 ⇒ 诚实跳过（不记噪声账）；
+   *      消融执法：disableKnowledge ⇒ 奖励通道同律断电（对照组的老虎机也不许偷学
+   *      —— 与 learnSettled/consolidateKnowledge 的消融先例同律）。
    */
   private checkpointState(
     intentId: string,
@@ -540,8 +548,19 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
         const r = this.persistence.save(this.deps.knowledge, this.worldModel);
         if (!r.ok) logKnowledge('knowledge-internal-fault', { intentId, phase: 'persist', reason: r.error.message.slice(0, 160) });
       }
+      // M5 奖励闭环：metrics.readAll 含本轮刚落账的行（appendFileSync 同步 flush），
+      // 收割窗口（7 天缺省）内逐条目判成败 —— 键在此时首次入册（台账律），
+      // sleep 第④幕 convergeMemoryOps 消费同一账本收敛阈值。
+      if (this.metrics && !this.cfg?.ablation?.disableKnowledge &&
+          this.deps?.knowledge instanceof InMemoryKnowledgeBase) {
+        const trials = harvestMemoryOpRewards(
+          this.deps.knowledge.snapshot(),
+          this.metrics.readAll().records,
+        );
+        applyHarvestedRewards(trials, 'insert');
+      }
     } catch {
-      // 检查点整体旁路：仪表盘/落盘的缺席不该让认知失能
+      // 检查点整体旁路：仪表盘/落盘/奖励收割的缺席不该让认知失能
     }
   }
 

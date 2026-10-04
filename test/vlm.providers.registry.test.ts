@@ -302,6 +302,23 @@ test('Ψ-5g: resolveProviderConfig(env/null) —— env 路识别、opts 覆写�
     assert.equal(r!.apiKey, 'opt');
     assert.equal(r!.baseUrl, 'https://generativelanguage.googleapis.com/v1beta');
   });
+  // ΑΩ-R35（ambiguousEnv 注记）：双平台 env 并存 ⇒ 选择不变（GLM 首位兼容律）
+  // 但结果携带 ambiguousEnv:true 供日志/测试观测；单平台/非 env 路缺省。
+  withEnv({ GLM_API_KEY: 'g1', OPENAI_API_KEY: 'o1' }, () => {
+    const amb = resolveProviderConfig();
+    assert.equal(amb!.preset.id, 'glm', '双设仍选 GLM 首位（兼容立法不动）');
+    assert.equal(amb!.via, 'env');
+    assert.equal(amb!.ambiguousEnv, true, '歧义在场 ⇒ 如实注记');
+    // env 路上 opts 仍在场 ⇒ 注记照发（歧义与覆写正交）
+    assert.equal(resolveProviderConfig({ model: 'glm-4.6' })!.ambiguousEnv, true);
+  });
+  withEnv({ OPENAI_API_KEY: 'solo' }, () => {
+    assert.equal(resolveProviderConfig()!.ambiguousEnv, undefined, '单平台 env ⇒ 无歧义注记');
+  });
+  withEnv({ GLM_API_KEY: 'g1', ANTHROPIC_API_KEY: 'a1' }, () => {
+    assert.equal(resolveProviderConfig({ provider: 'glm' })!.ambiguousEnv, undefined, '显式 provider 路不经 env 仲裁 ⇒ 无注记');
+    assert.equal(resolveProviderConfig({ baseUrl: 'https://api.openai.com/v1' })!.ambiguousEnv, undefined, 'baseUrl 路同律');
+  });
   // 路 4：无 provider、无 baseUrl、env 全空 ⇒ null（空 opts / 仅零散物料均不构成线索）
   withEnv({}, () => {
     assert.equal(resolveProviderConfig(), null);

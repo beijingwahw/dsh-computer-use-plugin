@@ -64,8 +64,11 @@ export function createZoomInspectTool(config) {
         },
         async execute(args) {
             const { x, y, half_size = 0.15, auto_descend = true } = args;
-            if (x < 0 || x > 1 || y < 0 || y > 1 || half_size <= 0 || half_size > 0.5) {
-                return `[Error]: Invalid arguments. x/y must be 0.0-1.0 and half_size in (0, 0.5].`;
+            // ΝΩ-31（NaN 卫兵）：NaN 与任何比较皆为 false，旧判 x<0||x>1 对 NaN 全放行
+            // （与 dragMouse.ts 的 NaN 卫兵同律）—— 补 Number.isFinite，非有限数直达拒绝
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(half_size) ||
+                x < 0 || x > 1 || y < 0 || y > 1 || half_size <= 0 || half_size > 0.5) {
+                return `[Error]: Invalid arguments. x/y must be finite numbers in 0.0-1.0 and half_size a finite number in (0, 0.5].`;
             }
             try {
                 // 裁剪框（归一化域，双侧夹取 —— 与坐标映射公式严格一致）

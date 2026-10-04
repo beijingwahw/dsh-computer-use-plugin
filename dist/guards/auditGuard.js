@@ -1,6 +1,9 @@
 import { onToolPre } from './hooks.js';
 import { matchesRiskPatterns } from '../riskGate.js';
 import { journal } from '../journal.js';
+// ΑΩ-R28（注册处单源）：变更类名单自工具装配唯一事实源只读引入 ——
+// guards→tools 单向依赖，无环（tools 桶的 import 闭包不触达本守卫）。
+import { MUTATING_TOOL_NAMES } from '../tools/index.js';
 /** 审计日志脱敏：type_text 的 args 可能含凭据/验证码 —— 与 typeText 工具的
  *  [REDACTED] 锚点同律，宿主控制台不落明文秘密 */
 const REDACT_KEYS = /^(text|typed_content|content|password|passwd|secret|token|api_?key)$/i;
@@ -26,71 +29,19 @@ function redactArgs(args, depth = 0) {
 /** W2-2（S4）：先行审计覆盖面 —— 全部变更类工具（触达物理世界的动作面）。
  *  观察/只读工具（take_screenshot 等）不入列：审计的是「世界将被打改」的意图。
  *
- * W6R-A9（覆盖面修复）：旧名单只收 6 个直接键鼠工具 —— 对照 src/tools/index.ts
- * 注册面与 README 工具表逐个盘点后补齐漏网的世界变更工具。判定标准：该工具
- * 派发后，用户机器的桌面状态 / 文件系统 / 后续物理动作面将被改变。纯观察类
- * （截图/读取/探针/问答）不入列。每项附文件证据。
- *  已核查不入列的边界项（理由见 README 工具表 + 源码）：
- *   · dismiss_popup —— 零副作用元工具（src/tools/dismissPopup.ts：只返回
- *     TACTICAL_PAUSE 字符串，不碰任何状态）；
- *   · swarm_dispatch —— 控制面记账（spawn/report/arbitrate 只动内存花名册，
- *     子代理的物理 IO 仍走常规动作工具 → 逐次被本守卫审计）；
- *   · grant_approval / request_approval / adjudicate_approval_queue —— 审批
- *     控制面（令牌簿自有留痕；物理动作在消费令牌的动作工具处被审计）；
- *   · remember_ui —— 会话内存笔记本（src/uiMemory.ts 的 UIMemory 类无任何
- *     磁盘持久化，不构成世界状态变更）；
- *   · probe_interactivity / zoom_inspect / diff_view / read_text / find_text /
- *     ask_screen / vlm_platforms / metrics_dashboard / recall_ui / match_skill /
- *     what_if / swarm_report / get_metrics / verify_journal / self_diagnose /
- *     steer_choice / steer_answer —— 观察探针或瞬态控制面。
- *  D-D12（子动作精化）：具名名单面的工具若自带混合读写子动作（唯
+ * ΑΩ-R28（注册处单源）：变更类名单已迁至工具装配唯一事实源 src/tools/index.ts
+ *（MUTATING_TOOL_NAMES 单源导出 —— 新增变更类工具必须在该处登记），本守卫
+ * 只读引入并再导出同一绑定。W6R-A9 的判定标准、三族盘点证据与只读边界项
+ * 理由随名单迁至该处注释；tools 侧另有装配期完备性执法（注册面全员二分类，
+ * 未分类名字装配即炸）—— 名单维护的 fail-open 病灶就此关闭。
+ * D-D12（子动作精化）原样保留：具名名单面的工具若自带混合读写子动作（唯
  *  shape_environment），按参数子动作分流执法 —— 只读子动作（capabilities/
  *  undo_log）免派发，变更子动作（apply/restore）与未知 action 保持执法
- *  （SHAPE_ENV_READ_ONLY_ACTIONS 闭集，fail-closed）。名单计数不变（18）。 */
-const MUTATING_TOOLS = new Set([
-    // ── 直接物理动作面（原 6 件，W2-2 铁律）──
-    'click_mouse', 'click_element', 'drag_mouse',
-    'scroll_page', 'type_text', 'press_hotkey',
-    // ── W6R-A9 补齐：直接物理动作面（漏网的键鼠/窗口/跳转族）──
-    // switch_tab：真实键击 ctrl(+shift)+tab（src/tools/switchTab.ts 调
-    //   system.pressHotkey）—— 浏览器前台标签被切换，世界状态改变
-    'switch_tab',
-    // switch_window：按标题把窗口调到前台（src/tools/switchWindow.ts 调
-    //   system.switchWindowByTitle）—— 焦点窗口被改变
-    'switch_window',
-    // open_url：经 OS 壳层打开默认浏览器（src/tools/openUrl.ts 调
-    //   system.openUrl）—— 世界跳转；ACTION_TOOLS 已在册（src/journal.ts）
-    'open_url',
-    // replay_actions：宏重放 = 把日志里的 click/type/drag 序列原样打到真实
-    //   桌面（src/tools/replayActions.ts 自述 "real-world side-effect
-    //   operation"）—— 一次调用含多次物理动作
-    'replay_actions',
-    // run_skill：技能执行 = 经 replayOne 逐步重放物理步骤（src/tools/skillTools.ts）
-    'run_skill',
-    // shape_environment：raise/maximize/move_window、set_zoom/set_contrast ——
-    //   直接重塑物理工作台（src/tools/shapeEnvironment.ts）。D-D12 子动作分流：
-    //   capabilities/undo_log 两个只读子动作免派发（见 SHAPE_ENV_READ_ONLY_ACTIONS），
-    //   apply/restore 及未知 action 仍按本名单执法（fail-closed 闭集）
-    'shape_environment',
-    // ── W6R-A9 补齐：绕过宿主管线的物理动作批次（入口审计是唯一机会）──
-    // autonomous_run：自主环内 PolicyAction 经 runtime.createExecute 直接驱
-    //   system 键鼠（src/autonomy/runtime.ts）—— **不经过宿主工具管线**，环内
-    //   逐步动作永远不会路过本守卫；入口处的先行审计是整批动作唯一的 WAL 机会
-    'autonomous_run',
-    // autonomy_resume：同一引擎续跑（src/tools/autonomyResume.ts 复用 runPilotLoop）
-    'autonomy_resume',
-    // ── W6R-A9 补齐：文件系统写入族（变更用户机器上的持久状态）──
-    // save_skill：技能库落盘（src/skillLibrary.ts writeFileSync 原子写）
-    'save_skill',
-    // save_checkpoint：认知态快照写盘（src/checkpoint.ts，config.checkpointPath）
-    'save_checkpoint',
-    // switch_vision_model：连接档案持久化到 ~/.dsh/vlm-connection.json
-    //   （src/vlm/connection.ts writeFileSync）并热替换全局 VLM 单例
-    'switch_vision_model',
-    // vlm_wizard：起回环服务 + system.openUrl 打开浏览器窗口（src/tools/
-    //   vlmWizard.ts）—— 浏览器被打开是世界可见动作
-    'vlm_wizard',
-]);
+ * （SHAPE_ENV_READ_ONLY_ACTIONS 闭集，fail-closed）。名单下限不变（18，
+ *  sec.audit-wal-floor 同律）。 */
+// 单源再导出：消费方（测试/未来守卫）可自守卫面取同一 Set 对象 ——「名单
+// 单源、两侧同一 Set」由对象恒等式直接可证（绑定即同体，非拷贝）。
+export { MUTATING_TOOL_NAMES };
 /** D-D12（子动作精化）：shape_environment 的只读子动作闭集 —— 源自
  *  src/tools/shapeEnvironment.ts 的 action 枚举（capabilities | apply |
  *  restore | undo_log）。仅 capabilities（能力申报，纯查询）与 undo_log
@@ -100,10 +51,10 @@ const MUTATING_TOOLS = new Set([
  *  闭集立法：只豁免显式列名的只读子动作 —— 未知/缺席 action 不可证明只读
  *  ⇒ 仍按变更类审计（fail-closed 语义在分流面上原样保持）。 */
 const SHAPE_ENV_READ_ONLY_ACTIONS = new Set(['capabilities', 'undo_log']);
-/** 该调用是否落入先行审计面（W2-2）：MUTATING_TOOLS 具名 + shape_environment
- *  按 D-D12 参数子动作分流（只读子动作免派发审计 WAL 行）。 */
+/** 该调用是否落入先行审计面（W2-2）：注册处单源名单具名（ΑΩ-R28）+
+ *  shape_environment 按 D-D12 参数子动作分流（只读子动作免派发审计 WAL 行）。 */
 function isPreDispatchAudited(name, args) {
-    if (!MUTATING_TOOLS.has(name))
+    if (!MUTATING_TOOL_NAMES.has(name))
         return false;
     if (name === 'shape_environment') {
         const action = args?.action;

@@ -24,18 +24,20 @@ function centerInRegion(cx, cy, region) {
  * L1 适配器（<1ms 预算域的诚实边界：无障碍树提取本身 <1ms，屏幕尺寸查询是
  * 一次性异步开销）。就绪条件 = 宿主已注入 AccessibilityProvider
  * （setAccessibilityProvider —— uiExtractor 既有契约，本适配器不越权代注入）。
+ * ΝΩ-26（帧缓存）：无障碍树是全屏提取 —— 2×2 网格每轮 4 分区 = 4 次全屏
+ * 提取（L2 OCR 自 J 纪元起就有 1500ms 帧缓存，L1 一直没有）。现加同款 TTL
+ * 帧缓存：窗口内一次提取、多区中心落区过滤；故障带负缓存（同窗口不重试，
+ * a11y 持续故障时不放大为每分区一次全屏重试）。
  */
 export function createStructuredFromUiExtractor(opts) {
-    return {
-        name: opts.name ?? 'uiExtractor-a11y(L1-adapter)',
-        isReady() {
-            return hasAccessibilityProvider();
-        },
-        async extract(region) {
-            if (!hasAccessibilityProvider())
-                return [];
-            // J 纪元修正：不再吞错 —— provider 抛错/尺寸查询失败向上抛，
-            // 工位 safeExtract 记 fault 补丁（失败空 ≠ 真空，归因链不断裂）
+    const ttl = opts.cacheTtlMs ?? 1500;
+    let cache = null;
+    let failCache = null;
+    // 单飞（in-flight 去重）：并发 extract（多区齐发）共享同一次在途提取 ——
+    // 缓存只挡「已完成」的重复，挡不住「进行中」的竞速（4 区齐发 = 4 次全屏提取）。
+    let inFlight = null;
+    async function loadFrame() {
+        try {
             const [els, size] = await Promise.all([
                 extractInteractiveElements(),
                 opts.screenSize(),
@@ -45,10 +47,42 @@ export function createStructuredFromUiExtractor(opts) {
                 name: e.name,
                 rect: normalizeRect(e.rect, size),
             }));
+            cache = { at: Date.now(), els: normalized };
+            failCache = null;
+            return normalized;
+        }
+        catch (e) {
+            failCache = { at: Date.now(), error: e instanceof Error ? e : new Error(String(e)) };
+            throw failCache.error;
+        }
+    }
+    async function frameElements() {
+        const now = Date.now();
+        if (cache && now - cache.at < ttl)
+            return cache.els;
+        if (failCache && now - failCache.at < ttl)
+            throw failCache.error; // 负缓存命中
+        if (!inFlight) {
+            inFlight = loadFrame();
+            // 落定即让位（成功/失败都清 —— 失败走负缓存挡后续，不挡重试语义本身）
+            inFlight.then(() => { inFlight = null; }, () => { inFlight = null; });
+        }
+        return inFlight;
+    }
+    return {
+        name: opts.name ?? 'uiExtractor-a11y(L1-adapter)',
+        isReady() {
+            return hasAccessibilityProvider();
+        },
+        async extract(region) {
+            if (!hasAccessibilityProvider())
+                return [];
+            const normalized = await frameElements();
             // 区域过滤（中心落区即入区）：无障碍树是全屏提取 —— 不过滤会把整套
-            // 元素重复贴进每个分区补丁（2×2 网格 = 每元素 4 份，决策 prompt 被污染）
+            // 元素重复贴进每个分区补丁（2×2 网格 = 每元素 4 份，决策 prompt 被污染）。
+            // 无 region（全屏）时防御拷贝：缓存条目绝不暴露给消费方突变（毒化帧）。
             if (!region)
-                return normalized;
+                return normalized.slice();
             return normalized.filter(e => centerInRegion(e.rect.x + e.rect.width / 2, e.rect.y + e.rect.height / 2, region));
         },
     };
@@ -155,6 +189,19 @@ export function createSemanticFromVlm(opts) {
         }
         catch { /* 遥测面绝不毒化主管线（防御式） */ }
     };
+    // ΝΩ-26：L3 帧缓存（buffer + 尺寸成对缓存 —— 坐标系一致性前提）。截屏失败
+    // 向上抛（不缓存失败）；缓存条目只读共享（applySparseSom 合成新 buffer，
+    // 绝不变异原帧 —— 多区叠加互不污染）。
+    const frameTtl = opts.frameCacheTtlMs ?? 1500;
+    let frameCache = null;
+    async function captureFrame() {
+        const now = Date.now();
+        if (frameCache && now - frameCache.at < frameTtl)
+            return frameCache;
+        const [buffer, size] = await Promise.all([opts.capture(), opts.screenSize()]);
+        frameCache = { at: now, buffer, size };
+        return frameCache;
+    }
     /**
      * W5-4: 稀疏 SoM 叠加步（编码前挂点 —— groundElements 内部才走 encodeForVlm，
      * 此处替换进编码的 buffer 即「叠加图替代原图」）。幂等可降级四律 + 防御绝不抛：
@@ -261,8 +308,9 @@ export function createSemanticFromVlm(opts) {
             return [...somLog];
         },
         async ground(region, question) {
-            // 截屏 + 尺寸（任一故障向上抛 —— 工位记 fault，两种空两种决策）
-            const [buffer, size] = await Promise.all([opts.capture(), opts.screenSize()]);
+            // 截屏 + 尺寸（任一故障向上抛 —— 工位记 fault，两种空两种决策）；
+            // ΝΩ-26：经帧缓存供给（窗口内多区共享同一帧 —— capture 计数不随分区数膨胀）
+            const { buffer, size } = await captureFrame();
             if (!Number.isFinite(size.width) || size.width < 1 || !Number.isFinite(size.height) || size.height < 1) {
                 throw new Error(`invalid screen size ${size.width}x${size.height}`);
             }

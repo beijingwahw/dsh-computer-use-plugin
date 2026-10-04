@@ -1,7 +1,7 @@
 // test/w2memory.test.ts
 // W2-6（M5 分类级记忆操作 Thompson 老虎机）：Beta 更新手算 / 分类别独立记账 /
 // n<门限零行为变化 / 阈值夹取 / seed 重放一致 / registry 键注册 + EvidenceLedger
-// 记账 / 既有 55 键语义不动 / 奖励收割手算 / 防御式绝不抛。
+// 记账 / 既有 58 键语义不动（ΝΩ-10 增三键）/ 奖励收割手算 / 防御式绝不抛。
 // 全离线纯内存断言，零网络零墙钟依赖（时间戳全部显式注入）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +15,7 @@ import {
   memoryOpKey, memoryOpSpecs, memoryOpSpecOf, registerMemoryOpKernels,
   seededRng, betaPosterior, betaPosteriorFromStats, betaSample,
   evaluateMemoryOpSuccess, harvestMemoryOpRewards, DEFAULT_REWARD_WINDOW_MS,
-  recordMemoryOpFeedback, applyHarvestedRewards,
+  recordMemoryOpFeedback, applyHarvestedRewards, compareHelpedCohorts,
   decideMemoryOpThreshold, thresholdFromSample, convergeMemoryOps,
   type CategoryTrials,
 } from '../src/knowledge/memoryOps.ts';
@@ -46,7 +46,7 @@ function freshPair(): { registry: KernelRegistry; ledger: EvidenceLedger } {
   return { registry: new KernelRegistry(), ledger: new EvidenceLedger() };
 }
 
-// ─── W2-6a registry 键注册：28 臂入册 / 规格区间 / 幂等 / 既有 55 键不动 ───
+// ─── W2-6a registry 键注册：28 臂入册 / 规格区间 / 幂等 / 既有 58 键不动 ───
 
 test('W2-6a registry 注册：28 键（7 类 × 4 操作）入册，区间与缺省 = 现行静态常数', () => {
   const { registry } = freshPair();
@@ -90,16 +90,16 @@ test('W2-6a 幂等：重入册保持现值与证据，只刷规格；set 过的�
   assert.equal(ledger.stats('memory.op.shortcut.evict').n, 0, '入册不碰账本');
 });
 
-test('W2-6a 既有 55 键语义不动：增量入册后生产键值逐字节不变', () => {
+test('W2-6a 既有 58 键语义不动：增量入册后生产键值逐字节不变', () => {
   resetKernelRuntime();
   try {
     registerProductionKernels();
     const before = kernelRegistry.snapshot();
-    assert.equal(Object.keys(before).length, 55, '生产单册基线 55 键');
+    assert.equal(Object.keys(before).length, 58, '生产单册基线 58 键（55+ΝΩ-10 三键）');
     const count = registerMemoryOpKernels();
     assert.equal(count, 28);
     const after = kernelRegistry.snapshot();
-    assert.equal(Object.keys(after).length, 83, '55 + 28 = 83');
+    assert.equal(Object.keys(after).length, 86, '58 + 28 = 86');
     for (const [k, v] of Object.entries(before)) {
       assert.equal(after[k], v, `既有键 ${k} 语义不动`);
     }
@@ -440,4 +440,58 @@ test('W2-6i 防御带：抛错/坏流依赖面下收敛器永不抛，落值恒�
   } finally {
     resetKernelRuntime();
   }
+});
+
+// ─── W2-6e（ΝΩ-28 任务3）：奖励归因去噪 —— helped 从窗口级全局布尔升两队列对照 ───
+
+test('W2-6e 两队列对照：注入在场组 vs 缺席组完成率定 helped；样本不足回退现行布尔', () => {
+  const NOW = 10_000_000_000;
+  const DAY = 24 * 60 * 60 * 1000;
+  const hit = entry({ category: 'workflow', updatedAt: NOW - DAY, usageCount: 3 });
+
+  // (a) 去噪主案例：在场组完成率 0.5 < 缺席组 1.0 ⇒ helped=false。旧全局布尔
+  //     只看「∃ 注入在场且 completed 的 run」⇒ 此处会误记 success —— 恰有
+  //     完成的知识 run ≠ 注入有助益（注入普遍在场而完成率反而更差的库，
+  //     不该全员记 success）。Cohen's h(0.5, 1.0) = −1.571 < 0 定号。
+  const denoised = harvestMemoryOpRewards([hit], [
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 2 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'failed', knowledgeRounds: 1 }),
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 0 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'completed', knowledgeRounds: 0 }),
+  ], { now: NOW });
+  assert.deepEqual(denoised.workflow, { successes: 0, failures: 1, entries: 1 }, '在场组完成率劣势 ⇒ 记败（旧布尔误记 success 的场景）');
+
+  // (b) 在场组占优（1.0 vs 0.5）⇒ helped=true（真助益照常记账）
+  const helpedCase = harvestMemoryOpRewards([hit], [
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 2 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'completed', knowledgeRounds: 1 }),
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 0 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'failed', knowledgeRounds: 0 }),
+  ], { now: NOW });
+  assert.deepEqual(helpedCase.workflow, { successes: 1, failures: 0, entries: 1 });
+
+  // (c) 并列（1.0 vs 1.0 ⇒ h=0）⇒ helped=false：无差异证据不是助益证据
+  const tie = harvestMemoryOpRewards([hit], [
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 2 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'completed', knowledgeRounds: 1 }),
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 0 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'completed', knowledgeRounds: 0 }),
+  ], { now: NOW });
+  assert.deepEqual(tie.workflow, { successes: 0, failures: 1, entries: 1 }, 'h=0 ⇒ 不记助益');
+
+  // (d) 样本不足（缺席组仅 1 条）⇒ 回退现行窗口级布尔（present completed 在场 ⇒ true）
+  const fallback = harvestMemoryOpRewards([hit], [
+    run({ ts: NOW - DAY, verdict: 'completed', knowledgeRounds: 2 }),
+    run({ ts: NOW - 2 * DAY, verdict: 'completed', knowledgeRounds: 0 }),
+  ], { now: NOW });
+  assert.deepEqual(fallback.workflow, { successes: 1, failures: 0, entries: 1 }, '任一侧 <2 ⇒ 布尔回退（零漂移安全带）');
+
+  // (e) compareHelpedCohorts 纯函数面：不足/垃圾 ⇒ null；充足 ⇒ h 定号
+  assert.equal(compareHelpedCohorts({ present: 1, presentCompleted: 1, absent: 5, absentCompleted: 5 }), null, 'present<2');
+  assert.equal(compareHelpedCohorts({ present: 5, presentCompleted: 1, absent: 1, absentCompleted: 1 }), null, 'absent<2');
+  assert.equal(compareHelpedCohorts({ present: 2, presentCompleted: 2, absent: 2, absentCompleted: 0 }), true);
+  assert.equal(compareHelpedCohorts({ present: 2, presentCompleted: 0, absent: 2, absentCompleted: 2 }), false);
+  assert.equal(compareHelpedCohorts(null), null);
+  assert.equal(compareHelpedCohorts({}), null, '字段缺席 ⇒ null（绝不抛）');
+  assert.equal(compareHelpedCohorts({ present: -1, presentCompleted: 0, absent: 2, absentCompleted: 0 }), null, '负计数 = 垃圾');
 });

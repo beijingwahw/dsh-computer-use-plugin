@@ -259,3 +259,28 @@ test('find_text: 只有正文命中 —— WARNING 话术禁止点击', async ()
   assert.match(out.state_anchor.locations[0], /interactivity=text/);
   assert.match(out.next_step, /WARNING: only text matches were found — do not click any of them\./);
 });
+
+// ═══ ΝΩ-31：find_text 多命中标注（形状先验全覆盖）═══
+
+test('ΝΩ-31 find_text: 第 9+ 命中不再从清单消失 —— 至少携带 wordShape 几何标注', async () => {
+  // 12 个 'menu' 命中：前 4 个紧凑（control-like）、第 5+ 个宽行（content-like）
+  const els = Array.from({ length: 12 }, (_, i) =>
+    i < 4
+      ? l2(`menu item ${i}`, { x: 0.1 + i * 0.05, y: 0.05, width: 0.05, height: 0.01 })
+      : l2(`menu option ${i} with a long caption line`, { x: 0.05, y: 0.1 + i * 0.05, width: 0.6, height: 0.04 }));
+  fakeOcr(els);
+  const out = JSON.parse(await exec(findText)({ keyword: 'menu' }));
+  assert.equal(out.status, 'SUCCESS');
+  assert.equal(out.state_anchor.matches, 12);
+  assert.equal(out.state_anchor.locations.length, 12, '全部命中入清单（旧行为只列前 8）');
+  const pool = out.state_anchor.locations.slice(0, 8) as string[];
+  const beyond = out.state_anchor.locations.slice(8) as string[];
+  assert.ok(pool.every(l => /interactivity=unprobed \(budget; trust shape with caution\)/.test(l)),
+    '探针池内未探针命中：budget 标注（旧语义不动）');
+  assert.ok(beyond.every(l => /shape=(control-like|content-like|ambiguous)/.test(l)),
+    '第 9+ 命中携带 wordShape 几何先验（无探针也有形状证据）');
+  assert.ok(beyond.every(l => /interactivity=unprobed \(beyond probe pool; shape prior only\)/.test(l)),
+    '第 9+ 命中如实标注池外（本轮不可能升级为物理判决）');
+  assert.match(beyond[0], /shape=content-like/, '宽行命中判 content-like（几何判据照常执法）');
+  assert.match(out.state_anchor.locations[0], /shape=control-like/);
+});

@@ -405,10 +405,61 @@ function safeObserve(observe) {
         return null;
     }
 }
+// ─── ΝΩ-3（P1×2 · Planner 通道预算看门狗）───
+//
+// 病灶：runOrchestrator 两处 planTasks（首规划 + Σ-4 重规划）都是裸 await ——
+// timeBudget 检查点全部在其后，一条挂起的 Planner 流把 start_complex_task
+// 永久冻结（预算语义对冻结的计划相位形同虚设）。修法：计划相位（首规划 +
+// 至多一次重规划**合计**）总墙钟 ≤ timeBudget 的 10%（下限钳 PLANNER_BUDGET_MIN_MS
+// —— 极小 timeBudget 的 10% 派生只会保证失败，短任务不值得零计划；无进展
+// 检测交给 planner.ts 的流层 idle 看门狗，总时长上限在此收口）。超限 ⇒
+// 诚实失败归因 planner-budget（响亮报告，绝不静默、绝不裸抛）。
+export const PLANNER_BUDGET_FRACTION = 0.1;
+const PLANNER_BUDGET_MIN_MS = 5000;
+/** planTasks 的预算包裹：deadline 内未落定 ⇒ tasks=[] + budgetTimeout=true；
+ *  planTasks 自身的 reject 原样上抛（与裸 await 语义逐字节一致 —— 零回归），
+ *  预算获胜后迟到的落定/拒绝不升级 unhandledRejection（静音收养）。 */
+async function planTasksGuarded(userPrompt, chat, budgetMs) {
+    if (budgetMs === undefined || !Number.isFinite(budgetMs) || budgetMs <= 0) {
+        return { tasks: await planTasks(userPrompt, chat), budgetTimeout: false };
+    }
+    let handle;
+    const gate = new Promise(resolve => {
+        handle = setTimeout(() => resolve(null), budgetMs);
+        handle?.unref?.(); // 预算门不阻进程退出
+    });
+    const planned = planTasks(userPrompt, chat);
+    planned.catch(() => { }); // 预算获胜后迟到拒绝静音（诚实归因已定，不再翻案）
+    try {
+        const raced = await Promise.race([planned, gate]);
+        return raced === null ? { tasks: [], budgetTimeout: true } : { tasks: raced, budgetTimeout: false };
+    }
+    finally {
+        if (handle !== undefined)
+            clearTimeout(handle);
+    }
+}
 export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs, opts) {
     const startAt = Date.now();
-    // 1. 调用 Planner 拆解任务
-    const subTasks = await planTasks(userPrompt, chat);
+    // ΝΩ-3（b）：计划相位预算派生 —— 显式覆写 > timeBudget×10%（下限钳 5s）；
+    // 绝对截止时刻供首规划 + 重规划合计消费（10% 是两段的总闸，不是各一段）
+    const plannerBudgetMs = (() => {
+        const explicit = opts?.plannerBudgetMs;
+        if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit > 0)
+            return explicit;
+        if (typeof timeBudgetMs === 'number' && Number.isFinite(timeBudgetMs) && timeBudgetMs > 0) {
+            return Math.max(PLANNER_BUDGET_MIN_MS, timeBudgetMs * PLANNER_BUDGET_FRACTION);
+        }
+        return undefined;
+    })();
+    const plannerDeadline = plannerBudgetMs !== undefined ? startAt + plannerBudgetMs : undefined;
+    // 1. 调用 Planner 拆解任务（ΝΩ-3：预算包裹 —— 挂起的流不再能冻结整个工具调用）
+    const initialPlan = await planTasksGuarded(userPrompt, chat, plannerBudgetMs);
+    if (initialPlan.budgetTimeout) {
+        return `[Planner] planner-budget exceeded：规划阶段超过 ${Math.round(plannerBudgetMs ?? 0)}ms 预算上限` +
+            `（timeBudget 的 10% 派生），任务未执行。`;
+    }
+    const subTasks = initialPlan.tasks;
     // 空计划守卫：宁可响亮失败，不可静默空转
     if (subTasks.length === 0) {
         return '[Planner] 未能生成任务计划（检查 llm 服务与提示词），任务未执行。';
@@ -446,7 +497,17 @@ export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs, o
                 + '\n以下子任务已失败，请重新规划剩余步骤避开失败路径：\n'
                 + task.action
                 + '\n失败结果：' + result.slice(0, 500);
-            const replanned = await planTasks(replanPrompt, chat);
+            // ΝΩ-3：重规划同受计划相位总预算约束（共用截止时刻 —— 10% 是首规划+
+            // 重规划的合计上限）；余额耗尽 ⇒ 不再发起调用，直接按预算超限落回
+            // fail-fast（tasks=[] 与空计划同路，诚实归因由 warn 留痕）
+            const replanLeft = plannerDeadline !== undefined ? plannerDeadline - Date.now() : undefined;
+            const replanOutcome = replanLeft !== undefined && replanLeft <= 0
+                ? { tasks: [], budgetTimeout: true }
+                : await planTasksGuarded(replanPrompt, chat, replanLeft);
+            if (replanOutcome.budgetTimeout) {
+                console.warn('[Orchestrator] Replan exceeded planner budget (planner-budget) — falling back to fail-fast.');
+            }
+            const replanned = replanOutcome.tasks;
             const reTopo = replanned.length > 0 ? topoSortSubTasks(replanned) : null;
             if (reTopo && !reTopo.cycle) {
                 const remaining = reTopo.order.map(t => ({ ...t, id: ++idCounter }));
@@ -551,7 +612,8 @@ export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs, o
     const layers = layerSubTasks(orderedSubTasks);
     const team = opts?.team ?? coordinator;
     // ── W5-3（L3 跨机编排）：crossMachine 注入缝的本地接线（缺省缺席 = 零行为差）──
-    // barrierFor：步骤 → barrier 声明（注入覆写优先，缺省 = 文本方言解析）；
+    // barrierOf：步骤 → barrier 声明（注入覆写优先，缺省 = 文本方言解析。
+    // ΑΩ-R34：旧注释误写 barrierFor —— 注入字段实名是 cross.barrierOf）；
     // awaitCrossBarrier：抵达即 arrive 等待 —— 成功 ⇒ [Barrier] 审计行（放行
     // 事实：seq/名册/耗时），失败 ⇒ [FAILED] 行（reason + 已见名册，诚实不臆造）。
     // 全程防御式（注入面异常 ⇒ null = 无 barrier 步，绝不炸编排主链）。

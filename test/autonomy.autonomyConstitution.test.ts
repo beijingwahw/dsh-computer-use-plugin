@@ -5,6 +5,10 @@
 // 系统还原族扩表（纪元 Δ：恢复出厂/恢复默认/重置系统/restore factory/
 // reset to default ⇒ destructive；「恢复」单字不成族反例）、
 // 空与垃圾 payload 不抛、条文副本防篡改。零网络、零墙钟、零测试顺序依赖。
+// ΑΩ-R43（终版立法）：goalText 危险词**照旧并入扫描面保守顶格**（Σ-3⑦/W7-D3
+// 执法定谳：目标级保守是刻意立法，可用性副作用让位）；交付面收窄为 backgroundRisk
+// 纯审计标注（判决书字段 + reason 注记，零行为变化）；动作面不可逆证据路径判决
+// 逐字节冻结；destructive 硬法锁定。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -116,9 +120,12 @@ test('Φ-8: 系统还原族（纪元 Δ 扩表）—— 「OK 恢复出厂设置
     assert.equal(v.requiresApproval, true, label);
   }
   // 文本扫描层：goalText 含系统还原词 ⇒ 词族已并入扫描并集，连 benign 的 scroll 也如实顶格
+  // （ΑΩ-R43 终版：保守顶格保持，另附 backgroundRisk=high 审计标注）
   const g = c.check(act({ kind: 'scroll', payload: { direction: 'down' } }), cctx({ goalText: '把设备恢复出厂' }));
   assert.equal(g.riskTier, 'destructive');
   assert.equal(g.requiresApproval, true);
+  assert.equal(g.backgroundRisk, 'high');
+  assert.match(g.reason, /backgroundRisk=high/);
 });
 
 test('Φ-8: 反例 —— 「恢复」单字不成族：恢复窗口布局 / Restore session 仍 benign 免审批', () => {
@@ -184,12 +191,15 @@ test('Φ-8: 律②取重 —— 词法 destructive 压过申报 benign；申报 
 
 // ─── 律③ 文本扫描（goalText / label / payload 三源 + 混淆免疫）───
 
-test('Φ-8: 律③ goalText 参与扫描 —— 目标含「清空」⇒ 连 benign 的 scroll 也升 destructive 须审批', () => {
+test('Φ-8/ΑΩ-R43: 律③ goalText 保守顶格（旧律字节忠实）+ backgroundRisk 审计标注 —— 目标含「清空」⇒ scroll 升 destructive 须审批', () => {
   const c = new AutonomyConstitution();
   const v = c.check(act({ kind: 'scroll', payload: { direction: 'down' } }), cctx({ goalText: '清空回收站' }));
   assert.equal(v.riskTier, 'destructive');
   assert.equal(v.allowed, true);
   assert.equal(v.requiresApproval, true);
+  assert.equal(v.backgroundRisk, 'high');
+  assert.match(v.reason, /backgroundRisk=high/);
+  assert.ok(v.reason.endsWith('。'), '注记以分号缀叙，理由仍一句中文句号收尾');
 });
 
 test('Φ-8: 律③ label 命中一般危险词（发送）⇒ sensitive 须审批；命中不可逆词（支付）⇒ destructive', () => {
@@ -229,15 +239,101 @@ test('Φ-8: 律③混淆免疫（复用 riskGate 归一化）—— 西里尔 d�
   assert.equal(plain.riskTier, 'destructive');
 });
 
-test('Φ-8: 律③自定义危险词 —— forbiddenKeywords 注入「引爆」命中 ⇒ sensitive（不在不可逆族，不顶格）', () => {
+test('Φ-8/ΑΩ-R43: 律③自定义危险词 —— forbiddenKeywords 注入「引爆」⇒ goalText 命中 sensitive 须审批（不在不可逆族）+ backgroundRisk=elevated 标注', () => {
   const c = new AutonomyConstitution({ forbiddenKeywords: ['引爆'] });
   const v = c.check(act({ kind: 'scroll', payload: { direction: 'down' } }), cctx({ goalText: '引爆测试装置' }));
   assert.equal(v.riskTier, 'sensitive');
   assert.equal(v.allowed, true);
   assert.equal(v.requiresApproval, true);
+  assert.equal(v.backgroundRisk, 'elevated');
+  assert.match(v.reason, /backgroundRisk=elevated/);
   // 自定义词表替换后，riskGate 默认危险词表仍恒在（并集立法）：删除照旧 destructive
   const v2 = c.check(act({ kind: 'click', target: target('删除') }), cctx());
   assert.equal(v2.riskTier, 'destructive');
+});
+
+// ─── ΑΩ-R43 扫描面分层：goalText 背景风险 ───
+
+test('ΑΩ-R43: goalText 危险词照旧保守顶格（终版立法）—— 判决含 backgroundRisk 审计标注，goalText 干净则无标注', () => {
+  const c = new AutonomyConstitution();
+  // 高危目标（不可逆词族）⇒ 连 benign 的 scroll 也升 destructive（旧律），并留 high 标注：
+  const v = c.check(act({ kind: 'scroll', payload: { direction: 'down' } }), cctx({ goalText: '删除临时文件并转账付款' }));
+  assert.equal(v.riskTier, 'destructive', '旧律保守顶格（Σ-3⑦/W7-D3 定谳）');
+  assert.equal(v.allowed, true);
+  assert.equal(v.requiresApproval, true);
+  assert.equal(v.backgroundRisk, 'high');
+  assert.match(v.reason, /backgroundRisk=high/);
+  assert.ok(v.reason.endsWith('。'));
+  // 申报 sensitive 的动作 + 高危目标 ⇒ 不可逆顶格压过申报档（旧律 maxTier 语义）
+  const s = c.check(act({ kind: 'click', target: target('打开设置'), riskTier: 'sensitive' }), cctx({ goalText: '删除临时文件' }));
+  assert.equal(s.riskTier, 'destructive');
+  assert.equal(s.requiresApproval, true);
+  assert.equal(s.backgroundRisk, 'high');
+  // 目标只含一般危险词（非不可逆族）⇒ sensitive 须审批（旧律）+ elevated 标注
+  const e = c.check(act({ kind: 'scroll', payload: { direction: 'up' } }), cctx({ goalText: '发送周报给主管' }));
+  assert.equal(e.riskTier, 'sensitive');
+  assert.equal(e.requiresApproval, true);
+  assert.equal(e.backgroundRisk, 'elevated');
+  // goalText 干净 ⇒ 无字段无注记（判决形态与旧律一致）
+  const clean = c.check(act({ kind: 'scroll', payload: { direction: 'down' } }), cctx({ goalText: '打开系统设置' }));
+  assert.equal(clean.backgroundRisk, undefined);
+  assert.equal(clean.riskTier, 'benign');
+  assert.equal(clean.reason.includes('backgroundRisk'), false);
+});
+
+test('ΑΩ-R43: 动作自身含危险词 ⇒ 旧行为逐字节 —— 判决对象全量对照（无 backgroundRisk 字段、reason 无注记），goalText 危险词不改变结果', () => {
+  const c = new AutonomyConstitution();
+  const withGoal = c.check(act({ kind: 'click', target: target('立即支付') }), cctx({ goalText: '删除全部订单' }));
+  const noGoal = c.check(act({ kind: 'click', target: target('立即支付') }), cctx());
+  // 逐字节冻结：动作自带不可逆证据的路径，有无 goalText 判决全等，且与旧律判决对象一致
+  assert.deepEqual(withGoal, {
+    allowed: true,
+    riskTier: 'destructive',
+    requiresApproval: true,
+    reason: '风险分层 destructive 不在自主白名单（benign）内，本动作须人工审批后方可执行。',
+  });
+  assert.deepEqual(noGoal, withGoal);
+  // 动作面一般危险词（label 发送）+ 高危目标：目标不可逆词照旧把整体顶格 destructive
+  // （旧律 maxTier 语义），backgroundRisk 留 high 审计标注
+  const s = c.check(act({ kind: 'click', target: target('发送邮件') }), cctx({ goalText: '删除全部订单' }));
+  assert.equal(s.riskTier, 'destructive');
+  assert.equal(s.requiresApproval, true);
+  assert.equal(s.backgroundRisk, 'high');
+});
+
+test('ΑΩ-R43: destructive 硬法恒审批不变 —— 白名单显式含 destructive，动作面不可逆证据仍恒审批且判决逐字节无注记', () => {
+  const c = new AutonomyConstitution({ allowAutonomousTiers: ['benign', 'sensitive', 'destructive'] });
+  const v = c.check(act({ kind: 'click', target: target('格式化磁盘') }), cctx({ goalText: '删除一切' }));
+  assert.equal(v.allowed, true); // 不是禁止 —— 批了就能做
+  assert.equal(v.requiresApproval, true); // 但审批是绕不开的（硬法不可让渡）
+  assert.equal(v.riskTier, 'destructive');
+  assert.match(v.reason, /硬法/);
+  assert.equal(v.reason.includes('backgroundRisk'), false, '动作自带不可逆证据 ⇒ 判决逐字节不变');
+  assert.equal(v.backgroundRisk, undefined);
+});
+
+test('ΑΩ-R43: 审计标注在场性 —— 目标背景危险无论动作面证据在场与否均保守顶格（旧律）并留痕；干净目标零标注', () => {
+  const c = new AutonomyConstitution();
+  // 无 label 无 payload + 高危目标 ⇒ destructive（旧律同果）+ high 标注
+  const v = c.check(act({ kind: 'scroll' }), cctx({ goalText: '清空回收站' }));
+  assert.equal(v.riskTier, 'destructive');
+  assert.equal(v.allowed, true);
+  assert.equal(v.requiresApproval, true);
+  assert.equal(v.backgroundRisk, 'high', '背景风险如实留痕供审计');
+  assert.match(v.reason, /backgroundRisk=high/);
+  // 对照：动作面证据在场（payload 非空）且干净 ⇒ 终版立法下仍顶格（goalText 恒在
+  // 扫描面 —— 与旧律逐字节同果），标注同样在场
+  const present = c.check(act({ kind: 'scroll', payload: { direction: 'down' } }), cctx({ goalText: '清空回收站' }));
+  assert.equal(present.riskTier, 'destructive');
+  assert.equal(present.requiresApproval, true);
+  assert.equal(present.backgroundRisk, 'high');
+  // elevated 背景 ⇒ sensitive 须审批（旧律同果）
+  assert.equal(c.check(act({ kind: 'wait' }), cctx({ goalText: '发送周报' })).riskTier, 'sensitive');
+  // goalText 干净时证据缺席不顶格（与旧律一致）、零标注
+  const clean = c.check(act({ kind: 'wait' }), cctx({ goalText: '打开设置' }));
+  assert.equal(clean.riskTier, 'benign');
+  assert.equal(clean.requiresApproval, false);
+  assert.equal(clean.backgroundRisk, undefined);
 });
 
 // ─── 律④ 审批律与硬法 ───

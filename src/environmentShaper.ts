@@ -100,6 +100,12 @@ export interface SystemAdapter {
   apply(action: ShaperAction): Promise<UndoRecipe>;
   /** 按配方复原。失败不抛出（返回错误说明由调用方记录，restoreAll 继续） */
   undo(recipe: UndoRecipe): Promise<void>;
+  /**
+   * ΝΩ-25(a)：批量复原（可选实现）—— 整条 LIFO 序列一次下发。返回与
+   * recipes 等长的逐条结果：错误信封不打折（单条失败有 reason、不阻断其余
+   * 条目）。未实现 ⇒ Shaper 回退逐条 undo（语义等价、往返更多）。
+   */
+  undoBatch?(recipes: readonly UndoRecipe[]): Promise<Array<{ ok: boolean; reason?: string }>>;
   /** 窗口几何查询（撤销配方的 before 快照来源）；无工具/未命中 ⇒ null */
   getWindowGeometry(titleHint: string): Promise<WindowGeometry | null>;
 }
@@ -323,6 +329,104 @@ function setHighContrastPs(flagExpr: string): string {
   return `${HC_DECL}; [Win.U32HC]::SetHC(${flagExpr}) | Out-Null`;
 }
 
+// ─── ΝΩ-25：PS 批处理小件（多动作单脚本 / 同类相邻合并）───
+//
+// 病灶：runPs 每次调用都是一次 PowerShell 冷启动 + Add-Type P/Invoke 重编译
+// （每窗口操作数百 ms）；restoreAll 的 LIFO 逐条复原把这条成本乘以条数 ×
+// 每条 2-4 次往返。修法：复原序列先按「执行通道」做同类相邻合并，PS 通道
+// 整段编译为单个脚本一次执行 —— Add-Type 只编译一次，往返数与条数解耦。
+
+/** 复原步（LIFO 序列的一步 + 原始下标 —— 批结果按此回填到对应账目） */
+interface UndoStep { index: number; recipe: UndoRecipe; }
+
+/**
+ * ΝΩ-25(b)：同类相邻段合并通用件 —— 序列按通道键切段，相邻同键步并入同批。
+ * encode 步合并的通用形状：批内步共享一次进程冷启动/一次编译；跨通道的步
+ * 永不合并（执行顺序保真 —— LIFO 依赖序不可重排）。纯函数。
+ */
+export function coalesceAdjacentRuns<T>(
+  items: readonly T[],
+  channelOf: (item: T) => string,
+): Array<{ channel: string; items: T[] }> {
+  const runs: Array<{ channel: string; items: T[] }> = [];
+  for (const item of items) {
+    const channel = channelOf(item);
+    const last = runs[runs.length - 1];
+    if (last && last.channel === channel) last.items.push(item);
+    else runs.push({ channel, items: [item] });
+  }
+  return runs;
+}
+
+/**
+ * 复原步的执行通道：'ps'（Win32/SPI P/Invoke，可并入单脚本）、'hotkey'
+ * （set_zoom 的 Ctrl+0 —— 走 system 热键管线，黑名单执法面不可绕）、
+ * 'noop'（raise_window：z-order 不可逆，文档化 no-op —— 无需任何往返）。
+ */
+function undoChannelOf(recipe: UndoRecipe): 'ps' | 'hotkey' | 'noop' {
+  switch (recipe.kind) {
+    case 'maximize_window':
+    case 'move_window':
+    case 'set_contrast': return 'ps';
+    case 'set_zoom': return 'hotkey';
+    default: return 'noop'; // raise_window
+  }
+}
+
+/** 批脚本的标记行：`R<index>|OK` / `R<index>|ERR|<消息>`（消息内换行折为空格） */
+const UNDO_MARKER_RE = /^R(\d+)\|(OK|ERR)(?:\|(.*))?$/;
+
+/** PS 异常消息的单行化（标记行协议必须逐行可解析） */
+const PS_MSG_FLATTEN = "([string]$_.Exception.Message).Replace([char]13,' ').Replace([char]10,' ')";
+
+/**
+ * ΝΩ-25(a)：LIFO 复原段 → 单个 PS 脚本。Add-Type 声明只在头部出现一次
+ * （多步共享一次 P/Invoke 编译）；每步包独立 try/catch —— 单步失败发 ERR
+ * 标记、不阻断后续步（「部分复原优于中止」在脚本内同样成立）。窗口不在场
+ * （未命中进程）⇒ 无变更、记 OK（与单条 undo 的诚实 no-op 同律）。
+ * 纯字符串编译；$ErrorActionPreference='Stop' 确保 try 内错误可捕获。
+ */
+function compileUndoPsScript(steps: readonly UndoStep[]): string {
+  let needsUser32 = false;
+  let needsHc = false;
+  const bodies: string[] = [];
+  for (const step of steps) {
+    const r = step.recipe;
+    const tag = `R${step.index}`;
+    const catchArm = `} catch { Write-Output ('${tag}|ERR|' + ${PS_MSG_FLATTEN}) }`;
+    if (r.kind === 'set_contrast') {
+      // O 纪元（#17）：精确还原 apply 前读到的 flags；未知 ⇒ 0（保守）
+      needsHc = true;
+      const orig = Number.parseInt(r.before?.theme ?? '0', 10);
+      const flags = Number.isFinite(orig) ? orig : 0;
+      bodies.push(`try { [Win.U32HC]::SetHC(${flags}) | Out-Null; Write-Output '${tag}|OK' ${catchArm}`);
+      continue;
+    }
+    // maximize_window / move_window：查找 → 置前 → 还原窗口态 →（有快照）精确归位
+    needsUser32 = true;
+    const b = r.before;
+    let mutate: string;
+    if (typeof b?.x === 'number' && typeof b.y === 'number') {
+      const w = typeof b.width === 'number' && b.width > 0 ? Math.round(b.width) : 0;
+      const h = typeof b.height === 'number' && b.height > 0 ? Math.round(b.height) : 0;
+      const flags = w > 0 && h > 0 ? 0x4 : 0x4 | 0x1; // 有尺寸快照 ⇒ 精确归位；否则 SWP_NOSIZE
+      mutate = `[Win.U32]::ShowWindowAsync($h, ${b.maximized ? 3 : 1}) | Out-Null; `
+        + `[Win.U32]::SetWindowPos($h, [IntPtr]::Zero, ${Math.round(b.x)}, ${Math.round(b.y)}, ${w}, ${h}, ${flags}) | Out-Null`;
+    } else {
+      // 无几何快照：止步于还原窗口态（与旧单条路径的诚实降级同律）
+      mutate = `[Win.U32]::ShowWindowAsync($h, 1) | Out-Null`;
+    }
+    bodies.push(
+      `try { `
+      + `$p = Get-Process | Where-Object { $_.MainWindowTitle -like '*' + ${psLiteral(r.titleHint ?? '')} + '*' } | Select-Object -First 1; `
+      + `if ($p) { $h = [IntPtr]$p.MainWindowHandle; [Win.U32]::SetForegroundWindow($h) | Out-Null; ${mutate} }; `
+      + `Write-Output '${tag}|OK' `
+      + catchArm);
+  }
+  const decls = `${needsUser32 ? `${USER32_DECL}; ` : ''}${needsHc ? `${HC_DECL}; ` : ''}`;
+  return `$ErrorActionPreference = 'Stop'; ${decls}${bodies.join(' ')}`;
+}
+
 export class WindowsAdapter implements SystemAdapter {
   readonly platform = 'win32';
   private probe: (cmd: string) => boolean;
@@ -381,28 +485,34 @@ export class WindowsAdapter implements SystemAdapter {
     return { hwnd: 0, title: '' };
   }
 
-  private async activate(hwnd: number): Promise<void> {
-    await this.runPs(`${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hwnd}) | Out-Null`);
-  }
-
   async apply(action: ShaperAction): Promise<UndoRecipe> {
     // O 纪元（#17 真机执法抓出的潜伏 bug）：set_contrast 是系统级动作，
     // 不需要窗口句柄 —— 旧实现无条件解析 hwnd 且空标题必 throw，真机上
     // apply({kind:'set_contrast'}) 从未可达（注入式测试的 exec 恒返 '4\n' 掩盖）。
     const needsWindow = action.kind !== 'set_contrast';
     const hint = action.titleHint ?? '';
-    const hit = needsWindow ? await this.hwndOf(hint) : { hwnd: 1, title: '' };
-    if (needsWindow && hit.hwnd === 0) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
+    // ΝΩ-25(b)：raise_window 的查找+置前已并入单脚本（顶部不再预解析 —— 省一次
+    // PS 冷启动）；maximize/move/set_zoom 仍预解析句柄（几何快照 / 热键前台 / 变异脚本复用）
+    const preResolve = needsWindow && action.kind !== 'raise_window';
+    const hit = preResolve ? await this.hwndOf(hint) : { hwnd: 1, title: '' };
+    if (preResolve && hit.hwnd === 0) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
     switch (action.kind) {
       case 'raise_window': {
-        await this.activate(hit.hwnd);
+        // ΝΩ-25(b)：查找 + 置前合并为单次往返（旧路径 hwndOf→activate 两次 PS 冷启动；
+        // 未命中 ⇒ 脚本内零变更，JS 侧照旧抛 no-window —— 物理语义不变）
+        const script = `${USER32_DECL}; $p = Get-Process | Where-Object { $_.MainWindowTitle -like '*' + ${psLiteral(hint)} + '*' } | Select-Object -First 1; `
+          + `if ($p) { "$($p.MainWindowHandle)||$($p.MainWindowTitle)"; [Win.U32]::SetForegroundWindow([IntPtr]$p.MainWindowHandle) | Out-Null } else { '0||' }`;
+        const { stdout } = await this.runPs(script);
+        const [h, t] = stdout.trim().split('||');
+        const hwnd = Number.parseInt(h ?? '', 10);
+        if (!(Number.isFinite(hwnd) && hwnd > 0)) throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
         // z-order 不可逆：undo 为文档化 no-op；matchedTitle 供 switch_window 取证
-        return { kind: 'raise_window', titleHint: hint, matchedTitle: hit.title };
+        return { kind: 'raise_window', titleHint: hint, matchedTitle: (t ?? '').trim() };
       }
       case 'maximize_window': {
         const before = await this.getWindowGeometry(hint);
-        await this.activate(hit.hwnd);
-        await this.runPs(`${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hit.hwnd}, 3) | Out-Null`); // SW_MAXIMIZE
+        // ΝΩ-25(b)：置前 + 最大化合并为单次往返（Add-Type 只编译一次）
+        await this.runPs(`${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hit.hwnd}) | Out-Null; [Win.U32]::ShowWindowAsync([IntPtr]${hit.hwnd}, 3) | Out-Null`); // SW_MAXIMIZE
         return { kind: 'maximize_window', titleHint: hint, before: before ?? undefined, matchedTitle: hit.title };
       }
       case 'move_window': {
@@ -410,10 +520,9 @@ export class WindowsAdapter implements SystemAdapter {
           throw new Error('move_window requires numeric x and y');
         }
         const before = await this.getWindowGeometry(hint);
-        await this.activate(hit.hwnd);
-        // SWP_NOSIZE(0x1) | SWP_NOZORDER(0x4)：只移不改尺寸/层级
+        // SWP_NOSIZE(0x1) | SWP_NOZORDER(0x4)：只移不改尺寸/层级；置前合并同一次往返（ΝΩ-25(b)）
         await this.runPs(
-          `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hit.hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`);
+          `${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hit.hwnd}) | Out-Null; [Win.U32]::SetWindowPos([IntPtr]${hit.hwnd}, [IntPtr]::Zero, ${Math.round(action.x)}, ${Math.round(action.y)}, 0, 0, 5) | Out-Null`);
         return { kind: 'move_window', titleHint: hint, before: before ?? undefined, matchedTitle: hit.title };
       }
       case 'set_zoom': {
@@ -437,43 +546,69 @@ export class WindowsAdapter implements SystemAdapter {
     }
   }
 
+  /** 单步置前（set_zoom 专用：热键需要目标前台） */
+  private async activate(hwnd: number): Promise<void> {
+    await this.runPs(`${USER32_DECL}; [Win.U32]::SetForegroundWindow([IntPtr]${hwnd}) | Out-Null`);
+  }
+
   async undo(recipe: UndoRecipe): Promise<void> {
-    switch (recipe.kind) {
-      case 'raise_window':
-        return; // z-order 不可逆：文档化 no-op（撤销栈如实记录）
-      case 'maximize_window':
-      case 'move_window': {
-        const { hwnd } = await this.hwndOf(recipe.titleHint ?? '');
-        if (hwnd === 0) return; // 窗口已不存在：诚实 no-op
-        const b = recipe.before;
-        await this.activate(hwnd);
-        if (typeof b?.x === 'number' && typeof b.y === 'number') {
-          await this.runPs(`${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, ${b.maximized ? 3 : 1}) | Out-Null`);
-          const w = typeof b.width === 'number' && b.width > 0 ? Math.round(b.width) : 0;
-          const h = typeof b.height === 'number' && b.height > 0 ? Math.round(b.height) : 0;
-          const flags = w > 0 && h > 0 ? 0x4 : 0x4 | 0x1; // 有尺寸快照 ⇒ 精确归位；否则 SWP_NOSIZE
-          await this.runPs(
-            `${USER32_DECL}; [Win.U32]::SetWindowPos([IntPtr]${hwnd}, [IntPtr]::Zero, ${Math.round(b.x)}, ${Math.round(b.y)}, ${w}, ${h}, ${flags}) | Out-Null`);
-        } else {
-          // 无几何快照：止步于还原窗口态（与 LinuxAdapter 的诚实降级同律）
-          await this.runPs(`${USER32_DECL}; [Win.U32]::ShowWindowAsync([IntPtr]${hwnd}, 1) | Out-Null`);
-        }
-        return;
-      }
-      case 'set_zoom': {
+    // ΝΩ-25(a)：单条复原走批处理编译器（单步批 = 1 次 PS 往返；旧逐条路径
+    // 每条最多 4 次往返：查找/置前/窗口态/归位各一次冷启动）
+    const [outcome] = await this.undoBatch([recipe]);
+    if (outcome && !outcome.ok) throw new Error(outcome.reason ?? 'undo failed');
+  }
+
+  /**
+   * ΝΩ-25(a)：批量复原 —— LIFO 序列按执行通道做同类相邻合并后整段下发：
+   * PS 通道（窗口几何 / 高对比度）每段编译为单个脚本、一次 spawn、Add-Type
+   * 只编译一次；hotkey 通道逐条走 system 热键管线（黑名单执法面不可绕）；
+   * noop 通道零往返。逐条错误信封不打折：单步失败记 reason、不阻断其余步。
+   */
+  async undoBatch(recipes: readonly UndoRecipe[]): Promise<Array<{ ok: boolean; reason?: string }>> {
+    const outcomes: Array<{ ok: boolean; reason?: string }> = recipes.map(() => ({ ok: true }));
+    const steps: UndoStep[] = recipes.map((recipe, index) => ({ index, recipe }));
+    for (const run of coalesceAdjacentRuns(steps, s => undoChannelOf(s.recipe))) {
+      if (run.channel === 'noop') continue; // raise_window：z-order 不可逆，文档化 no-op
+      if (run.channel === 'hotkey') {
         const { system } = await import('./system');
-        await system.pressHotkey(['ctrl', '0']);
-        return;
+        for (const s of run.items) {
+          try { await system.pressHotkey(['ctrl', '0']); } // 归零策略：站点内部态不可读
+          catch (e: any) { outcomes[s.index] = { ok: false, reason: e?.message ?? String(e) }; }
+        }
+        continue;
       }
-      case 'set_contrast': {
-        // O 纪元（#17）：精确还原 apply 前读到的 flags —— 原本就开着高对比度
-        // （奇数 flags）的机器，& ~0x1 会错关用户自己的设置；未知 ⇒ 0（保守）。
-        const orig = Number.parseInt(recipe.before?.theme ?? '0', 10);
-        const flags = Number.isFinite(orig) ? orig : 0;
-        await this.runPs(setHighContrastPs(String(flags)));
-        return;
+      // ps 通道：整段一个脚本一次往返
+      let lines: string[] = [];
+      let runError: string | null = null;
+      try {
+        const { stdout } = await this.runPs(compileUndoPsScript(run.items));
+        lines = stdout.split(/\r?\n/);
+      } catch (e: any) {
+        runError = e?.message ?? String(e); // spawn 失败/整脚本退出非零 ⇒ 整段记因
+      }
+      const reported = new Set<number>();
+      if (runError === null) {
+        for (const line of lines) {
+          const m = UNDO_MARKER_RE.exec(line.trim());
+          if (!m) continue;
+          const idx = Number.parseInt(m[1]!, 10);
+          if (reported.has(idx)) continue; // 同步重复标记：首见为准（防御式）
+          reported.add(idx);
+          if (m[2] === 'OK') outcomes[idx] = { ok: true };
+          else outcomes[idx] = { ok: false, reason: m[3] ?? 'powershell undo step failed' };
+        }
+      }
+      // 对账：零标记方言（旧 exec 桩只回显数值）⇒ 视为整段成功（兼容）；有任一
+      // 标记 ⇒ 严格对账，缺席步记失败（脚本中断而退出码为零的防御性不信任）
+      if (reported.size > 0 || runError !== null) {
+        for (const s of run.items) {
+          if (!reported.has(s.index)) {
+            outcomes[s.index] = { ok: false, reason: runError ?? `ps undo batch: no completion marker for R${s.index}` };
+          }
+        }
       }
     }
+    return outcomes;
   }
 
   async getWindowGeometry(titleHint: string): Promise<WindowGeometry | null> {
@@ -655,9 +790,28 @@ class Shaper implements EnvironmentShaper {
     this.ensure();
     const results: ShaperResult[] = [];
     // LIFO：后做的先还原 —— 依赖序天然正确（先 move 后 maximize 的逆序复原）
+    const pending: UndoRecord[] = [];
     for (let i = this.undoLog.length - 1; i >= 0; i--) {
       const rec = this.undoLog[i];
-      if (rec.undone) continue;
+      if (!rec.undone) pending.push(rec);
+    }
+    if (pending.length === 0) return results;
+    // ΝΩ-25(a)：适配器支持批量复原 ⇒ 整条 LIFO 序列一次下发（Windows：整段
+    // 编译为单个 PS 脚本、Add-Type 只编译一次）；逐条错误信封不打折。
+    if (typeof this.adapter.undoBatch === 'function') {
+      try {
+        const outcomes = await serialize(() => this.adapter.undoBatch!(pending.map(r => r.recipe)));
+        this.applyUndoOutcomes(pending, outcomes, results);
+      } catch (e: any) {
+        const reason = e?.message ?? String(e);
+        for (const rec of pending) {
+          rec.undoFailureReason = reason;
+          results.push({ token: rec.token, ok: false, reason });
+        }
+      }
+      return results;
+    }
+    for (const rec of pending) {
       try {
         await serialize(() => this.adapter.undo(rec.recipe));
         rec.undone = true;
@@ -671,6 +825,27 @@ class Shaper implements EnvironmentShaper {
       }
     }
     return results;
+  }
+
+  /** ΝΩ-25：批复原结果回填（与逐条路径同构 —— undone/undoneAt/undoFailureReason 三态记账） */
+  private applyUndoOutcomes(
+    pending: UndoRecord[],
+    outcomes: ReadonlyArray<{ ok: boolean; reason?: string }>,
+    results: ShaperResult[],
+  ): void {
+    for (let i = 0; i < pending.length; i++) {
+      const rec = pending[i];
+      const oc = outcomes[i];
+      if (oc && oc.ok) {
+        rec.undone = true;
+        rec.undoneAt = Date.now();
+        results.push({ token: rec.token, ok: true });
+      } else {
+        const reason = oc?.reason ?? 'undoBatch: missing outcome';
+        rec.undoFailureReason = reason;
+        results.push({ token: rec.token, ok: false, reason });
+      }
+    }
   }
 
   dumpUndoLog(): UndoRecord[] {

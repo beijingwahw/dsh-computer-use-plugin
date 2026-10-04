@@ -20,7 +20,7 @@ export interface ProviderProbe {
   latencyMs: number;
   /** 一句中文：通了/未配置/超时/HTTP 状态/错误摘要 —— 绝不泄漏 apiKey 值 */
   detail: string;
-  /** 探测响应是否像视觉模型（回复非空且无 'image not supported' 类字样） */
+  /** 探测响应是否像视觉模型（回复非空且不含明确「拒绝/不支持图像」语义 —— ΑΩ-R8） */
   visionGuessed: boolean;
 }
 
@@ -28,8 +28,45 @@ export interface ProviderProbe {
 const PROBE_TIMEOUT_MS = 15_000;
 /** 探针的回复预算 —— 只需要一句「ok」，8 token 足矣 */
 const PROBE_MAX_TOKENS = 8;
-/** 「模型不支持图像」类文案的嗅探模式 —— 命中即判 visionGuessed:false */
-const UNSUPPORTED_HINT_RE = /unsupport|not support|image/i;
+/**
+ * 「模型明确拒绝/不支持图像」的拒绝语义模式族（ΑΩ-R8 收紧）—— 仅命中才判
+ * visionGuessed:false。旧判据 /unsupport|not support|image/i 裸匹配 "image" 一词，
+ * 正常视觉回复（"The image shows a red button"）即被误杀。
+ *
+ * 边界取舍（ΑΩ-R8）：拿不准 ⇒ 不命中 ⇒ 判 true（保守信任视觉能力）——
+ * 误杀真视觉模型的代价（整条视觉链路被错误降级）高于漏判一个纯文本脑
+ * （后续真调用自然暴露），与项目「宁可不确定不可乱判」的降级方向一致。
+ * 故本族只收录明确拒绝形态（cannot process / does not support /
+ * image inputs are not supported / unsupported / 只能处理文本 等），
+ * 模糊表述（如 "I don't see text"、"I am a language model"）一律放行。
+ */
+const UNSUPPORTED_HINT_RE = new RegExp([
+  // —— 英文拒绝语义 ——
+  // ① 助动词否定 + 能力动词："This model does not support vision" / "don't accept images"
+  String.raw`(?:don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not)\s+(?:currently\s+|directly\s+|yet\s+)?(?:support|accept|process|handle|understand|recogni[sz]e)`,
+  // ② cannot/can't + 感知/处理动词："I cannot process image inputs" / "I can't see any image"
+  String.raw`(?:cannot|can\s+not|can['’]?t)\s+(?:currently\s+)?(?:see|view|accept|process|handle|interpret|understand|recogni[sz]e|display|receive|access)`,
+  // ③ (not) able to + 动词："unable to process images" / "not able to view"
+  String.raw`(?:unable|not\s+able)\s+to\s+(?:see|view|accept|process|handle|support|interpret|understand|recogni[sz]e|display|receive|access)`,
+  // ④ image(s)/vision/… (input(s)) not supported："image inputs are not supported"
+  String.raw`(?:images?|photos?|pictures?|vision|visual|multimodal)\s+(?:inputs?\s+)?(?:(?:are|is)\s+)?not\s+(?:supported|allowed|accepted|enabled)`,
+  // ⑤ 缩写否定 + supported 族："images aren't supported" / "vision isn't allowed"
+  String.raw`(?:aren['’]?t|isn['’]?t)\s+(?:supported|allowed|accepted|enabled)`,
+  // ⑥ unsupport* 词族（API 错误风）："unsupported content type" / "unsupported for vision requests"
+  String.raw`\bunsupport`,
+  // ⑦ 纯文本域自述："only supports text" / "can only process text" / "text-only model"
+  String.raw`only\s+(?:supports?|handles?|accepts?|processes?|understands?)\s+(?:plain\s+)?text`,
+  String.raw`can\s+only\s+(?:process|handle|accept|understand|generate|work(?:\s+with)?)\s+(?:plain\s+)?text`,
+  String.raw`text[-\s]?(?:only|based)\s+(?:model|assistant|ai|input|mode)`,
+  // —— 中文拒绝语义 ——
+  // ⑧ 「不支持…图像/图片/视觉/输入」："当前模型不支持图像输入"
+  String.raw`不\s*支持[^。！？]{0,12}?(?:图像|图片|视觉|多模态|输入|image|vision|photo)`,
+  // ⑨ 「无法/不能 + 处理/查看…（图像）」："抱歉，我无法处理 image。"
+  String.raw`(?:无法|不能|没法)(?:查看|看到|识别|处理|解析|理解|接收|接受|读取|显示)`,
+  String.raw`(?:无法|不能|没法)[\s,，、]{0,3}(?:图像|图片|视觉|image|photo|picture)`,
+  // ⑩ 「只能/仅支持…文本」："我只能处理文本" / "仅支持文本输入"
+  String.raw`(?:只能|仅能|只可以|仅支持|只支持)[^。！？]{0,6}?(?:文本|text)`,
+].join('|'), 'i');
 /** 模型发现超时缺省 */
 const DISCOVER_TIMEOUT_MS = 10_000;
 
@@ -106,8 +143,9 @@ function whitePixelJpeg(): Promise<string> {
  * - 已配置 ⇒ 发一张 1x1 白图（sharp 现场生成 JPEG）+ prompt「回复 ok」
  *   （maxTokens 8 / maxRetries 0 —— 探针不重试，一次不通就快速让位），latency 记测
  * - ok 判定：chat 结果 ok 且 text 非空
- * - visionGuessed 判定：结果 text 不含 /unsupport|not support|image/i
- *   （回复像「This model does not support image input」的纯文本脑 ⇒ false）
+ * - visionGuessed 判定：结果 text 不命中 UNSUPPORTED_HINT_RE 拒绝语义族
+ *   （ΑΩ-R8：仅明确拒绝形态（"cannot process image inputs" 等）才判 false；
+ *   正常视觉回复含 "image" 一词不算拒绝 —— 拿不准 ⇒ true 保守信任视觉能力）
  * - detail 一句中文（通了/未配置/超时/HTTP 状态/错误摘要），经密钥卫生兜底 —— 绝不泄 key
  *
  * @param provider 任意兄弟适配器铸造出的 VisionProvider（或测试桩）

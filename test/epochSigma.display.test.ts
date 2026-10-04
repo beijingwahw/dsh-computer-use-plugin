@@ -12,13 +12,12 @@
 //      take_screenshot 工具 schema 含 display、锚点 display 字段（假 system 注入）
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { join, dirname, resolve as pathResolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startPythonService, stopPythonService } from './lib/serviceHarness.mjs';
 
 const repoRoot = pathResolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -38,66 +37,21 @@ test('Σ-5①: python -m compileall 通过（screen.py/routes.py 多屏改动无
 });
 
 // ─── ② 真端到端：spawn 真实 Python 微服务 ───
+// ΝΩ-49：起服务三件套（动态端口 + 一次性密钥 + 探活）收敛到 test/lib/serviceHarness.mjs
+// 共享基建 —— 行为与原本地实现逐字一致（同 bin 'python'、同 env、同 250ms 轮询 /
+// 25s 上限 / 1s 单探超时），本册本就是测试级共享服务（册顶一次 spawn，E2E 各例连接）。
 
-interface PyService {
-  proc: ChildProcess;
-  port: number;
-  keyPath: string;
-  baseUrl: string;
-  pyOut: string;
-}
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const p = (srv.address() as { port: number }).port;
-      srv.close(() => resolve(p));
-    });
-  });
-}
-
-/** 起服务：随机空闲端口 + 一次性密钥 + base64 传输（免 mmap 文件）。
- *  探活 25s 失败 ⇒ 返回 null（调用方按仓库先例 skip，不判 fail —— 环境信号非代码信号）。 */
-async function startPythonService(): Promise<PyService | null> {
-  const port = await freePort();
-  const tmp = mkdtempSync(join(tmpdir(), 'dsh-sigma5-'));
-  const keyPath = join(tmp, 'test.key');
-  writeFileSync(keyPath, randomBytes(32));
-  const proc = spawn('python', ['-m', 'dsh_physical'], {
-    cwd: join(repoRoot, 'python_service'),
-    env: {
-      ...process.env,
-      DSH_PHYSICAL_TRANSPORT: 'tcp',
-      DSH_PHYSICAL_TCP_HOST: '127.0.0.1',
-      DSH_PHYSICAL_TCP_PORT: String(port),
-      DSH_PHYSICAL_KEY_PATH: keyPath,
-      DSH_PHYSICAL_SHOT_TRANSPORT: 'base64',
-      DSH_PHYSICAL_PID_ATTESTATION: 'false',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let pyOut = '';
-  proc.stdout?.on('data', d => { pyOut += d; });
-  proc.stderr?.on('data', d => { pyOut += d; });
-
-  const baseUrl = `http://127.0.0.1:${port}/v1`;
-  const deadline = Date.now() + 25_000;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) return null; // 启动即退（缺依赖等）
-    try {
-      const r = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1000) });
-      if (r.ok) return { proc, port, keyPath, baseUrl, pyOut };
-    } catch { /* 尚未就绪 */ }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  try { proc.kill(); } catch { /* noop */ }
-  try { rmSync(tmp, { recursive: true, force: true }); } catch { /* noop */ }
-  return null;
-}
-
-const svc = await startPythonService();
+const svc = await startPythonService({
+  cwd: join(repoRoot, 'python_service'),
+  env: ({ port, keyPath }) => ({
+    DSH_PHYSICAL_TRANSPORT: 'tcp',
+    DSH_PHYSICAL_TCP_HOST: '127.0.0.1',
+    DSH_PHYSICAL_TCP_PORT: String(port),
+    DSH_PHYSICAL_KEY_PATH: keyPath,
+    DSH_PHYSICAL_SHOT_TRANSPORT: 'base64',
+    DSH_PHYSICAL_PID_ATTESTATION: 'false',
+  }),
+});
 
 // 服务所在平台（/health 免鉴权）：越界 400 断言仅 Windows（其余平台按契约诚实降级主屏）
 let svcPlatform = '';
@@ -114,18 +68,18 @@ const skipNote = 'Python 物理微服务未能在本环境拉起（探活失败�
 
 if (svc) {
   after(() => {
-    try { svc.proc.kill(); } catch { /* noop */ }
-    try { rmSync(dirname(svc.keyPath), { recursive: true, force: true }); } catch { /* noop */ }
+    stopPythonService(svc); // kill + 密钥 tmp 目录清场（幂等，不抛）
   });
 }
 
-test('Σ-5②(环境): Python 服务端到端段执行状态如实申报', () => {
+// ΝΩ-38 诚实度修正：原唯一断言 assert.ok(true)（永真）——「通过」计数虚胖。改 {skip}：
+// 环境状态由 maybeE2E 段的实际执行/skip 计数如实反映，不再以永真断言充数（skip 后本体不执行）。
+test('Σ-5②(环境): Python 服务端到端段执行状态如实申报', { skip: '申报性测试：原唯一断言 assert.ok(true) 永真——状态改由 E2E 段实际执行/skip 计数如实反映（ΝΩ-38）' }, () => {
   if (svc) {
     console.log(`[Σ-5] 真服务已起 http://127.0.0.1:${svc.port}/v1（platform=${svcPlatform || '?'}）—— E2E 段全量执行`);
   } else {
     console.log(`[Σ-5] ${skipNote}`);
   }
-  assert.ok(true); // 申报性测试：永远通过，状态见 stdout
 });
 
 // 鉴权头：与 Python 端 auth 中间件同一 HMAC 契约（capToken.ts 铸 X-Cap-Token）

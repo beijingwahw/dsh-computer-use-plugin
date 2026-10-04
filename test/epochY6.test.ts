@@ -269,3 +269,97 @@ test('D-D11-3: 阈值立法在源 —— TRAJECTORY_NEAR_EPS = 1/TRAJECTORY_GRID
   assert.ok(src.includes('const TRAJECTORY_NEAR_EPS = 1 / TRAJECTORY_GRID'), '叶级近参数阈立法在源（= 桶宽，单一常量语义）');
   assert.ok(src.includes('function isNearParam'), '桶判等 ∪ 叶级距离判等的执法函数在场');
 });
+
+// ═── ΑΩ-R24：popupGuard 弹窗态的会话隔离（Y6 立法补全）══════════════
+
+test('R24-1: 弹窗态跨会话隔离 —— 会话 A 的弹窗不得拦会话 B 的动作', async () => {
+  const { registerPopupGuard, updatePopupState, resetPopupState, TACTICAL_PAUSE } =
+    await import('../src/guards/popupGuard.ts');
+  resetPopupState();
+  const ctx = fakeCtx();
+  registerPopupGuard(ctx);
+
+  // 会话 A 传感器上报弹窗 ⇒ A 的动作被拦（会话内联动语义保持），话术逐字不变
+  updatePopupState(true, 'r24-A');
+  const blockedA = await drivePre(ctx, exec('click_mouse', { x: 0.5, y: 0.5 }, 'r24-A'));
+  assert.equal(blockedA.kind, 'deny', 'A 自己的弹窗仍拦 A');
+  assert.equal(blockedA.reason, TACTICAL_PAUSE, '拦截话术逐字不变（TACTICAL_PAUSE 单一事实源）');
+
+  // 会话 B：同一管线时刻 —— B 的动作放行（旧单例在此被 A 的弹窗态误拦）
+  const passB = await drivePre(ctx, exec('click_mouse', { x: 0.5, y: 0.5 }, 'r24-B'));
+  assert.equal(passB.kind, 'accept', 'B 不被 A 的弹窗态误拦（工单主诉修复面）');
+
+  // B 的传感器上报无弹窗 ⇒ 不得清除 A 的弹窗态（写隔离，互不污染）
+  updatePopupState(false, 'r24-B');
+  const stillBlockedA = await drivePre(ctx, exec('type_text', { text: 'x' }, 'r24-A'));
+  assert.equal(stillBlockedA.kind, 'deny', 'B 的无弹窗上报不清 A 的态');
+
+  // 白名单不变：传感器与处理器在弹窗活跃期照常工作
+  assert.equal((await drivePre(ctx, exec('take_screenshot', {}, 'r24-A'))).kind, 'accept', '传感器白名单不变');
+  assert.equal((await drivePre(ctx, exec('dismiss_popup', {}, 'r24-A'))).kind, 'accept', '处理器白名单不变');
+});
+
+test('R24-2: 旧调用面零回归 —— 无 sessionId 的写/读落在 default 单例键（拦截语义保持）', async () => {
+  const { registerPopupGuard, updatePopupState, getPopupState, resetPopupState } =
+    await import('../src/guards/popupGuard.ts');
+  resetPopupState();
+  const ctx = fakeCtx();
+  registerPopupGuard(ctx);
+
+  // 旧写法（无 sessionId）+ 旧表面（exec 无 agent.id）：拦 / 放行语义与旧单例一致
+  updatePopupState(true);
+  assert.equal(getPopupState(), true, '无参读 = 全局最新读数（旧单例语义）');
+  const noAgent = { name: 'click_mouse', arguments: { x: 0.5, y: 0.5 } };
+  assert.equal((await drivePre(ctx, noAgent)).kind, 'deny', '旧表面拦截语义保持');
+
+  updatePopupState(false);
+  assert.equal((await drivePre(ctx, noAgent)).kind, 'accept', '复位后放行（旧语义）');
+});
+
+test('R24-3: 无会话读者桥 —— 带会话写入对无参 getPopupState() 仍可见（canary/interactivity 语义不变）', async () => {
+  const { updatePopupState, getPopupState, resetPopupState } =
+    await import('../src/guards/popupGuard.ts');
+  resetPopupState();
+
+  updatePopupState(true, 'r24-sess');
+  assert.equal(getPopupState(), true, '旧单例 = 全局最新读数：会话写入镜像到 default');
+  assert.equal(getPopupState('r24-sess'), true, '会话键自身可读');
+  assert.equal(getPopupState('r24-other'), false, '其他会话键隔离（新会话全新开始）');
+});
+
+test('R24-4: 陈旧会话清理 —— 10 分钟无更新的活跃弹窗态读取时过期物理清除', async () => {
+  const { updatePopupState, getPopupState, resetPopupState, popupSessionCount } =
+    await import('../src/guards/popupGuard.ts');
+  resetPopupState();
+  const origNow = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    updatePopupState(true, 'r24-stale');
+    const sizeFresh = popupSessionCount();
+    assert.equal(getPopupState('r24-stale'), true, '新鲜读：弹窗态在场');
+
+    clock += 10 * 60 * 1000 + 1; // 超过 POPUP_STALE_MS（10 分钟）1ms
+    assert.equal(getPopupState('r24-stale'), false, '陈旧读：视为无弹窗（弹窗态短命，不无限拦）');
+    assert.ok(popupSessionCount() < sizeFresh, '过期即物理清除（非仅读时屏蔽）');
+
+    clock = 1_000_000; // 回拨时钟 —— 已清除的态不得复活（防僵尸拦截）
+    assert.equal(getPopupState('r24-stale'), false, '清除后回拨时钟不复活');
+  } finally {
+    Date.now = origNow;
+  }
+});
+
+test('R24-5: LRU 容量 —— 会话键封顶 32，满逐最旧；default 基础设施键免逐', async () => {
+  const { updatePopupState, getPopupState, popupSessionCount, resetPopupState } =
+    await import('../src/guards/popupGuard.ts');
+  resetPopupState();
+
+  updatePopupState(true, 'r24-first'); // 最旧会话键（将最先被逐）
+  for (let i = 0; i < 32; i++) updatePopupState(true, `r24-lru-${i}`); // 灌满 32
+  assert.equal(popupSessionCount(), 33, '32 会话键 + default（免逐的基础设施键）');
+  assert.equal(getPopupState('r24-first'), false, '最旧会话键被逐出（LRU 满逐最旧）');
+  assert.equal(getPopupState('r24-lru-0'), true, '界内最旧会话键仍在');
+  assert.equal(getPopupState('r24-lru-31'), true, '最新会话键仍在');
+  assert.equal(getPopupState(), true, 'default 全局视图不受逐出影响');
+});

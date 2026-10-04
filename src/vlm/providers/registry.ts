@@ -45,6 +45,13 @@ export interface ResolvedProviderConfig {
   model: string;
   /** 归因：'explicit'=显式 provider id；'baseurl'=baseUrl 线索；'env'=环境变量自动识别 */
   via: 'explicit' | 'baseurl' | 'env';
+  /**
+   * ΑΩ-R35（兼容立法的观测注记）：仅 via='env' 路且 ≥2 个平台的密钥环境变量
+   * 同时在场时为 true —— 选择律不变（声明序首位/GLM 兼容优先），但双平台
+   * env 并存这一事实不再静默：日志/测试据此可见「宿主同时配了多家脑，系统
+   * 按兼容序选了首位」。其余路径与单平台场景缺省（零形状变化）。
+   */
+  ambiguousEnv?: boolean;
 }
 
 /** 自定义合成预设的固定 id（baseUrl 未命中任何已知平台时使用） */
@@ -321,6 +328,8 @@ export function detectPresetFromEnv(): PlatformPreset | null {
  *   4. 全无 ⇒ null。
  * 三物料的取值律（各路同法）：opts 显式值 > env 首命中（预设 envKeys） > 预设
  * 缺省值；baseUrl/model 无 env 来源；apiKey 兜底 ''（本地服务允许）。
+ * ΑΩ-R35：路 3 且 ≥2 平台 env 并存 ⇒ 结果附 ambiguousEnv:true（选择不变，
+ * 仅供观测）。
  * 空串/纯空白 opts 值视为缺席。绝不抛异常。
  */
 export function resolveProviderConfig(opts?: {
@@ -360,15 +369,22 @@ export function resolveProviderConfig(opts?: {
     };
   }
 
-  // 路 3：环境变量自动识别（声明序首个命中）
+  // 路 3：环境变量自动识别（声明序首个命中；GLM 首位兼容律保持不变）
   const preset = detectPresetFromEnv();
   if (!preset) return null;
+  // ΑΩ-R35（ambiguousEnv 注记）：多平台密钥同时在场 ⇒ 如实标注（选择不变）。
+  // 本地预设 envKeys 恒空数组，天然不计入歧义。
+  let envPlatforms = 0;
+  for (const p of PLATFORM_PRESETS) {
+    if (firstEnvValue(p.envKeys) !== '') envPlatforms++;
+  }
   return {
     preset,
     apiKey: optKey !== '' ? optKey : firstEnvValue(preset.envKeys),
     baseUrl: preset.baseUrl,
     model: optModel !== '' ? optModel : preset.defaultModel,
     via: 'env',
+    ...(envPlatforms >= 2 ? { ambiguousEnv: true } : {}),
   };
 }
 

@@ -12,22 +12,27 @@ const HASH_BITS = 64; // 8x8 有效比较位
  * 物理/逻辑位序与 dhash() 一致由「同一进制展开」保证 —— 所有服务端指纹
  * 经同一函数转换后，与本地指纹共用 hammingDistance/similarity 比较器。
  * 已是位串（64×'0'/'1'）则原样透传（混合部署时的宽容性）。
+ * ΝΩ-24：长度校验 —— 旧实现对任意长度 hex 按 hex.length*4 补位，非 16-hex
+ * 输入（截断/超长/脏串）产出非 64 位串被静默吞（下游汉明距离错尺判决）。
+ * 非法返回 null 上浮 unverifiable（Δ-7 保守律同向）；合法域收窄为恰
+ * HASH_BITS/4 = 16 位 hex。
  */
 export function hexToBits(hex) {
     if (/^[01]+$/.test(hex) && hex.length === HASH_BITS)
         return hex;
-    let n;
-    try {
-        n = BigInt(`0x${hex}`);
-    }
-    catch {
-        return '0'.repeat(HASH_BITS);
-    }
-    return n.toString(2).padStart(hex.length * 4, '0');
+    if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== HASH_BITS / 4)
+        return null;
+    return BigInt(`0x${hex}`).toString(2).padStart(HASH_BITS, '0');
 }
-/** 宽容归一：本地 dhash 位串 / 服务端 hex 统一进位串域 */
+/** 宽容归一：本地 dhash 位串 / 服务端 hex 统一进位串域。
+ *  ΝΩ-24 调用方防御：hexToBits 的 null 就地收敛为全零哨兵 —— Δ-7
+ *  reportEffect 的 'zero' 退化臂以其为输入契约（全零 = 信息量零 ⇒
+ *  unverifiable，不产边界假信号）；绝不把 null 击穿到无守卫的
+ *  hamming/similarity 调用方（外部消费面零行为回归）。 */
 export function normalizeHash(h) {
-    return /^[01]+$/.test(h) ? h : hexToBits(h);
+    if (/^[01]+$/.test(h))
+        return h;
+    return hexToBits(h) ?? '0'.repeat(HASH_BITS);
 }
 /**
  * 计算图像 dHash 指纹，返回 64 位 '0'/'1' 字符串。

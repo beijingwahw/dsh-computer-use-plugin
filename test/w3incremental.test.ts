@@ -658,3 +658,86 @@ test('W3-6: saveScreenshotAttachment 缺席时返回 null（旧行为不变）',
   // 本进程未注入 store（其他测试 finally 已复位）—— 与现状语义一致
   assert.equal(await saveScreenshotAttachment(Buffer.from('x'), 't.jpg'), null);
 });
+
+// ─── ΝΩ-24：computeDiffRegions 维度守卫 + 账本重置路径维度缓存 ───
+
+test('ΝΩ-24: 维度守卫原子 usableImageDims —— 非法维度一律 null（有限正数双轴）', async () => {
+  const { usableImageDims } = await import('../src/visualDiff.ts');
+  // 合法域
+  assert.deepEqual(usableImageDims({ width: 480, height: 270 }), { width: 480, height: 270 });
+  assert.deepEqual(usableImageDims({ width: 100.5, height: 50 }), { width: 100.5, height: 50 });
+  // 非法域：缺席 / 非数 / 非有限 / 非正 —— 旧实现 height!/width! 全部直喂 NaN
+  assert.equal(usableImageDims({}), null, '双轴缺席 ⇒ null');
+  assert.equal(usableImageDims({ width: 480 }), null, 'height 缺席 ⇒ null');
+  assert.equal(usableImageDims({ width: 480, height: undefined }), null);
+  assert.equal(usableImageDims({ width: NaN, height: 270 }), null, 'NaN ⇒ null');
+  assert.equal(usableImageDims({ width: Infinity, height: 270 }), null, '∞ ⇒ null');
+  assert.equal(usableImageDims({ width: 0, height: 270 }), null, '零宽 ⇒ null');
+  assert.equal(usableImageDims({ width: 480, height: -3 }), null, '负高 ⇒ null');
+  assert.equal(usableImageDims(null), null, 'meta 本身缺席 ⇒ null（防御面）');
+});
+
+test('ΝΩ-24: 重置路径维度缓存命中 —— force/surprise/TTL 免自 diff，冷启动仍探测', async () => {
+  let analyzeCalls = 0;
+  let clock = 1_000;
+  const ledger = new ScreenStateLedger({
+    analyze: async () => { analyzeCalls++; return stubAnalysis(800, 600, 0); },
+    now: () => clock,
+  });
+  const buf = Buffer.from([7, 7, 7]);
+  const v1 = await ledger.ingest(buf); // 冷启动：缓存缺席 ⇒ 自 diff 恰一次
+  assert.equal(v1.kind, 'keyframe');
+  assert.equal(analyzeCalls, 1, '冷启动探测（维度缓存的铸入点）');
+  assert.deepEqual(ledger.stats().prevDims, { width: 800, height: 600 });
+  // 重置信号 ①：forceKeyframe —— 缓存命中 ⇒ 零分析调用，判决同旧路径
+  const v2 = await ledger.ingest(buf, { forceKeyframe: true });
+  assert.equal(analyzeCalls, 1, '维度缓存命中：重置免自 diff');
+  assert.equal(v2.kind, 'keyframe');
+  assert.equal(v2.generation, 2);
+  assert.match(v2.reason, /forceKeyframe/, '判决理由与旧路径同文');
+  // 重置信号 ②：surpriseBits —— 同律命中
+  const v3 = await ledger.ingest(buf, { surpriseBits: 30 });
+  assert.equal(analyzeCalls, 1);
+  assert.equal(v3.kind, 'keyframe');
+  assert.match(v3.reason, /surpriseBits/);
+  // 重置信号 ③：TTL 到期 —— 同律命中
+  clock += 200_000;
+  const v4 = await ledger.ingest(buf);
+  assert.equal(analyzeCalls, 1);
+  assert.equal(v4.kind, 'keyframe');
+  assert.match(v4.reason, /TTL/);
+  // reset 归零缓存 ⇒ 下一次冷启动回到自 diff
+  ledger.reset();
+  await ledger.ingest(buf);
+  assert.equal(analyzeCalls, 2, 'reset 出册：缓存缺席才回落自 diff');
+});
+
+test('ΝΩ-24: 缓存缺席（DimsFree 收养后）才回落自 diff —— 探测成功回填缓存', async () => {
+  let portUp = true;
+  let calls = 0;
+  const ledger = new ScreenStateLedger({
+    analyze: async () => {
+      calls++;
+      if (!portUp) throw new Error('port down');
+      return stubAnalysis(800, 600, 0);
+    },
+    now: () => 5_000,
+  });
+  await ledger.ingest(Buffer.from([1])); // 冷启动成功：缓存建立
+  assert.equal(calls, 1);
+  portUp = false;
+  const degraded = await ledger.ingest(Buffer.from([2])); // 主路径双败 ⇒ DimsFree（prevW=0 出册）
+  assert.equal(degraded.kind, 'keyframe');
+  assert.ok(degraded.degraded, '双重失败诚实申报');
+  assert.deepEqual(ledger.stats().prevDims, { width: 0, height: 0 }, 'DimsFree：维度未知即缓存出册');
+  const before = calls;
+  const v = await ledger.ingest(Buffer.from([3]), { forceKeyframe: true }); // 缓存缺席 ⇒ 自 diff（仍败）
+  assert.equal(calls, before + 1, '缓存缺席：回落自 diff 恰一次');
+  assert.ok(v.degraded, '探测仍败 ⇒ DimsFree 兜底');
+  portUp = true;
+  const v2 = await ledger.ingest(Buffer.from([4]), { forceKeyframe: true }); // 探测成功 ⇒ 正常收养
+  assert.equal(calls, before + 2);
+  assert.equal(v2.kind, 'keyframe');
+  assert.equal(v2.degraded, null);
+  assert.deepEqual(ledger.stats().prevDims, { width: 800, height: 600 }, '探测维度回填缓存');
+});

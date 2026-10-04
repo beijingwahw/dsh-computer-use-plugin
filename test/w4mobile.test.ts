@@ -632,13 +632,13 @@ if (svc) {
   });
 }
 
-test('W4-5④(环境): 真服务端到端段执行状态如实申报', () => {
+// ΝΩ-38 诚实度修正：原唯一断言 assert.ok(true)（永真）——改 {skip}，状态由 maybeE2E 段实际执行/skip 如实反映（skip 后本体不执行）。
+test('W4-5④(环境): 真服务端到端段执行状态如实申报', { skip: '申报性测试：原唯一断言 assert.ok(true) 永真——状态改由 E2E 段实际执行/skip 计数如实反映（ΝΩ-38）' }, () => {
   if (svc) {
     console.log(`[W4-5] 真服务已起 http://127.0.0.1:${svc.port}/v1 —— E2E 段全量执行`);
   } else {
     console.log('[W4-5] Python 物理微服务未能在本环境拉起（探活失败）—— 按仓库先例 skip 真端到端段');
   }
-  assert.ok(true); // 申报性测试：永远通过，状态见 stdout
 });
 
 const maybeE2E = svc ? test : test.skip;

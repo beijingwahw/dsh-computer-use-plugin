@@ -18,6 +18,9 @@
 // —— 429 限流与 5xx 服务端故障值得退避重试；其余 4xx 是请求本身有病，重试无义。
 export const HTTP_STATUS_TOO_MANY_REQUESTS = 429;
 export const HTTP_STATUS_SERVER_ERROR_FLOOR = 500;
+// ΝΩ 收官（smell.magic-number 清偿）：400 是"请求方言被网关拒绝"的信号位
+// （json_schema/response_format 不支持类）——ΝΩ-18/44 的降级回退链以它为触发。
+export const HTTP_STATUS_BAD_REQUEST = 400;
 /** 剥 Markdown 围栏 —— ```json\n{...}\n``` → {...（仅当整体被围栏包裹时） */
 export function stripFences(s) {
     const m = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```$/.exec(s.trim());

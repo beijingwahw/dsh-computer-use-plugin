@@ -1,9 +1,12 @@
 // test/reflexiveDecision.test.ts
 // 反射决策工位（ReflexiveDecisionStation）—— 桩纪元终结者的执法点测试。
-// 四条路径各有独立测试：脊髓反射 / 免疫抑制 / 反射弧缺席 / 平票歧义 + LLM 大脑路径。
+// 既有路径各有独立测试：脊髓反射 / 免疫抑制 / 反射弧缺席 / 平票歧义 + 前额叶
+// 仿真 / 核证探针；ΝΩ-16 增级联仲裁组（反射先行、LLM 断后）+ DS-3 嵌入缓存
+// + DS-4 闩锁升级。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ReflexiveDecisionStation } from '../src/knowledge/stations.ts';
+import { ReflexiveDecisionStation, embedCached } from '../src/knowledge/stations.ts';
+import { embed } from '../src/semanticHash.ts';
 import type {
   AtomicAction, DecisionContext, ExecutionResult, NeedGrounding, PerceptionRequest,
   ScenePatch,
@@ -90,14 +93,124 @@ test('平票歧义：两个元素同分 ⇒ 反射不明确 ⇒ NeedGrounding（
   assert.match(out.reason, /ambiguous/);
 });
 
-test('大脑路径：chat 在场 ⇒ LLM 规划优先（反射让位于大脑）', async () => {
-  const chat = async () => '{"type":"action","action":{"kind":"type_text","args":{"text":"hello"}},"rationale":"llm says"}';
+// ─── ΝΩ-16 级联仲裁：反射先行、LLM 断后（反转「LLM 独裁坍缩」）───
+// 旧律 chat 在场 ⇒ 一切交 LLM（Tier0/1/2/2.5 全旁路）；新律恒序级联。
+
+test('级联 #1 LLM 在场 + 明确反射命中 ⇒ 反射直发不调 LLM（计数断言）+ 轨迹记 reflex', async () => {
+  let calls = 0;
+  const chat = async () => {
+    calls += 1;
+    return '{"type":"action","action":{"kind":"type_text","args":{"text":"x"}},"rationale":"llm says"}';
+  };
   const station = new ReflexiveDecisionStation({ chat });
-  const sc = scene(el('settings', 0.1, 0.1));
+  const sc = scene(el('settings', 0.1, 0.1, 0.2, 0.1), el('close', 0.8, 0.05));
   const out = await station.decide(env(ctx('open settings', sc)));
+  assert.equal(calls, 0, '无歧义反射命中 ⇒ 零 LLM 调用（延迟/成本归零）');
+  assert.ok(!isNeedGrounding(out), `期望反射动作，得到 ${JSON.stringify(out)}`);
+  assert.equal(out.kind, 'click_mouse', '反射弧直发（而非 LLM 的 type_text）');
+  assert.match(out.rationale ?? '', /reflex.*'settings'/, '审计轨迹：反射依据可回放');
+  assert.equal((out as any).tierUsed, 'reflex', '决策轨迹层别标注：reflex');
+});
+
+test('级联 #2 LLM 在场 + 压制命中 ⇒ prompt 含压制证据（两级语义），LLM 绕行非被否决', async () => {
+  const prompts: string[] = [];
+  const chat = async (p: string) => {
+    prompts.push(p);
+    return '{"type":"action","action":{"kind":"click_mouse","args":{"x":0.9,"y":0.9}},"rationale":"llm reroute"}';
+  };
+  const station = new ReflexiveDecisionStation({ chat });
+  // 本能弧会命中 'delete item'（唯一词重合）—— 但 error-pattern 0.7 ≥ 0.55 压制
+  const sc = scene(el('delete item', 0.4, 0.4, 0.2, 0.1));
+  const knowledge = {
+    summary: '[error-pattern] delete item broken',
+    categories: ['error-pattern' as const],
+    maxConfidence: 0.7,
+    sources: [{ type: 'manual' as const, ref: 'kb-1' }],
+    fragments: [{ category: 'error-pattern' as const, content: 'delete item button is broken', confidence: 0.7 }],
+  };
+  const out = await station.decide(env(ctx('delete the record', sc, knowledge)));
+  assert.equal(prompts.length, 1, '压制 ⇒ 交大脑绕行（证据注入），而非直接否决 LLM');
+  assert.match(prompts[0], /IMMUNE SUPPRESSION ACTIVE/, '压制声明入 prompt（一级确定性语义）');
+  assert.match(prompts[0], /delete item button is broken/, '陷阱证据入 prompt（二级咨询性语义）');
+  assert.ok(!isNeedGrounding(out), 'LLM 绕行成功 ⇒ 动作成立');
+  assert.match(out.rationale ?? '', /llm reroute/);
+  assert.equal((out as any).tierUsed, 'llm', '决策轨迹层别标注：llm');
+  // 被压制的本能弧绝不发射：直发坐标（delete item 中心 x=0.5）不得出现
+  assert.ok(Math.abs((out as any).args.x - 0.5) > 0.01, `LLM 绕行坐标 ≠ 被压制本能弧坐标，实际 ${(out as any).args.x}`);
+});
+
+test('级联 #3 平票歧义 ⇒ LLM 终审 + Tier2 效用排序提示注入（提示非指令，可推翻）', async () => {
+  const prompts: string[] = [];
+  const chat = async (p: string) => {
+    prompts.push(p);
+    // 大脑故意推翻提示：点 settings（x=0.15）而非提示偏向的 settings panel（x=0.55）
+    return '{"type":"action","action":{"kind":"click_mouse","args":{"x":0.15,"y":0.15}},"rationale":"brain overrules"}';
+  };
+  const station = new ReflexiveDecisionStation({ chat });
+  const sc = scene(el('settings', 0.1, 0.1), el('settings panel', 0.5, 0.5));
+  const knowledge = {
+    summary: '[workflow] open settings panel via sidebar',
+    categories: ['workflow' as const],
+    maxConfidence: 0.9,
+    sources: [],
+    fragments: [{ category: 'workflow' as const, content: 'open settings panel via sidebar', confidence: 0.9 }],
+  };
+  const out = await station.decide(env(ctx('open settings', sc, knowledge)));
+  assert.equal(prompts.length, 1, '平票歧义 ⇒ 交大脑');
+  assert.match(prompts[0], /RANKING HINT/, 'Tier2 效用评分作为排序提示入 prompt');
+  assert.match(prompts[0], /settings panel/, '提示携带仿真胜者证据');
   assert.ok(!isNeedGrounding(out));
-  assert.equal(out.kind, 'type_text', 'LLM 输出优先于脊髓反射');
-  assert.equal(out.rationale, 'llm says');
+  assert.equal((out as any).args.x, 0.15, '大脑可推翻提示（裁决权在模型）');
+  assert.equal((out as any).tierUsed, 'llm');
+});
+
+test('级联 #4 LLM 在场 + 无反射弧 ⇒ 大脑断后；无证据面 ⇒ 无伪造排序提示；大脑接地即接地', async () => {
+  const prompts: string[] = [];
+  const chat = async (p: string) => {
+    prompts.push(p);
+    return '{"type":"need-grounding","reason":"brain needs semantics","focus":"full-scene"}';
+  };
+  const station = new ReflexiveDecisionStation({ chat });
+  const sc = scene(el('close', 0.8, 0.05), el('minimize', 0.7, 0.05));
+  const out = await station.decide(env(ctx('open settings panel', sc)));
+  assert.equal(prompts.length, 1, '无弧 ⇒ 大脑断后');
+  assert.doesNotMatch(prompts[0], /RANKING HINT/, '无证据面 ⇒ 排序提示诚实缺席');
+  assert.ok(isNeedGrounding(out), '大脑的接地就是接地');
+  assert.match(out.reason, /brain needs semantics/);
+});
+
+test('级联 #5 压制 + 大脑通道故障 ⇒ 压制接地兜底（最坏情形 = 诚实停手，绝不是本能弧）', async () => {
+  const chat = async (): Promise<string> => { throw new Error('channel down'); };
+  const station = new ReflexiveDecisionStation({ chat });
+  const sc = scene(el('delete item', 0.4, 0.4, 0.2, 0.1));
+  const knowledge = {
+    summary: '[error-pattern] delete item broken',
+    categories: ['error-pattern' as const],
+    maxConfidence: 0.7,
+    sources: [],
+    fragments: [{ category: 'error-pattern' as const, content: 'delete item button is broken', confidence: 0.7 }],
+  };
+  const out = await station.decide(env(ctx('delete the record', sc, knowledge)));
+  assert.ok(isNeedGrounding(out), '大脑故障 ⇒ 压制接地兜底');
+  assert.match(out.reason, /suppressed by error-pattern/);
+  assert.equal(out.focus, 'knowledge');
+});
+
+test('级联 #6 重试语境（chat 在场）⇒ 反射复读让位大脑（失败上下文随行 prompt）', async () => {
+  const prompts: string[] = [];
+  const chat = async (p: string) => {
+    prompts.push(p);
+    return '{"type":"action","action":{"kind":"click_mouse","args":{"x":0.9,"y":0.9}},"rationale":"retry reroute"}';
+  };
+  const station = new ReflexiveDecisionStation({ chat });
+  const sc = scene(el('settings', 0.1, 0.1)); // 唯一命中 —— 但这是重试
+  const out = await station.decide(
+    env(ctx('open settings', sc)),
+    { reason: 'click timed out', retryCount: 1 },
+  );
+  assert.equal(prompts.length, 1, '首次发射已失败 ⇒ 确定性复读交大脑（保守原则）');
+  assert.match(prompts[0], /LAST FAILURE/, '失败上下文入 prompt');
+  assert.equal((out as any).tierUsed, 'llm');
 });
 
 test('免疫系统闭环：免疫抑制 + 反射 + 执行失败的端到端语义（组合而非单元）', async () => {
@@ -305,4 +418,79 @@ test('核证接地 #6 无证据面兼容：fragments 缺席的压制 ⇒ 门控�
   const out = await station.decide(env(ctx('delete the record', sc, knowledge)));
   assert.ok(isNeedGrounding(out), '无证据面 ⇒ 不探针（无从评估信任），诚实接地');
   assert.match(out.reason, /suppressed by error-pattern/);
+});
+
+// ─── DS-3（ΝΩ-16 顺修）：仿真层文本嵌入的进程级 LRU 缓存 ───
+
+test('DS-3 嵌入缓存命中：同文本返回同一引用（零重算），值与裸 embed 同源', async () => {
+  const text = 'ds3 cache probe 整理数据';
+  const a = embedCached(text);
+  const b = embedCached(text);
+  assert.ok(a === b, '命中 = 同一对象引用（缓存生效，非重算）');
+  assert.deepEqual(b.dims, embed(text).dims, '缓存值与裸 embed 同源（纯函数零漂移）');
+  const c = embedCached('ds3 distinct text');
+  assert.ok(c !== a, '不同文本 ⇒ 不同向量对象');
+});
+
+test('DS-3 容量执法：1025 新键 ⇒ 最旧者被逐（LRU 非全清），逐出只损失缓存不损失正确性', async () => {
+  const first = embedCached('ds3-evict-0');
+  for (let i = 1; i <= 1024; i++) embedCached(`ds3-evict-${i}`);
+  const survivorA = embedCached('ds3-evict-1'); // 邻近较新键：仍应命中
+  const reFirst = embedCached('ds3-evict-0'); // 最旧键：已被逐 ⇒ 重算
+  assert.ok(reFirst !== first, '容量 1024 ⇒ 最旧键逐出后重算（新引用）');
+  assert.deepEqual(reFirst.dims, first.dims, '逐出只损失缓存不损失正确性');
+  const survivorB = embedCached('ds3-evict-1');
+  assert.ok(survivorA === survivorB, 'LRU 语义：较新键仍命中（非全清）');
+});
+
+// ─── DS-4（ΝΩ-16 顺修）：探针闩锁进程级升级（学习闭环容量断裂的跨 run 续护）───
+
+/** 传闻压制场景铸造（探针触发条件全齐：heresay error-pattern ≥ 阈值 + 会命中的本能弧） */
+function hearsayTrapEnv(intentId: string) {
+  const sc = scene(el('delete item', 0.4, 0.4, 0.2, 0.1));
+  const knowledge = {
+    summary: '[error-pattern] delete item broken',
+    categories: ['error-pattern' as const],
+    maxConfidence: 0.7,
+    sources: [{ type: 'manual' as const, ref: 'kb-1' }],
+    fragments: [{ category: 'error-pattern' as const, content: 'delete item button is broken', confidence: 0.7 }],
+  };
+  return env({
+    intent: { id: intentId, description: 'delete the record' },
+    scene: sc,
+    knowledgeContext: knowledge,
+  });
+}
+
+test('DS-4 闩锁升级：容量断裂上报 ⇒ 跨工位实例续护（新实例不再重付探针学费）', async () => {
+  // 病灶复现：探针失败的学习若被容量拒绝，跨实例闩锁为空 ⇒ 新 run 再探一针
+  const a = new ReflexiveDecisionStation({ chat: null });
+  const outA = await a.decide(hearsayTrapEnv('ds4-a'));
+  assert.ok(!isNeedGrounding(outA));
+  assert.match(outA.rationale ?? '', /probe\(verified-grounding\)/, 'run A 探针放行（传闻无背书）');
+  const b = new ReflexiveDecisionStation({ chat: null });
+  const outB = await b.decide(hearsayTrapEnv('ds4-a'));
+  assert.ok(!isNeedGrounding(outB));
+  assert.match(outB.rationale ?? '', /probe\(verified-grounding\)/, '病灶：实例闩锁不跨实例 ⇒ run B 重付学费');
+  // 修复：pipeline 侧 learnFromOutcome 容量拒绝上报（接线缝）⇒ 闩锁升进程级
+  b.escalateProbeLatch('ds4-a');
+  const c = new ReflexiveDecisionStation({ chat: null });
+  const outC = await c.decide(hearsayTrapEnv('ds4-a'));
+  assert.ok(isNeedGrounding(outC), '进程级闩锁续护 ⇒ 不再探针，诚实接地');
+  assert.match(outC.reason, /suppressed by error-pattern/);
+});
+
+test('DS-4 闩锁衰减：1h 过线自动解除（容量拒绝可被上游清库 —— 复活通道不焊死）', async () => {
+  const stale = new ReflexiveDecisionStation({ chat: null });
+  // 时间旅行缝：61 分钟前升级 ⇒ 已过 decay 线
+  stale.escalateProbeLatch('ds4-d', Date.now() - 61 * 60 * 1000);
+  const outD = await stale.decide(hearsayTrapEnv('ds4-d'));
+  assert.ok(!isNeedGrounding(outD));
+  assert.match(outD.rationale ?? '', /probe\(verified-grounding\)/, '衰减过线 ⇒ 闩锁自动解除，探针复活');
+
+  const fresh = new ReflexiveDecisionStation({ chat: null });
+  fresh.escalateProbeLatch('ds4-e'); // 缺省墙钟（刚刚）⇒ 闩锁生效
+  const outE = await fresh.decide(hearsayTrapEnv('ds4-e'));
+  assert.ok(isNeedGrounding(outE), '未过衰减线 ⇒ 进程级闩锁照常执法');
+  assert.match(outE.reason, /suppressed by error-pattern/);
 });

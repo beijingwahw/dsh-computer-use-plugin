@@ -25,15 +25,22 @@
 // 假新鲜度端口（setFreshnessPort 注入缝）—— 零真网络、零真截屏、零服务孵化。
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config.ts';
 import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
-import { journal } from '../src/journal.ts';
+import { journal, flushJournal, journalDiskStats } from '../src/journal.ts';
 import { system } from '../src/system.ts';
 import { setAccessibilityProvider } from '../src/uiExtractor.ts';
-import { registerAuditGuard } from '../src/guards/auditGuard.ts';
+import { registerAuditGuard, MUTATING_TOOL_NAMES as GUARD_SIDE_BINDING } from '../src/guards/auditGuard.ts';
+// ΑΩ-R28（注册处单源）：名单自工具装配唯一事实源只读引入 —— 单源恒等与
+// 装配期完备性执法的受试面（桶在测试环境可静态导入，register.mjs 解析钩同源）。
+import {
+  MUTATING_TOOL_NAMES as TOOLS_SIDE_REGISTRY,
+  assertToolAuditClassification,
+  buildAllTools,
+} from '../src/tools/index.ts';
 import {
   setFreshnessPort, resetFreshnessProbe, probeGroundingFreshness,
   GROUNDING_FRESHNESS_THRESHOLD, freshnessPortInstalled,
@@ -278,7 +285,18 @@ test('S4-5: WAL 先行落盘 —— 派发前 .wal 同步行在场且自带链�
     assert.equal(deny.state_anchor.reason, 'pre-dispatch-audit-commit-failed', 'WAL 磁盘故障拒派');
     assert.equal(journal.list(false).length, entriesBefore, '失败路径主链零残留（无半提交）');
     // 主 JSONL 的异步取证副本落定后再清理（避免清理竞态的 ENOENT 噪声）
-    await new Promise(r => setTimeout(r, 100));
+    // ΝΩ-38 真睡治理：固定 100ms 改为对可观察完成面（两条健康派发的取证副本落定）的有界轮询；超时放行（失败面与旧固定等待等同）。
+    const forensicSettled = (): boolean => {
+      try {
+        const ls = readFileSync(path.join(dir, 'j.jsonl'), 'utf8').trim();
+        return ls.length > 0 && ls.split('\n').length >= 2;
+      } catch { return false; }
+    };
+    const settleBy = Date.now() + 2_000;
+    while (!forensicSettled()) {
+      if (Date.now() > settleBy) break;
+      await new Promise(r => setTimeout(r, 5));
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -451,6 +469,96 @@ test('S4-9: shape_environment 子动作分流 —— 只读无 AUDIT_PRE、变�
   }
 
   assert.equal(journal.verify().ok, true, '哈希链完整（分流不破坏防篡改承诺）');
+});
+
+// ─── S4 注册处单源 + 完备性执法（ΑΩ-R28）───
+// 名单搬到家门口（tools/index.ts —— 工具装配唯一事实源）：登记处单源导出，
+// auditGuard 只读引入；装配期断言对注册面全员二分类 —— 未分类名字装配即炸
+//（配置期 fail-fast），「新增变更类工具忘登记 ⇒ 静默漏审计」的 fail-open
+// 病灶（W6R-A9 历史事故）就此关闭。
+
+test('S4-10: ΑΩ-R28 名单单源 —— tools 注册处与 auditGuard 执法面同一 Set，逐名执法全通', async () => {
+  // 对象恒等：守卫面再导出的绑定 === 工具装配唯一事实源导出的绑定（同体，非拷贝/非影子名单）
+  assert.equal(GUARD_SIDE_BINDING, TOOLS_SIDE_REGISTRY, '单源：两侧引用同一 Set 对象');
+  // 名单下限（sec.audit-wal-floor 同律 —— 防误删回缩；下限语义给未来登记留增长空间）
+  assert.ok(TOOLS_SIDE_REGISTRY.size >= 18, `变更类名单下限 18（实际 ${TOOLS_SIDE_REGISTRY.size}）`);
+
+  // 执法面 = 注册面：登记的每个变更类工具经守卫管线都产生先行审计行
+  //（shape_environment 以缺席 action 走 fail-closed 闭集 —— 同样入链）
+  const { ctx, pre } = makeFakeCtx();
+  registerAuditGuard(ctx as never);
+  const PASSTHROUGH = { passthrough: true };
+  for (const name of TOOLS_SIDE_REGISTRY) {
+    const out = await withSilencedWarn(() => pre[0]({ name, arguments: {} }, async () => PASSTHROUGH));
+    assert.deepEqual(out, PASSTHROUGH, `${name} 提交成功 ⇒ 放行`);
+    assert.ok(
+      journal.list(false).some(e => e.tool === 'AUDIT_PRE' && e.args?.tool === name),
+      `${name}：注册处登记 ⇒ 执法面先行入链`,
+    );
+  }
+
+  // 名单外仍是观察面（二分类不是全员审计 —— 白名单工具不入先行审计）
+  await pre[0]({ name: 'take_screenshot', arguments: {} }, async () => PASSTHROUGH);
+  assert.equal(
+    journal.list(false).some(e => e.tool === 'AUDIT_PRE' && e.args?.tool === 'take_screenshot'),
+    false,
+    '白名单工具不产生先行审计行',
+  );
+  assert.equal(journal.verify().ok, true, '哈希链完整（单源执法不破坏防篡改承诺）');
+});
+
+/** 全开配置：buildAllTools 的每个挂载门都点亮（最大注册面）。cast 走 Config
+ *  缝（与 toolCfg 同法 —— 工厂只读字段建定义，不触网、不落盘）。 */
+const allOnCfg = {
+  enableElementIdMode: true,
+  localVisionApi: 'http://localhost:1/vision',
+  enableUIMemory: true,
+  enableJournal: true,
+  enableOcr: true,
+  vlmApiKey: 'w2audit-test-key',
+  autonomyEnabled: true,
+  enableInteractivityProbe: true,
+  enableOpenUrl: true,
+  enableSkillLibrary: true,
+  enableQualityDoctor: true,
+  enableSubAgents: true,
+  enableEnvironmentShaper: true,
+  enableApprovalGate: true,
+  enableTelemetry: true,
+  checkpointPath: 'w2audit-checkpoint.json',
+  kernelEvolutionEnabled: true,
+  federationEndpoint: 'http://localhost:1/federation',
+} as unknown as Config;
+
+test('S4-11: ΑΩ-R28 装配期完备性执法 —— 未分类名字装配即炸；全开配置全员二分类', () => {
+  // 断言路径直驱：假工具名注入 ⇒ 如实 throw（配置期 fail-fast —— 报错点名
+  // 假名并指回登记处，新工具作者第一眼就知道去哪登记）
+  assert.throws(
+    () => assertToolAuditClassification([
+      { name: 'click_mouse' }, { name: 'take_screenshot' }, { name: 'dsh_unregistered_probe_tool' },
+    ]),
+    /dsh_unregistered_probe_tool[\s\S]*MUTATING_TOOL_NAMES[\s\S]*KNOWN_READ_ONLY_TOOL_NAMES/,
+    '未分类名字 ⇒ 装配期如实报错（fail-fast）',
+  );
+  // 已分类两翼（变更类 + 只读/控制面白名单）⇒ 安静通过
+  assert.doesNotThrow(() => assertToolAuditClassification([
+    { name: 'click_mouse' }, { name: 'take_screenshot' }, { name: 'federation_sync' },
+  ]), '已分类全员通过');
+
+  // 全开配置真实装配：最大注册面全员二分类（buildAllTools 收尾断言不炸自证），
+  // 且登记处无死名 —— 每个登记的变更类工具都确实会被装配出来
+  const tools = buildAllTools(allOnCfg);
+  const registered = new Set(tools.map(t => t.name));
+  // ΝΩ-1：沙箱插件（sandbox/index.ts 的 apply）是第二注册面 —— 它的四件工具
+  // 不经 buildAllTools 装配，但同样受审计分类账管辖（replay_on_host ∈ MUTATING）。
+  // 硬编码四名与沙箱注册处同步：沙箱侧改名/删件时本断言即红（fail-fast 不弱化）。
+  for (const name of ['rehearse_chain', 'recall_muscle', 'replay_on_host', 'verify_sandbox_log']) {
+    registered.add(name);
+  }
+  for (const name of TOOLS_SIDE_REGISTRY) {
+    assert.ok(registered.has(name), `登记处无死名：${name} 出现在全开注册面中`);
+  }
+  assert.ok(tools.length >= TOOLS_SIDE_REGISTRY.size, `装配面不小于登记面（${tools.length} ≥ ${TOOLS_SIDE_REGISTRY.size}）`);
 });
 
 // ─── S3：接地新鲜度探针 ───
@@ -699,4 +807,184 @@ test('合成: 先行审计在链、新鲜度阻断在派发前 —— 两道防�
     'S3 阻断留痕入链',
   );
   assert.equal(journal.verify().ok, true, '链完整');
+});
+
+// ─── ΝΩ-2：审计 WAL 顺序倒置修复 —— 拦截路径的 journal 行序执法 ───
+//
+// 注册序 = 瀑布执行序（src/guards/index.ts）：拦截型 pre 守卫（popup/repeat/
+// canary）必须先于 auditGuard 的 pre-WAL 提交。被拦截的动作**不得**留下
+// 「即将派发」的 AUDIT_PRE 幽灵行（回滚系统按 WAL 对账会对未发生的动作回滚）；
+// 通过全部拦截的动作仍保持「审计先行于派发」（W2-2 fail-closed 语义不变）。
+
+test('ΝΩ-2: 弹窗拦截 ⇒ 零 AUDIT_PRE（幽灵审计行消灭）；放行动作 ⇒ 审计先行于派发', async () => {
+  const { registerAllGuards } = await import('../src/guards/index.ts');
+  const { TACTICAL_PAUSE, updatePopupState } = await import('../src/guards/popupGuard.ts');
+  // fake ctx：按事件名收集挂载位（注册序保留 —— 瀑布序的受试面）
+  const handlers: Array<{ event: string; handler: any }> = [];
+  const ctx = { on(event: string, handler: any) { handlers.push({ event, handler }); return () => {}; } };
+  const cfg = {
+    maxConsecutiveFailures: 99,
+    dangerPatterns: 'send,delete,支付',
+    noopSimilarityThreshold: 0.97,
+    probeRegionRadius: 0.06,
+    dryRun: false,
+    focusMaxAgeMs: 30_000,
+    enableInteractivityProbe: false,
+    enableJournal: true, journalPath: '',
+    enableTelemetry: false,
+  } as unknown as Config;
+  registerAllGuards(ctx as never, cfg);
+  const pres = handlers.filter(h => h.event === 'tools/pre-execute').map(h => h.handler);
+  assert.ok(pres.length >= 6, `六层 pre 瀑布在册（实际 ${pres.length}）`);
+  // 宿主瀑布：handler[i] 的 next ⇒ handler[i+1]；末位 next ⇒ 工具派发位
+  const drivePre = (e: any, dispatch?: () => void): Promise<any> => {
+    const run = (i: number): Promise<any> =>
+      i >= pres.length ? Promise.resolve(dispatch ? dispatch() : { kind: 'accept' }) : pres[i](e, () => run(i + 1));
+    return run(0);
+  };
+  const exec = (name: string, args: unknown): any =>
+    ({ name, arguments: args, agent: { id: 'now2-audit' }, token: {}, rootCallId: 'c1' });
+
+  // ① 弹窗活跃 ⇒ popup 拦截：AUDIT_PRE 零落盘（旧序会先落 WAL 再被拦 —— 幽灵行）
+  updatePopupState(true, 'now2-audit'); // ΑΩ-R24：弹窗态按会话分键（exec 带 agent.id）
+  let dispatchCalled = false;
+  const blocked = await withSilencedWarn(() => drivePre(exec('click_mouse', { x: 0.5, y: 0.5 }), () => {
+    dispatchCalled = true;
+    return { kind: 'accept' };
+  }));
+  updatePopupState(false, 'now2-audit');
+  assert.equal(blocked.kind, 'deny');
+  assert.equal(blocked.reason, TACTICAL_PAUSE, 'popup 拦截话术（话术单一事实源）');
+  assert.equal(dispatchCalled, false, '派发位未执行');
+  assert.equal(
+    journal.list(false).some(e => e.tool === 'AUDIT_PRE' && e.args?.tool === 'click_mouse'),
+    false,
+    '被拦截动作零 AUDIT_PRE —— 有意图无动作的幽灵审计行消灭',
+  );
+
+  // ② 弹窗解除 ⇒ 同一动作放行：AUDIT_PRE 在派发位执行时已在链上（先行性不变）
+  let auditAtDispatch = -1;
+  const out = await withSilencedWarn(() => drivePre(exec('click_mouse', { x: 0.5, y: 0.5 }), () => {
+    auditAtDispatch = journal.list(false).filter(e => e.tool === 'AUDIT_PRE' && e.args?.tool === 'click_mouse').length;
+    return { kind: 'accept' };
+  }));
+  assert.deepEqual(out, { kind: 'accept' }, '全链放行');
+  assert.equal(auditAtDispatch, 1, 'audit 仍在工具派发之前提交（W2-2 先行性零回归）');
+});
+
+test('ΝΩ-2: 防重拦截 ⇒ 不新增 AUDIT_PRE（只记真正派发的两次）；金丝雀 fail-closed 同律', async () => {
+  const { registerAllGuards } = await import('../src/guards/index.ts');
+  const { updatePopupState } = await import('../src/guards/popupGuard.ts');
+  const { kernelRegistry } = await import('../src/kernel/registry.ts');
+  const { recentCanaryEvents, resetCanaryGuard } = await import('../src/guards/canaryGuard.ts');
+  const handlers: Array<{ event: string; handler: any }> = [];
+  const ctx = { on(event: string, handler: any) { handlers.push({ event, handler }); return () => {}; } };
+  const cfg = {
+    maxConsecutiveFailures: 99,
+    dangerPatterns: 'send,delete,支付',
+    noopSimilarityThreshold: 0.97,
+    probeRegionRadius: 0.06,
+    dryRun: false,
+    focusMaxAgeMs: 30_000,
+    enableInteractivityProbe: false,
+    enableJournal: true, journalPath: '',
+    enableTelemetry: false,
+  } as unknown as Config;
+  registerAllGuards(ctx as never, cfg);
+  const pres = handlers.filter(h => h.event === 'tools/pre-execute').map(h => h.handler);
+  const posts = handlers.filter(h => h.event === 'tools/post-execute').map(h => h.handler);
+  const drivePre = (e: any, dispatch?: () => any): Promise<any> => {
+    const run = (i: number): Promise<any> =>
+      i >= pres.length ? Promise.resolve(dispatch ? dispatch() : { kind: 'accept' }) : pres[i](e, () => run(i + 1));
+    return run(0);
+  };
+  const drivePost = async (e: any, result: any): Promise<any> => {
+    const run = async (i: number): Promise<any> =>
+      i >= posts.length ? result : posts[i](e, result, () => run(i + 1));
+    return run(0);
+  };
+  const exec = (name: string, args: unknown): any =>
+    ({ name, arguments: args, agent: { id: 'now2-audit' }, token: {}, rootCallId: 'c1' });
+  const FAILED_RESULT = { isError: false, value: '{\n  "status": "FAILED",\n  "state_anchor": {}\n}' };
+  const countAudit = (): number =>
+    journal.list(false).filter(e => e.tool === 'AUDIT_PRE' && e.args?.tool === 'click_mouse').length;
+  updatePopupState(false);
+
+  // ① 第一次点击：全链放行（AUDIT_PRE=1），post 判失败（防重守卫记忆同签名失败）
+  const o1 = await withSilencedWarn(() => drivePre(exec('click_mouse', { x: 0.5, y: 0.5 })));
+  assert.deepEqual(o1, { kind: 'accept' });
+  assert.equal(countAudit(), 1, '第一次真实派发 ⇒ 先行审计行在册');
+  await withSilencedWarn(() => drivePost(exec('click_mouse', { x: 0.5, y: 0.5 }), FAILED_RESULT));
+
+  // ② 第二次原样重试 ⇒ repeatAction 拦截：零新增 AUDIT_PRE
+  //   （旧序 audit 先于 repeat ⇒ 这里会是 2 —— 有意图无动作的幽灵行，本测试执法消灭）
+  let dispatchCalled = false;
+  const o2 = await withSilencedWarn(() => drivePre(exec('click_mouse', { x: 0.5, y: 0.5 }), () => {
+    dispatchCalled = true;
+    return { kind: 'accept' };
+  }));
+  assert.equal(o2.kind, 'deny', '原样重试被防重守卫拦截');
+  assert.match(o2.reason, /Repeated identical action/, '拦截方言（换策略指引）');
+  assert.equal(dispatchCalled, false);
+  assert.equal(countAudit(), 1, '被拦截重试零新增 AUDIT_PRE —— 行序执法：只记真正派发的动作');
+
+  // ③ 金丝雀 fail-closed（令牌路径 + 探针缺席）⇒ 拦截同样零 AUDIT_PRE；
+  //    非令牌对照 ⇒ 降级放行 + AUDIT_PRE 落盘（金丝雀之后 audit 照常执法）
+  kernelRegistry.register({ key: 'uncertainty.highProceed', organ: 'now2-audit', defaultValue: 0.7, min: 0, max: 1 });
+  try {
+    const pa = approval.request('expand options under token protocol');
+    const blockedToken = await withSilencedWarn(() => drivePre(exec('click_mouse', {
+      x: 0.6, y: 0.6, target_description: 'Expand Advanced Options',
+      expected_change: 'advanced settings panel expands', confidence: 0.95, approval_token: pa.token,
+    })));
+    assert.equal(blockedToken.kind, 'deny', 'W6R：令牌路径探针缺席 ⇒ fail-closed 拦截');
+    assert.match(blockedToken.reason, /\[Canary\]/);
+    assert.equal(countAudit(), 1, '金丝雀拦截 ⇒ 零新增 AUDIT_PRE（幽灵行同律消灭）');
+    assert.equal(recentCanaryEvents()[0].action, 'blocked', '拦截留痕走金丝雀自身观察面（语义=被拦截）');
+
+    const before = countAudit();
+    const benign = await withSilencedWarn(() => drivePre(exec('click_mouse', {
+      x: 0.7, y: 0.7, target_description: 'Expand Advanced Options',
+      expected_change: 'advanced settings panel expands', confidence: 0.95,
+    })));
+    assert.deepEqual(benign, { kind: 'accept' }, '非令牌 ⇒ 探针缺席降级放行（可用性优先）');
+    assert.equal(countAudit(), before + 1, '放行路径 audit 照常先行提交（顺序修复不废 fail-closed 审计）');
+  } finally {
+    kernelRegistry.reset();
+    resetCanaryGuard();
+    updatePopupState(false);
+  }
+});
+
+// ─── ΝΩ-45：组提交窗口内的 WAL 同步执法（W2-2 语义零回归的增量执法） ───
+// 主 JSONL 改组提交（行缓冲 + 按批 fsync）后，先行审计的底线由 WAL 独立承担：
+// appendPreDispatch 的 appendFileSync 同步通道**绝不入队** —— 派发前返回即已
+// 交割 OS。本用例在主 JSONL 尚处组提交窗口（未冲刷）时即读 .wal，执法该不变量。
+
+test('ΝΩ-45: WAL 仍同步执法 —— 主 JSONL 在组提交窗口内未落，.wal 已先行在盘', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'w2audit-no45-'));
+  try {
+    journal.reset();
+    journal.configure(true, path.join(dir, 'j.jsonl'), 100);
+    const r = journal.appendPreDispatch('click_mouse', { x: 0.5 });
+    assert.equal(r.ok, true, '健康通道提交成功');
+    // 主 JSONL：仍在内存行缓冲（异步取证副本 —— 吞吐导向，W2-2 立法的另一半）
+    assert.equal(existsSync(path.join(dir, 'j.jsonl')), false, '主 JSONL 在组提交窗口内（未冲刷）');
+    assert.equal(journalDiskStats().buffered, 1, 'AUDIT_PRE 的主 JSONL 副本走队列（WAL 为同步底线）');
+    // WAL：同步先行在盘 —— appendFileSync 返回即交割 OS（fail-closed 的物理根基）
+    const wal = readFileSync(path.join(dir, 'j.jsonl.wal'), 'utf8');
+    const row = JSON.parse(wal.trim());
+    assert.equal(row.tool, 'click_mouse', 'WAL 行携带工具名');
+    assert.equal(row.seq, 1, 'WAL 序号单调');
+    assert.match(row.wal_hash, /^[0-9a-f]{64}$/, 'WAL 自身哈希链在场');
+    assert.equal(row.main_tip_before, 'GENESIS', '首行引用主链尖端（交叉锚）');
+    // 冲刷后主 JSONL 取证副本补齐（与 WAL 行同源对账）
+    assert.equal(flushJournal(), 1);
+    const disk = JSON.parse(readFileSync(path.join(dir, 'j.jsonl'), 'utf8').trim());
+    assert.equal(disk.tool, 'AUDIT_PRE');
+    assert.equal(disk.hash, row.hash, '主链行哈希 = WAL 交叉锚（崩溃后可对账复原）');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    journal.configure(true, '', 1000);
+  }
 });

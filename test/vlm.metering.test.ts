@@ -244,6 +244,58 @@ test('Ω-10c: open 态试探成功即治愈（onSuccess 直接闭合）', () => 
   assert.equal(b.retryAt(t0 + 500), null);
 });
 
+// ─── ΝΩ-18：recordServer429 回填 + onExtractionFailure 半权 ───
+
+test('ΝΩ-18: recordServer429 —— 回填记一次本地配额并给出释放边界提示；桶未满回 0', () => {
+  const rl = new VlmRateLimiter({ maxPerMinute: 3 }); // 小时桶缺省 180 不参与
+  const t0 = 7_000_000;
+  rl.tryAcquire(t0);
+  rl.tryAcquire(t0 + 10_000);
+  rl.tryAcquire(t0 + 20_000); // 分钟窗 3/3 满
+  // 回填：第 4 戳入账（t0+30000），提示 = 最早戳 t0 滑出边界 60000 − 30000
+  assert.equal(rl.recordServer429(t0 + 30_000), 30_000, '回填后等待提示精确到释放边界');
+  // 回填收紧生效：下一次 tryAcquire 被拒（4 戳 ≥ 3），等待锚仍是 t0
+  assert.deepEqual(rl.tryAcquire(t0 + 31_000), { allowed: false, retryAfterMs: 29_000 });
+  // 桶未满时回填 ⇒ 提示 0（无等待可提示），但戳照记（下次判断如实收紧）
+  const rl2 = new VlmRateLimiter({ maxPerMinute: 5 });
+  assert.equal(rl2.recordServer429(t0), 0, '桶未满 ⇒ 0');
+  assert.deepEqual(rl2.tryAcquire(t0), { allowed: true, retryAfterMs: 0 }, '1 戳 < 5 仍放行');
+  // 脏入参防御：非有限 now 按 Date.now 计（不抛，返回有限数）
+  const rl3 = new VlmRateLimiter({ maxPerMinute: 1 });
+  rl3.tryAcquire(100);
+  const hint = rl3.recordServer429(Number.NaN);
+  assert.ok(Number.isFinite(hint) && hint > 0, '脏 now 兜底 Date.now 仍给出有限提示');
+});
+
+test('ΝΩ-18: onExtractionFailure 半权 —— 阈值 N 需 2N 次剥壳失败才 open；真失败全权同速；成功清零分数账', () => {
+  const b = new VlmApiBreaker({ failureThreshold: 2, cooldownMs: 1000 });
+  const t0 = 50_000_000;
+  b.onExtractionFailure(t0); // 0.5
+  b.onExtractionFailure(t0 + 1); // 1.0
+  b.onExtractionFailure(t0 + 2); // 1.5 < 2
+  assert.equal(b.state(t0 + 3), 'closed', '3 次剥壳失败（1.5 权）< 阈值 2 ⇒ 不熔断');
+  b.onExtractionFailure(t0 + 3); // 2.0 ≥ 2 ⇒ open
+  assert.equal(b.state(t0 + 4), 'open', '第 4 次（2N）恰熔断 —— 半权语义');
+  assert.equal(b.retryAt(t0 + 4), t0 + 3 + 1000);
+
+  // 真实拨号失败全权（与既有 onFailure 同速）：1 全权 + 1 半权 = 1.5 < 2，再 1 半权 ⇒ open
+  const b2 = new VlmApiBreaker({ failureThreshold: 2, cooldownMs: 1000 });
+  b2.onFailure(t0);
+  b2.onExtractionFailure(t0 + 1); // 1.5
+  assert.equal(b2.state(t0 + 2), 'closed');
+  b2.onExtractionFailure(t0 + 2); // 2.0
+  assert.equal(b2.state(t0 + 3), 'open', '混合计数：全权 1 + 半权×2 = 2 ⇒ 熔断');
+
+  // 成功清零分数累计（好 JSON 一次即治愈 —— 交替型不误熔断）
+  const b3 = new VlmApiBreaker({ failureThreshold: 2, cooldownMs: 1000 });
+  b3.onExtractionFailure(t0);
+  b3.onExtractionFailure(t0 + 1);
+  b3.onExtractionFailure(t0 + 2); // 1.5
+  b3.onSuccess(t0 + 3); // 清零
+  b3.onExtractionFailure(t0 + 4); // 0.5
+  assert.equal(b3.state(t0 + 5), 'closed', '成功清零后分数账从 0 重计');
+});
+
 // ─── Ω-10d jitterBackoff：全抖动 uniform(0, min(cap, base·2^attempt)) ───
 
 test('Ω-10d: 缺省 base=500 / cap=8000 的全抖动范围 [0, min(cap, base·2^attempt)]', () => {

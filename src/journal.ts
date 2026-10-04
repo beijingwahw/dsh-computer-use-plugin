@@ -5,8 +5,10 @@
 // 第七轮：SHA-256 哈希链 —— 每条记录携带前条哈希的哈希（区块链式防篡改审计）。
 // 事后任何对历史记录的增/删/改都会断裂链条，verify_journal 立即定位第一个断点。
 // 这是金融级审计日志的世界标准：日志不仅要记，还要能证明自己没被改过。
-import { mkdir, open } from 'fs/promises';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import {
+  appendFileSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync,
+  statSync, renameSync, unlinkSync,
+} from 'node:fs';
 import { createHash } from 'crypto';
 import path from 'path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -46,12 +48,48 @@ export type JournalMarker =
    *  （orchestrator 的 ACTION_TOOLS 过滤）、技能归纳（sinceTaskStart/list(true)）、
    *  过程评分（processScore 的 status==='MARKER' 旁路）全部天然跳过黑板行，
    *  与 AUDIT_PRE（W2-2）同律的白名单隔离：黑板绝不污染动作重放。 */
-  | { kind: 'AGENT_NOTE'; agentId: string; event: 'claim' | 'post'; subject: string; body?: string };
+  | { kind: 'AGENT_NOTE'; agentId: string; event: 'claim' | 'post'; subject: string; body?: string }
+  /** ΑΩ-R4（守卫物理探针审计盲区消除）：探针存证行 —— 金丝雀试演
+   *  （probe-click / probe-click-back(-retry) / probe-type-char / probe-backspace(-retry)
+   *  / region-hash）与根因鉴别（hover-cursor / capture-frame）这类**绕过宿主
+   *  工具管线**的物理微动作派发，此前只活在各守卫自己的事件环里、不进任何
+   *  防篡改链 —— 与 W2-2「变更类动作先入审计链再派发」立法不对称。本标记
+   *  把每次物理派发（含复位重试与帧通道）补进哈希链：探针是安全机制的
+   *  「微型变更」，同样要有不可抵赖的轨迹。载荷走既有脱敏纪律（与 auditGuard
+   *  的 REDACT_KEYS 同律从严）：只记守卫名 + 探针步名 + 区域坐标 + 结果三态；
+   *  type 探针只记 charCount（单字符事实），字符/文本内容零明文。结果三态：
+   *  ok（派发成功/观察在手）/ failed（派发被拒或观察缺席 —— 端口返回
+   *  false/null，世界未被触碰）/ threw（端口抛错，防御式收口）。
+   *  立法取舍（fail-open，与 W2-2 的 fail-closed 相反）：探针是安全机制本身
+   *  —— 幂等可逆微动作 + 预算封顶，审计失败若 fail-closed 会因审计通道抖动
+   *  瘫痪安全层 ⇒ fail-open + 遥测打点 <guard>:probe-audit-failed，完整论证
+   *  见 guards/probeAudit.ts。白名单隔离同 AGENT_NOTE/AUDIT_PRE：GUARD_PROBE
+   *  永不进 ACTION_TOOLS —— 重放/技能归纳/过程评分天然跳过探针行。 */
+  | {
+      kind: 'GUARD_PROBE';
+      guard: 'canary' | 'rootcause';
+      probe: string;
+      result: 'ok' | 'failed' | 'threw';
+      point?: { x: number; y: number };
+      radius?: number;
+      charCount?: number;
+    }
+  /** ΝΩ-1：沙箱宿主重放的单步派发存证（五门全过后的真派发）。三态脱敏方言
+   *  与 GUARD_PROBE 同律：只记动作种类/归一坐标/字符数，文本/令牌零明文；
+   *  fail-open（重放已过五门，审计通道故障不拦截）。永不进 ACTION_TOOLS。 */
+  | {
+      kind: 'SANDBOX_HOST_REPLAY';
+      action: string;
+      result: 'ok' | 'failed' | 'threw';
+      point?: { x: number; y: number };
+      charCount?: number;
+    };
 
 /** 标记的 tool 名集合：append 门控的旁路白名单（status 恒为 'MARKER'）。
- *  W6-4：AGENT_NOTE 入白名单（黑板行经 appendMarker 入链）；ACTION_TOOLS
- *  不动 —— 白名单隔离是单向的：能入链 ≠ 能重放。 */
-const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE', 'AGENT_NOTE']);
+ *  W6-4：AGENT_NOTE 入白名单（黑板行经 appendMarker 入链）；ΑΩ-R4：GUARD_PROBE
+ *  入白名单（守卫物理探针存证行）；ACTION_TOOLS 不动 —— 白名单隔离是单向的：
+ *  能入链 ≠ 能重放。 */
+const MARKER_TOOLS = new Set(['AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE', 'AGENT_NOTE', 'GUARD_PROBE', 'SANDBOX_HOST_REPLAY']);
 
 export interface JournalEntry {
   ts: number;
@@ -90,15 +128,61 @@ export type PreDispatchAuditResult =
   | { ok: true; hash?: string; skipped?: 'journal-disabled' }
   | { ok: false; error: string };
 
-/** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提） */
-function canonical(obj: any): string {
+/** ΝΩ-24：canonical 病态载荷守卫参数 —— 深度上限与降级哨兵。
+ *  守卫律与 processScore 的 safeCanonical 同源（降级为常量哨兵串，序列化
+ *  稳定、绝不抛）；哨兵在哈希域内确定性一致 —— 同一病态载荷每次铸出同一
+ *  指纹，verify 重算同哨兵，链不断。 */
+const CANONICAL_MAX_DEPTH = 64;
+const CANONICAL_SENTINEL = '"#unserializable"';
+
+// ── ΝΩ-45（journal 组提交 + JSONL rotation）：flusher 与轮转参数 ──
+/** 组提交窗口：50ms 周期或 32 行批阈值，先到者触发一次 open/write/fsync/close */
+const FLUSH_INTERVAL_MS = 50;
+/** 批阈值：第 32 行并入当批同步提交（不等周期 —— 高频动作流上把窗口压到一条尾延迟内） */
+const FLUSH_BATCH = 32;
+/** 防涨硬上限：缓冲达 256 行 ⇒ 同步冲刷。不变式执法缝：批阈值在每条 enqueue 后
+ *  即时检查，缓冲正常上界 = FLUSH_BATCH（32）⇒ 本限正常不可达；它是为未来
+ *  flusher 异步化重构（批触发改为延迟排程的形态）预留的防御底座 —— 缓冲增长
+ *  永远有界，绝不因冲刷通道停滞而无限吃内存。 */
+const QUEUE_LIMIT = 256;
+/** 轮转阈值：当前代追加后总字节将超 5MB ⇒ 先轮转再追加（新当前代从本批起算） */
+const ROTATION_LIMIT_BYTES = 5 * 1024 * 1024;
+/** 轮转保留代数：.1（上一代）与 .2（上上代），更旧出局 */
+const ROTATION_GENERATIONS = 2;
+
+/** ΝΩ-45（观测/测试面）：主 JSONL 组提交通道的统计快照（reset 归零） */
+export interface JournalDiskStats {
+  /** 组提交次数（每批每文件一计 —— open/write/fsync/close 四联的执行次数） */
+  flushes: number;
+  /** fsync 调用次数（旧路径逐条 = 行数；组提交后 = 批数 —— 下降幅度的断言锚点） */
+  fsyncs: number;
+  /** 成功落盘行数 */
+  linesWritten: number;
+  /** 轮转发生次数 */
+  rotations: number;
+  /** 写失败丢弃的行数（旁路义务的诚实观测 —— WAL 不在此列，其永不丢） */
+  droppedLines: number;
+}
+
+/** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提）。
+ *  ΝΩ-24：递归加 WeakSet 环检测 + 深度上限 64 —— 旧实现无守卫，畸形深嵌套
+ *  args 栈溢出、环形 args 无限递归，RangeError 可击穿 append（无 catch）直达
+ *  宿主事件层。seen 只记当前递归路径（出口即删）：同一子对象被两键引用是
+ *  合法 DAG 载荷（JSON.stringify 同律逐处展开），只有真环才降级哨兵。 */
+function canonical(obj: any, depth = 0, seen = new WeakSet<object>()): string {
   if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
-  if (Array.isArray(obj)) return '[' + obj.map(canonical).join(',') + ']';
-  // 值为 undefined 的自有键与缺键同域：JSON.stringify 落盘时丢弃前者
-  // （checkpoint 落盘-恢复往返），若哈希域区分两者，恢复后 verify 重算即误报断链。
-  return '{' + Object.keys(obj).sort()
-    .filter(k => obj[k] !== undefined)
-    .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
+  if (depth > CANONICAL_MAX_DEPTH || seen.has(obj)) return CANONICAL_SENTINEL;
+  seen.add(obj);
+  try {
+    if (Array.isArray(obj)) return '[' + obj.map(v => canonical(v, depth + 1, seen)).join(',') + ']';
+    // 值为 undefined 的自有键与缺键同域：JSON.stringify 落盘时丢弃前者
+    // （checkpoint 落盘-恢复往返），若哈希域区分两者，恢复后 verify 重算即误报断链。
+    return '{' + Object.keys(obj).sort()
+      .filter(k => obj[k] !== undefined)
+      .map(k => JSON.stringify(k) + ':' + canonical(obj[k], depth + 1, seen)).join(',') + '}';
+  } finally {
+    seen.delete(obj);
+  }
 }
 
 function sha256(s: string): string {
@@ -121,8 +205,15 @@ class ActionJournal {
   private chainTip = GENESIS;  // 哈希链尖端：checkpoint 恢复时随行
   private chainBase = GENESIS; // 链基（B-1）：最旧存活条目的「前条哈希」。
   private lastObserved = '';   // C-3：最近观察摘要（[观察]→[行动] 因果桥）
-  /** 磁盘写尾链（J 纪元）：并发 append 的 JSONL 行序与链序保持一致 */
-  private diskTail: Promise<void> = Promise.resolve();
+  /** ΝΩ-45（组提交）：主 JSONL 行缓冲（FIFO）。磁盘行序恒等于链序 —— J 纪元
+   *  「并发 append 的 JSONL 行序与链序保持一致」不变量的新承载：入队即定序，
+   *  flushDisk 单线程同步成批写出（旧实现靠 diskTail 尾链串行化，本实现靠
+   *  「同步批写」这一更强的不变量 —— 无 await 窗口即无完成倒置）。 */
+  private pendingLines: Array<{ filePath: string; line: string }> = [];
+  /** ΝΩ-45：flusher 周期计时器（unref 不阻进程退出；node:test mock.timers 可注入假钟） */
+  private flushTimer: NodeJS.Timeout | null = null;
+  /** ΝΩ-45：组提交统计（观测/测试面；reset 归零） */
+  private diskCounters: JournalDiskStats = { flushes: 0, fsyncs: 0, linesWritten: 0, rotations: 0, droppedLines: 0 };
   /** Δ-6：日志目录一次保证集（按路径记账）—— 首写建立后入集，configure 换路径时清空重探 */
   private ensuredDirs = new Set<string>();
   // ── W2-2（S4）：先行审计 WAL 通道的簿记 ──
@@ -155,6 +246,9 @@ class ActionJournal {
     // W2-2（S4）：WAL 链一并归零（测试隔离缝 —— 与主链同一确定性基线）
     this.walTip = GENESIS;
     this.walSeq = 0;
+    // ΝΩ-45：组提交统计随会话/测试隔离归零（磁盘行不回滚 —— 缓冲行留待
+    // flusher 落盘，与旧 diskTail 在途行跨 reset 落盘同律）
+    this.diskCounters = { flushes: 0, fsyncs: 0, linesWritten: 0, rotations: 0, droppedLines: 0 };
   }
 
   /** 当前任务描述（未处于复杂任务中则为空串） */
@@ -168,7 +262,21 @@ class ActionJournal {
     const isMarker = MARKER_TOOLS.has(entry.tool);
     if (!isMarker && !ACTION_TOOLS.includes(entry.tool)) return;
     // 链式封存：本条哈希 = f(前条哈希, 本条内容)
-    entry.hash = chainHash(this.chainTip, entry);
+    // ΝΩ-24：防御 catch —— canonical 守卫（环/深度）之外的残余病态向量
+    //（BigInt 值、抛错 getter 等 JSON.stringify 硬拒值）在哈希域炸出时，
+    // args 降级为安全字符串后重铸；重铸仍败 ⇒ 弃条。观察位通道 fail-open
+    //（appendPreDispatch 的 fail-closed 立法见其注记 —— 审计行缺席优于
+    // 击穿宿主事件层；弃条时链上前滚从未发生，内存态零残留）。
+    try {
+      entry.hash = chainHash(this.chainTip, entry);
+    } catch (e: any) {
+      try {
+        entry.args = { degraded: `unserializable args (${String(e?.message ?? e).slice(0, 160)})` };
+        entry.hash = chainHash(this.chainTip, entry);
+      } catch {
+        return;
+      }
+    }
     this.chainTip = entry.hash;
     this.entries.push(entry);
     if (this.entries.length > this.capacity) {
@@ -184,36 +292,153 @@ class ActionJournal {
   }
 
   /**
-   * J 纪元磁盘写尾链的入队原语（W2-2 抽取：append 与 appendPreDispatch 共用）。
-   * 旧实现两个并发 append 各自 await mkdir 后再 appendFile，完成顺序可倒置：
-   * 内存哈希链正确，磁盘 JSONL 行序却可能违反链序。入队时快照 filePath
-   * （configure 换路径后在途条目不得写进新路径）；追加失败不阻断主流程（旁路义务）。
+   * ΝΩ-45（组提交）：主 JSONL 行缓冲的入队原语（append 与 appendPreDispatch 共用 ——
+   * 后者只是主 JSONL 取证副本入队，其 WAL 先行落盘仍走 appendFileSync 同步通道，
+   * W2-2 fail-closed 语义零变化）。入队时快照 filePath（configure 换路径后在途行
+   * 不得写进新路径）；序列化失败弃行（旁路义务）。
+   *
+   * 触发策略（三重，任一先到）：① 缓冲达 QUEUE_LIMIT（256）⇒ 立即同步冲刷（防涨
+   * 硬上限）；② 达 FLUSH_BATCH（32）⇒ 本条并入当批立即同步提交；③ 否则排 50ms
+   * 周期计时器（unref）。每批一次 open/write/fsync/close —— 旧路径每条 4 syscall，
+   * 32 条一批后摊销为 1/32。
+   *
+   * ── 崩溃窗口论证（选定方案：内存行缓冲 + 组提交，否决 writeSync+定期 fsync 折中）──
+   * 取舍面：窗口内进程崩溃 ⇒ 缓冲中 ≤ 上界条数的**主 JSONL 行**丢失（正常上界 32、
+   * 防涨上界 256），对照旧路径的每条 fsync（零丢失但每条 4 syscall + 一次 fsync
+   * 延迟，高频动作流上不可持续）。为什么有界丢失可接受：
+   *   1. 审计底线不由主 JSONL 承担 —— 全部变更类工具的审计行经 appendPreDispatch
+   *      的 WAL（appendFileSync 同步写）**先行**落盘（W2-2 语义绝对不变）；WAL 行
+   *      自带主链交叉锚 hash，崩溃后审计史以 .wal 为准对账，主 JSONL 缺席的
+   *      AUDIT_PRE 行可从 WAL 复原事实。
+   *   2. 内存链由 checkpoint 随行持久化；index.ts 卸载链在 saveCheckpoint（collect
+   *      前）与 journal.reset（清理前）之间显式 flushJournal()，优雅关闭零丢失。
+   *   3. 主 JSONL 的角色是吞吐导向的磁盘取证副本（W2-2 注记原文：「主 JSONL 是
+   *      异步批写……吞吐导向，不满足先行性」——组提交正是该立法的兑现）。
+   * 否决折中方案（每条 writeSync 进页缓存 + 定期 fsync）：它挡得住进程崩溃、挡不住
+   * 断电（页缓存不承诺持久），只省 fsync 不省 open/close，且把「丢行边界」从本处
+   * 显式有界的 32/256 行换成 OS 页缓存的隐式承诺 —— 显式有界窗口 + WAL 同步底线
+   * 的组合更可论证、可测试（journalDiskStats().buffered 即窗口深度的观测面）。
    */
   private enqueueDisk(entry: JournalEntry): void {
     const filePath = this.filePath;
-    this.diskTail = this.diskTail.then(async () => {
+    let line: string;
+    try {
+      line = JSON.stringify(entry) + '\n';
+    } catch {
+      return; // 序列化失败：弃行（与旧实现 write 失败吞错同律的旁路义务）
+    }
+    this.pendingLines.push({ filePath, line });
+    if (this.pendingLines.length >= QUEUE_LIMIT) {
+      this.flushDisk(); // 防涨上限：同步清账（批阈值先执法 ⇒ 正常不可达的防御缝）
+      return;
+    }
+    if (this.pendingLines.length >= FLUSH_BATCH) {
+      this.flushDisk(); // 批阈值：本条并入当批同步提交
+      return;
+    }
+    if (this.flushTimer === null) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        try {
+          this.flushDisk();
+        } catch { /* 计时器回调绝不抛（flushDisk 自身全守卫，双保险） */ }
+      }, FLUSH_INTERVAL_MS);
+      // unref：不阻进程退出；node:test mock.timers 的句柄可能无 unref 面 —— 防御式探测
+      if (typeof this.flushTimer.unref === 'function') this.flushTimer.unref();
+    }
+  }
+
+  /**
+   * ΝΩ-45（组提交）：同步成批落盘 —— 取走全部缓冲行，按 filePath 快照分段
+   * （configure 换路径的在途行各归各路径，段序 = 入队序），每段一次
+   * mkdir（受 ensuredDirs 标志门控）+ 轮转判定 + open('a')/write/fsync/close。
+   * 全程无 await ⇒ 无完成倒置窗口，磁盘行序 = 链序（J 纪元不变量）。
+   * 绝不抛（每段独立 try/catch，失败弃段并 warn —— 旁路义务不炸调用方，
+   * appendPreDispatch 的 fail-closed 只针对其 WAL 步，本方法在其 try 域内
+   * 也恒不抛）。返回本次成功落盘行数。
+   */
+  flushDisk(): number {
+    if (this.pendingLines.length === 0) return 0;
+    const batch = this.pendingLines;
+    this.pendingLines = [];
+    let written = 0;
+    let i = 0;
+    while (i < batch.length) {
+      const filePath = batch[i]!.filePath;
+      let text = '';
+      let lines = 0;
+      while (i < batch.length && batch[i]!.filePath === filePath) {
+        text += batch[i]!.line;
+        lines++;
+        i++;
+      }
       try {
         // Δ-6：目录保证一次化（按路径记账）—— 每条路径首写建立后入集；
-        // 旧实现每条 append 都 recursive mkdir，高频动作流上是无谓的系统调用税。
-        // mkdir 失败不入集（下次 append 重试）；追加失败不阻断主流程（旁路义务）
+        // mkdir 失败不入集（下次冲刷重试）；追加失败不阻断主流程（旁路义务）
         if (!this.ensuredDirs.has(filePath)) {
-          await mkdir(path.dirname(filePath), { recursive: true });
+          mkdirSync(path.dirname(filePath), { recursive: true });
           this.ensuredDirs.add(filePath);
         }
-        // 崩溃一致性：fsync 落盘的追加写 —— appendFile 只进 OS 页缓存，
-        // 断电可丢/撕裂 JSONL 尾部行（磁盘取证半边与内存链不同等可靠）；
-        // open('a') + write + sync 逐条提交，句柄必经 finally 关闭（无泄漏）。
-        const fh = await open(filePath, 'a');
+        // ΝΩ-45：轮转判定先于追加（超限代降为 .1 后新代从本批起算）
+        this.rotateIfNeeded(filePath, Buffer.byteLength(text, 'utf8'));
+        // 崩溃一致性：fsync 落盘的追加写 —— 页缓存不算落盘；整批一次
+        // open/write/fsync/close（组提交摊销），句柄必经 finally 关闭（无泄漏）。
+        const fd = openSync(filePath, 'a');
         try {
-          await fh.write(JSON.stringify(entry) + '\n', null, 'utf8');
-          await fh.sync();
+          writeSync(fd, text, null, 'utf8');
+          fsyncSync(fd);
         } finally {
-          await fh.close();
+          closeSync(fd);
         }
+        written += lines;
+        this.diskCounters.flushes += 1;
+        this.diskCounters.fsyncs += 1;
+        this.diskCounters.linesWritten += lines;
       } catch (e: any) {
-        console.warn(`[Journal] write failed: ${e.message}`);
+        this.diskCounters.droppedLines += lines;
+        console.warn(`[Journal] write failed: ${e?.message ?? e}`);
       }
-    });
+    }
+    return written;
+  }
+
+  /**
+   * ΝΩ-45（JSONL rotation）：size-based 轮转 —— 当前代追加后总字节将超
+   * ROTATION_LIMIT_BYTES（5MB）⇒ 先右移一代再追加：.2 出局（unlink）、.1 递补
+   * 为 .2、当前代降为 .1，保留 ROTATION_GENERATIONS（2）代。
+   *
+   * ── 边界诚实注记（只盖当前代）──
+   *   · journal.verify() 走内存存活窗口 —— 轮转对其零影响；
+   *   · notary 的 journalDisk 磁盘指纹锚（ΝΩ-21）与 R21 复核端只读 journalPath
+   *     本尊 ⇒ 锚与指纹**只盖当前代**：轮转后旧誓言前缀迁移进 .1/.2，复核端对
+   *     当前代重算只见更少完整行 ⇒ fewer-lines drift 注记（诚实边界，非伪造）；
+   *     当前代之外的磁盘取证由 .1/.2 文件本体承载（运维保管面）；
+   *   · processScore 等 CLI 消费者按显式路径读 —— 读到的是当前代。
+   * 轮转是旁路义务：任何一步失败 ⇒ 照常追加当前代（诚实降级为不轮转），绝不抛。
+   */
+  private rotateIfNeeded(filePath: string, incomingBytes: number): void {
+    try {
+      let size = 0;
+      try {
+        size = statSync(filePath).size;
+      } catch {
+        return; // 无当前代文件 ⇒ 首写新档，无需轮转
+      }
+      if (size + incomingBytes <= ROTATION_LIMIT_BYTES) return;
+      const oldest = filePath + '.' + ROTATION_GENERATIONS;
+      const prev = filePath + '.' + (ROTATION_GENERATIONS - 1);
+      try { unlinkSync(oldest); } catch { /* .2 缺席 = 历史更短，右移照常 */ }
+      try { renameSync(prev, oldest); } catch { /* .1 缺席同上 */ }
+      renameSync(filePath, prev); // 本步失败 ⇒ 外层 catch ⇒ 追加照旧写当前代
+      this.diskCounters.rotations += 1;
+    } catch {
+      /* rotation 失败 ⇒ 不轮转照常追加（旁路义务） */
+    }
+  }
+
+  /** ΝΩ-45（观测/测试面）：组提交统计快照 + 当前缓冲深度（崩溃窗口的观测面） */
+  diskStats(): JournalDiskStats & { buffered: number } {
+    return { ...this.diskCounters, buffered: this.pendingLines.length };
   }
 
   // ── W2-2（S4）：先行审计 WAL —— 派发前 fail-closed 提交通道 ──
@@ -223,8 +448,9 @@ class ActionJournal {
   // 为前提。三步提交，任一步失败 ⇒ ok=false（调用方拒派该动作，fail-closed）：
   //   1. 铸造：AUDIT_PRE 标记 + 主链哈希计算（canonical 序列化可在病态载荷上
   //      抛出 —— 深嵌套/环形参数是对审计面的注入向量，抛出即拒绝，绝不下沉）；
-  //   2. WAL 同步落盘：单行 appendFileSync（journalPath + '.wal'，独立轻量通道
-  //      —— 主 JSONL 是异步批写 + 逐条 fsync，吞吐导向，不满足先行性；WAL 是
+    //   2. WAL 同步落盘：单行 appendFileSync（journalPath + '.wal'，独立轻量通道
+    //      —— 主 JSONL 是异步批写（ΝΩ-45 组提交：行缓冲 + 按批 fsync），吞吐导向，
+    //      不满足先行性；WAL 是
   //      数据库 write-ahead log 的标准形态：一条小行、同步写、派发前返回）。
   //      无磁盘路径（内存态 journal）⇒ 跳过本步（内存链即事实源）；
   //   3. 内存提交：主链尖端前滚 + entries.push（与 append() 同律，含容量驱逐）
@@ -466,6 +692,31 @@ class ActionJournal {
 
 export const journal = new ActionJournal();
 
+// ─── ΝΩ-45：组提交的显式冲刷与观测面 ───
+
+/**
+ * ΝΩ-45：显式冲刷 API —— 组提交窗口的确定性清账点。生产接入位（index.ts 卸载链）：
+ * notary 磁盘旁链锚与 saveCheckpoint（collect 读内存链）之前、journal.reset（清理）
+ * 之前 —— 保证磁盘取证副本与锚/快照看到同一份链尾。返回本次落盘行数；绝不抛
+ * （flushDisk 全守卫，此处防御式双保险）。
+ */
+export function flushJournal(): number {
+  try {
+    return journal.flushDisk();
+  } catch {
+    return 0;
+  }
+}
+
+/** ΝΩ-45（观测/测试面）：组提交统计快照（含缓冲深度 —— 崩溃窗口上界的观测锚点） */
+export function journalDiskStats(): JournalDiskStats & { buffered: number } {
+  try {
+    return journal.diskStats();
+  } catch {
+    return { flushes: 0, fsyncs: 0, linesWritten: 0, rotations: 0, droppedLines: 0, buffered: 0 };
+  }
+}
+
 // ─── W4-0（E 接线）：动作验证实证三字段的防御提取 ───
 
 /**
@@ -507,18 +758,26 @@ function verifyEvidenceOf(result: unknown): Pick<JournalEntry, 'scale' | 'intent
 export function registerJournalGuard(ctx: Context, config: Config): void {
   journal.configure(config.enableJournal, config.journalPath, 1000);
   onToolPost(ctx, async (call, result, next) => {
-    const c = classifyResult(result); // B-2：统一契约解析
-    // C-3 因果链注入：思考来自模型行动前的出声思考，观察来自最近截图锚点
-    // W4-0（E）：动作验证实证三字段顶层直录（state_anchor.effect → 链上行）
-    await journal.append({
-      ts: Date.now(), tool: call.name, args: call.args,
-      status: c.status, effect_detected: c.effectDetected,
-      ...verifyEvidenceOf(result),
-      thought: typeof call.args?.reasoning === 'string' && call.args.reasoning.trim()
-        ? call.args.reasoning.trim().slice(0, 500) // 思考预算：防长篇推理反噬 Token
-        : undefined,
-      observe: journal.lastObservation(),
-    });
+    // ΝΩ-24：观察位守卫防御收口 —— 记录路径的任何异常（残余病态 args、
+    // 契约外形状）就地吞除，绝不击穿到宿主事件层；next 在 try 之外：守卫
+    // 自身失败也必须原样透传工具结果（纯观察的旁路义务 —— 旧实现异常时
+    // next 不被调用，管线被观察者带崩）。
+    try {
+      const c = classifyResult(result); // B-2：统一契约解析
+      // C-3 因果链注入：思考来自模型行动前的出声思考，观察来自最近截图锚点
+      // W4-0（E）：动作验证实证三字段顶层直录（state_anchor.effect → 链上行）
+      await journal.append({
+        ts: Date.now(), tool: call.name, args: call.args,
+        status: c.status, effect_detected: c.effectDetected,
+        ...verifyEvidenceOf(result),
+        thought: typeof call.args?.reasoning === 'string' && call.args.reasoning.trim()
+          ? call.args.reasoning.trim().slice(0, 500) // 思考预算：防长篇推理反噬 Token
+          : undefined,
+        observe: journal.lastObservation(),
+      });
+    } catch {
+      /* 弃条降级：审计行缺席，工具结果不受影响 */
+    }
     return next(result); // 纯观察，原样透传
   });
 }

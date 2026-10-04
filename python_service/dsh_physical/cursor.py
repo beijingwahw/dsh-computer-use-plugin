@@ -39,6 +39,61 @@ _STANDARD_CURSORS: dict[int, str] = {
 _CURSOR_SHOWING = 0x00000001
 
 
+def _raw_mirror_position() -> dict | None:
+    """ΝΩ-53：Raw Input 镜像读位（零 Win32 调用 —— 事件驱动替代轮询）。
+
+    镜像缺席（默认关闭）/未启动/陈旧 ⇒ ``None``：调用方回退既有轮询路径，
+    不抛、不谎报（运行层铁律）。陈旧门由 rawinput 模块按 config 播种
+    （``stale_after_s`` 缺省 2s —— SetCursorPos 类程序性移动不产生 Raw
+    Input 事件，陈旧即回退是诚实设计）。
+    """
+    try:
+        from . import rawinput
+
+        shot = rawinput.read_position()
+        if shot.get("ok"):
+            return {
+                "x": int(shot["x"]), "y": int(shot["y"]),
+                "age_ms": int(float(shot["age_s"]) * 1000),
+            }
+    except Exception:  # noqa: BLE001 —— 感知通道失败 = 诚实降级，不炸服务
+        pass
+    return None
+
+
+def _mirror_enabled() -> bool:
+    """ΝΩ-53：镜像开关回显（config.enabled —— 决定响应是否附加 position）。"""
+    try:
+        from . import rawinput
+
+        return bool(rawinput.describe().get("enabled"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def cursor_position() -> dict:
+    """鼠标位置读取 —— Raw Input 镜像优先，缺席/陈旧回退 GetCursorPos。
+
+    ΝΩ-53 的读取面：镜像在场时零系统调用（dict 快照）；否则单次
+    GetCursorPos（与 pyautogui.position 同一底层调用）。永不抛。
+    """
+    pos = _raw_mirror_position()
+    if pos is not None:
+        return {**pos, "source": "raw-input-mirror"}
+    if sys.platform != "win32":
+        return {"source": "unsupported", "platform": sys.platform}
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        pt = wintypes.POINT(0, 0)
+        if not ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):  # type: ignore[attr-defined]
+            return {"source": "win32", "error": "GetCursorPos returned 0"}
+        return {"x": int(pt.x), "y": int(pt.y), "source": "win32"}
+    except Exception as e:  # noqa: BLE001 —— 读侧绝不抛
+        return {"source": "win32", "error": f"{type(e).__name__}: {e}"}
+
+
 def _read_kind_windows() -> dict:
     import ctypes
     from ctypes import wintypes
@@ -61,16 +116,21 @@ def _read_kind_windows() -> dict:
     if not user32.GetCursorInfo(ctypes.byref(ci)):
         return {"kind": "error", "detail": "GetCursorInfo returned 0"}
 
+    # ΝΩ-53：CURSORINFO 结构本就携带 ptScreenPos —— 同一次调用的免费位置
+    # （临时键，cursor_kind 决定去留：镜像开启 ⇒ 转正为 position；关闭 ⇒ 剥除
+    # 保持旧响应形状）
+    pos = {"x": int(ci.ptScreenPos.x), "y": int(ci.ptScreenPos.y)}
+
     if not (ci.flags & _CURSOR_SHOWING):
-        return {"kind": "hidden"}
+        return {"kind": "hidden", "pt_screen_pos": pos}
 
     current = ctypes.c_void_p(ci.hCursor or 0).value or 0
     for resid, name in _STANDARD_CURSORS.items():
         standard = user32.LoadCursorW(None, ctypes.c_void_p(resid)) or 0
         if current and standard and current == standard:
-            return {"kind": name, "handle": current}
+            return {"kind": name, "handle": current, "pt_screen_pos": pos}
     # 应用自定义光标（浏览器/游戏偶见）—— 无法归类，如实上报
-    return {"kind": "custom", "handle": current}
+    return {"kind": "custom", "handle": current, "pt_screen_pos": pos}
 
 
 def cursor_kind() -> dict:
@@ -78,6 +138,12 @@ def cursor_kind() -> dict:
 
     返回 ``{kind, handle?}``；kind ∈ arrow/ibeam/hand/wait/busy/resize/
     cross/unavailable/hidden/custom/error/unsupported。
+
+    ΝΩ-53 结构差异注记：镜像开关开启（``DSH_PHYSICAL_RAW_INPUT=1``）时
+    响应附加 ``position`` —— (x,y) 优先读 Raw Input 镜像（零额外 Win32
+    调用；句柄比对仍需 GetCursorInfo，Raw Input 不给句柄），镜像陈旧/缺席
+    则回用**同一次** GetCursorInfo 已取回的 ``ptScreenPos``（零新增调用）。
+    默认关闭 ⇒ 响应形状与旧版逐字节一致（零回归铁律）。
     """
     if sys.platform != "win32":
         return {
@@ -87,6 +153,18 @@ def cursor_kind() -> dict:
                       "the probe falls back to hover-repaint evidence only",
         }
     try:
-        return _read_kind_windows()
+        result = _read_kind_windows()
     except Exception as e:  # noqa: BLE001 —— 感知通道失败 = 诚实降级，不炸服务
         return {"kind": "error", "detail": f"{type(e).__name__}: {e}"}
+    if not isinstance(result, dict):
+        return result
+    ci_pos = result.pop("pt_screen_pos", None)
+    if _mirror_enabled():
+        # 镜像在场：(x,y) 优先读镜像（零额外调用）；陈旧/未播种 ⇒ 回用同一次
+        # GetCursorInfo 已取回的 ptScreenPos（零新增调用 —— 结构差异注记）
+        mirror_pos = _raw_mirror_position()
+        if mirror_pos is not None:
+            result["position"] = {**mirror_pos, "source": "raw-input-mirror"}
+        elif ci_pos is not None:
+            result["position"] = {**ci_pos, "source": "getcursorinfo"}
+    return result

@@ -2,26 +2,225 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { onCognitionPlanReady, onDoctorVerdict, onHostToolPost, sniffFingerprint, } from './events.js';
 import { sandboxLog } from './log.js';
 import { SandboxEngineImpl } from './engine.js';
-import { muscleReliability } from './types.js';
+import { validateActionChainInput } from './actionSchema.js';
+import { muscleReliability, } from './types.js';
 export { SandboxEngineImpl } from './engine.js';
 export { muscleReliability, resolveConsolidation, hasVerificationLayer } from './types.js';
+// ΝΩ-1：宿主执行器适配层公开（装配产物可独立执法测试 —— dryRun 拒绝/黑名单
+// 拦截/存证 marker 均在适配层执法，不依赖 cordis 宿主在场）。
+export { physicalBackendHostExecutor };
 export const name = 'sandbox-execution-plugin';
 // 可选依赖 '?' 语法：缺席不阻断加载，相关能力诚实降级
 export const inject = ['tools', 'dsh.cognition?', 'dsh.quality-doctor?'];
 // D-5 替身人格（三正交段内嵌于工具描述 —— DSH 模式：工具即角色的躯壳）
 const SHADOW_DOCTRINE = 'You are the Sandbox Execution Engine — the safe avatar of this digital organism in the physical world. ' +
     'THE HOST IS SACRED: everything here is virtual; replay_on_host is the ONLY exit and only passes ' +
-    'the four gates (token / doctor / reliability / fingerprint). ' +
+    'the five gates (token / doctor / reliability / fingerprint / step-level safety scan — ' +
+    'replays are never exempt from the approval and risk gates). ' +
     'DRILL, THEN DELIVER: errors are nutrients — captured, diagnosed, corrected, repeated; ' +
     'the conversation sees results, never sweat. ' +
     'TRUST IS A FINGERPRINT: replay starts only when the host state matches the rehearsal state; ' +
     'a stale rehearsal is a lie.';
+/** ΝΩ-1：guardDryRun 在场探测。system 层的 dryRun 守卫不抛不返错（静默吞派发
+ *  —— 提示词调试语义），宿主重放若把静默吞当成派发成功即是谎言，故须显式拒绝。
+ *  探测原语：零量滚动 —— dryRun 在场 ⇒ guardDryRun 在 system.scroll 同步入口
+ *  打印 '[dry-run] …' 后早退（零服务接触、零世界触碰）；dryRun 缺席 ⇒
+ *  scrollPage(down, 0) 物理零位移（或服务报错 ⇒ 探测不可判定，如实放行，交由
+ *  真实派发自己诚实归因）。'[dry-run]' 前缀全库唯一（system.ts guardDryRun 的
+ *  唯一打印点）。侦听只覆盖同步调用窗（JS 单线程，无异步交错窗口）；转发原
+ *  console.log，日志零丢失。纯探测、永不抛。 */
+function guardDryRunPresent(sys) {
+    let hit = false;
+    const orig = console.log;
+    console.log = (...args) => {
+        if (typeof args[0] === 'string' && args[0].startsWith('[dry-run]'))
+            hit = true;
+        return orig(...args);
+    };
+    try {
+        sys.system.scroll('down', 0).catch(() => { });
+    }
+    catch {
+        /* 同步抛 = 不可判定：后续真实派发自会诚实归因 */
+    }
+    finally {
+        console.log = orig;
+    }
+    return hit;
+}
+/** ΝΩ-1：无机械动作的步（noop / dismiss_popup 模型侧占位）—— 无派发即无
+ *  guardDryRun 吞没风险，免探测免审计（与宿主 replayOne 的无害占位同律）。 */
+const NON_PHYSICAL_KINDS = new Set(['noop', 'dismiss_popup']);
+function physicalBackendHostExecutor(sys, markerSink) {
+    const S = sys.system; // 宿主系统层唯一事实源（黑名单/dryRun/ioMutex 全在內）
+    const fail = (note) => ({ ok: false, note });
+    const done = (note) => ({ ok: true, note });
+    const num01 = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+    /** ΝΩ-1：单步派发的宿主账本存证（三态 + 脱敏；fail-open 绝不抛） */
+    const audit = (action, result, redacted = {}) => {
+        try {
+            const p = markerSink.appendMarker({
+                kind: 'SANDBOX_HOST_REPLAY', action, result,
+                ...(redacted.point !== undefined ? { point: redacted.point } : {}),
+                ...(redacted.charCount !== undefined ? { charCount: redacted.charCount } : {}),
+            });
+            if (p && typeof p.catch === 'function')
+                p.catch(() => { });
+        }
+        catch { /* fail-open：审计通道故障绝不拦截已过五门的重放派发 */ }
+    };
+    return {
+        async executeAction(action) {
+            const a = action.args ?? {};
+            const kindLabel = typeof action?.kind === 'string'
+                ? action.kind : 'unknown';
+            // 脱敏参数面（GUARD_PROBE 同律）：归一化坐标（沙箱方言的区域定位事实）+
+            // 字符计数（长度事实）；文本/关键词/热键和弦/令牌零明文。
+            const redacted = {};
+            let ret;
+            let result;
+            try {
+                // ΝΩ-1 dryRun 前置拒绝（诚实报错）：物理步在 dryRun 宿主上派发必被
+                // guardDryRun 静默吞没 —— 拒绝并归因，绝不把"被吞"报告成"已交付"。
+                if (!NON_PHYSICAL_KINDS.has(kindLabel) && guardDryRunPresent(sys)) {
+                    ret = fail('host replay refused: host is in dry-run mode (guardDryRun would '
+                        + 'silently swallow the dispatch) — rehearsal must not be reported as delivery');
+                    result = 'failed';
+                }
+                else {
+                    switch (kindLabel) {
+                        case 'click_mouse': {
+                            const x = num01(a.x), y = num01(a.y);
+                            if (x === null || y === null) {
+                                ret = fail('click_mouse requires finite x/y in [0,1]');
+                                break;
+                            }
+                            const button = a.button === 'right' || a.button === 'middle' ? a.button : 'left';
+                            redacted.point = { x, y };
+                            // 尺寸只取一次（replayOneTraced 同律：两次独立异步读在分辨率切换
+                            // 间隙会用不同比例映射 x/y）；像素域换算后由 system 内部再归一化
+                            const s = await S.getScreenSize();
+                            await S.clickMouse(x * s.width, y * s.height, button);
+                            ret = done(`clicked (${x.toFixed(3)},${y.toFixed(3)}) ${button}`);
+                            break;
+                        }
+                        case 'type_text': {
+                            if (typeof a.text !== 'string') {
+                                ret = fail('type_text requires string text');
+                                break;
+                            }
+                            redacted.charCount = a.text.length; // 只记长度，内容零明文（脱敏纪律）
+                            await S.typeText(a.text, a.clearFirst === true);
+                            ret = done(`typed ${a.text.length} char(s)${a.clearFirst === true ? ' (cleared first)' : ''}`);
+                            break;
+                        }
+                        case 'scroll_page': {
+                            const amount = typeof a.amount === 'number' && Number.isFinite(a.amount) && a.amount > 0
+                                ? a.amount : null;
+                            if (amount === null) {
+                                ret = fail('scroll_page requires finite positive amount');
+                                break;
+                            }
+                            const direction = a.direction === 'up' || a.direction === 'left' || a.direction === 'right'
+                                ? a.direction : 'down';
+                            await S.scroll(direction, amount);
+                            ret = done(`scrolled ${direction} x${amount}`);
+                            break;
+                        }
+                        case 'press_hotkey': {
+                            if (!Array.isArray(a.keys) || a.keys.length === 0
+                                || !a.keys.every(k => typeof k === 'string')) {
+                                ret = fail('press_hotkey requires non-empty string array keys');
+                                break;
+                            }
+                            // ΝΩ-1：黑名单执法在 system 层（两条躯体之前拦截）—— 命中即抛
+                            // HOTKEY_BLACKLIST_MARKER 错误，下方 catch 收敛为 ok:false 归因。
+                            await S.pressHotkey(a.keys);
+                            ret = done(`hotkey ${a.keys.join('+')}`);
+                            break;
+                        }
+                        case 'drag_mouse': {
+                            const sx = num01(a.startX), sy = num01(a.startY);
+                            const ex = num01(a.endX), ey = num01(a.endY);
+                            if (sx === null || sy === null || ex === null || ey === null) {
+                                ret = fail('drag_mouse requires finite startX/startY/endX/endY in [0,1]');
+                                break;
+                            }
+                            redacted.point = { x: ex, y: ey };
+                            const s = await S.getScreenSize();
+                            await S.dragMouse({ x: sx * s.width, y: sy * s.height }, { x: ex * s.width, y: ey * s.height });
+                            ret = done(`dragged (${sx.toFixed(3)},${sy.toFixed(3)})→(${ex.toFixed(3)},${ey.toFixed(3)})`);
+                            break;
+                        }
+                        case 'switch_tab': {
+                            const keys = a.direction === 'previous' ? ['ctrl', 'shift', 'tab'] : ['ctrl', 'tab'];
+                            await S.pressHotkey(keys);
+                            ret = done(`tab switched ${a.direction === 'previous' ? 'previous' : 'next'}`);
+                            break;
+                        }
+                        case 'switch_window': {
+                            const kw = typeof a.titleKeyword === 'string' ? a.titleKeyword : '';
+                            if (!kw) {
+                                ret = fail('switch_window requires non-empty titleKeyword');
+                                break;
+                            }
+                            const r = await S.switchWindowByTitle(kw);
+                            if (!r || r.matched === null || r.matched === undefined) {
+                                ret = fail(`no window title matched "${kw.slice(0, 60)}"`);
+                                break;
+                            }
+                            ret = done(`window switched to ${String(r.matched).slice(0, 60)}`);
+                            break;
+                        }
+                        case 'dismiss_popup':
+                            // 纯模型侧恢复指令（无机械动作）—— 宿主 replayOne 同律：无害占位不作失败
+                            ret = done('model-side recovery instruction; nothing to execute');
+                            break;
+                        case 'noop':
+                            ret = done('noop');
+                            break;
+                        default:
+                            ret = fail(`unsupported kind ${JSON.stringify(kindLabel)} — executor vocabulary closed`);
+                    }
+                    result = ret.ok ? 'ok' : 'failed';
+                }
+            }
+            catch (e) {
+                // 三态归因：黑名单拦截是政策拒绝（世界未被触碰）⇒ failed；其余派发通道
+                // 异常 ⇒ threw（防御式收口，端口契约本就永不抛 —— 这是双保险层）。
+                result = sys.isHotkeyBlacklistError(e) ? 'failed' : 'threw';
+                ret = fail(`dispatch error: ${e?.message ?? 'unknown'}`);
+            }
+            if (!NON_PHYSICAL_KINDS.has(kindLabel))
+                audit(kindLabel, result, redacted);
+            return ret;
+        },
+    };
+}
 export async function apply(ctx, config) {
     console.log('[Sandbox] Initializing Sandbox Execution Engine (D-5)...');
     const engine = new SandboxEngineImpl(ctx);
     // 《异常诚实分层契约》第一条（加载层）：配置非法 throw —— 拒绝带病上线；
     // 此后第二条（运行层）：一切运行时永不抛错（Result/verdict 降级）
     engine.configure(config);
+    // ΑΩ-R19：宿主执行器接线（config 开关，缺省关闭 = 开发者预览语义零回归 ——
+    // 四门全过仍诚实 failed "no host executor wired"）。懒导入根层模块：开关关闭
+    // 时模块图与现状一致（装配失败也诚实降级为未接线，不阻断插件加载）。
+    // ΝΩ-1：装配改经 system 安全链（黑名单 + guardDryRun + ioMutex serialize）
+    // + journal（SANDBOX_HOST_REPLAY 派发存证）—— 第四条物理派发通道收编。
+    if (config.enableHostReplayExecution === true) {
+        try {
+            const sys = await import('../system.js');
+            const { journal } = await import('../journal.js');
+            engine.wireHostExecutor(physicalBackendHostExecutor(sys, journal));
+            console.log('[Sandbox] Host executor wired via system safety chain (hotkey blacklist '
+                + '+ dryRun + ioMutex + SANDBOX_HOST_REPLAY audit markers) — five-gate replays now end in real dispatch.');
+        }
+        catch (e) {
+            console.warn(`[Sandbox] Host executor wiring failed (${e?.message ?? e}) — `
+                + 'replay stays in developer preview (honest failure).');
+        }
+    }
     // L 纪元（服务归属决策）：D-5 是 'dsh.sandbox' 的天然属主 —— 向总线自荐注册
     // 引擎视图（rehearse/recall/replay 面由 SandboxStationView 等消费方言定义）。
     // 宿主无 set 面 ⇒ 注册不成立，消费方（D-6 探测）保持既有诚实降级；决策成文。
@@ -89,10 +288,15 @@ export async function apply(ctx, config) {
         output: { schema: { type: 'string' }, render: (_a, v) => [{ type: "text", text: v }] },
         async execute(args) {
             try {
-                const actions = JSON.parse(args.actions);
-                if (!Array.isArray(actions) || actions.length === 0) {
-                    return JSON.stringify({ status: 'FAILED', reason: 'actions must be a non-empty JSON array' });
+                // ΑΩ-R19：入参执法升级 —— JSON 合法性 + 动作 schema（kind 闭集 / 坐标
+                // 值域 [0,1] / 字符串与数量上限）双闸。非法条目整链拒绝，拒绝原因如实
+                // 入结果（运行层铁律：不抛 —— 校验器本身也永不抛）。
+                const parsed = JSON.parse(args.actions);
+                const schema = validateActionChainInput(parsed);
+                if (!schema.ok) {
+                    return JSON.stringify({ status: 'FAILED', reason: `actions schema rejected: ${schema.reason}` });
                 }
+                const actions = schema.actions;
                 const chain = {
                     id: `chain-manual-${Date.now().toString(36)}`,
                     actions,
@@ -149,7 +353,8 @@ export async function apply(ctx, config) {
         name: 'replay_on_host',
         description: SHADOW_DOCTRINE + ' Request host replay of a muscle-memory entry. '
             + 'Phase 1: omit confirm_token to obtain a pending token. Phase 2: re-call with the token. '
-            + 'Four gates: token / doctor verdict / reliability threshold / entry-scene fingerprint match.',
+            + 'Five gates: token / doctor verdict / reliability threshold / entry-scene fingerprint match / '
+            + 'step-level safety scan (dangerous steps need a granted approval_token in step args).',
         parameters: {
             entry_id: { type: 'string', required: true, description: 'Muscle memory entry id.' },
             confirm_token: {

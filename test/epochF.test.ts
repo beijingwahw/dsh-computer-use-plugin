@@ -12,7 +12,7 @@ import { sequitur, expandGrammar, expandSymbols } from '../src/sequitur.ts';
 import { skillLibrary } from '../src/skillLibrary.ts';
 import { fitGpdTail } from '../src/telemetry.ts';
 import { telemetry } from '../src/telemetry.ts';
-import { SchmittPopupFilter, resetPopupBelief } from '../src/popupDetector.ts';
+import { SchmittPopupFilter, resetPopupBelief, resetPopupSprt, detectPopup } from '../src/popupDetector.ts';
 import { journal, lempelZivComplexity, normalizedActionComplexity } from '../src/journal.ts';
 import { swarm } from '../src/swarm.ts';
 
@@ -143,6 +143,204 @@ test('F-3 语义证据更强：单帧语义 ON；清洁场景恒 OFF', () => {
   const g = new SchmittPopupFilter();
   assert.equal(g.update({ geometric: false, semantic: true }).active, true, '单帧语义 ⇒ ON');
   resetPopupBelief(); // 生命周期归零通道在场（模块级单例不泄漏）
+});
+
+// ─── ΝΩ-32：popupDetector 语义通道帧复用（有 buffer ⇒ 零服务端自截）───
+//
+// 病灶：take_screenshot 已把 cap.buffer 传给 detectPopup，但语义 OCR 通道仍先走
+// readTextAny（服务端 L2 自截一帧）—— 同一屏同一时刻的第二次截屏是纯浪费。
+// 立法后：有 buffer ⇒ 帧通道（sharp 中央带裁剪 + 本地 OCR）零自截；buffer 缺席
+// ⇒ 服务端 L2 旧路径零回归。全离线确定性：假 adapter（计数服务端面）+
+// 假 OCR worker（textReader._setWorkerFactory_forTest 注入缝）+ 真像素帧（sharp）。
+
+test('ΝΩ-32 F-3a: 调用方帧在场 ⇒ 词表命中（帧通道 OCR）且零自截（adapter 服务端面零调用）', async () => {
+  const { default: sharp } = await import('sharp');
+  const backend = await import('../src/physicalBackend.ts');
+  const { _setWorkerFactory_forTest } = await import('../src/textReader.ts');
+
+  // 服务端面计数器：take_screenshot（截屏）与 get_ui_tree（服务端自截 OCR）
+  let serverShots = 0, uiTreeCalls = 0;
+  backend._setAdapterForTests({
+    takeScreenshot: async () => {
+      serverShots++;
+      return { ok: false as const, error: 'census: 不该发生服务端截屏' };
+    },
+    getUiTree: async () => {
+      uiTreeCalls++;
+      return { ok: false as const, error: 'census: 不该发生服务端自截 OCR' };
+    },
+  } as never);
+  // 真像素帧（≥32px 才进帧通道）+ 假 OCR worker（词表命中的文本）
+  const frame = await sharp(Buffer.alloc(200 * 200 * 3, 128), {
+    raw: { width: 200, height: 200, channels: 3 },
+  }).png().toBuffer();
+  _setWorkerFactory_forTest(async () => ({
+    recognize: async () => ({
+      data: { text: 'We use cookies. Accept all?', words: [], lines: [] },
+    }),
+    terminate: async () => { /* 生命周期占位 */ },
+  }) as never);
+  resetPopupBelief();
+  resetPopupSprt();
+  try {
+    const det = await detectPopup(frame, {
+      enableOcr: true, popupKeywords: 'cookie,accept,更新', ocrLang: 'eng',
+    }, null);
+    assert.equal(det.semantic, true, '帧通道 OCR 命中词表');
+    assert.ok(det.matchedKeywords.includes('cookie') && det.matchedKeywords.includes('accept'),
+      `命中词随行（实际 ${JSON.stringify(det.matchedKeywords)}）`);
+    assert.equal(serverShots, 0, '零服务端截屏（take_screenshot 面）');
+    assert.equal(uiTreeCalls, 0, '零服务端自截 OCR（get_ui_tree 面）');
+  } finally {
+    backend._setAdapterForTests(null);
+    _setWorkerFactory_forTest(null);
+    resetPopupBelief();
+    resetPopupSprt();
+  }
+});
+
+test('ΝΩ-32 F-3b: 帧缺席（无帧调用方）⇒ 服务端 L2 路径零回归（getUiTree 恰一次）', async () => {
+  const backend = await import('../src/physicalBackend.ts');
+  let uiTreeCalls = 0;
+  backend._setAdapterForTests({
+    getUiTree: async () => {
+      uiTreeCalls++;
+      return {
+        ok: true as const,
+        value: {
+          funnel_depth: 'l2',
+          elements: [
+            { source: 'L2-ocr', name: 'Accept cookies?', rect: { x: 0.2, y: 0.3, width: 0.6, height: 0.2 } },
+          ],
+        },
+      };
+    },
+  } as never);
+  resetPopupBelief();
+  resetPopupSprt();
+  try {
+    const det = await detectPopup(null, {
+      enableOcr: true, popupKeywords: 'cookie,accept', ocrLang: 'eng',
+    }, null);
+    assert.equal(det.semantic, true, '无帧路径照走服务端 L2（旧行为）');
+    assert.equal(uiTreeCalls, 1, '服务端自截 OCR 恰一次（无帧专属，不重复）');
+  } finally {
+    backend._setAdapterForTests(null);
+    resetPopupBelief();
+    resetPopupSprt();
+  }
+});
+
+test('ΝΩ-32 F-3c: 帧在场但 OCR 失败 ⇒ 语义证据诚实缺席（[]）且不回退自截（零自截律）', async () => {
+  const { default: sharp } = await import('sharp');
+  const backend = await import('../src/physicalBackend.ts');
+  const { _setWorkerFactory_forTest, disposeOcr } = await import('../src/textReader.ts');
+
+  let uiTreeCalls = 0;
+  backend._setAdapterForTests({
+    getUiTree: async () => {
+      uiTreeCalls++;
+      return { ok: false as const, error: 'census: 有帧不得回退自截' };
+    },
+  } as never);
+  const frame = await sharp(Buffer.alloc(200 * 200 * 3, 128), {
+    raw: { width: 200, height: 200, channels: 3 },
+  }).png().toBuffer();
+  // worker 池先清（F-3a 注入的 'eng' worker 会被 Map 缓存复用 —— 池不空则
+  // 本用例的失败工厂根本不会被咨询）；帧通道 OCR 失败 ⇒ 语义缺席，不回退
+  await disposeOcr();
+  _setWorkerFactory_forTest(async () => {
+    throw new Error('ocr offline');
+  });
+  resetPopupBelief();
+  resetPopupSprt();
+  try {
+    const det = await detectPopup(frame, {
+      enableOcr: true, popupKeywords: 'cookie,accept', ocrLang: 'eng',
+    }, null);
+    assert.equal(det.semantic, false, '语义证据诚实缺席');
+    assert.deepEqual(det.matchedKeywords, []);
+    assert.equal(uiTreeCalls, 0, '失败也不得回退服务端自截（零自截律）');
+  } finally {
+    backend._setAdapterForTests(null);
+    _setWorkerFactory_forTest(null);
+    resetPopupBelief();
+    resetPopupSprt();
+  }
+});
+
+test('ΝΩ-32 F-3d: take_screenshot 工具面 —— OCR 开启 ⇒ popupDetector 零额外截屏（cap.buffer 直通）', async () => {
+  const { default: sharp } = await import('sharp');
+  const { createTakeScreenshotTool } = await import('../src/tools/takeScreenshot.ts');
+  const { system } = await import('../src/system.ts');
+  const backend = await import('../src/physicalBackend.ts');
+  const { _setWorkerFactory_forTest, disposeOcr } = await import('../src/textReader.ts');
+
+  // 工具自身捕获走假 system（captureScreenWithOverlay）；服务端 adapter 只数
+  // 「额外」截屏 —— 立法后 popupDetector 不得再产生任何一次
+  let extraShots = 0, uiTreeCalls = 0;
+  backend._setAdapterForTests({
+    takeScreenshot: async () => {
+      extraShots++;
+      return { ok: false as const, error: 'census: 不该有额外服务端截屏' };
+    },
+    getUiTree: async () => {
+      uiTreeCalls++;
+      return { ok: false as const, error: 'census: 不该有服务端自截 OCR' };
+    },
+  } as never);
+
+  const jpeg = await sharp(Buffer.alloc(400 * 300 * 3, 128), {
+    raw: { width: 400, height: 300, channels: 3 },
+  }).jpeg().toBuffer();
+  const savedSystem: Record<string, unknown> = {};
+  const host = system as unknown as Record<string, unknown>;
+  const fakeSystem = {
+    getActiveDisplay: async () => ({ name: 'Primary', x: 0, y: 0, width: 1920, height: 1080 }),
+    getMousePosition: async () => ({ x: 960, y: 540 }),
+    getScreenSize: async () => ({ width: 1920, height: 1080 }),
+    captureScreenWithOverlay: async () => ({
+      buffer: jpeg, width: 400, height: 300,
+      dhash: '0011223344556677', phash: null, regionDhash: null,
+      unchanged: false, frameId: null, transport: 'base64', salience: null,
+    }),
+  };
+  for (const [k, v] of Object.entries(fakeSystem)) {
+    savedSystem[k] = host[k];
+    host[k] = v;
+  }
+  // worker 池先清（前用例的 'eng' worker 会被 Map 缓存 —— 本用例文本自证）
+  await disposeOcr();
+  _setWorkerFactory_forTest(async () => ({
+    recognize: async () => ({
+      data: { text: 'Accept cookies to continue', words: [], lines: [] },
+    }),
+    terminate: async () => { /* 生命周期占位 */ },
+  }) as never);
+  resetPopupBelief();
+  resetPopupSprt();
+  const tool: any = createTakeScreenshotTool({
+    compressWidth: 1440, jpegQuality: 75, gridDivisions: 10,
+    maxImageCount: 9, maxContextImageKb: 4096,
+    enableElementIdMode: false, enableQuantumSense: false,
+    enableOcr: true, popupKeywords: 'cookie,accept', ocrLang: 'eng',
+    stableScreenDistance: 3,
+  } as never);
+  try {
+    const raw = String(await tool.execute({}, undefined));
+    const out = JSON.parse(raw);
+    assert.equal(out.status, 'SUCCESS', '工具面照常成功');
+    assert.equal(out.state_anchor.popup_detected, true, '语义通道经 cap.buffer 命中（弹窗态在场）');
+    assert.match(out.state_anchor.popup_evidence, /cookie/, '锚点证据含命中词');
+    assert.equal(extraShots, 0, 'popupDetector 零额外服务端截屏（take_screenshot 面零调用）');
+    assert.equal(uiTreeCalls, 0, 'popupDetector 零服务端自截 OCR（get_ui_tree 面零调用）');
+  } finally {
+    for (const [k, v] of Object.entries(savedSystem)) host[k] = v;
+    backend._setAdapterForTests(null);
+    _setWorkerFactory_forTest(null);
+    resetPopupBelief();
+    resetPopupSprt();
+  }
 });
 
 // ─── F-4：LZ76 行为熵率 ───

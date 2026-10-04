@@ -69,7 +69,12 @@ export class MetricsLedger {
             return { ok: false, error: msg };
         }
     }
-    /** 全量读回（损坏行跳过并计数 —— append-only 账本对坏行宽容，对历史忠实） */
+    /** 全量读回（损坏行跳过并计数 —— append-only 账本对坏行宽容，对历史忠实）。
+     *  ΝΩ-28 任务6：数值字段有限性补全执法 —— 旧守卫只看 ts/intentId/verdict 三键，
+     *  rounds 缺席 / executions:"many" / durationMs:1e999(JSON.parse ⇒ Infinity) 之类
+     *  半坏行会混进 records，summarizeRuns 对其求和 ⇒ NaN 仪表盘（NaN 说谎）。
+     *  全部数值字段（ts + 9 个计数/时长字段）必须有限，否则整行归 corruptLines
+     *  （对历史忠实：计数不吞，行不采）。 */
     readAll() {
         try {
             if (!existsSync(this.filePath))
@@ -80,7 +85,15 @@ export class MetricsLedger {
             for (const line of lines) {
                 try {
                     const obj = JSON.parse(line);
-                    if (typeof obj.ts === 'number' && typeof obj.intentId === 'string' && typeof obj.verdict === 'string') {
+                    const numericFields = [
+                        'ts', 'rounds', 'executions', 'durationMs', 'l3Rounds', 'knowledgeRounds',
+                        'knowledgeEntries', 'worldTypes', 'worldObservations', 'consolidated',
+                    ];
+                    const numericsOk = numericFields.every(f => {
+                        const v = obj[f];
+                        return typeof v === 'number' && Number.isFinite(v);
+                    });
+                    if (numericsOk && typeof obj.intentId === 'string' && typeof obj.verdict === 'string') {
                         records.push(obj);
                     }
                     else {

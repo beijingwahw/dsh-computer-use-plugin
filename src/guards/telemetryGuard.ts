@@ -8,29 +8,13 @@
 // 归一化对象为键，pre 的键与 post 的键永不相同 ⇒ duration 恒 0，全部 P50/P95
 // 失真（指标仍计数，只是延迟维度失明）。修法：直接挂原始事件，以**原始 exec
 // 引用**为键（pre/post 事件对同一 ToolExecution 对象发射）；观察者语义不变：
-// 结果值提取与 hooks.extractResultValue 同律（该函数未导出且 hooks 归别簇
-// 所有，此处镜像实现，漂移面已用注释锚定）。
+// 结果值提取直接 import hooks 导出的 extractResultValue 正主（ΑΩ-R16 单源化：
+// 旧私有镜像已删，两份实现漂移的隐患根除；「绕过 normalizeExec 挂原始事件」
+// 的设计不变 —— 只单源化函数，不改挂载方式）。
 import type { Context } from '@deepseek-ai/cordis';
 import { telemetry } from '../telemetry';
 import { classifyResult, isSuccess, isFailure } from '../resultContract';
-
-/** rc.6 ToolExecutionResult → 旧字符串值语义（镜像 hooks.extractResultValue；
- *  telemetryGuard 不能改 hooks.ts（别簇所有），故本文件私有保真副本） */
-function extractResultValue(result: any): any {
-  if (result == null || typeof result === 'string') return result;
-  if (result.isError === true) {
-    // 失败臂：错误文本（分类通道依赖可解析的失败签名）
-    const content = Array.isArray(result.content)
-      ? result.content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n')
-      : '';
-    return content || (result.error ? `[Error]: ${JSON.stringify(result.error).slice(0, 300)}` : '[Error]');
-  }
-  if ('value' in result) return result.value;
-  if (Array.isArray(result.content)) {
-    return result.content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n');
-  }
-  return result;
-}
+import { extractResultValue } from './hooks';
 
 export function registerTelemetryGuard(ctx: Context): void {
   const startedAt = new WeakMap<object, number>();

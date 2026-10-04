@@ -87,6 +87,32 @@ const shapeKey = (s: ActionShape): string =>
     ? `${s.tool}@${s.x.toFixed(3)},${s.y.toFixed(3)}`
     : `${s.tool}#${s.text_length_bucket ?? '*'}`;
 
+// ─── ΝΩ-22（热路径 IO 放大①）：防抖落盘 ───
+//
+// 问题：recordOutcome / learnFromDemonstration / bindTemplate /
+// recordTemplateOutcome 每次触发 save() 全库 JSON.stringify + rename ——
+// 高频回写（每步执行成败、每次示范蒸馏、每次模板绑定尝试）把 O(全库) 的
+// 序列化+原子换名放大到热路径上。
+// 修法：脏标记 + 50ms 合并窗（scheduleSave）—— 窗口内任意多次回写并作
+// 一次全库落盘。语义边界：
+//   · 紧急路径保留：显式 save() 调用立即冲刷并取消待决合并写（卸载/显式
+//     落盘面的语义逐字节不变）；
+//   · 退出冲刷：beforeExit / exit 钩子保证合并窗内的变更不因进程退出蒸发
+//    （save() 是同步写 —— exit 钩子里合法）；
+//   · 批量路径（induce / recombine / distillTemplates / addDormantSkill）
+//     保持立即落盘（低频批操作，不进合并窗 —— 既有「蒸馏成果即刻入档」
+//     语义不变）；
+//   · timer 可注入（离线测试零真等）。
+
+/** ΝΩ-22：防抖定时器宿主（注入面 —— 测试注入假 timer，离线零真等） */
+export interface SaveTimerHost {
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+/** ΝΩ-22：合并窗宽度（ms）—— 同窗内多次回写并作一次全库落盘 */
+const SAVE_DEBOUNCE_MS = 50;
+
 class SkillLibrary {
   private skills: Skill[] = [];
   private nextId = 1;
@@ -102,8 +128,17 @@ class SkillLibrary {
   private nextTemplateId = 1;               // tpl-N 发号器（独立号段，跨会话不冲突）
   // ── W4-1（G3 契约）：休眠技能段（联邦对接口 —— 隔离登记区，不入 match 主池） ──
   private dormant: Array<DormantSkillInput & { receivedAt: number }> = [];
+  // ── ΝΩ-22（热路径 IO 放大①）：防抖落盘簿记 ──
+  private dirty = false;                         // 合并窗内有未落盘变更
+  private saveTimer: unknown = null;             // 待触发的合并写句柄（null = 无待写）
+  private timerHost: SaveTimerHost | null = null; // null ⇒ 全局 timers（生产）
+  private exitHooksInstalled = false;
+  private saveWriteCount = 0;                    // 观测面：实际落盘次数（显式 + 合并）
+  private saveScheduleCount = 0;                 // 观测面：合并窗开启次数
 
   configure(enabled: boolean, filePath: string, capacity = 50): void {
+    // ΝΩ-22：路径/配置切换前冲刷待决写（待决数据属于旧路径 —— 不静默蒸发）
+    this.flush();
     this.enabled = enabled;
     this.filePath = filePath;
     this.capacity = capacity;
@@ -143,9 +178,14 @@ class SkillLibrary {
   /**
    * C-2 原子落盘（工程约束兑现）：tmp + rename —— 合成过程中崩溃 ⇒ 磁盘永远是完整旧库。
    * 与 checkpoint.ts 的 saveCheckpoint 同一原子写律。
+   * ΝΩ-22：紧急路径语义保留 —— 显式调用即立即全量落盘，并取消待决合并写
+   *（此刻数据已是最新，合并窗不再需要）。
    */
   save(): void {
+    this.cancelPendingSave();
+    this.dirty = false;
     if (!this.filePath) return;
+    this.saveWriteCount++;
     const tmp = this.filePath + '.tmp';
     try {
       mkdirSync(path.dirname(this.filePath), { recursive: true });
@@ -163,9 +203,87 @@ class SkillLibrary {
     }
   }
 
+  /** ΝΩ-22：热路径回写的防抖入口 —— 50ms 合并窗内多次回写并作一次全库落盘
+   *  （recordOutcome / learnFromDemonstration / bindTemplate /
+   *  recordTemplateOutcome 的 O(全库) 落盘降 O(合并窗一次)。绝不抛。 */
+  private scheduleSave(): void {
+    if (!this.filePath) return; // 无盘库（纯内存测试）零簿记
+    this.dirty = true;
+    this.installExitHooks();
+    if (this.saveTimer !== null) return; // 已在合并窗内 ⇒ O(1) 合并
+    this.saveScheduleCount++;
+    try {
+      this.saveTimer = this.timerHost !== null
+        ? this.timerHost.setTimeout(() => this.debouncedSave(), SAVE_DEBOUNCE_MS)
+        : setTimeout(() => this.debouncedSave(), SAVE_DEBOUNCE_MS) as unknown;
+    } catch {
+      // 防御式：timer 面故障 ⇒ 立即冲刷（宁可多一次全量写，不丢回写）
+      this.saveTimer = null;
+      this.dirty = false;
+      this.save();
+    }
+  }
+
+  /** ΝΩ-22：合并窗到点 —— 窗内全部回写并作一次全库落盘 */
+  private debouncedSave(): void {
+    this.saveTimer = null;
+    if (!this.dirty) return;
+    this.dirty = false;
+    this.save();
+  }
+
+  /** ΝΩ-22：取消待决合并写（显式 save 前调用 —— 数据已随显式写最新化） */
+  private cancelPendingSave(): void {
+    if (this.saveTimer === null) return;
+    const host = this.timerHost;
+    const handle = this.saveTimer;
+    this.saveTimer = null;
+    try {
+      if (host !== null) host.clearTimeout(handle);
+      else clearTimeout(handle as ReturnType<typeof setTimeout>);
+    } catch { /* 防御式：清理面故障不影响落盘 */ }
+  }
+
+  /** ΝΩ-22：冲刷待决合并写（进程退出钩子 / 卸载与重配置路径 / 测试同步面） */
+  flush(): void {
+    if (this.saveTimer === null && !this.dirty) return;
+    this.save(); // save 内部取消待决定时器并清脏标记
+  }
+
+  /** ΝΩ-22：退出冲刷钩子（懒装一次 —— beforeExit/exit 双钩，同步写合法） */
+  private installExitHooks(): void {
+    if (this.exitHooksInstalled) return;
+    this.exitHooksInstalled = true;
+    try {
+      process.on('beforeExit', () => this.flush());
+      process.on('exit', () => this.flush());
+    } catch { /* 防御式：钩子面故障不炸回写路径 */ }
+  }
+
+  /** ΝΩ-22（测试面）：注入假 timer 宿主（离线零真等） */
+  setSaveTimersForTest(host: SaveTimerHost | null): void {
+    this.flush(); // 宿主切换前冲刷（待决写归属旧宿主的时钟）
+    this.timerHost = host;
+  }
+
+  /** ΝΩ-22（测试面）：防抖簿记观测 —— writes=实际落盘次数 / scheduled=合并窗
+   *  开启次数 / pending=合并窗内有待写 */
+  saveStatsForTest(): { writes: number; scheduled: number; pending: boolean } {
+    return {
+      writes: this.saveWriteCount,
+      scheduled: this.saveScheduleCount,
+      pending: this.saveTimer !== null || this.dirty,
+    };
+  }
+
   /** 插件卸载：仅清内存，磁盘保留 —— 技能的寿命长于会话。
-   *  Τ 纪元：蒸馏簿记（回避注记+无匹配计数）随库归零 —— 隔离缝不漏全局态。 */
+   *  Τ 纪元：蒸馏簿记（回避注记+无匹配计数）随库归零 —— 隔离缝不漏全局态。
+   *  ΝΩ-22：清内存前冲刷待决合并写（卸载是最后的落盘点 —— 不蒸发尾窗回写）。 */
   reset(): void {
+    this.flush();
+    // ΝΩ-22：观测簿记随会话归零（reset 是隔离缝 —— 计数从新会话起算）
+    this.saveWriteCount = 0;
+    this.saveScheduleCount = 0;
     this.skills = [];
     this.avoidShapes = [];
     this.demoUnmatched = 0;
@@ -499,14 +617,15 @@ class SkillLibrary {
     return { chain, siblings: sameGen - 1, familySize: visiting.size };
   }
 
-  /** 执行结果回写：技能的可靠度随真实使用持续校准 */
+  /** 执行结果回写：技能的可靠度随真实使用持续校准。
+   *  ΝΩ-22：热路径防抖 —— 每步回写不再触发全库 stringify+rename，并入合并窗。 */
   recordOutcome(id: number, success: boolean): void {
     const s = this.skills.find(x => x.id === id);
     if (!s) return;
     s.attemptCount++;
     if (success) s.successCount++;
     s.lastUsedAt = Date.now();
-    this.save();
+    this.scheduleSave();
   }
 
   // ── W3-2（M2 参数化通用技能）：反统一蒸馏 / 模板召回 / 运行时绑定 ──
@@ -731,14 +850,14 @@ class SkillLibrary {
         try {
           raw = reader({ templateId: t.id, stepIndex: si, key, tool: ts.tool, type: slot.type, source: slot.source });
         } catch {
-          this.save();
+          this.scheduleSave(); // ΝΩ-22：失败路径的账本回写同样并入合并窗
           return {
             ok: false, templateId: t.id, reason: 'hole-read-failed',
             failed: { stepIndex: si, key, source: slot.source },
           };
         }
         if (raw === undefined || raw === null || !valueMatchesHoleType(raw, slot.type)) {
-          this.save();
+          this.scheduleSave(); // ΝΩ-22：同上
           return {
             ok: false, templateId: t.id,
             reason: raw === undefined ? 'hole-read-failed' : 'hole-type-mismatch',
@@ -751,18 +870,19 @@ class SkillLibrary {
       steps.push({ tool: ts.tool, args });
     }
     t.lastUsedAt = Date.now(); // 召回新鲜化（执行成败的回写归 recordTemplateOutcome）
-    this.save();
+    this.scheduleSave(); // ΝΩ-22：热路径防抖（每步绑定不再全库重写）
     return { ok: true, templateId: t.id, steps };
   }
 
-  /** W3-2：模板执行结果回写（recordOutcome 的模板同律 —— 越用越准） */
+  /** W3-2：模板执行结果回写（recordOutcome 的模板同律 —— 越用越准）。
+   *  ΝΩ-22：热路径防抖 —— 同 recordOutcome。 */
   recordTemplateOutcome(id: number, success: boolean): void {
     const t = this.templates.find(x => x.id === id);
     if (!t) return;
     t.attemptCount++;
     if (success) t.successCount++;
     t.lastUsedAt = Date.now();
-    this.save();
+    this.scheduleSave();
   }
 
   /** W3-2：模板观测面 */
@@ -874,7 +994,7 @@ class SkillLibrary {
       }
       hit.demoBonus = Math.min(DEMO_RELIABILITY_CAP, (hit.demoBonus ?? 0) + DEMO_BETA);
       hit.demoEndorsed = (hit.demoEndorsed ?? 0) + 1; // 来源注记在册
-      this.save();
+      this.scheduleSave(); // ΝΩ-22：示范蒸馏热路径防抖（每次审批事件不重写全库）
       return { kind: ev.kind, outcome: 'reinforced', skillId: hit.id };
     }
     // approval-denied：这条路用户不让走
@@ -883,7 +1003,7 @@ class SkillLibrary {
     if (!hit) return { kind: ev.kind, outcome: shape ? 'avoidance-only' : 'no-shape' };
     hit.demoBonus = (hit.demoBonus ?? 0) - DEMO_BETA;
     hit.demoDenied = (hit.demoDenied ?? 0) + 1;
-    this.save();
+    this.scheduleSave(); // ΝΩ-22：同上
     return { kind: ev.kind, outcome: 'penalized', skillId: hit.id };
   }
 

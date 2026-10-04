@@ -33,13 +33,19 @@ import {
 } from '../src/popupDetector.ts';
 import { recoveryEfficacy } from '../src/recoveryEfficacy.ts';
 import { resetVerifyGateBudget, groundElements } from '../src/vlm/grounding.ts';
-import type { GlmClient } from '../src/vlm/glmClient.ts';
 // cascade 全族导出面（经 vlm/index 桶再分发 —— 本测试即其消费证据）
+// ΑΩ-R2：另引入桶面接线件 —— GlmClient/attachCascadeFace（级联咨询桥的 E2E）
+// 与请求级动态因子面（cascadeRequestFactors/resetCascadeTriageFamiliarity）。
 import {
   configureVlm, getProviderPool, getVlmCascade,
   VlmCascade, triageDanger, withinBboxValidator, schemaValidator, ocrTextValidator,
   CASCADE_TRIAGE_WEIGHTS, CASCADE_DANGER_MAX,
+  attachCascadeFace, GlmClient,
+  cascadeRequestFactors, resetCascadeTriageFamiliarity,
+  classifyCascadeRequest, cascadeSemanticValidators, wireCascadeConsultFace,
+  attachVlmRateLimiter, getGlmClient, resetGlmClient,
 } from '../src/vlm/index.ts';
+import type { CascadePoolFace, CascadeValidator, ProviderTier } from '../src/vlm/index.ts';
 // ⑤ 跑环边界挂点（autonomous_run / autonomy_resume 共用脊梁）+ W8-B2 消费面终态
 import { runPilotLoop } from '../src/tools/autonomousRun.ts';
 import { GoalStateMachine, PilotStore, createPerceive } from '../src/autonomy/index.ts';
@@ -287,6 +293,350 @@ test('W3-C③: configureVlm 铸造 —— tiers 入池/双钥激活/缺省阈值
   configureVlm({});
   assert.equal(getProviderPool(), null, '空 fallbacks ⇒ 池置 null');
   assert.equal(getVlmCascade(), null, '级联摘除');
+});
+
+// ─── ΑΩ-R2（级联因子源点亮）：请求级动态因子执法 ───
+//
+// 病灶：原接线 factors 恒静态保守（danger 恒 0.6 > 0.35）⇒ 配了便宜档也永不
+// 触发。执法三面：① 低危 + 同 prompt 复现 ⇒ 命中便宜臂（真实省钱事件）；
+// ② 危险词 ⇒ 恒主力（复现/高置信也压不进便宜臂）；③ factors 缺席 ⇒ 旧行为
+// （静态保守源 danger 0.6 ⇒ 弃权）。全离线：假级联池 + 假 fetch，零网络。
+
+/** 假级联池（w2cascade 手写桩同律）：cheap/primary 双档 + 调用计数 */
+function fakeCascadePool(cheapText: string): {
+  pool: CascadePoolFace;
+  cheapCalls: () => number;
+  primaryCalls: () => number;
+} {
+  let cheap = 0;
+  let primary = 0;
+  const pool: CascadePoolFace = {
+    size: 2,
+    tierRoster: () => [
+      { id: 'cheap-1', tier: 'cheap' as ProviderTier },
+      { id: 'main-1', tier: 'primary' as ProviderTier },
+    ],
+    async chatTier(_req, tier) {
+      if (tier === 'cheap') {
+        cheap++;
+        return { ok: true, text: cheapText, latencyMs: 5, model: 'm-cheap', providerId: 'cheap-1' };
+      }
+      primary++;
+      return { ok: true, text: '{"from":"primary"}', latencyMs: 9, model: 'm-main', providerId: 'main-1' };
+    },
+  };
+  return { pool, cheapCalls: () => cheap, primaryCalls: () => primary };
+}
+
+/** ΑΩ-R2 假 fetch（级联弃权时单例主路径才抵达 —— 计数即承接证据）；w7fullon 同款 */
+function fakeCascadeFetch(): { fetchImpl: typeof fetch; calls: () => number } {
+  let n = 0;
+  const fetchImpl = (async (): Promise<Response> => {
+    n++;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: '{"from":"singleton"}' } }] }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls: () => n };
+}
+
+/** ΑΩ-R2 同款执行器：铸池面静态保守源 + 咨询桥供请求级动态因子（configureVlm 同构） */
+function wireR2Cascade(pool: CascadePoolFace): VlmCascade {
+  return new VlmCascade(pool, {
+    factors: () => ({ risk: 'medium' as const, sceneFamiliar: false, confidence: 0.5 }),
+    validators: [{
+      name: 'json-structural',
+      check: (v: unknown) => v !== null && (Array.isArray(v) || typeof v === 'object'),
+    }],
+  });
+}
+
+test('ΑΩ-R2①: 低风险+配置便宜档 ⇒ 同 prompt 复现命中便宜臂（danger 0.2 < 0.35）', async () => {
+  resetCascadeTriageFamiliarity();
+  const { pool, cheapCalls, primaryCalls } = fakeCascadePool('{"from":"cheap"}');
+  const cascade = wireR2Cascade(pool);
+  attachCascadeFace({
+    consultJson: req => cascade.runJson(req, { factors: cascadeRequestFactors(req) }),
+  });
+  const { fetchImpl, calls: fetchCalls } = fakeCascadeFetch();
+  const client = new GlmClient({ apiKey: 'k', model: 'm', fetchImpl });
+  const PROMPT = '识别图中所有可见文字。只输出严格 JSON。';
+  try {
+    // 首见：低危但新场景 ⇒ danger = 0.4×0.5 + 0.2×1 = 0.4 > 0.35 ⇒ 弃权走主路径
+    const r1 = await client.chatJson<{ from?: string }>({ images: [], prompt: PROMPT, maxRetries: 0 });
+    assert.equal(r1.ok, true);
+    assert.equal(r1.value?.from, 'singleton', '首见弃权 ⇒ 单例主路径应答（无证据不便宜）');
+    assert.equal(fetchCalls(), 1, '弃权 ⇒ 单例拨号恰一次');
+    assert.equal(cheapCalls(), 0, '便宜脑零调用');
+    // 因子直测：低危分类 + 复现后熟悉 + 置信诚实中性
+    const f = cascadeRequestFactors({ prompt: PROMPT });
+    assert.equal(f.risk, 'low', '只读观察语义且无危险词 ⇒ low');
+    assert.equal(f.sceneFamiliar, true, '同 prompt 复现 ⇒ 场景熟悉（重复度代理）');
+    assert.equal(f.confidence, 0.5, '置信不可得 ⇒ 中性 0.5（诚实）');
+    assert.ok(triageDanger(f) < CASCADE_DANGER_MAX, `低危+熟悉 ⇒ danger ${triageDanger(f)} < 0.35`);
+    // 复现：danger = 0.4×0.5 = 0.2 ≤ 0.35 ⇒ 便宜臂点亮（结构校验过检直采）
+    const r2 = await client.chatJson<{ from?: string }>({ images: [], prompt: PROMPT, maxRetries: 0 });
+    assert.equal(r2.ok, true);
+    assert.equal(r2.value?.from, 'cheap', '复现 ⇒ 便宜臂过检直采（暗功能点亮）');
+    assert.equal(fetchCalls(), 1, '承接后单例零新拨号');
+    assert.equal(cheapCalls(), 1, '便宜脑恰一调');
+    assert.equal(primaryCalls(), 0, '主力零调用（省钱事件）');
+    assert.equal(cascade.stats.cheapHit, 1, 'cheap-hit 记账');
+  } finally {
+    attachCascadeFace(null);
+    resetCascadeTriageFamiliarity();
+  }
+});
+
+test('ΑΩ-R2②: 危险词 ⇒ 恒主力（场景复现/置信拉满也压不进便宜臂）', async () => {
+  resetCascadeTriageFamiliarity();
+  const { pool, cheapCalls } = fakeCascadePool('{"from":"cheap"}');
+  const cascade = wireR2Cascade(pool);
+  const DANGER_PROMPT = '把回收站里的旧邮件全部删除，然后发送确认回执';
+  try {
+    // 因子直测：危险词（删除/发送）⇒ high；与熟悉度正交（复现仍 high）
+    const f1 = cascadeRequestFactors({ prompt: DANGER_PROMPT });
+    assert.equal(f1.risk, 'high', '危险词 ⇒ high');
+    assert.equal(f1.sceneFamiliar, false, '首见 ⇒ 新场景');
+    const f2 = cascadeRequestFactors({ prompt: DANGER_PROMPT });
+    assert.equal(f2.risk, 'high', '复现仍 high（词法分级与熟悉度正交）');
+    assert.equal(f2.sceneFamiliar, true, '复现 ⇒ 熟悉（但压不过 high）');
+    assert.ok(triageDanger(f2) > CASCADE_DANGER_MAX, `危险词因子 danger ${triageDanger(f2)} > 0.35`);
+    // 数学执法：high 在最好余因子（熟悉+置信拉满）下 danger = 0.4 恒 > 0.35
+    assert.ok(
+      triageDanger({ risk: 'high', sceneFamiliar: true, confidence: 1 }) > CASCADE_DANGER_MAX,
+      'high 上界情形仍 > 0.35 ⇒ 恒主力',
+    );
+    // 行为执法：三次同 prompt 咨询全部弃权（primaryDirect 记账），便宜脑零调用
+    const before = cascade.stats.primaryDirect;
+    for (let i = 0; i < 3; i++) {
+      const r = await cascade.runJson(
+        { images: [], prompt: DANGER_PROMPT },
+        { factors: cascadeRequestFactors({ prompt: DANGER_PROMPT }) },
+      );
+      assert.equal(r, null, `第 ${i + 1} 次咨询 ⇒ 弃权（恒主力）`);
+    }
+    assert.equal(cascade.stats.primaryDirect, before + 3, '三次全记高危直行');
+    assert.equal(cheapCalls(), 0, '便宜脑零调用');
+  } finally {
+    resetCascadeTriageFamiliarity();
+  }
+});
+
+test('ΑΩ-R2③: factors 缺席 ⇒ 旧行为（保守静态源 danger 0.6 ⇒ 弃权）', async () => {
+  configureVlm({ vlmFallbackProviders: 'ollama', vlmProviderTiers: 'ollama=cheap' });
+  const cascade = getVlmCascade();
+  assert.ok(cascade instanceof VlmCascade, '双钥 ⇒ 级联铸造');
+  // 直接 runJson 无 perCall：请求文本再低危也不进动态因子 —— 实例静态保守源
+  // （medium/false/0.5 ⇒ danger 0.6）保持 W3-0 旧行为，弃权且零拨号。
+  const before = cascade!.stats.primaryDirect;
+  const r = await cascade!.runJson({ images: [], prompt: '识别图中所有可见文字。' });
+  assert.equal(r, null, 'factors 缺席 ⇒ danger 0.6 > 0.35 ⇒ 弃权（旧行为）');
+  assert.equal(cascade!.stats.primaryDirect, before + 1, 'primaryDirect 记账（旧行为）');
+  // 信号不可用的诚实回落：空请求 ⇒ medium/新场景/中性置信（与旧静态源同值）
+  const f = cascadeRequestFactors({});
+  assert.deepEqual(f, { risk: 'medium', sceneFamiliar: false, confidence: 0.5 }, '信号不可用 ⇒ 保守回落（诚实原则）');
+  assert.ok(triageDanger(f) > CASCADE_DANGER_MAX, '回落因子 ⇒ 仍弃权');
+  configureVlm({}); // 摘除（幂等）—— 不留模块级状态给后续测试
+});
+
+test('ΑΩ-R2④: 组合根源级断言 —— 咨询桥接请求级动态因子 + 实例静态保守源保持', () => {
+  const src = readFileSync(new URL('../src/vlm/index.ts', import.meta.url), 'utf8');
+  assert.match(src, /factors:\s*cascadeRequestFactors\(req\)/, 'consultJson 桥必须供请求级动态因子（perCall 优先律）');
+  assert.match(
+    src,
+    /factors:\s*\(\)\s*=>\s*\(\{\s*risk:\s*'medium'/,
+    '实例因子源保持 W3-0 静态保守值（直接 runJson 旧行为逐字节保持）',
+  );
+});
+
+// ─── ΝΩ-18（桥面语义谓词）：按请求类型注册的便宜臂法定校验 ───
+//
+// 病灶：级联桥只验「非空对象/数组」—— grounding 空 elements / verdict 缺字段 /
+// OCR 缺 words 都过检直采。执法三面：① 分类面（三器官提示词标记词判型）；
+// ② 谓词面（三型语义谓词的过/不过矩阵）；③ 桥面（wireCascadeConsultFace 装配
+// 后的端到端：语义不过 ⇒ 走 cascade 升级路径，主力重做）。全离线假池假 fetch。
+
+/** 三器官真实提示词片段（som.ts 构造器同源 —— 分类面的判型材料） */
+const GROUNDING_REQ = {
+  system: '你是屏幕元素定位器。只输出严格 JSON 数组……',
+  prompt: '图像尺寸：800×600 像素……任务：列出图中所有可交互元素与关键文字块……',
+};
+const VERDICT_REQ = { prompt: '对比前图与后图，判断预期是否达成：打开设置。只输出严格 JSON：{"verdict":"confirmed/refuted/uncertain 之一"……' };
+const OCR_REQ = { prompt: '识别图中所有可见文字。只输出严格 JSON：{"words":[{"text":"原文","bbox":[x0,y0,x1,y1]}]}。' };
+const GENERIC_REQ = { prompt: '描述这张桌面上正在发生什么' };
+
+test('ΝΩ-18①: 请求类型分类 —— 三器官标记词判型 + 泛化请求归 generic + 脏值防御', () => {
+  assert.equal(classifyCascadeRequest(GROUNDING_REQ), 'grounding', 'system 标记词判 grounding');
+  assert.equal(classifyCascadeRequest({ prompt: GROUNDING_REQ.prompt }), 'grounding', 'prompt 标记词同律');
+  assert.equal(classifyCascadeRequest(VERDICT_REQ), 'verdict');
+  assert.equal(classifyCascadeRequest(OCR_REQ), 'ocr');
+  assert.equal(classifyCascadeRequest(GENERIC_REQ), 'generic', '泛化请求零语义谓词（零行为变化律）');
+  assert.equal(classifyCascadeRequest(null), 'generic');
+  assert.equal(classifyCascadeRequest({ prompt: 42, system: undefined }), 'generic', '脏值防御');
+});
+
+test('ΝΩ-18②: 三型语义谓词过/不过矩阵 —— 空 elements/缺 bbox/枚举外 verdict/缺 words 全拦截', () => {
+  // grounding：elements 非空且首条有 bbox（双形态 bbox + {elements} 方言）
+  const g = cascadeSemanticValidators(GROUNDING_REQ);
+  assert.equal(g.length, 1);
+  assert.equal(g[0]!.name, 'semantic-grounding');
+  assert.equal(g[0]!.check({ elements: [{ id: 'e1', label: '确定', role: 'button', bbox: [10, 20, 90, 80], confidence: 0.9 }] }), true, '好载荷过检');
+  assert.equal(g[0]!.check([{ bbox: { x0: 1, y0: 2, x1: 3, y1: 4 } }]), true, '裸数组方言 + 对象形 bbox 过检');
+  assert.equal(g[0]!.check({ elements: [] }), false, '空 elements 拦截（病灶一）');
+  assert.equal(g[0]!.check({ elements: [{ id: 'e1', label: '无框' }] }), false, '首条缺 bbox 拦截');
+  assert.equal(g[0]!.check({ elements: [{ bbox: [1, 2, 3, Number.NaN] }] }), false, 'bbox 非有限数拦截');
+  assert.equal(g[0]!.check({}), false, '缺 elements 键拦截');
+  assert.equal(g[0]!.check('[]'), false, '字符串载荷拦截');
+
+  // verdict：verdict ∈ 枚举
+  const v = cascadeSemanticValidators(VERDICT_REQ);
+  assert.equal(v.length, 1);
+  assert.equal(v[0]!.name, 'semantic-verdict');
+  assert.equal(v[0]!.check({ verdict: 'confirmed', scale: 'page', explanation: 'x', confidence: 0.9 }), true);
+  assert.equal(v[0]!.check({ verdict: 'uncertain' }), true);
+  assert.equal(v[0]!.check({ verdict: 'CONFIRMED' }), false, '大小写漂移拦截（枚举严格同 verdict.ts）');
+  assert.equal(v[0]!.check({ verdict: 'maybe' }), false, '枚举外值拦截（病灶二）');
+  assert.equal(v[0]!.check({ scale: 'page' }), false, '缺 verdict 字段拦截');
+  assert.equal(v[0]!.check([{ verdict: 'confirmed' }]), false, '数组载荷拦截');
+
+  // OCR：words 在场（空数组合法 —— 屏上无字是真实结果）
+  const o = cascadeSemanticValidators(OCR_REQ);
+  assert.equal(o.length, 1);
+  assert.equal(o[0]!.name, 'semantic-ocr');
+  assert.equal(o[0]!.check({ words: [{ text: '保存', bbox: [1, 2, 3, 4], confidence: 0.9 }] }), true);
+  assert.equal(o[0]!.check({ words: [] }), true, '空 words 数组在场即过（合法空结果）');
+  assert.equal(o[0]!.check([{ text: '裸数组方言' }]), true, '裸数组方言 = words 本体');
+  assert.equal(o[0]!.check({}), false, '缺 words 键拦截（病灶三）');
+  assert.equal(o[0]!.check({ words: 'not-array' }), false, 'words 非数组拦截');
+
+  // 泛化请求零语义谓词（ask_screen 等不受影响）
+  assert.deepEqual(cascadeSemanticValidators(GENERIC_REQ), [], 'generic ⇒ 无谓词（结构谓词独守）');
+});
+
+/** ΝΩ-18 假级联池：双档可控回复（cheapText 可换弹）+ 调用计数 */
+function semanticFakePool(cheapTexts: string[]): {
+  pool: CascadePoolFace;
+  cheapCalls: () => number;
+  primaryCalls: () => number;
+} {
+  let cheap = 0;
+  let primary = 0;
+  let i = 0;
+  const pool: CascadePoolFace = {
+    size: 2,
+    tierRoster: () => [
+      { id: 'main-1', tier: 'primary' as ProviderTier },
+      { id: 'cheap-1', tier: 'cheap' as ProviderTier },
+    ],
+    async chatTier(_req, tier) {
+      if (tier === 'cheap') {
+        const text = cheapTexts[Math.min(i, cheapTexts.length - 1)] ?? '';
+        i++;
+        cheap++;
+        return { ok: true, text, latencyMs: 5, model: 'm-cheap', providerId: 'cheap-1' };
+      }
+      primary++;
+      // 主力档回好载荷（升级后的正确答案）
+      return {
+        ok: true,
+        text: JSON.stringify({ elements: [{ id: 'p1', label: '主力答案', role: 'button', bbox: [10, 10, 60, 60], confidence: 0.9 }] }),
+        latencyMs: 9, model: 'm-main', providerId: 'main-1',
+      };
+    },
+  };
+  return { pool, cheapCalls: () => cheap, primaryCalls: () => primary };
+}
+
+test('ΝΩ-18③: wireCascadeConsultFace 端到端 —— 语义不过 ⇒ 升级主力；好载荷 ⇒ 便宜直采；generic 不加谓词', async () => {
+  resetCascadeTriageFamiliarity();
+  try {
+    // ΑΩ-R2 同律：首见 prompt ⇒ 新场景 ⇒ danger 0.4 ⇒ 弃权走单例（ priming 调用），
+    // 复现 ⇒ danger 0.2 ⇒ 便宜臂点亮 —— 语义谓词在便宜臂采信前执法。
+    const mkCascade = (pool: CascadePoolFace): VlmCascade => new VlmCascade(pool, {
+      factors: () => ({ risk: 'medium' as const, sceneFamiliar: false, confidence: 0.5 }),
+      validators: [{
+        name: 'json-structural',
+        check: (v: unknown) => v !== null && (Array.isArray(v) || typeof v === 'object'),
+      } as CascadeValidator],
+    });
+
+    // ① grounding 请求 + 便宜臂空 elements ⇒ 语义谓词拦截 ⇒ 升级主力（主力好载荷承接）
+    const bad = semanticFakePool([JSON.stringify({ elements: [] })]);
+    wireCascadeConsultFace(mkCascade(bad.pool));
+    const { fetchImpl, calls: fetchCalls } = fakeCascadeFetch();
+    const client = new GlmClient({ apiKey: 'k', model: 'm', fetchImpl });
+    const groundingCall = () => client.chatJson<{ elements?: Array<{ label?: string }> }>({
+      images: [], prompt: GROUNDING_REQ.prompt, system: GROUNDING_REQ.system, maxRetries: 0,
+    });
+    await groundingCall(); // priming：首见弃权走单例
+    const r1 = await groundingCall(); // 复现：便宜臂点亮
+    assert.equal(r1.ok, true);
+    assert.equal(r1.value?.elements?.[0]?.label, '主力答案', '空 elements 被语义谓词拦截 ⇒ 升级主力重做');
+    assert.equal(bad.cheapCalls(), 1, '便宜臂拨过一次（真实事件）');
+    assert.equal(bad.primaryCalls(), 1, '主力档重做一次');
+    assert.equal(fetchCalls(), 1, '承接 ⇒ 单例仅 priming 一拨');
+
+    // ② 好载荷 ⇒ 便宜直采（语义谓词不误伤）
+    const good = semanticFakePool([JSON.stringify({
+      elements: [{ id: 'x1', label: '设置', role: 'button', bbox: [20, 20, 90, 80], confidence: 0.9 }],
+    })]);
+    wireCascadeConsultFace(mkCascade(good.pool));
+    const r2 = await client.chatJson<{ elements?: Array<{ label?: string }> }>({
+      images: [], prompt: GROUNDING_REQ.prompt, system: GROUNDING_REQ.system, maxRetries: 0,
+    });
+    assert.equal(r2.value?.elements?.[0]?.label, '设置', '好载荷过语义谓词 ⇒ 便宜直采');
+    assert.equal(good.primaryCalls(), 0, '主力零调用（省钱事件）');
+    assert.equal(fetchCalls(), 1);
+
+    // ③ generic 请求 ⇒ 无语义谓词，结构谓词独守（旧行为：非空对象即过）
+    const generic = semanticFakePool(['{"anything":"结构完整即可"}']);
+    wireCascadeConsultFace(mkCascade(generic.pool));
+    const genericCall = () => client.chatJson<{ anything?: string }>({
+      images: [], prompt: GENERIC_REQ.prompt, maxRetries: 0,
+    });
+    await genericCall(); // priming
+    const r3 = await genericCall();
+    assert.equal(r3.value?.anything, '结构完整即可', '泛化请求保持纯结构校验（零行为变化）');
+    assert.equal(generic.primaryCalls(), 0);
+  } finally {
+    attachCascadeFace(null);
+    resetCascadeTriageFamiliarity();
+  }
+});
+
+test('ΝΩ-18④: 组合根源级断言 —— configureVlm 的限流注入与桥面语义谓词字面接线', () => {
+  const src = readFileSync(new URL('../src/vlm/index.ts', import.meta.url), 'utf8');
+  assert.match(src, /attachVlmRateLimiter\(new VlmRateLimiter\(/, 'configureVlm 必须铸 VlmRateLimiter 注入限流闸（vlm.maxPerMinute > 0）');
+  assert.match(src, /kernelRegistry\.getOrDefault\('vlm\.maxPerMinute', 0\)/, '限流参数读内核注册表（Ξ-D 同律）');
+  assert.match(src, /wireCascadeConsultFace\(cascadeSingleton\)/, 'configureVlm 铸级联后必须经 wireCascadeConsultFace 装配语义谓词桥');
+});
+
+test('ΝΩ-18⑤: configureVlm 限流注入行为 —— vlm.maxPerMinute 供参后 chatJson 第二次前置拒绝（全程零网络）', async () => {
+  // 环境控制法：摘掉 OPENAI env（openai 无钥 + 远端 baseUrl ⇒ configured:false，
+  // 降级臂零 fetch —— 限流行为可离线观测，绝不真实联网）
+  const savedKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  kernelRegistry.register({
+    key: 'vlm.maxPerMinute', organ: 'perception',
+    defaultValue: 0, min: 0, max: 100_000, note: 'ΝΩ-18 测试注册',
+  });
+  try {
+    kernelRegistry.set('vlm.maxPerMinute', 1);
+    configureVlm({ vlmProvider: 'openai' }); // 无钥单例（降级臂）+ 限流闸注入
+    const r1 = await getGlmClient().chatJson({ images: [], prompt: 'p', maxRetries: 0 });
+    assert.equal(r1.ok, false);
+    assert.match(r1.error!, /not configured/, '首次放行（配额 1 已耗）⇒ 降级臂诚实失败（零网络）');
+    const r2 = await getGlmClient().chatJson({ images: [], prompt: 'p', maxRetries: 0 });
+    assert.equal(r2.ok, false);
+    assert.match(r2.error!, /rate limited \(retry after \d+ms\)/, '第二次前置拒绝（vlm.maxPerMinute=1 生效）');
+  } finally {
+    kernelRegistry.set('vlm.maxPerMinute', 0);
+    configureVlm({}); // 摘除限流闸 + 级联/池（幂等）—— 不留模块级状态
+    resetGlmClient(); // 单例归零（下次按 env 缺省解析）
+    if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+  }
 });
 
 // ─── W3-B②：resetVerifyGateBudget 边界挂点（runPilotLoop 跑环边界） ───

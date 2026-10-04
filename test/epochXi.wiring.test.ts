@@ -11,7 +11,7 @@
 //        0.5，消费处 Math.min(off, on) 再兜一层；重叠 specs（off 0.1..0.9）下
 //        消费处兜序仍保施密特迟滞（单清洁帧不放行）；evidenceSem 越序被
 //        Math.max(sem, geo) 抬正（语义帧 belief 0.955 而非 0.514）；
-//   Ξ-D④ registerProductionKernels 后 list() 键数 = 55（Θ 18 + Ξ-D 37）且
+//   Ξ-D④ registerProductionKernels 后 list() 键数 = 58（Θ 18 + Ξ-D 37 + ΝΩ 3）且
 //        drift() 空（入册值全为缺省 —— 零行为变化的锚）；
 //   Ξ-D⑤ 幂等：两次入册长度 / 现值 / 快照逐字节不变。
 // 全程 try/finally resetKernelRuntime（生产单例不带走测试残迹）；全离线、
@@ -257,12 +257,12 @@ test('Ξ-D③: set(popup.offThreshold,0.8) 越序 ⇒ specs 夹回 0.5；消费�
 
 // ─── Ξ-D④：册容量与零漂移 ───
 
-test('Ξ-D④: registerProductionKernels ⇒ 55 键在册（Θ 18 + Ξ-D 37）且 drift() 空', () => {
+test('Ξ-D④: registerProductionKernels ⇒ 58 键在册（Θ 18 + Ξ-D 37 + ΝΩ-10 三键）且 drift() 空', () => {
   resetKernelRuntime();
   try {
     registerProductionKernels();
     const all = kernelRegistry.list();
-    assert.equal(all.length, 55, `入册键数 = 18+37（实测 ${all.length}）`);
+    assert.equal(all.length, 58, `入册键数 = 18+37+3（ΝΩ-10 policy 权重三键，实测 ${all.length}）`);
 
     // Ξ-D 新键抽查：六族代表全在册
     const xiKeys = [
@@ -309,13 +309,13 @@ test('Ξ-D⑤: registerProductionKernels 幂等 —— 两次入册长度 / 快�
   try {
     registerProductionKernels();
     const snap1 = kernelRegistry.snapshot();
-    assert.equal(Object.keys(snap1).length, 55);
+    assert.equal(Object.keys(snap1).length, 58);
 
     // 人为漂移一枚：重入册须保持现值（register 幂等契约：只刷规格不动值）
     kernelRegistry.set('osc.fuzzTol', 9);
     registerProductionKernels();
     const snap2 = kernelRegistry.snapshot();
-    assert.equal(kernelRegistry.list().length, 55, '两次入册长度不变（幂等）');
+    assert.equal(kernelRegistry.list().length, 58, '两次入册长度不变（幂等）');
     assert.equal(snap2['osc.fuzzTol'], 9, '重入册保持 set 后的现值');
     snap2['osc.fuzzTol'] = snap1['osc.fuzzTol']!;
     assert.deepEqual(snap2, snap1, '除人为漂移外快照逐字节相同');

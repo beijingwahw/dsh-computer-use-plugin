@@ -475,7 +475,12 @@ test('W7-E2E①成功路径：宣布→感知→宏技能(排练过)→验证→
   // 门控足迹搭车律：pendingGateNote 落在「门控裁决后首个落账步」—— wait 值守
   // 语义下即随后那步（宏步）的 journal，而非 wait 步自身（wait 先于任何门控裁决落账）。
   assert.ok(macroStep!.note?.includes('免看门控'), '免看门控值守足迹搭车在门控裁决后首个落账步（宏步）注记');
-  assert.match(macroStep!.note ?? '', /prophecy:(hit|miss|no-model)/, '预言旁路结算注记在宏步 journal');
+  // ΝΩ-11（no-impact 闸）：recall_skill 按 W1-3 classifyExpectedVisualEffect 归
+  // 「无影响」档 ⇒ ⑥′ 不铸预言（自环转移不得回灌污染 predict 首名）—— 宏步
+  // journal 不再有 prophecy 注记，账本全程零铸造零结算（wait 先于 ⑥′、declare
+  // 亦无影响 ⇒ 本 run 无一动作铸预言）。
+  assert.ok(!(macroStep!.note ?? '').includes('prophecy:'), '无影响动作不铸预言 ⇒ 宏步 journal 零 prophecy 注记（ΝΩ-11）');
+  assert.equal(prophecy.stats().settled, 0, '账本零结算（wait/recall_skill/declare 全程无一铸造）');
   assert.equal(macroStep!.effectiveRiskTier, 'benign', '宪法判决分层盖章');
 
   // ── 宏执行器足迹（排练门禁真实执法） ──
@@ -744,6 +749,10 @@ test('W7-E2E②失败复原：审批升级→暂存队列→steer漂移出题B�
   assert.ok(r3.summary.includes('替代升级 1 次'), '恢复态升级被探索建议替代');
   // 守卫瀑布足迹：熔断 GUARD_BLOCKED 入链 + 根因报告 + 失败记忆
   await new Promise<void>(resolve => setImmediate(resolve)); // 熔断存证 void-promise 落账
+  // ΝΩ-2：根因探针 fire-and-forget（post 链不再被 3s 预算拖住）—— 归因报告
+  // 改为后台结算，等在途探针落账后再断言观察面
+  const { rootCauseProbesSettled } = await import('../src/guards/rootCauseGuard.ts');
+  await rootCauseProbesSettled();
   assert.ok(journal.list(false).some(e => e.tool === 'GUARD_BLOCKED'), '熔断拦截防篡改存证入链');
   assert.ok(recentRootCauseReports().length >= 1, '根因归因报告在环');
   assert.ok(failureMemory.dump().records.length >= 1, '失败记忆自动接线入账');

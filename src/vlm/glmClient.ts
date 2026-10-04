@@ -35,20 +35,14 @@ import { createAnthropicProvider } from './providers/anthropic';
 import { createGeminiProvider } from './providers/gemini';
 import { createOpenAiProvider } from './providers/openai';
 import { detectPresetFromBaseUrl, detectPresetFromEnv, getPreset } from './providers/registry';
-import { jitterDelayMs, sanitizeError } from './providers/types';
+import { fetchWithRetry, sanitizeError } from './providers/types';
 import type { ProviderMeterRecord, VisionProvider } from './providers/types';
 // W6R-A4（工具去重）：传输小件 / JSON 剥壳律 / 可重试状态常量收拢 internalUtils
-// 单一实现 —— 本模块不再自持拷贝（jitter 退避取 providers/types 的防御版导出，
-// 对正常 attempt 域行为与原实现逐位一致）。
-import {
-  extractBalancedJson,
-  HTTP_STATUS_SERVER_ERROR_FLOOR,
-  HTTP_STATUS_TOO_MANY_REQUESTS,
-  isAbortError,
-  safeBodyText,
-  sleep,
-  timeoutSignal,
-} from './internalUtils';
+// 单一实现 —— 本模块不再自持拷贝。ΑΩ-R15（重试律单一立法）：传输重试循环
+// 整体退役 —— 原生 GLM 路径全权委托 providers/types.fetchWithRetry（与三厂
+// 适配器同源同律），jitter 退避 / 超时信号 / 中止判定等重试小件不再被本模块
+// 引用，仅剩 JSON 剥壳律（extractGlmJson 的底座）。
+import { extractBalancedJson, HTTP_STATUS_TOO_MANY_REQUESTS } from './internalUtils';
 
 /** 视觉输入：裸 base64（不带 data: 前缀）+ 可选 mime（默认 image/jpeg） */
 export interface GlmImageInput {
@@ -99,7 +93,9 @@ export interface GlmChatResult {
   /** 降级标记 —— true = 未配置 apiKey（调用方应走本地认知降级路径） */
   degraded?: boolean;
   /** 切换备注（P2a-1）—— 'failover' = 本结果来自故障切换池的备脑（providerId
-   *  标注来源脑）；主脑直连路径恒缺省（不接线池时返回值逐字段不变） */
+   *  标注来源脑）；主脑直连路径恒缺省（不接线池时返回值逐字段不变）。
+   *  ΝΩ-18：'rate-limited' 族 = 服务端 429 终败经限流闸回填后的等待提示
+   * （如 'rate-limited by server (429); retry after 60000ms'）。 */
   note?: string;
 }
 
@@ -148,7 +144,9 @@ function envApiKey(): string {
 // W6R-A4（工具去重）：jitterDelayMs / timeoutSignal / isAbortError / stripFences /
 // scanBalanced / safeBodyText / sleep / 可重试状态常量的原本地拷贝已删除 ——
 // 单一实现见 internalUtils（传输小件与剥壳律）与 providers/types.jitterDelayMs
-// （防御版导出）。全抖动退避语义不变：attempt 从 0 起 delay ∈ [0, min(500·2^attempt, 8000))。
+// （防御版导出）。ΑΩ-R15 起重试循环本身也退役（fetchWithRetry 全权接管），
+// 上述传输小件不再被本模块直接引用。全抖动退避语义不变：
+// attempt 从 0 起 delay ∈ [0, min(500·2^attempt, 8000))。
 
 /** 错误信息提取（网络异常的 code/message 归并，供 error 字符串） */
 function errText(e: unknown): string {
@@ -359,6 +357,80 @@ export function attachCascadeFace(face: GlmCascadeFace | null): void {
       : null;
 }
 
+// ─── ΝΩ-18（限流器接线）：VlmRateLimiter 前置闸 ───
+
+/**
+ * ΝΩ-18：限流器的最小结构契约 —— 注入而非 import metering.VlmRateLimiter
+ *（与 GlmFailoverPool/GlmCascadeFace 同律：结构满足即可，杜绝模块耦合）。
+ * metering.VlmRateLimiter 天然满足（tryAcquire 双桶滑动窗 + ΝΩ-18 的
+ * recordServer429 服务端 429 回填面，后者可选 —— 缺席时回填跳过）。
+ */
+export interface GlmRateLimitGate {
+  /** 尝试获取配额：获批入账放行；被拒不占配额并给出 retryAfterMs */
+  tryAcquire(now?: number): { allowed: boolean; retryAfterMs: number };
+  /** 服务端 429 回填（可选面）：把一次服务端限流终败记作本地已用配额，返回等待提示 ms */
+  recordServer429?(now?: number): number;
+}
+
+/** 模块级限流闸 —— 宿主接线注入（vlm/index 的 configureVlm 或直接 attachVlmRateLimiter）；
+ *  null = 未接线（缺省 —— chat/chatJson 行为与既往逐字节一致，零回归红律） */
+let vlmRateGate: GlmRateLimitGate | null = null;
+
+/**
+ * ΝΩ-18：注入/摘除限流闸 —— 传 null 摘除；垃圾输入（非对象/无 tryAcquire 函数）
+ * 安静归 null（不抛铁律）。重复调用以最后一次为准（幂等）。接线后 chat/chatJson
+ * 前置 tryAcquire：被拒 ⇒ ok:false 归因 rate-limited（不重试、不咨询级联/池、
+ * 零网络）；服务端 429 终败经 recordServer429 回填本地桶并把 retryAfterMs 提示
+ * 写进错误 note。
+ */
+export function attachVlmRateLimiter(gate: GlmRateLimitGate | null): void {
+  vlmRateGate =
+    gate && typeof gate === 'object' && typeof (gate as { tryAcquire?: unknown }).tryAcquire === 'function'
+      ? gate
+      : null;
+}
+
+/**
+ * ΝΩ-18：限流前置探测 —— 被拒 ⇒ 返回等待毫秒数（≥0）；放行/未接线 ⇒ null。
+ * 敌意闸上抛 ⇒ 视为未接线放行（fail-open：限流是护栏不是命门，闸自身故障
+ * 不得阻断主路径 —— 与未接线的缺省行为同形）；绝不抛。
+ */
+function rateGateDenyMs(): number | null {
+  const gate = vlmRateGate;
+  if (gate === null) return null;
+  try {
+    const r = gate.tryAcquire();
+    if (r !== null && typeof r === 'object' && (r as { allowed?: unknown }).allowed === false) {
+      const ms = Number((r as { retryAfterMs?: unknown }).retryAfterMs);
+      return Number.isFinite(ms) && ms > 0 ? Math.ceil(ms) : 0;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ΝΩ-18：服务端 429 回填 —— 把终败的 429 记作本地已用配额（本地桶收紧，下一次
+ * tryAcquire 被拒并给出诚实 retryAfterMs，而非再烧一次真实 429 往返），返回
+ * 回填后的等待提示 ms（未接线/闸无回填面/故障 ⇒ 0）。绝不抛。
+ */
+function backfillServer429(): number {
+  const gate = vlmRateGate;
+  if (gate === null || typeof gate.recordServer429 !== 'function') return 0;
+  try {
+    const ms = Number(gate.recordServer429());
+    return Number.isFinite(ms) && ms > 0 ? Math.ceil(ms) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** ΝΩ-18：限流拒绝的错误串（glm 路径与委托路径共用 `${platformId}` 前缀形态） */
+function rateLimitError(platformId: string, retryAfterMs: number): string {
+  return `${platformId} rate limited (retry after ${retryAfterMs}ms)`;
+}
+
 /**
  * W2-8：咨询级联面 —— chatJson 的最前置闸。承接 ⇒ 整流为 chatJson 形状返回；
  * 弃权/面故障 ⇒ null（主路径照走）。绝不抛。
@@ -512,8 +584,31 @@ export class GlmClient {
    * - 429/5xx/网络错误 ⇒ 全抖动指数退避重试（默认 2 次）；超时不重试
    * - 成功 ⇒ text + usage + latencyMs；jsonMode 下附 json（提取失败仅缺省字段）
    * - 每次调用（无论成败）恰好上报一条 meter 记录
+   * - ΝΩ-18（限流器接线）：接线限流闸时前置 tryAcquire —— 被拒 ⇒ ok:false
+   *   归因 rate-limited（不重试、不咨询故障切换池、零网络；meter 仍恰一条）；
+   *   服务端 429 终败经 recordServer429 回填本地桶，retryAfterMs 提示进 note。
    */
   async chat(req: GlmVisionRequest): Promise<GlmChatResult> {
+    // ΝΩ-18：限流前置闸 —— 覆盖原生与委托两路（置于委托分派之前）；被拒不重试
+    //（配额等待不是传输抖动，退避重试只会加剧超支）、不咨询池（池内备脑同享
+    // 全局预算，救回即绕闸）。chatJson 的结构化路径经 chatCore 复用本闸语义
+    //（chatJson 自身在入口设闸，避免一次调用双扣配额）。
+    const denyMs = rateGateDenyMs();
+    if (denyMs !== null) {
+      const res: GlmChatResult = {
+        ok: false, text: '', latencyMs: 0,
+        model: this.model !== '' ? this.model : (this.delegate !== null ? this.delegate.model : this.model),
+        error: rateLimitError(this.platformId, denyMs),
+        note: 'rate-limited',
+      };
+      this.report(res);
+      return res;
+    }
+    return this.chatCore(req);
+  }
+
+  /** chat 的执行核（ΝΩ-18 拆分）：限流闸之后的一切原路径 —— 行为逐字节保持 */
+  private async chatCore(req: GlmVisionRequest): Promise<GlmChatResult> {
     // 委托路径（纪元 Ψ）：全权交平台适配器（重试律/降级律/meter/密键卫生皆其自管），
     // 壳层只整流结果形状；适配器违约上抛在此收敛（不抛铁律的最后一块拼图）。
     // P2a-1：委托路径自身重试全败后同样咨询池 —— 池救回 ⇒ 备脑结果；池缺席/全败
@@ -587,71 +682,68 @@ export class GlmClient {
     };
 
     const url = `${this.baseUrl}/chat/completions`;
-    let attempt = 0; // 已完成的重试次数
-    for (;;) {
-      let resp: Response;
-      try {
-        resp = await doFetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.apiKey}`,
-          },
-          body: JSON.stringify(payload),
-          signal: timeoutSignal(timeoutMs),
+    // ΑΩ-R15（重试律单一立法）：手写重试循环退役 —— 传输层（仅 429/5xx/网络错
+    // 可重试、超时不重试、全抖动指数退避 jitterDelayMs、每次尝试独立超时
+    // AbortSignal）全权委托 providers/types.fetchWithRetry 唯一定义点（与三厂
+    // 适配器同源同律，杜绝双实现漂移）。本层只保留 GLM 专有面：请求头/负载
+    // 构造、choices/usage/json 响应剥壳、错误串的 glm 前缀 + apiKey 回显剔除、
+    // meter 记账（每调用恰一条，经 finish/fail 收口不变）。
+    const fr = await fetchWithRetry({
+      doFetch,
+      url,
+      init: {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+      },
+      maxRetries,
+      timeoutMs,
+    });
+
+    if (!fr.ok) {
+      if (fr.failureKind === 'http') {
+        // HTTP 终败：错误体片段（空白折叠 + 截 300 字）+ 密钥卫生律（错误体可能
+        // 回显 apiKey，一律替换后才能进入 error/meter）—— 与原手写环逐字节同律
+        // （attempts 即原 attempt+1；>1 才缀尝试次数）
+        const raw = (fr.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        const snippet = this.apiKey ? raw.split(this.apiKey).join('[REDACTED]') : raw;
+        // ΝΩ-18（429 回填）：服务端限流终败是「本方已超速」的实证 —— 经限流闸
+        // recordServer429 记作本地已用配额（下一次 tryAcquire 被拒并给出诚实
+        // retryAfterMs，不再白烧 429 往返），等待提示写进错误 note（未接线闸 ⇒ 0，
+        // 不附 note，错误串与既往逐字节一致）。
+        const hint429 = fr.status === HTTP_STATUS_TOO_MANY_REQUESTS ? backfillServer429() : 0;
+        return fail({
+          ok: false, text: '',
+          error: `glm chat/completions HTTP ${fr.status}${fr.attempts > 1 ? ` after ${fr.attempts} attempts` : ''}: ${snippet}`,
+          ...(hint429 > 0 ? { note: `rate-limited by server (429); retry after ${hint429}ms` } : {}),
         });
-      } catch (e) {
-        // 超时：调用方主动止损 —— 不重试，立即诚实归因
-        if (isAbortError(e)) {
-          return fail({ ok: false, text: '', error: `glm request aborted after ${timeoutMs}ms` });
-        }
-        // 网络错误（连接拒绝 / DNS / 断流）：可重试
-        if (attempt < maxRetries) {
-          await sleep(jitterDelayMs(attempt));
-          attempt++;
-          continue;
-        }
-        return fail({ ok: false, text: '', error: `glm fetch failed after ${attempt + 1} attempts: ${errText(e)}` });
       }
-
-      if (resp.ok) {
-        let body: unknown;
-        try {
-          body = await resp.json();
-        } catch (e) {
-          return fail({ ok: false, text: '', error: `glm response JSON parse failed: ${errText(e)}` });
-        }
-        const content = extractContent(body);
-        if (content === null) {
-          return fail({ ok: false, text: '', error: 'glm response missing choices[0].message.content' });
-        }
-        const usage = mapUsage((body as { usage?: unknown }).usage);
-        const r: Omit<GlmChatResult, 'latencyMs' | 'model'> = { ok: true, text: content };
-        if (usage) r.usage = usage;
-        if (req.jsonMode) {
-          const j = extractGlmJson(content);
-          if (j !== undefined) r.json = j;
-        }
-        return finish(r);
-      }
-
-      // 非 2xx：429/5xx 可重试，其余 4xx 立即失败（请求本身有病，重试无义）
-      // W6-2：具名常量单一立法（W6R-A4 起收拢 internalUtils，与 fetchWithRetry 同源），数值逐位不变
-      const retryable = resp.status === HTTP_STATUS_TOO_MANY_REQUESTS || resp.status >= HTTP_STATUS_SERVER_ERROR_FLOOR;
-      if (retryable && attempt < maxRetries) {
-        await safeBodyText(resp); // 排干 body 再退避（连接复用礼貌）
-        await sleep(jitterDelayMs(attempt));
-        attempt++;
-        continue;
-      }
-      const raw = (await safeBodyText(resp)).replace(/\s+/g, ' ').trim().slice(0, 300);
-      // 密钥卫生律（纪元 Ψ 终审补刀）：错误体可能回显 apiKey，一律替换后才能进入 error/meter
-      const snippet = this.apiKey ? raw.split(this.apiKey).join('[REDACTED]') : raw;
-      return fail({
-        ok: false, text: '',
-        error: `glm chat/completions HTTP ${resp.status}${attempt > 0 ? ` after ${attempt + 1} attempts` : ''}: ${snippet}`,
-      });
+      // 传输终败（网络错重试耗尽）/ 超时：内核归因串（'fetch failed after N
+      // attempts: …' / 'request aborted after Xms'）拼 glm 前缀即原路径形状
+      return fail({ ok: false, text: '', error: `glm ${fr.error ?? 'unknown transport failure'}` });
     }
+
+    let body: unknown;
+    try {
+      body = JSON.parse(fr.body ?? '');
+    } catch (e) {
+      return fail({ ok: false, text: '', error: `glm response JSON parse failed: ${errText(e)}` });
+    }
+    const content = extractContent(body);
+    if (content === null) {
+      return fail({ ok: false, text: '', error: 'glm response missing choices[0].message.content' });
+    }
+    const usage = mapUsage((body as { usage?: unknown }).usage);
+    const r: Omit<GlmChatResult, 'latencyMs' | 'model'> = { ok: true, text: content };
+    if (usage) r.usage = usage;
+    if (req.jsonMode) {
+      const j = extractGlmJson(content);
+      if (j !== undefined) r.json = j;
+    }
+    return finish(r);
   }
 
   /**
@@ -661,6 +753,15 @@ export class GlmClient {
    * 模型回复原文（成功也是），调用方可落日志/回退解析。
    */
   async chatJson<T>(req: GlmVisionRequest): Promise<{ ok: boolean; value?: T; error?: string; raw: string }> {
+    // ΝΩ-18（限流器接线）：结构化路径的限流前置闸 —— 置于级联咨询之前（级联
+    // 便宜臂同享全局预算，闸拒绝时连便宜脑也不该拨）与委托分派之前。被拒 ⇒
+    // ok:false 归因 rate-limited（不重试零网络）；放行后原生路径走 chatCore
+    //（不再过 chat() 的闸 —— 一次调用恰扣一次配额，绝不双扣）。
+    const denyMs = rateGateDenyMs();
+    if (denyMs !== null) {
+      return { ok: false, error: rateLimitError(this.platformId, denyMs), raw: '' };
+    }
+
     // W2-8（C2 成本级联路由）：结构化路径最先咨询级联面 —— 承接 ⇒ 直接整流返回
     // （便宜档过检直采 / 升级主力重做）；弃权/未接线/面故障 ⇒ null ⇒ 主路径照走
     // （缺省未接线时本段恒不改变任何返回值 —— 零行为变化律）。
@@ -685,7 +786,7 @@ export class GlmClient {
       }
       return res;
     }
-    const res = await this.chat({ ...req, jsonMode: true });
+    const res = await this.chatCore({ ...req, jsonMode: true });
     if (!res.ok) {
       return { ok: false, error: res.error, raw: res.text };
     }

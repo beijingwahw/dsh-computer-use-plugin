@@ -42,7 +42,9 @@ export type CognitionPlanReadyPayload =
 
 // ─── 类型化发射表面（永不抛错 —— 发射失败是旁路义务，不阻断主流程）───
 
-/** D-1 发射侧铸造点：意图方言载荷（delegateToPipeline 交班的唯一铸造源）。
+/** D-1 发射侧铸造点：意图方言载荷（delegate_to_pipeline 工具交班的唯一铸造源。
+ *  ΑΩ-R34：旧注释误写 camelCase 的 delegateToPipeline —— 工具注册实名是
+ *  snake_case 的 delegate_to_pipeline，按实名核正）。
  *  结构保证：goal ≤160 / successCriteria ≤200（对齐 D-6 契约预算 —— 不靠下游自觉）；
  *  budgetMs 域执法（风险加固）：只放行正有限数 —— 负数（秒级瞬死）/ NaN（永不超时）
  *  一旦流入 D-6 时间治理即毒化 intent 层时钟，域外值诚实缺席（undefined）。

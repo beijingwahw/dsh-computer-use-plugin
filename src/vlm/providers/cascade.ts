@@ -289,6 +289,9 @@ const NULL_POOL: CascadePoolFace = {
  *      成功且可解析 ⇒ 主力值承接（escalated）；失败/不可解析 ⇒ ok:false 诚实
  *      归因（不用失败覆盖主路径的失败 —— 但也绝不静默吞：升级已花真金，结果
  *      如实上报）。台账记便宜实拨 + 主力价（负节省如实呈现）。
+ *      ΝΩ-18（承接语义收窄）：仅「真实拨号后的失败」算承接 —— primary 档
+ *      空链/未拨号合成 degraded ⇒ 返回 null 弃权（主路径照走，绝不短路单例
+ *      主脑与 failover 池）。
  *
  * 内部任何故障（敌意桩上抛 / 假想外的同步面）⇒ null（不抛铁律的最终兜底）。
  */
@@ -418,6 +421,16 @@ export class VlmCascade {
 
       // ── 升级主力重做：便宜答案作废，主力档链重做（安全升级） ──
       const primaryRes = await this.safeChatTier(req, 'primary');
+      // ΝΩ-18（承接语义收窄）：仅「真实拨号后的失败」算承接。primary 档空链
+      //（用户把主力也标 cheap 等配置形态）或档内全员未配置/熔断被跳时，
+      // chatTier 回合成 degraded（degraded:true = 未拨号，与便宜臂 cheapCalled
+      // 同一判定面）。此时若承接 ok:false，会把 glmClient 单例主脑与 failover
+      // 池一并短路 —— 主力档根本没试过，不是级联的诚实失败现场。弃权（null）
+      // 让主路径照走；台账不记 escalation（主力未拨号 ⇒ 不虚记主力价；便宜臂
+      // 若有真实拨号，其花费由池内适配器自身 meter 如实上报，级联台账不重复记）。
+      if (primaryRes !== null && primaryRes.degraded === true) {
+        return null;
+      }
       this.meterImpl.recordEscalation(cheapUnits, cheapCalled);
       if (primaryRes !== null && primaryRes.ok === true) {
         const v = extractProviderJson(primaryRes.text);

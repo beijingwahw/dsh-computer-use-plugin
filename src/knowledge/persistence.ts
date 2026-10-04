@@ -10,7 +10,7 @@
 //   - 水合先验后写（器官内 restoreSnapshot 执法）：任一非法 ⇒ 整体拒绝，
 //     绝不把半具尸体接活
 //   - load 缺席/损坏 ⇒ 空脑开局（诚实的新生儿，不是崩溃的病人）
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'fs';
 import { join } from 'path';
 import type { Result } from './contracts';
 import { InMemoryKnowledgeBase } from './knowledgeBase';
@@ -20,11 +20,23 @@ import { InMemoryWorldModel } from './worldModel';
 const KNOWLEDGE_FILE = 'knowledge.json';
 const WORLD_MODEL_FILE = 'world-model.json';
 
-/** 原子写（tmp + rename：读者要么看到完整旧态，要么看到完整新态） */
+/**
+ * 原子写（tmp + fsync + rename：读者要么看到完整旧态，要么看到完整新态）。
+ * ΝΩ-28 任务6：rename 前补 fsyncSync（对齐 trust store / checkpoint 先例）——
+ * rename 可先于数据块持久化，页缓存不算落盘：崩溃窗口内 rename 已生效而
+ * 数据块未达盘 ⇒ 读到空/截断档。fsync 把数据块推到盘上再换名，崩溃一致性
+ * 收口（脑是可水合的状态 —— 半档比没有更糟）。
+ */
 function atomicWriteJson(path: string, data: unknown): Result<void, Error> {
+  const tmp = `${path}.tmp`;
   try {
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    const fd = openSync(tmp, 'w');
+    try {
+      writeSync(fd, Buffer.from(JSON.stringify(data), 'utf8'));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, path);
     return { ok: true, value: undefined };
   } catch (e: unknown) {

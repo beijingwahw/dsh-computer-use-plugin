@@ -11,7 +11,7 @@ import { contextManager } from '../contextManager.js';
 import { focusTracker } from '../focusTracker.js';
 import * as backend from '../physicalBackend.js';
 import { computeDiffRegions, renderDiffOverlay, classifyPersistence, noteDiffObserved, spatialDisplacement, } from '../visualDiff.js';
-import { toolOkNoAction } from '../toolResult.js';
+import { toolErr, toolOkNoAction } from '../toolResult.js';
 function decodeDataUrl(base64) {
     return Buffer.from(base64.split(',')[1] ?? base64, 'base64');
 }
@@ -64,6 +64,10 @@ export function createDiffViewTool() {
                     const beforeBuf = decodeDataUrl(before.base64);
                     const afterBuf = decodeDataUrl(after.base64);
                     const diff = await computeDiffRegions(beforeBuf, afterBuf);
+                    // ΝΩ-24：非图像 buffer ⇒ null（维度守卫）——诚实降级为无法比对
+                    if (!diff) {
+                        return toolErr('diff_view', '无法比对：截图帧解码异常（非图像数据）', '重试 diff_view；若持续失败，用 take_screenshot 获取新帧后再比对。');
+                    }
                     regions = diff.regions;
                     changedPct = diff.changed_fraction_pct;
                     identical = diff.identical || diff.regions.length === 0;

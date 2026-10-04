@@ -23,9 +23,17 @@
 // W6-4（持久化缝包）：信任账可落盘 —— 原子写（tmp + fsync + rename，checkpoint
 // 同律）+ 防御恢复（垃圾值归先验）+ 突变计数节流；缺省不武装（纯内存，与旧行为
 // 逐字节一致），dump 面 = federationTrustReport，restore 面 = restoreFederationTrust。
+// ΑΩ-R6（试用期缓升）：初见源 trust 封顶 PROBATION_TRUST_CAP（0.35），累计
+// PROBATION_CLEAN_MERGES（3）次干净合并解除；试用期内检疫票 ⇒ 回退重启；
+// 'local' 源豁免。试用期原始计数（merges/cleanMerges/dirty）随档落盘（trust 仍
+// 派生）；配额链路经闸③ quota=floor(cap×trust) 自然折减，三道闸语义零变化。
 // W6R-A5（聚合端共享密钥认证）：上行 HMAC-SHA256 请求签名 + 时间戳防重放（Cap
 // Token 同风格）—— DSH_FEDERATION_TOKEN 在场时 federationSync 自动附签名头，
 // 服务端（scripts/federation-server.mjs）同 env 强制验签（缺省 open 零配置）。
+// ΝΩ-19（联邦逐源签名）：DSH_FED_SIGNING_KEY（Ed25519 pkcs8/base64 或 seed）在场
+// ⇒ 上行摘要附 {pubkey,sig}、下行逐源验签（假源剔除 + unverifiableSources 计数，
+// 绝不混入中位数）+ 止血限额/同毫秒批量护栏 + 信任账键扩为 endpoint#指纹（ΑΩ-R6
+// 试用期平移到正确主体粒度；未配置密钥 ⇒ 未签名旧路径逐字节 —— 零回归律）。
 // 全模块随机源/时钟/网络/账本皆可注入，resetFederationRuntime 供测试隔离。
 // ─── 纪元 Μ2 纯增量：拜占庭鲁棒聚合面再分发 ───
 // aggregate.ts 是零运行时依赖本模块的纯函数核心（类型面经 import type 借用，编译期
@@ -38,9 +46,9 @@ export { robustMergeDigests, applyQuarantineToTrust, contributionCap, OUTLIER_FL
 import { resetTrustRuntime } from './trust.js';
 import { resetLastSync } from './sync.js';
 export { DIGEST_VERSION, DIGEST_BINS, DIGEST_MARGIN_CLIP, FEDERATION_TIMEOUT_MS, DEFAULT_FEDERATION_EPSILON, DEFAULT_MAX_REMOTE_SHARE, mulberry32, laplaceNoise, mintEvidenceDigest, mergeDigests, } from './digest.js';
-export { FEDERATION_AUTH_ENV, FEDERATION_AUTH_TIMESTAMP_HEADER, FEDERATION_AUTH_SIGNATURE_HEADER, FEDERATION_AUTH_SKEW_MS, federationAuthHeaders, lastFederationSync, federationSync, } from './sync.js';
+export { FEDERATION_AUTH_ENV, FEDERATION_AUTH_TIMESTAMP_HEADER, FEDERATION_AUTH_SIGNATURE_HEADER, FEDERATION_AUTH_SKEW_MS, federationAuthHeaders, FEDERATION_SIGNING_KEY_ENV, federationSigningIdentity, signEvidenceDigest, verifyEvidenceDigestSignature, canonicalFederationJson, federationSigningKeyHint, logFederationSigningKeyHint, lastFederationSync, federationSync, } from './sync.js';
 export { applyFederatedEvidence, } from './apply.js';
-export { TRUST_STORE_VERSION, DEFAULT_TRUST_FLUSH_EVERY, recordFederationTrust, federationTrustOf, federationTrustReport, createFederationTrustFileStore, serializeFederationTrust, restoreFederationTrust, loadFederationTrust, armFederationTrustPersistence, flushFederationTrust, federationTrustPersistenceStatus, } from './trust.js';
+export { TRUST_STORE_VERSION, DEFAULT_TRUST_FLUSH_EVERY, PROBATION_TRUST_CAP, PROBATION_CLEAN_MERGES, TRUST_PROBATION_EXEMPT_SOURCE, FEDERATION_FINGERPRINT_KEY_SEP, federationFingerprintSourceId, recordFederationTrust, federationTrustOf, federationTrustReport, createFederationTrustFileStore, serializeFederationTrust, restoreFederationTrust, loadFederationTrust, armFederationTrustPersistence, flushFederationTrust, federationTrustPersistenceStatus, } from './trust.js';
 // ─── 测试缝：联邦运行时复位（信任账 + 上次同步记忆 + W6-4 持久化武装；生产代码无理由调用） ───
 export function resetFederationRuntime() {
     resetTrustRuntime(); // W9-3：信任账/持久化武装复位（trust.ts 私有账本之门）

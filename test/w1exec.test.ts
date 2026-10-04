@@ -19,7 +19,7 @@ import {
   type RuntimeWord,
   type W1ExecTuning,
 } from '../src/autonomy/runtime.ts';
-import { composeSnapshot, type WorldSnapshot } from '../src/autonomy/worldSnapshot.ts';
+import { composeSnapshot, findInSnapshot, type WorldSnapshot } from '../src/autonomy/worldSnapshot.ts';
 import type { GoalSpec, PolicyAction } from '../src/autonomy/index.ts';
 import {
   createExecWorldProbe,
@@ -133,6 +133,10 @@ interface ExecOpts {
   snapshot?: WorldSnapshot | null;
   readWords?: (buf: Buffer) => Promise<RuntimeWord[]>;
   dhashOf?: (buf: Buffer) => Promise<string | null>;
+  /** ΑΩ-R12：drag 端口假件（缺席 ⇒ execute 走防御式降级路径） */
+  drag?: RuntimeDeps['drag'];
+  /** ΑΩ-R12：省略 deps.readWords（inspect 聚焦检视的诚实降级路径） */
+  noReadWords?: boolean;
 }
 
 /** 铸造被测 execute + 观测账本（captures / sleeps 延迟读取）—— 全注入零真 IO */
@@ -140,18 +144,22 @@ function makeExecute(o: ExecOpts = {}): {
   execute: (action: PolicyAction) => Promise<import('../src/autonomy/runtime.ts').ExecOutcome>;
   getCaptures: () => number;
   sleeps: number[];
+  /** ΝΩ-13：感知快照槽观测面（inspect 增量回流断言用 —— 与 deps 同一引用） */
+  ref: () => { current: WorldSnapshot | null };
 } {
   const captures: number[] = [];
   const sleeps: number[] = [];
   let clock = 1_000;
+  const lastRef: { current: WorldSnapshot | null } = { current: o.snapshot === undefined ? null : o.snapshot };
   const deps: RuntimeDeps & { spec: GoalSpec; width: number; height: number } = {
     capture: async () => { captures.push(1); return Buffer.from([captures.length]); },
     imageSize: async () => ({ width: 512, height: 384 }),
     dhashOf: o.dhashOf ?? (async () => 'aaaaaaaaaaaaaaaa'),
-    readWords: o.readWords ?? (async (): Promise<RuntimeWord[]> => []),
+    ...(o.noReadWords ? {} : { readWords: o.readWords ?? (async (): Promise<RuntimeWord[]> => []) }),
+    ...(o.drag ? { drag: o.drag } : {}),
     now: () => (clock += 50),
     sleep: async (ms: number) => { sleeps.push(ms); },
-    lastSnapshotRef: { current: o.snapshot === undefined ? null : o.snapshot },
+    lastSnapshotRef: lastRef,
     ...(o.probe ? { probe: o.probe } : {}),
     ...(o.focus ? { focus: o.focus } : {}),
     ...(o.w1 ? { w1: o.w1 } : {}),
@@ -159,7 +167,7 @@ function makeExecute(o: ExecOpts = {}): {
     width: 512,
     height: 384,
   };
-  return { execute: createExecute(deps), getCaptures: () => captures.length, sleeps };
+  return { execute: createExecute(deps), getCaptures: () => captures.length, sleeps, ref: () => lastRef };
 }
 
 /** 标准点击目标：bbox {200,160,312,224}（112×64）中心 (256,192) → 屏幕像素 (960,540) */
@@ -175,14 +183,18 @@ function clickAction(over: { bbox?: { x0: number; y0: number; x1: number; y1: nu
   };
 }
 
-/** 含词级元素的感知快照（A2③ / A4 词质心的 before 侧证据） */
-function snapshotWithWords(words: Array<{ label: string; bbox: { x0: number; y0: number; x1: number; y1: number }; confidence?: number }>): WorldSnapshot {
+/** 含词级元素的感知快照（A2③ / A4 词质心的 before 侧证据；now 可注入 —— ΝΩ-13 回流断言用） */
+function snapshotWithWords(
+  words: Array<{ label: string; bbox: { x0: number; y0: number; x1: number; y1: number }; confidence?: number }>,
+  now?: number,
+): WorldSnapshot {
   return composeSnapshot({
     width: 512,
     height: 384,
     dhash: 'aaaaaaaaaaaaaaaa',
     localElements: words.map(w => ({ label: w.label, bbox: w.bbox, confidence: w.confidence ?? 0.9 })),
     ocrText: words.map(w => w.label).join(' '),
+    ...(now !== undefined ? { now } : {}),
   });
 }
 
@@ -854,4 +866,353 @@ test('W1_EXEC_TUNING 缺省值契约（集成阶段接 config 的对照基线）
   assert.equal(W1_EXEC_TUNING.clickRetryMax, 8);
   assert.equal(W1_EXEC_TUNING.smallBboxPx, 24);
   assert.equal(W1_EXEC_TUNING.smallShrinkRatio, 0.2);
+});
+
+// ─── ΑΩ-R12：inspect 聚焦检视 / drag 拖拽端口（执行面落地） ───
+// inspect：围绕检视点开 ROI 窗（W1 tuning roiRadiusPx=128）词级 OCR —— 窗内词
+// 入摘要（信息增益）、窗外词不入；绝不移动鼠标绝不点击（零像素影响）；OCR
+// 端口缺席/检视点缺席 ⇒ 诚实降级 no_effect + 注记。
+// drag：像素换算（与 click 同律）后经 deps.drag 端口派发；端口缺席 ⇒ no_effect
+// + 诚实注记；端口报失败 ⇒ error 诚实归因。
+
+test('ΑΩ-R12 inspect 正：ROI 窗内词入摘要、窗外词不入（payload.region 方言，零键鼠）', async () => {
+  const world = patchWorld();
+  try {
+    const { execute, getCaptures } = makeExecute({
+      readWords: async () => [
+        { label: '窗内词', bbox: { x0: 240, y0: 180, x1: 280, y1: 200 }, confidence: 0.9 },
+        { label: '窗外词', bbox: { x0: 8, y0: 8, x1: 48, y1: 28 }, confidence: 0.9 },
+      ],
+    });
+    // 策略引擎僵局切换方言：payload.region（快照像素域）中心 (256,192)
+    const out = await execute({
+      kind: 'inspect',
+      payload: { region: { x0: 200, y0: 160, x1: 312, y1: 224 } },
+      rationale: 'ΑΩ-R12', expectedEffect: '无像素影响', utility: 0.5, riskTier: 'benign',
+    });
+    assert.equal(out.outcome, 'no_effect', '观察性动作 —— 零像素影响照旧');
+    assert.ok(out.note?.includes('窗内词'), 'ROI 窗内词进摘要（信息增益）');
+    assert.ok(!out.note?.includes('窗外词'), 'ROI 窗外词不进摘要');
+    assert.ok(out.note?.includes('读到 1 词'), '词数如实记账');
+    assert.ok(out.note?.includes('聚焦检视'), 'note 记检视归因');
+    assert.equal(world.clicks.length, 0, '绝不点击');
+    assert.equal(world.typed.length, 0, '绝不键入');
+    assert.equal(world.scrolled.length, 0, '绝不滚动');
+    assert.equal(world.hotkeys.length, 0, '绝不按键');
+    assert.ok(getCaptures() >= 1, '检视需一帧截屏做 OCR');
+    assert.equal(out.verification?.noise, false, '零世界动作的诚实账');
+    assert.deepEqual(out.verification?.degraded, []);
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΑΩ-R12 inspect 正：target.center 优先于 payload.region（换算链同 click）', async () => {
+  const world = patchWorld();
+  try {
+    const { execute } = makeExecute({
+      readWords: async () => [
+        { label: '近点词', bbox: { x0: 90, y0: 100, x1: 130, y1: 120 }, confidence: 0.9 },
+        { label: '远点词', bbox: { x0: 280, y0: 280, x1: 320, y1: 320 }, confidence: 0.9 },
+      ],
+    });
+    const out = await execute({
+      kind: 'inspect',
+      target: { bbox: { x0: 60, y0: 60, x1: 140, y1: 140 }, center: { x: 100, y: 100 }, label: '焦点区' },
+      payload: { region: { x0: 400, y0: 300, x1: 500, y1: 360 } }, // region 在场但 target.center 优先
+      rationale: 'ΑΩ-R12', expectedEffect: '无像素影响', utility: 0.5, riskTier: 'benign',
+    });
+    assert.equal(out.outcome, 'no_effect');
+    assert.ok(out.note?.includes('近点词'), 'target.center 邻域词入摘要');
+    assert.ok(!out.note?.includes('远点词'), '远点词不入摘要');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΑΩ-R12 inspect 降级：deps.readWords 缺席 ⇒ no_effect + 诚实注记（不伪读）', async () => {
+  const { execute, getCaptures } = makeExecute({ noReadWords: true });
+  const out = await execute({
+    kind: 'inspect',
+    payload: { region: { x0: 200, y0: 160, x1: 312, y1: 224 } },
+    rationale: 'ΑΩ-R12', expectedEffect: '无像素影响', utility: 0.5, riskTier: 'benign',
+  });
+  assert.equal(out.outcome, 'no_effect');
+  assert.ok(out.note?.includes('deps.readWords'), 'note 诚实归因 OCR 端口缺席');
+  assert.equal(getCaptures(), 0, '端口缺席 ⇒ 不截屏（零浪费）');
+  assert.deepEqual(out.verification?.degraded, []);
+});
+
+test('ΑΩ-R12 inspect 降级：检视点缺席（无 target.center / payload.region）⇒ 不动作', async () => {
+  const world = patchWorld();
+  try {
+    const { execute, getCaptures } = makeExecute({ readWords: async () => [] });
+    const out = await execute({
+      kind: 'inspect',
+      rationale: 'ΑΩ-R12', expectedEffect: '无像素影响', utility: 0.5, riskTier: 'benign',
+    });
+    assert.equal(out.outcome, 'no_effect');
+    assert.ok(out.note?.includes('检视点缺席'), 'note 诚实归因');
+    assert.equal(getCaptures(), 0);
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΑΩ-R12 drag 正：端口注入 ⇒ 换算像素四元组派发（快照像素 → 归一化 → 屏幕像素）', async () => {
+  const world = patchWorld();
+  try {
+    const calls: Array<[number, number, number, number]> = [];
+    const { focus, sets } = fakeFocus({ x: -9, y: -9 });
+    const { execute } = makeExecute({
+      focus,
+      drag: async (sx, sy, ex, ey) => { calls.push([sx, sy, ex, ey]); return { ok: true }; },
+    });
+    const out = await execute({
+      kind: 'drag',
+      target: { bbox: { x0: 200, y0: 160, x1: 312, y1: 224 }, center: { x: 256, y: 192 }, label: '滑块' },
+      payload: { end: { x: 400, y: 300 } },
+      rationale: 'ΑΩ-R12', expectedEffect: '滑块右移', utility: 0.5, riskTier: 'benign',
+    });
+    assert.deepEqual(calls, [[960, 540, 1500, 844]], '起点/终点均按 click 同律换算为屏幕像素');
+    assert.deepEqual(sets, [[400 / 512, 300 / 384]], '落点登记于终点（归一化）');
+    assert.equal(world.clicks.length, 0, 'drag 不经 system.clickMouse（端口破环）');
+    assert.ok(out.verification, '世界动作走三区判决管线');
+    assert.equal(out.outcome, 'progress', '无探针 ⇒ 全屏降级判决：before 帧缺席首见判变');
+    assert.ok(out.verification?.degraded.includes('roi'), '探针缺席记 roi 降级');
+    assert.ok(out.note?.includes('拖拽像素 (960, 540) → (1500, 844)'), 'note 记派发轨迹');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΑΩ-R12 drag 降级：端口缺席 / 终点缺席 ⇒ no_effect + 诚实注记（不动作）', async () => {
+  const world = patchWorld();
+  try {
+    const { execute } = makeExecute(); // 不注入 drag 端口
+    const base: PolicyAction = {
+      kind: 'drag',
+      target: { bbox: { x0: 200, y0: 160, x1: 312, y1: 224 }, center: { x: 256, y: 192 }, label: '滑块' },
+      rationale: 'ΑΩ-R12', expectedEffect: '滑块右移', utility: 0.5, riskTier: 'benign',
+    };
+    const out1 = await execute({ ...base, payload: { end: { x: 400, y: 300 } } });
+    assert.equal(out1.outcome, 'no_effect', '端口缺席 ⇒ 与接线前 default 空转同结局');
+    assert.ok(out1.note?.includes('deps.drag'), '多一句可审计归因');
+
+    const calls: Array<[number, number, number, number]> = [];
+    const { execute: execute2 } = makeExecute({
+      drag: async (sx, sy, ex, ey) => { calls.push([sx, sy, ex, ey]); return { ok: true }; },
+    });
+    const out2 = await execute2({ ...base }); // 有端口但 payload.end 缺席
+    assert.equal(out2.outcome, 'no_effect');
+    assert.ok(out2.note?.includes('payload.end'), 'note 诚实归因终点缺席');
+    assert.equal(calls.length, 0, '绝不派发');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΑΩ-R12 drag 失败：端口报 ok:false ⇒ error 诚实归因（外层收口不抛）', async () => {
+  const world = patchWorld();
+  try {
+    const { execute } = makeExecute({ drag: async () => ({ ok: false, error: '物理层拒绝' }) });
+    const out = await execute({
+      kind: 'drag',
+      target: { bbox: { x0: 200, y0: 160, x1: 312, y1: 224 }, center: { x: 256, y: 192 }, label: '滑块' },
+      payload: { end: { x: 400, y: 300 } },
+      rationale: 'ΑΩ-R12', expectedEffect: '滑块右移', utility: 0.5, riskTier: 'benign',
+    });
+    assert.equal(out.outcome, 'error', '端口失败 = 派发失败 ⇒ error（与 click 派发异常同律）');
+    assert.ok(out.note?.includes('物理层拒绝'), 'note 携端口错误归因');
+    assert.ok(out.note?.includes('execute:'), '外层 error 收口格式保持');
+  } finally {
+    world.restore();
+  }
+});
+
+// ─── ΝΩ-13（执行回路三修）：inspect 产物回流 / 重试抽查去重 / type 焦点回填 ───
+// 一修：handleInspect 的 ROI 新词合成 LocalElement 增量，经 composeSnapshot 单源
+// 重铸进 lastSnapshotRef（takenAt 刷新、degraded 记 'inspect-merged'、dhash 原样
+// 透传）—— 下一步 policy.decide 可见；幂等闸防重复检视虚增，防御式保旧快照。
+// 二修：click 网格重试传 spotOverride:false —— spotDue 到期时抽查在首发消费
+// 一次即止，8 邻位重试不再重复截屏+OCR。
+// 三修：type 的外推焦点是哨兵远点（焦点源禁用）而 hitTest 端口在场 ⇒ 用最近
+// click 派发落点经 hitTest 证实后回填 ROI 判决；端口缺席/证实失败 ⇒ 全屏（旧行为）。
+
+test('ΝΩ-13 一修正：ROI 新词重铸进快照槽 —— decide 检索面可见、幂等不虚增', async () => {
+  const world = patchWorld();
+  try {
+    const before = snapshotWithWords(
+      [{ label: '旧词', bbox: { x0: 236, y0: 188, x1: 276, y1: 196 } }],
+      1_000,
+    );
+    const { execute, ref } = makeExecute({
+      snapshot: before,
+      readWords: async () => [
+        { label: '检视新词', bbox: { x0: 240, y0: 180, x1: 280, y1: 200 }, confidence: 0.9 },
+        { label: '窗外词', bbox: { x0: 8, y0: 8, x1: 48, y1: 28 }, confidence: 0.9 },
+      ],
+    });
+    const action: PolicyAction = {
+      kind: 'inspect',
+      payload: { region: { x0: 200, y0: 160, x1: 312, y1: 224 } },
+      rationale: 'ΝΩ-13', expectedEffect: '无像素影响', utility: 0.5, riskTier: 'benign',
+    };
+    const out = await execute(action);
+    assert.equal(out.outcome, 'no_effect', '观察性动作结局照旧');
+    assert.ok(out.note?.includes('增量回流 1 词'), 'note 记回流账');
+    const merged = ref().current;
+    assert.ok(merged, '快照槽在位');
+    assert.ok(findInSnapshot(merged, '检视新词').length >= 1, '检视新词对检索面可见（decide 同源）');
+    assert.ok(!merged.elements.some(el => el.label === '窗外词'), 'ROI 窗外词不入增量');
+    assert.ok(merged.elements.some(el => el.label === '旧词'), '旧元素保持');
+    assert.ok(merged.degraded.includes('inspect-merged'), 'degraded 诚实记 inspect-merged');
+    assert.equal(merged.dhash, before.dhash, '零像素影响 —— 指纹原样透传');
+    assert.ok(merged.takenAt > before.takenAt, 'takenAt 刷新（注入时钟步进）');
+    assert.ok(merged.textDigest.includes('检视新词'), '文本摘要携带增量');
+    // 幂等闸：重复检视同一区域 —— 同标签同位置词已在账上 ⇒ 零新增量零重铸
+    const out2 = await execute(action);
+    assert.ok(!out2.note?.includes('增量回流'), '全在账 ⇒ 不再记回流');
+    assert.equal(ref().current, merged, '无增量 ⇒ 快照对象不换（零虚增零抖动）');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΝΩ-13 一修防御：OCR 读取失败 ⇒ 旧快照原样保持（检视诚实降级不伪读）', async () => {
+  const world = patchWorld();
+  try {
+    const before = snapshotWithWords(
+      [{ label: '旧词', bbox: { x0: 236, y0: 188, x1: 276, y1: 196 } }],
+      1_000,
+    );
+    const { execute, ref } = makeExecute({
+      snapshot: before,
+      readWords: async () => { throw new Error('OCR 端口故障'); },
+    });
+    const out = await execute({
+      kind: 'inspect',
+      payload: { region: { x0: 200, y0: 160, x1: 312, y1: 224 } },
+      rationale: 'ΝΩ-13', expectedEffect: '无像素影响', utility: 0.5, riskTier: 'benign',
+    });
+    assert.equal(out.outcome, 'no_effect');
+    assert.ok(out.note?.includes('读取失败'), '诚实降级注记保持');
+    assert.equal(ref().current, before, '旧快照原样保持（回流绝不伪造）');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΝΩ-13 二修：spotDue 到期首发抽查恰一次，8 邻位重试零抽查', async () => {
+  const world = patchWorld();
+  try {
+    // 样本序：两发命中（各 3 帧）+ 第三发全静 miss（首发 3 帧 + 8 邻位各 3 帧）
+    const hitFrames = (base: number): FrameSample[] => [
+      S(H0, H0, base), S(B(10), B(10), base + 1), S(B(12), B(12), base + 2),
+    ];
+    const missAll = Array.from({ length: 27 }, (_, i) => S(H0, H0, 100 + i));
+    const { probe } = makeProbe({ samples: [...hitFrames(1), ...hitFrames(4), ...missAll] });
+    let readCalls = 0;
+    const { execute, getCaptures } = makeExecute({
+      probe,
+      readWords: async (): Promise<RuntimeWord[]> => { readCalls++; return []; },
+    });
+    await execute(clickAction()); // verifiedCount→1（1%3≠0）
+    await execute(clickAction()); // verifiedCount→2（2%3≠0）
+    assert.equal(readCalls, 0, '未到期零抽查');
+    assert.equal(getCaptures(), 0, '探针在场且无 OCR 需求 ⇒ 零全帧截屏');
+    const out = await execute(clickAction()); // verifiedCount→3 ⇒ spotDue 首发；重试全 miss
+    assert.equal(out.outcome, 'no_effect');
+    assert.equal(world.clicks.length, 2 + 9, '前两发命中 + 第三发首发与 8 邻位全 miss');
+    assert.equal(out.verification?.retries, 8);
+    assert.equal(readCalls, 1, '判据抽查恰首发一次 —— 重试期不再抽查');
+    assert.equal(getCaptures(), 1, '抽查截屏恰一次（重试零截屏）');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΝΩ-13 三修正：哨兵焦点 + hitTest 在场 ⇒ click 落点回填 ROI 判决', async () => {
+  const world = patchWorld();
+  try {
+    // click 命中（3 帧）→ type：before 区域指纹 B(10) → 门后 B(14)（距 4 > 2 ⇒ ROI 变而全屏静）
+    const { probe, calls } = makeProbe({
+      samples: [
+        S(H0, H0, 1), S(B(10), B(10), 2), S(B(12), B(12), 3),
+        S(H0, B(10), 4), S(H0, B(10), 5), S(H0, B(14), 6),
+      ],
+      hit: { available: true, classification: 'control', controlType: 'EditControl' },
+    });
+    const { execute } = makeExecute({ probe }); // 不注入 focus ⇒ 禁用态哨兵远点
+    await execute(clickAction()); // 真实派发 ⇒ 闭包记落点 (0.5, 0.5)
+    const out = await execute({
+      kind: 'type', payload: { text: 'hello' },
+      rationale: 't', expectedEffect: 't', utility: 0.5, riskTier: 'benign',
+    });
+    assert.deepEqual(world.typed, ['hello']);
+    assert.equal(out.outcome, 'progress');
+    assert.equal(out.verification?.roiChanged, true, '回填焦点 ⇒ ROI 三区判决（非全屏降级）');
+    assert.equal(out.verification?.fullscreenChanged, false, '全屏静 —— Toast 类局部反馈不漏');
+    assert.ok(!out.verification?.degraded.includes('roi'), 'ROI 证据链在场');
+    assert.ok(out.note?.includes('hitTest 回填'), 'note 记回填归因');
+    assert.equal(calls.hits, 2, 'click 预检 + type 回填各恰一次 hitTest');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΝΩ-13 三修降级：hitTest 端口缺席 ⇒ 哨兵焦点保持全屏判决（旧行为）', async () => {
+  const world = patchWorld();
+  try {
+    // 最小探针：只有帧采样（hitTestPoint 方法缺席 —— 端口缺席的诚实降级面）
+    const queue: FrameSample[] = [
+      S(H0, H0, 1), S(B(10), B(10), 2), S(B(12), B(12), 3), // click：命中（落点已记）
+      S(H0, null, 4), S(B(6), null, 5), S(B(10), null, 6),  // type：全屏变（降级判决面）
+    ];
+    const minimal: ExecWorldProbe = {
+      sampleFrame: async () => queue.shift() ?? null,
+      frameDiff: async () => null,
+      frameRowMeans: async () => null,
+    };
+    const { execute } = makeExecute({ probe: minimal }); // 不注入 focus ⇒ 哨兵
+    await execute(clickAction());
+    const out = await execute({
+      kind: 'type', payload: { text: 'hello' },
+      rationale: 't', expectedEffect: 't', utility: 0.5, riskTier: 'benign',
+    });
+    assert.deepEqual(world.typed, ['hello']);
+    assert.equal(out.verification?.roiChanged, null, '无 ROI 判决');
+    assert.ok(out.verification?.degraded.includes('roi'), '诚实降级记 roi（与接线前一致）');
+    assert.ok(!out.note?.includes('回填'), '无回填归因');
+    assert.equal(out.outcome, 'progress', '全屏变 ⇒ progress（旧行为保持）');
+  } finally {
+    world.restore();
+  }
+});
+
+test('ΝΩ-13 三修降级：hitTest 证实失败（unavailable）⇒ 全屏判决（诚实降级）', async () => {
+  const world = patchWorld();
+  try {
+    const { probe, calls } = makeProbe({
+      samples: [
+        S(H0, H0, 1), S(B(10), B(10), 2), S(B(12), B(12), 3),
+        S(H0, null, 4), S(B(6), null, 5), S(B(10), null, 6),
+      ],
+      hit: { available: false, classification: 'unavailable', controlType: null },
+    });
+    const { execute } = makeExecute({ probe }); // 不注入 focus ⇒ 哨兵
+    await execute(clickAction());
+    const out = await execute({
+      kind: 'type', payload: { text: 'hello' },
+      rationale: 't', expectedEffect: 't', utility: 0.5, riskTier: 'benign',
+    });
+    assert.deepEqual(world.typed, ['hello']);
+    assert.equal(out.verification?.roiChanged, null, '证实失败 ⇒ 不回填');
+    assert.ok(out.verification?.degraded.includes('roi'), '诚实降级记 roi');
+    assert.ok(!out.note?.includes('回填'), '无回填归因');
+    assert.equal(calls.hits, 2, 'click 预检 + type 证实尝试各恰一次');
+    assert.equal(out.outcome, 'progress', '全屏变 ⇒ progress（旧行为保持）');
+  } finally {
+    world.restore();
+  }
 });

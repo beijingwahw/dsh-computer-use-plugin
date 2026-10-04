@@ -654,9 +654,9 @@ test('G3-10: 三道闸（零证据/份额帽/信任折减）+ 技能联邦独立
   const g3b = skillFederation.receive(cands, { localSkillCount: 1, sourceId: 'fed-src', maxRemoteShare: 1, rng: mulberry32(3), now: () => 5 });
   assert.equal(g3b.trust, 1 / 6, '信任函数 1/(1+regressed) 入闸');
   assert.equal(g3b.injected, 0, 'quota = floor(1 × 1/6) = 0');
-  // 初见源全信：trust=1（与联邦初见全信同律）
-  const g3c = skillFederation.receive(cands.slice(0, 1), { localSkillCount: 4, sourceId: 'fresh-src', maxRemoteShare: 0.5, rng: mulberry32(3), now: () => 6 });
-  assert.equal(g3c.trust, 1);
+    // 初见源：试用期封顶 0.35（与联邦 ΑΩ-R6 新先验同律 —— 初见不再全信）
+    const g3c = skillFederation.receive(cands.slice(0, 1), { localSkillCount: 4, sourceId: 'fresh-src', maxRemoteShare: 0.5, rng: mulberry32(3), now: () => 6 });
+    assert.ok(Math.abs(g3c.trust - 0.35) < 1e-12, '初见 ⇒ 试用期封顶 0.35（干净 3 次合并后解除）');
 
   // 独立记账：技能联邦的接收不写联邦证据信任账（applied/regressed 零变化）
   const before = JSON.stringify(federationTrustReport());

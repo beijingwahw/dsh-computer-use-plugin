@@ -7,6 +7,8 @@
 // 铁律：锚点一律走 toolResult 工厂；未配置/失败诚实 toolErr —— 绝不抛、绝不伪造答案。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import * as backend from '../physicalBackend.js';
+import { normalizeHash } from '../perceptualHash.js';
+import { contextManager } from '../contextManager.js';
 import { toolOk, toolErr } from '../toolResult.js';
 import { getGlmClient, isGlmConfigured } from '../vlm/glmClient.js';
 import { encodeForVlm } from '../vlm/codec.js';
@@ -18,6 +20,53 @@ const QUESTION_MAX_CHARS = 500;
 const ASK_SYSTEM_PROMPT = '你是屏幕观察员。用户给出一张当前屏幕截图和一个问题，请只依据截图中的可见内容作答：' +
     '简洁、直接、事实优先；引用屏幕上的原文时保持原文。截图之外的信息不要臆测；' +
     '看不清/不确定时如实说明。用提问所用的语言回答。';
+/** 64 位 dhash 的 hex 表示长度（perceptualHash 单源方言）。 */
+const DHASH_HEX_LENGTH = 16;
+/** ΝΩ-31：位串 → hex（backend gate 比对域；已是 hex 透传，坏值回空串跳闸）。 */
+function hashBitsToHex(h) {
+    const bits = normalizeHash(h);
+    if (/^[01]+$/.test(bits)) {
+        try {
+            return BigInt(`0b${bits}`).toString(16).padStart(DHASH_HEX_LENGTH, '0');
+        }
+        catch {
+            return '';
+        }
+    }
+    return /^[0-9a-f]+$/i.test(bits) && bits.length === DHASH_HEX_LENGTH ? bits : ''; // ΝΩ 收官：dhash 恒 64bit=16 hex（perceptualHash 方言）
+}
+/** ΝΩ-31：缺省复用闸 —— 窗口内最新截图指纹 vs 当前屏（metaOnly 探针，零图像字节）。
+ *  探针任何失败 ⇒ null（诚实退回全新截屏，绝不以缓存冒充新鲜）。 */
+function defaultReuseGate(config) {
+    return async () => {
+        // config.stableScreenDistance 缺席（残缺 config / 测试注入 {}）⇒ 门控不武装
+        if (typeof config.stableScreenDistance !== 'number')
+            return null;
+        const last = contextManager.lastImageRecord();
+        if (!last?.hash || !last.base64)
+            return null;
+        const ref = hashBitsToHex(last.hash);
+        if (!ref)
+            return null;
+        try {
+            const probe = await backend.captureProcessed({
+                metaOnly: true,
+                wantHashes: true,
+                gate: { dhashRef: ref, distance: config.stableScreenDistance },
+            });
+            if (probe?.unchanged) {
+                const bare = last.base64.replace(/^data:[^;]+;base64,/, '');
+                const buffer = Buffer.from(bare, 'base64');
+                if (buffer.length > 0)
+                    return { unchanged: true, buffer, sourceId: last.id };
+            }
+        }
+        catch {
+            return null; // 探针故障 = 无证据（诚实全新截屏）
+        }
+        return { unchanged: false };
+    };
+}
 export function createAskScreenTool(_config, deps = {}) {
     return defineTool({
         name: 'ask_screen',
@@ -50,7 +99,22 @@ export function createAskScreenTool(_config, deps = {}) {
             }
             try {
                 const capture = deps.capture ?? (() => backend.captureCleanPng());
-                const buffer = await capture();
+                // ΝΩ-31（unchanged 门控）：先问复用闸 —— 屏幕与窗口内最新截图同指纹 ⇒
+                // 复用缓存帧引用（零新截屏），与 take_screenshot 的变化门同律协同。
+                let reusedFrom = null;
+                let buffer = null;
+                const gate = deps.reuseGate ?? defaultReuseGate(_config);
+                try {
+                    const verdict = await gate();
+                    if (verdict?.unchanged && Buffer.isBuffer(verdict.buffer) && verdict.buffer.length > 0) {
+                        buffer = verdict.buffer;
+                        reusedFrom = typeof verdict.sourceId === 'number' ? verdict.sourceId : null;
+                    }
+                }
+                catch { /* 门控故障 = 诚实全新截屏 */ }
+                if (buffer === null) {
+                    buffer = await capture();
+                }
                 if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
                     return toolErr('ask_screen failed.', 'Screen capture returned an empty buffer.', 'The capture pipeline may be unavailable — try take_screenshot to check the vision channel.');
                 }
@@ -77,6 +141,10 @@ export function createAskScreenTool(_config, deps = {}) {
                     answer: answer.length > ANSWER_MAX_CHARS ? answer.slice(0, ANSWER_MAX_CHARS) + '...[truncated]' : answer,
                     latency_ms: res.latencyMs,
                     model: res.model,
+                    // ΝΩ-31：帧供给通道透明化 —— 缓存帧复用（截图 #id，零新截屏）或全新截屏
+                    ...(reusedFrom !== null
+                        ? { frame_source: `reused cached screenshot #${reusedFrom} (screen unchanged since capture)` }
+                        : { frame_source: 'fresh capture' }),
                 }, 'The answer describes the screen AT CAPTURE TIME — it may be stale now. ' +
                     'Before acting on it, ground coordinates yourself: take_screenshot (visual grounding) or find_text; ' +
                     'ask_screen is read-only and never justifies clicking guessed coordinates.');

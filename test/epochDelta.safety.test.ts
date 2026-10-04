@@ -18,7 +18,8 @@ import { skillLibrary } from '../src/skillLibrary.ts';
 import { setFreshnessPort, resetFreshnessProbe } from '../src/popupDetector.ts';
 import { createClickMouseTool } from '../src/tools/clickMouse.ts';
 import { createTypeTextTool } from '../src/tools/typeText.ts';
-import { createReplayActionsTool, replayOne } from '../src/tools/replayActions.ts';
+// ΝΩ-5：replayOneTraced 的预留结算面（步终世界判决 → consume/attemptFailed）
+import { createReplayActionsTool, replayOne, settleReservedApproval } from '../src/tools/replayActions.ts';
 import { createRunSkillTool } from '../src/tools/skillTools.ts';
 import { SAFETY_GATE_BLOCK } from '../src/tools/actionGate.ts';
 
@@ -384,4 +385,104 @@ test('W6R-B: 新鲜度探针缺席 ⇒ 危险令牌派发被拒（fail-closed）
   assert.equal(ok.state_anchor.freshness.verdict, 'degraded', '降级不静默 —— 锚点观测');
   assert.equal(ok.state_anchor.acceptance.verdict, 'unverified-dispatch-consumed', '旧方言：派发即消费');
   assert.equal(approval.validate(pa.token), false, '用后即焚');
+});
+
+// ─── ⑥ ΝΩ-5：审批协议执行侧对齐 —— replayOne 预留-结算闭环 + run_skill 令牌通道 ───
+
+test('ΝΩ-5-E: replay_actions 危险步成功 ⇒ 步终 consume 验收式（令牌不再永久 in-flight）', async () => {
+  armOob(); // W6R：授予须带外码
+  const pa = approval.request('重放：点击 发送订单 提交');
+  assert.equal(grantOob(pa.token), true);
+  await journal.append({
+    ts: 1, tool: 'click_mouse',
+    args: { x: 0.5, y: 0.5, target_description: '发送订单', approval_token: pa.token }, status: 'SUCCESS',
+  });
+  const out = await runJson(createReplayActionsTool(clickCfg), { confirm: true });
+  assert.equal(out.status, 'SUCCESS', '危险步带有效令牌重放照常执行');
+  assert.ok(String(out.state_anchor.detail).includes('clicked'), '步回执为动作方言');
+  assert.equal(clicks, 1, '物理派发恰一次');
+  // 旧缺陷（审批悬账）：beginAttempt 预留后无人结算 ⇒ 令牌永久 in-flight，
+  // 同令牌重放被在途互斥结构性拒绝。新法：成功 ⇒ consume（世界已承接效果）。
+  assert.equal(approval.validate(pa.token), false, '步终 consume：令牌焚毁（一次同意一次世界验证）');
+  assert.equal(approval.status(pa.token).present, false);
+});
+
+test('ΝΩ-5-F: replay_actions 危险步派发异常 ⇒ FAILED 步结算 attemptFailed（令牌保留可重试，预留不悬账）', async () => {
+  armOob();
+  const pa = approval.request('重放：点击 支付 now');
+  assert.equal(grantOob(pa.token), true);
+  await journal.append({
+    ts: 2, tool: 'click_mouse',
+    args: { x: 0.5, y: 0.5, target_description: '支付 now', approval_token: pa.token }, status: 'SUCCESS',
+  });
+  system.clickMouse = async () => { clicks++; throw new Error('dispatch boom'); };
+  const out = await runJson(createReplayActionsTool(clickCfg), { confirm: true });
+  assert.equal(out.status, 'PARTIAL_FAILURE', '派发失败即停（fail-fast 保持）');
+  assert.equal(out.state_anchor.gate, 'step dispatch failure (system-layer exception) — 该步未执行即失败');
+  // 异常结算：attemptFailed 释放预留 + 计数恰 +1，令牌保留（B-3 异常重试语义）
+  assert.equal(approval.validate(pa.token), true, '令牌保留（未生效尝试不消耗同意）');
+  assert.equal(approval.status(pa.token).attempts, 1, '预留 + 结算恰 +1（不重复计数）');
+  assert.equal(approval.beginAttempt(pa.token), true, '预留已释放 —— 同令牌可再预留（不悬账）');
+  settleReservedApproval(pa.token, true, 'test-teardown'); // 归还簿记语义
+});
+
+test('ΝΩ-5-G: settleReservedApproval 世界判决两臂 —— 死步/失败 ⇒ attemptFailed 续期；成功 ⇒ consume', async () => {
+  armOob();
+  const pa = approval.request('结算单元：删除全部');
+  assert.equal(grantOob(pa.token), true);
+  // 死步臂（dead-step / FAILED 共用 failed=true）：预留 → 结算 ⇒ 续期
+  assert.equal(approval.beginAttempt(pa.token), true);
+  settleReservedApproval(pa.token, true, 'dead-step');
+  assert.equal(approval.validate(pa.token), true, '死步 ⇒ 令牌保留');
+  assert.equal(approval.status(pa.token).attempts, 1, '恰 +1');
+  // 成功臂：预留 → 结算 ⇒ consume 焚毁
+  assert.equal(approval.beginAttempt(pa.token), true);
+  settleReservedApproval(pa.token, false, 'replay-step-verified');
+  assert.equal(approval.validate(pa.token), false, '成功 ⇒ 验收式消费（焚毁）');
+  // 无预留 ⇒ no-op（绝不抛）
+  settleReservedApproval(undefined, true, 'no-op');
+});
+
+test('ΝΩ-5-H: replayOne 字符串方言面（index.ts 宏派发接线）就地结算 —— 预留不悬账', async () => {
+  armOob();
+  const pa = approval.request('宏派发：发送周报');
+  assert.equal(grantOob(pa.token), true);
+  const line = await replayOne(
+    { tool: 'click_mouse', args: { x: 0.5, y: 0.5, target_description: '发送周报', approval_token: pa.token } },
+    clickCfg);
+  assert.equal(line, 'clicked');
+  assert.equal(approval.validate(pa.token), false, '字符串面无步终观测 ⇒ 包装层就地 consume（保守近似）');
+  // 失败臂：派发异常 ⇒ 包装层 attemptFailed（令牌保留）
+  armOob();
+  const pb = approval.request('宏派发失败臂：支付');
+  assert.equal(grantOob(pb.token), true);
+  system.clickMouse = async () => { clicks++; throw new Error('boom'); };
+  const failed = await replayOne(
+    { tool: 'click_mouse', args: { x: 0.5, y: 0.5, target_description: '支付', approval_token: pb.token } },
+    clickCfg);
+  assert.match(failed, /^FAILED:/);
+  assert.equal(approval.validate(pb.token), true, '失败 ⇒ attemptFailed 续期（不悬账、不焚毁）');
+});
+
+test('ΝΩ-5-I: run_skill 带新令牌跑危险步成功（旧令牌覆盖）；无令牌 ⇒ 诚实拒绝', async () => {
+  // 技能录制时携带旧令牌（一次性 + TTL ⇒ 重放时刻必失效 —— 旧缺陷：结构性永远失败）
+  const skill = skillLibrary.induce('发送订单流程', [
+    { tool: 'click_mouse', args: { x: 0.5, y: 0.5, target_description: '发送订单', approval_token: 'APR-STALE-RECORDED' } },
+  ]);
+  assert.ok(skill, '技能铸成');
+  // ① 无 approval_token 参数：steps 里的旧令牌必失效 ⇒ 危险步诚实拒绝、零派发
+  const denied = await runJson(createRunSkillTool(clickCfg), { id: skill.id, confirm: true });
+  assert.equal(denied.status, 'PARTIAL_FAILURE');
+  assert.equal(denied.state_anchor.steps_failed, 1);
+  assert.ok(denied.execution_log.includes('token-not-granted-or-expired'), '拒绝归因：旧令牌失效');
+  assert.equal(clicks, 0, '诚实拒绝：物理零派发');
+  // ② 带新铸已授予令牌：覆盖危险步令牌槽 ⇒ 过闸派发 + 步终 consume
+  armOob();
+  const pa = approval.request('重放技能「发送订单流程」的危险步');
+  assert.equal(grantOob(pa.token), true);
+  const ok = await runJson(createRunSkillTool(clickCfg), { id: skill.id, confirm: true, approval_token: pa.token });
+  assert.equal(ok.state_anchor.steps_failed, 0, '危险步带新令牌照常执行');
+  assert.ok(ok.execution_log.includes('clicked'), '步回执为动作方言');
+  assert.equal(clicks, 1);
+  assert.equal(approval.validate(pa.token), false, '步终 consume：新令牌验收式焚毁（不悬账）');
 });

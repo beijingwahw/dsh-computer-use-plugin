@@ -1,6 +1,19 @@
 // src/tools/typeText.ts
 // 三层融合：长度防御（迭代中曾丢失，此处找回）+ 平台抽象（全部委托 system）+ 输入状态锚点。
 // input_state 的二值语义（Replaced / Appended）让模型在验证截图前就知道该预期什么。
+//
+// ΑΩ-R29 老工具方言整治：SUCCESS 回执收编 toolOk 工厂 —— 手拼对象的键序
+//（status/action/state_anchor/next_step）与缩进（null,2）与工厂产出逐字节相同，
+// 消除手拼零形状变化。不收编清单（差异键 + 为什么）：
+//   · 超长拒绝 `[Error]: Text too long...` 前缀方言 —— 工厂只产 JSON 四件套，
+//     无法复现前缀串；epochDelta.safety.test.ts 以 /^\[Error\]: Text too long\./
+//     正则钉死该形状。
+//   · 敏感输入 ACTION_REQUIRED：无顶层 action 键、无 reason 键
+//    （toolActionRequired 会注入 action 并把 reason 前置合并进 state_anchor，
+//     键序漂移）；epochDelta.safety.test.ts 钉死 state_anchor.typed_content
+//     ='[REDACTED]' 的锚点结构。
+//   · catch FAILED：{status, error, next_step} —— error 在顶层、无 action/
+//     state_anchor（toolErr 产 state_anchor.error），键位差异保持零回归。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
@@ -9,6 +22,7 @@ import { quantum } from '../quantumSense';
 import { focusTracker } from '../focusTracker';
 import { semanticConfirm, type SemanticConfirm } from '../textReader';
 import { matchesRiskPatterns } from '../riskGate';
+import { toolOk } from '../toolResult';
 import { assertActionAllowed } from './actionGate';
 import { gateByReversibility, laneAnchorOf } from './clickMouse';
 
@@ -126,10 +140,10 @@ export function createTypeTextTool(config: Config) {
           effect = effect && { ...effect, detected: true, scale: effect.scale === 'none' ? 'element-level' : effect.scale };
         }
 
-        return JSON.stringify({
-          status: 'SUCCESS',
-          action: 'Text typed successfully.',
-          state_anchor: {
+        // ΑΩ-R29：SUCCESS 收编 toolOk（工厂产出与旧手拼逐字节相同 —— 键序/缩进一致）。
+        return toolOk(
+          'Text typed successfully.',
+          {
             // 回显也做 Token 预算：截断到 50 字符。
             // J 纪元（防御纵深）：文本自身命中风险词时无论闸门开关一律脱敏 ——
             // 旧实现仅在 enableRiskGate=true 的拦截路径不回显，闸门关闭的
@@ -157,13 +171,13 @@ export function createTypeTextTool(config: Config) {
                 : { confirmed: typedConfirmed.confirmed, region_text_snippet: typedConfirmed.snippet })
               : undefined,
           },
-          next_step: (noopSuspected && !semanticLanded)
+          (noopSuspected && !semanticLanded)
             ? 'WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.'
             : (typedConfirmed && typedConfirmed !== 'ocr-unavailable' && !typedConfirmed.confirmed
               ? 'SEMANTIC MISMATCH: the typed text was NOT found in the focus region — it may have gone to the WRONG field or been swallowed by an IME. Verify with take_screenshot and retype if needed.'
               : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field." +
                 (expected_change ? ` Confirm: "${expected_change}".` : '')),
-        }, null, 2);
+        );
 
       } catch (error: any) {
         return JSON.stringify({

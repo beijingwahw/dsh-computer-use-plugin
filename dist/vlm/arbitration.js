@@ -17,6 +17,11 @@
 //        · confidence = min(1, (cv+cl)/2 + agreementBonus)（默认 0.15）：
 //          两条独立信道命中同一元素，伪命中是乘性小概率事件 —— 双源一致
 //          是比任一单信道更强的证据，故给加成并封顶于 1；
+//          ΝΩ-47（连折膨胀修正）：此为 classic 模式（缺省）。合议庭 askElements
+//          的座次序累进折叠复用本公式时，左席置信已含前几轮加成，等权均值会让
+//          加成复利膨胀（基线 0.8 的 5 家连折两轮即饱和至 1）—— loglinear 模式
+//          （opt-in）改有界累积：conf = min(1, (cv+cl)/2 + bonus/√families)，
+//          见 fuseMode 选项的独立性修正论证；
 //        · source='fusion'、agreesWith='both'。
 //   ② 仅 VLM 命中 ⇒ source='vlm'、agreesWith='vlm'（只有自己为自己作证）。
 //   ③ 仅本地命中 ⇒ source='local'、agreesWith='local'。
@@ -97,6 +102,12 @@ export function arbitrateElements(vlm, local, opts) {
     // opts 仍最高优先。同步纯读，纯函数性不变。
     const iouThreshold = opts?.iouThreshold ?? kernelRegistry.getOrDefault('arbitration.iouThreshold', 0.5);
     const agreementBonus = opts?.agreementBonus ?? kernelRegistry.getOrDefault('arbitration.agreementBonus', 0.15);
+    // ΝΩ-47：模式与家数整形（脏值安静归缺省 —— classic / 2，绝不抛）。
+    const fuseMode = opts?.fuseMode === 'loglinear' ? 'loglinear' : 'classic';
+    const foldedRaw = opts?.foldedFamilies;
+    const foldedFamilies = typeof foldedRaw === 'number' && Number.isFinite(foldedRaw) && foldedRaw >= 2
+        ? Math.floor(foldedRaw)
+        : 2;
     const vlmList = Array.isArray(vlm) ? vlm : [];
     const localList = Array.isArray(local) ? local : [];
     // 候选对全枚举（小域 O(V·L) 可审计）→ IoU 降序贪心一对一
@@ -146,11 +157,26 @@ export function arbitrateElements(vlm, local, opts) {
             x1: v.bbox.x1 * wv + l.bbox.x1 * wl,
             y1: v.bbox.y1 * wv + l.bbox.y1 * wl,
         };
+        // ΝΩ-47（连折置信膨胀修正，公式论证）：
+        //   classic（缺省）= min(1, (cv+cl)/2 + bonus) —— 单对双源融合的既有律。
+        //   连折场景（合议庭 askElements 座次序累进折叠复用本公式）的病灶：左席
+        //   置信 cv 已含前几轮加成，等权均值 (cv+cl)/2 只稀释一半旧加成、又全额
+        //   叠加新加成 —— 加成复利膨胀，基线 0.8 的 5 家两折即触顶饱和至 1，
+        //   「多源一致」的证据强度被虚报为满分。
+        //   loglinear（opt-in）= min(1, (cv+cl)/2 + bonus/√families) —— 独立性修正
+        //   的最小实现：n 份证词两两相关性未知时，保守假设其联合证据增益按 √n
+        //   增长（与独立噪声平均的标准差口径同源 —— 完全独立应除 n、完全相关不
+        //   除，√n 是无相关性证据下的中间保守增益）；均值项保持等权（合议庭各家
+        //   平等一票，左席是融合产物而非 k 张独立新票）。数值上该式有不动点
+        //   c* = 基线 + 2·bonus/√n：连折收敛于基线之上的有界小增益，永不饱和。
+        const confidence = fuseMode === 'loglinear'
+            ? Math.min(1, (cv + cl) / 2 + agreementBonus / Math.sqrt(foldedFamilies))
+            : Math.min(1, (cv + cl) / 2 + agreementBonus);
         elements.push({
             label: cv >= cl ? v.label : l.label, // 置信高者；平票归 VLM（语义强）
             bbox,
             center: { x: (bbox.x0 + bbox.x1) / 2, y: (bbox.y0 + bbox.y1) / 2 },
-            confidence: Math.min(1, (cv + cl) / 2 + agreementBonus),
+            confidence,
             source: 'fusion',
             agreesWith: 'both',
         });

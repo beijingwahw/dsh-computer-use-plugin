@@ -3,9 +3,13 @@
 // PER 权重常量、确定性原语（fnv1a）、梦方言契约类型（轨迹/世界参数/因子面）、
 // 失败记录→梦轨迹映射、PER 优先级与水位线、同构世界选取。逐字节搬运（零逻辑/
 // 零数值变更）；dreamReplay.ts 保留编排（runDreamReplay）与预算解析，导入面不变。
+// ΝΩ-34（睡眠编排四件）增量：策略指纹原语（POLICY_FINGERPRINT_GRID /
+// policyFingerprintOf）、dreamBatchWatermark 的策略分量、dream.cf 键分桶
+//（dreamCfKey）—— 全部纯函数、绝不抛。
 import { pcgWorldStream } from '../autonomy/gym';
 import type { GymGrammarOptions, GymNoiseSpec, PcgWorld } from '../autonomy/gym';
 import type { FailureRecord } from '../failureMemory';
+import { fnv1a } from '../dialects/random';
 
 // ─── W5-2：PER 权重与预算（模块冻结常量 —— 公式可审计的锚） ───
 
@@ -32,21 +36,61 @@ const HISTORY_MAX = 8;
 /** 优先级数值网格（1e-6 —— 防浮点尾噪，可重放） */
 const PRIORITY_GRID = 1e6;
 
-// ─── 确定性原语（本模块零依赖铁律：哈希自带，与 evolutionEngine 同源不外借） ───
+// ─── 确定性原语（ΝΩ-41 方言克隆律：本地 FNV-1a 副本退役，单源再导出） ───
 
-/** FNV-1a 32 位字符串哈希（>>>0 归一）—— 轨迹指纹与世界种子的确定性锚 */
-export function fnv1a(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
+/**
+ * FNV-1a 32 位字符串哈希（>>>0 归一）—— 轨迹指纹与世界种子的确定性锚。
+ * ΝΩ-41：实现自 src/dialects/random.ts 单源原样再导出（逐字节同实现，导入面与
+ * 导出面均零改动；金样 test/no41.dialectClones.test.ts）。
+ */
+export { fnv1a };
 
 /** 非负有限数守卫（垃圾计数不进公式） */
 export function finiteNonNeg(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+// ─── ΝΩ-34：梦水位线策略指纹（纯函数区） ───
+
+/** ΝΩ-34：策略指纹显著性网格（heuristics 权重先粗化再入指纹）：η=0.05 的单步
+ *  更新在单位尺度上恰一格 —— 网格内微漂不触发重梦（「策略显著变化」的立法定
+ *  义），跨格进化换指纹 ⇒ 同一失败集允许重梦。 */
+export const POLICY_FINGERPRINT_GRID = 0.05;
+
+/**
+ * ΝΩ-34：策略指纹（纯函数，绝不抛）：heuristics 权重表 → 粗化 fnv1a。
+ * 权重按键排序（键序无关）、值粗化到 POLICY_FINGERPRINT_GRID 网格索引后串接
+ * 哈希 —— 同策略（网格内微漂）同指纹，显著进化（跨格）换指纹；非有限值键
+ * 跳过；无有效键 / 垃圾输入 ⇒ 'void'（无权重证据的策略面诚实申报为空指纹，
+ * 不冒充任何具体策略）。消费面：dreamBatchWatermark 的策略分量。
+ */
+export function policyFingerprintOf(weights: unknown): string {
+  if (!weights || typeof weights !== 'object' || Array.isArray(weights)) return 'void';
+  const w = weights as Record<string, unknown>;
+  const keys = Object.keys(w)
+    .filter(k => typeof w[k] === 'number' && Number.isFinite(w[k]))
+    .sort();
+  if (keys.length === 0) return 'void';
+  const canon = keys.map(k => `${k}:${Math.round((w[k] as number) / POLICY_FINGERPRINT_GRID)}`).join(',');
+  return `h${fnv1a(canon).toString(16)}`;
+}
+
+/**
+ * ΝΩ-34：dream.cf 键分桶（纯函数，绝不抛）：分歧结局入账的账本键。
+ *   rootCause 桶优先（`dream.cf:rc:<病因>` —— 结构化病因，与 EXP4 failureCluster
+ *   上下文同源词表：同病因的证据进同一滑窗，成功率读数才有场景意义）；缺席 ⇒
+ *   世界指纹桶（`dream.cf:w:<推导指纹前 16>` —— 同构世界同桶）。桶身截 40、
+ *   空白归缺席；键恒非空有界（dream.cf 词表开放 —— 与 kernel 参数键不同律，
+ *   账本键是自由字符串）。修法动因：原单键 'dream.counterfactual' 滑窗把所有
+ *   参数场景混装一桶，跨场景的成功率互相掺水。
+ */
+export function dreamCfKey(rootCause: string | undefined, worldFingerprint: string): string {
+  const rc = typeof rootCause === 'string' ? rootCause.trim().slice(0, 40) : '';
+  if (rc !== '') return `dream.cf:rc:${rc}`;
+  const fp = typeof worldFingerprint === 'string' && worldFingerprint !== ''
+    ? worldFingerprint.slice(0, 16)
+    : 'void';
+  return `dream.cf:w:${fp}`;
 }
 
 // ─── 契约类型 ───
@@ -301,8 +345,12 @@ export function computeDreamPriority(
  * 梦回放批次水位线（纯函数）：输入失败集的**身份指纹**（id/at/sceneHash/文本
  * 三元组/冻结世界参数的规范形，按 id 排序 —— 与 now 与优先级无关：年龄增长
  * 不改变「这批失败已梦过」的事实，防重复回放的锚是身份不是分数）。
+ * ΝΩ-34：水位线追加**策略指纹**分量 —— 梦的前提是「当前策略」重决策：策略
+ * 显著进化后旧梦的结局已过时，同一失败集允许重梦；同策略同失败集仍去重。
+ * policyFp 缺席/空 ⇒ 'void' 槽位（占位保持哈希结构稳定 —— 无策略读数面的
+ * 调用方与旧去重语义同律：失败集身份单独定胜负）。
  */
-export function dreamBatchWatermark(trajectories: DreamFailureTrajectory[]): string {
+export function dreamBatchWatermark(trajectories: DreamFailureTrajectory[], policyFp?: string): string {
   const canon = trajectories
     .map(t => [
       t.id,
@@ -316,7 +364,73 @@ export function dreamBatchWatermark(trajectories: DreamFailureTrajectory[]): str
     ])
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
     .map(row => JSON.stringify(row));
-  return `dream-${fnv1a(canon.join('')).toString(16)}`;
+  const policy = typeof policyFp === 'string' && policyFp !== '' ? policyFp : 'void';
+  return `dream-${fnv1a(`${canon.join('')}|${policy}`).toString(16)}`;
+}
+
+// ─── ΑΩ-R40：条间预算感知选梦（纯逻辑区：期望步数证据链 + 估计打分 + 选梦） ───
+
+/** ΑΩ-R40：梦耗时估计器常量（Object.freeze —— 审计面，与 PER_WEIGHTS 同律） */
+export const DREAM_COST_ESTIMATOR = Object.freeze({
+  /** 指数滑动均值平滑系数（新样本权重 0.5 —— 半新半旧，两个样本即走到新水平的一半路程） */
+  emaAlpha: 0.5,
+  /** 冷启动每步估计常量（ms）：无任何实测样本时的保守锚 —— 宁少勿挂（估高 ⇒ 弃梦而非挂床） */
+  coldStepMs: 40,
+} as const);
+
+/**
+ * ΑΩ-R40：一条梦的期望步数（证据优先链，纯函数绝不抛）：
+ *   stepsWasted（失败实际浪费的步数 —— 最直接的梦长证据）
+ *   > history.length（截到 HISTORY_MAX 的决策对照面 —— 有损投影，回落位）
+ *   > stepsWastedPrior（申报先验 —— 均匀先验只定标不改排序）。
+ * 钳到 [1, maxStepsPerDream]（梦中步循环的步数硬顶 —— 期望步数不可能超过它；
+ * 垃圾上限 ⇒ 回落 8，与 DREAM_BUDGET_DEFAULTS.maxStepsPerDream 同值）。
+ */
+export function dreamExpectedSteps(t: DreamFailureTrajectory, maxStepsPerDream: number): number {
+  const capRaw = Number(maxStepsPerDream);
+  const cap = Number.isFinite(capRaw) && capRaw >= 1 ? Math.floor(capRaw) : 8;
+  const hist = Array.isArray(t.history) ? t.history.length : 0;
+  const wasted = finiteNonNeg(t.stepsWasted);
+  const evidence = wasted ?? (hist > 0 ? hist : PER_WEIGHTS.stepsWastedPrior);
+  return Math.min(cap, Math.max(1, Math.ceil(evidence)));
+}
+
+/** ΑΩ-R40：选梦候选（PER 打分后的池条目 —— 编排层 scored 的结构子集） */
+export interface DreamCandidate {
+  t: DreamFailureTrajectory;
+  p: number;
+}
+
+/**
+ * ΑΩ-R40：条间预算感知选梦（纯函数，绝不抛）—— 从已按 PER 序排好的候选池取下一条：
+ *   · remainingMs 为 null（无预算读数面 —— 旧调用方）⇒ 纯 PER 序取队首（既有行为）；
+ *   · 队首估计耗时 ≤ 剩余预算 ⇒ 按 PER 序取队首（预算充裕时长短皆按 PER 序，零漂移）；
+ *   · 队首装不下而池中仍有装得下的短梦 ⇒ 取「装得下的最短者」（同短取池序前者
+ *     = PER 高者 —— 预算现实主义：一条短梦好过零条长梦）；
+ *   · 全都装不下 ⇒ index=-1（诚实收场 —— 编排层按现状语义注记 truncated/time）。
+ */
+export function pickDreamByBudget(
+  pool: ReadonlyArray<DreamCandidate>,
+  remainingMs: number | null,
+  estimateMs: (expectedSteps: number) => number,
+  maxStepsPerDream: number,
+): { index: number; mode: 'per' | 'short' | 'none' } {
+  if (pool.length === 0) return { index: -1, mode: 'none' };
+  if (remainingMs === null) return { index: 0, mode: 'per' };
+  if (estimateMs(dreamExpectedSteps(pool[0].t, maxStepsPerDream)) <= remainingMs) {
+    return { index: 0, mode: 'per' };
+  }
+  let best = -1;
+  let bestSteps = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < pool.length; i++) {
+    const steps = dreamExpectedSteps(pool[i].t, maxStepsPerDream);
+    if (estimateMs(steps) > remainingMs) continue; // 装不下（估计超剩余预算）
+    if (steps < bestSteps) {
+      best = i;
+      bestSteps = steps; // 装得下的最短者；同短 ⇒ 先扫到者（池序 = PER 序）
+    }
+  }
+  return best >= 0 ? { index: best, mode: 'short' } : { index: -1, mode: 'none' };
 }
 
 // ─── 同构世界选取（从 pcgWorldStream 取 —— seed 与世界参数来自原轨迹） ───

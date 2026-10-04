@@ -12,7 +12,7 @@
 //      全抖动指数退避（500·2^n 封顶 8s，仅 429/5xx/网络错可重试，超时不重试）
 //
 // 适配器实现 VisionProvider 接口；registry（Ψ-2+）按 ProviderOptions 装配。
-import { extractBalancedJson, HTTP_STATUS_SERVER_ERROR_FLOOR, HTTP_STATUS_TOO_MANY_REQUESTS, isAbortError, safeBodyText, sleep, timeoutSignal, } from '../internalUtils.js';
+import { extractBalancedJson, HTTP_STATUS_BAD_REQUEST, HTTP_STATUS_SERVER_ERROR_FLOOR, HTTP_STATUS_TOO_MANY_REQUESTS, isAbortError, safeBodyText, sleep, timeoutSignal, } from '../internalUtils.js';
 // ─── JSON 剥壳律（W6R-A4：单一实现收拢于 internalUtils.extractBalancedJson，
 //     本导出名保留为消费面兼容的薄委托 —— 与 glmClient.extractGlmJson 同源同律） ───
 /**
@@ -20,6 +20,7 @@ import { extractBalancedJson, HTTP_STATUS_SERVER_ERROR_FLOOR, HTTP_STATUS_TOO_MA
  * 成功返回解析值（可为 null/false 等合法 JSON 值）；失败返回 undefined。
  * 永不抛异常 —— 入参为 null/undefined 等脏值同样安静返回 undefined。
  */
+export { HTTP_STATUS_BAD_REQUEST };
 export function extractProviderJson(text) {
     return extractBalancedJson(text);
 }
@@ -207,16 +208,16 @@ export function jitterDelayMs(attempt, baseMs = 500, capMs = 8000) {
  *  - 每次尝试注入独立的超时 AbortSignal（覆盖 init.signal；timeoutMs 归此函数管）
  *  - 重试间隔 = jitterDelayMs(attempt)（全抖动 500·2^n 封顶 8s）
  *  - 成功（2xx）⇒ { ok:true, status, body, attempts }
- *  - HTTP 终败 ⇒ { ok:false, status, body, error:'http <s> after <n> attempts', attempts }
- *  - 传输终败 ⇒ { ok:false, error:'fetch failed after <n> attempts: ...', attempts }
- *  - 超时/中止 ⇒ { ok:false, error:'request aborted after <timeoutMs>ms', attempts }
+ *  - HTTP 终败 ⇒ { ok:false, status, body, error:'http <s> after <n> attempts', attempts, failureKind:'http' }
+ *  - 传输终败 ⇒ { ok:false, error:'fetch failed after <n> attempts: ...', attempts, failureKind:'network' }
+ *  - 超时/中止 ⇒ { ok:false, error:'request aborted after <timeoutMs>ms', attempts, failureKind:'aborted' }
  *  attempts 恒为实际发出的 fetch 次数（1 = 未重试）；绝不抛异常。
  */
 export async function fetchWithRetry(opts) {
     try {
         const doFetch = typeof opts?.doFetch === 'function' ? opts.doFetch : undefined;
         if (!doFetch) {
-            return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0 }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
+            return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0, failureKind: 'network' }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
         }
         let url;
         try {
@@ -246,7 +247,7 @@ export async function fetchWithRetry(opts) {
             catch (e) {
                 // 超时：调用方主动止损 —— 不重试，立即诚实归因
                 if (isAbortError(e)) {
-                    return { ok: false, error: `request aborted after ${timeoutMs}ms`, attempts: attempt + 1 };
+                    return { ok: false, error: `request aborted after ${timeoutMs}ms`, attempts: attempt + 1, failureKind: 'aborted' };
                 }
                 // 网络错误（连接拒绝 / DNS / 断流）：可重试
                 if (attempt < maxRetries) {
@@ -259,6 +260,7 @@ export async function fetchWithRetry(opts) {
                     ok: false,
                     error: `fetch failed after ${attempt + 1} attempts: ${stringifyError(e).slice(0, 300)}`,
                     attempts: attempt + 1,
+                    failureKind: 'network',
                 };
             }
             if (resp && resp.ok) {
@@ -281,12 +283,18 @@ export async function fetchWithRetry(opts) {
                 body: await safeBodyText(resp),
                 error: `http ${status} after ${n} attempt${n > 1 ? 's' : ''}`,
                 attempts: n,
+                failureKind: 'http',
             };
         }
     }
     catch (e) {
         // 不抛铁律的最终兜底（理论不可达 —— init 展开等同步面故障）
-        return { ok: false, error: `fetchWithRetry internal error: ${stringifyError(e).slice(0, 200)}`, attempts: 1 };
+        return {
+            ok: false,
+            error: `fetchWithRetry internal error: ${stringifyError(e).slice(0, 200)}`,
+            attempts: 1,
+            failureKind: 'network',
+        };
     }
 }
 /** onRetry 安全回调 —— 回调自身抛错不得影响主路径 */

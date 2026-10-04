@@ -349,3 +349,28 @@ test('Φ-6-11: invalidate 清空条目后同指纹必重拨；空 Buffer 有 cli
   await sem.read(png, '   ') // 纯空白指纹同理
   assert.equal(sem.stats().entries, entriesBefore, '非法指纹不入缓存')
 })
+
+// ─── ΝΩ-14 变化门控执法（屏未变 ⇒ sceneRead 整跳过 —— 组合键缓存既有行为的专项执法） ───
+
+test('ΝΩ-14: 屏未变（dhash 原值）+ 同问 ⇒ 整跳过 VLM 回旧值；dhash 变 ⇒ 重拨', async () => {
+  const { client, calls } = fakeClient(() => okReply(sceneJson()))
+  const sem = new SceneSemanticsCache({ client, now: () => 4000 })
+  const png = await makePng(48, 32)
+  const q = '下一步该点什么？'
+
+  const r1 = await sem.read(png, Z16, q)
+  assert.equal(r1.cached, false)
+  assert.equal(calls.length, 1, '首读一拨')
+
+  // 屏未变 + 同问：lookup 组合键命中（question 相等 且 汉明距离 0 ≤ 容差）⇒ 零 VLM 回旧值
+  const r2 = await sem.read(png, Z16, q)
+  assert.equal(r2.cached, true, 'dhash 未变 + 同问 ⇒ 整跳过（缓存回读）')
+  assert.deepEqual(r2.reading, r1.reading, '回的是旧值（非重读）')
+  assert.equal(calls.length, 1, '门控命中 ⇒ sceneRead 零重拨')
+  assert.equal(sem.stats().vlmCalls, 1)
+
+  // 屏变（距离 4 > 容差）：同问也必须重拨 —— 门控不吞真变化
+  const r3 = await sem.read(png, fp('f'), q)
+  assert.equal(r3.cached, false)
+  assert.equal(calls.length, 2, '指纹突变 ⇒ 重拨')
+})

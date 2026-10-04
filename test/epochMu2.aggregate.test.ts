@@ -7,6 +7,8 @@
 //        null；坏源（版本错配/形状坏/陷阱属性）按缺席处理并注记；逐 key 源数偏差。
 //   Μ2-3 检疫有牙齿（端到端）：16 票 ⇒ floor(16/5)=3 次 regressed ⇒ 信任账
 //        1/(1+3)=0.25 ⇒ 下次 apply 配额 5→1；不足 5 票的噪声容限不立脏账。
+//        （ΑΩ-R6 后初见源另有试用期封顶 0.35 —— raw 低于封顶时封顶不是约束；
+//         试用期执法册见 epochMu.federation.test.ts Μ-9。）
 //   Μ2-4 贡献帽：单源洪泛格被封顶到 capShare×鲁棒值（先帽后并：Μ 旧求和路径
 //        喂帽后源表，洪泛格 100400→600、占比 ≤1/3）；原输入不可变；单源不帽。
 //   Μ2-5 集成与回归：federationSync robust:true 走鲁棒合并（假 fetch 回环喂毒源
@@ -23,13 +25,22 @@
 //        客户端 federationSync（authToken 注入 + 真全局 fetch 环回往返）签名
 //        被收 ⇒ 鲁棒臂吃 digests 数组照常掺入（认证是旁路：零配置语义不变）；
 //        open 模式 /health 明示 UNAUTHENTICATED（诚实声明面）。
+//   Μ2-9 逐源签名（ΝΩ-19）：Ed25519 客户端签名链路 —— 密钥/指纹解析（seed 与
+//        pkcs8 双形态同指纹）、上行附 {pubkey,sig}、无密钥上行逐字节旧路径；
+//        假源验签剔除（中位数不被污染）；指纹粒度试用期独立（毒指纹折减/诚实
+//        指纹毕业/端点账不吃指纹票）；无签名旧格式诚实降级全剔除；同毫秒批量
+//        剔除；止血限额（已知客户端×2+4 拒超额）；签后改体/剥签名拒收；
+//        旧档 endpoint 键与 endpoint#指纹键同档兼容。
+//   Μ2-10 参考聚合端签名中继（ΝΩ-19）：带签摘要原样入环回传（pubkey/sig 域
+//        不被剥）；回传件验签成立、改体件拒绝；客户端真 fetch 环回端到端
+//        （自己的带签摘要入环 ⇒ 验签存活 ⇒ 掺入）。环境不支持 ⇒ 诚实 skip。
 // 全程离线（fetch 全假件/仅环回 127.0.0.1）、确定性（钉死字面量摘要 / 注入时钟）、
 // 生产单例 try/finally 复位；Μ 既有测试（epochMu.federation）另行回归保绿。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createHmac } from 'node:crypto';
+import { createHmac, createHash, generateKeyPairSync, sign as ed25519SignTest, type KeyObject } from 'node:crypto';
 
 import { EvidenceLedger } from '../src/kernel/registry.ts';
 import {
@@ -49,6 +60,16 @@ import {
   federationAuthHeaders,
   FEDERATION_AUTH_TIMESTAMP_HEADER,
   FEDERATION_AUTH_SIGNATURE_HEADER,
+  // ΝΩ-19（联邦逐源签名）：客户端签名链路 + 指纹粒度信任账
+  FEDERATION_SIGNING_KEY_ENV,
+  federationSigningIdentity,
+  signEvidenceDigest,
+  verifyEvidenceDigestSignature,
+  canonicalFederationJson,
+  federationSigningKeyHint,
+  federationFingerprintSourceId,
+  serializeFederationTrust,
+  restoreFederationTrust,
   type FederationFetch,
   type EvidenceDigest,
 } from '../src/federation/index.ts';
@@ -212,11 +233,11 @@ test('Μ2-3: 16 票 ⇒ 3 次 regressed ⇒ 信任 1/4 ⇒ 下次 apply 配额 5
     const report = applyQuarantineToTrust(rr.quarantined, recordFederationTrust);
     assert.deepEqual(report, [{ sourceId: 'host-c', votes: 16, regressed: 3 }], '折算报告：16 票 ⇒ 3 次');
     assert.equal(federationTrustOf('host-c'), 1 / (1 + 3), '信任账 1/(1+3) = 0.25');
-    assert.equal(federationTrustOf('host-a'), 1, '无票源不受牵连');
+    assert.ok(Math.abs(federationTrustOf('host-a') - 0.35) < 1e-12, '无票源不受牵连（初见 ⇒ 试用期封顶 0.35，非检疫所致 —— ΑΩ-R6）');
 
     // (b) 不足 5 票的噪声容限：不立脏账
     assert.deepEqual(applyQuarantineToTrust({ 'host-d': 4 }, recordFederationTrust), [], '4 票 < 5 ⇒ 零事件');
-    assert.equal(federationTrustOf('host-d'), 1, '噪声不折减信任');
+    assert.ok(Math.abs(federationTrustOf('host-d') - 0.35) < 1e-12, '噪声不立脏账（停在试用期封顶 0.35 —— 非票折减）');
 
     // (c) 端到端：毒被隔离后的合并面（诚实分布）经 host-c 掺入 —— 信任 0.25 折减配额 5→1
     const ledger = seedLedger(K, 10); // 本地 n=10
@@ -225,11 +246,11 @@ test('Μ2-3: 16 票 ⇒ 3 次 regressed ⇒ 信任 1/4 ⇒ 下次 apply 配额 5
     assert.equal(applied.applied, 1, 'quota = floor(floor(0.5×10) × 0.25) = 1 —— 检疫的牙齿');
     assert.equal(ledger.stats(K).n, 11, '账本 10 → 11');
 
-    // (d) 对照：无检疫记录的诚实源同摘要 ⇒ 配额 5
+    // (d) 对照：无检疫记录的诚实源同摘要 ⇒ 初见试用期封顶 0.35（ΑΩ-R6 —— 首掺不再免费）
     const ledger2 = seedLedger(K, 10);
     const applied2 = applyFederatedEvidence(ledger2, rr.merged, { maxRemoteShare: 0.5, sourceId: 'host-a', now: () => 999 });
-    assert.equal(applied2.applied, 5, '诚实源 quota = floor(5 × 1) = 5');
-    assert.equal(applied2.trust, 1, '初见全信');
+    assert.equal(applied2.applied, 1, '初见源 quota = floor(5 × 0.35) = 1');
+    assert.ok(Math.abs(applied2.trust - 0.35) < 1e-12, '初见试用期封顶 0.35（3 次干净合并后解除 —— 见 Μ-9）');
 
     // (e) 信任账报告可见折算后的账目
     const rec = federationTrustReport().find(r => r.sourceId === 'host-c')!;
@@ -344,12 +365,14 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
     assert.equal(res.applied!.applied, 1, '掺入恰 1 条');
     assert.equal(target.stats(K).n, 11, '账本 10 → 11');
     assert.equal(lastFederationSync()!.applied, 1, '上次同步记忆 applied=1');
-    // 毒隔离的端到端证据：掺入记录的 margin = 坨中心（合并面是均匀 50 的鲁棒摘要 ⇒
-    // quota 1 落在最大余数法首格 bin0/success ⇒ margin = -0.875、success、ts=42）
+    // 毒隔离的端到端证据：掺入记录的 margin 落坨覆盖区间（ΝΩ-20：合并面是均匀 50
+    // 的鲁棒摘要 ⇒ quota 1 落在最大余数法首格 bin0/success ⇒ margin ∈ [-1,-0.75]
+    // 坨宽抖动、success、ts 落合并摘要 mintedAt=42 邻域 ±5 分钟）
     const tail = target.entries(K).slice(-1)[0];
     assert.equal(tail.success, true, '成败由坨坐标反演（success 列）');
-    assert.ok(Math.abs((tail.margin ?? Number.NaN) - -0.875) < 1e-12, `margin 取坨中心 -0.875（实测 ${tail.margin}）`);
-    assert.equal(tail.ts, 42, 'ts 走注入时钟');
+    const tailM = tail.margin ?? Number.NaN;
+    assert.ok(Number.isFinite(tailM) && tailM >= -1 - 1e-9 && tailM <= -0.75 + 1e-9, `margin 落 bin0 覆盖区间 [-1,-0.75]（ΝΩ-20 坨宽抖动，实测 ${tailM}）`);
+    assert.ok(tail.ts >= 42 - 5 * 60_000 && tail.ts <= 42 + 5 * 60_000, `ts 落源 mintedAt=42 邻域（ΝΩ-20 散布，实测 ${tail.ts}）`);
 
     // (b) robust 缺省 false = Μ 旧路径逐字节：digest 单件语义 / 结果无 robust 字段
     resetFederationRuntime();
@@ -360,9 +383,9 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
     const fakeLegacy = (async () => ({ json: async () => ({ digest: legacyDigest }) })) as unknown as FederationFetch;
     const res2 = federationSync({ endpoint: EP2, fetchImpl: fakeLegacy, ledger: target2, maxRemoteShare: 0.5, now: () => 43 });
     await res2.settled;
-    assert.equal(res2.applied!.applied, 5, 'legacy：floor(0.5×10) = 5（与 Μ-4 同语义）');
-    assert.equal(target2.stats(K2).n, 15, 'legacy：账本 10 → 15');
-    assert.equal(federationTrustOf(EP2), 1, 'legacy：端点 applied 立账、trust=1');
+    assert.equal(res2.applied!.applied, 1, 'legacy：新端点试用期 ⇒ floor(5 × 0.35) = 1（ΑΩ-R6 对两臂同律）');
+    assert.equal(target2.stats(K2).n, 11, 'legacy：账本 10 → 11');
+    assert.ok(Math.abs(federationTrustOf(EP2) - 0.35) < 1e-12, 'legacy：端点 applied 立账、试用期封顶 0.35');
     assert.equal(res2.robust, undefined, 'legacy 结果形状无 robust 字段（Μ 旧行为逐字节）');
 
     // (c) legacy 臂不聚合 digests 数组（多源响应在旧路径 = 不可用载荷）
@@ -630,10 +653,10 @@ test('Μ2-7: token 模式强制验签（无签/坏签/过期/篡改体 ⇒ 401 �
       assert.equal(res.network, 'fired', '签名请求已发');
       await res.settled;
       assert.equal(res.applied !== null, true, '验签通过 ⇒ 响应被消费（未掺入才是异常）');
-      assert.equal(res.applied!.applied, 5, '环内唯一源 = 自己的摘要 ⇒ 鲁棒 2 源均值、trust=1 ⇒ quota 5');
+      assert.equal(res.applied!.applied, 1, '环内唯一源 = 自己的摘要 ⇒ 鲁棒 2 源均值；新端点试用期 0.35 ⇒ quota = floor(5×0.35) = 1');
       assert.equal(res.robust!.method, 'mean', 'local + 环内 1 份（自己）⇒ 2 源均值');
       assert.equal(res.robust!.mergedFrom, 2, 'mergedFrom = 2');
-      assert.equal(ledger.stats(K).n, 15, '账本 10 → 15');
+      assert.equal(ledger.stats(K).n, 11, '账本 10 → 11');
       assert.equal((await health()).buffered, 1, '合法签名 ⇒ 入环');
     } finally {
       resetFederationRuntime();
@@ -699,4 +722,273 @@ test('Μ2-8: federationAuthHeaders 纯函数 —— 空 token 零头/双头字�
   // (d) 容差常量与协议字面量锁定（服务端同值 —— 双实现漂移的测试把守）
   assert.equal(FEDERATION_AUTH_TIMESTAMP_HEADER, 'x-dsh-fed-timestamp', '时间戳头名锁定');
   assert.equal(FEDERATION_AUTH_SIGNATURE_HEADER, 'x-dsh-fed-signature', '签名头名锁定');
+});
+
+// ─── Μ2-9（ΝΩ-19 联邦逐源签名）：假源验签剔除 + 指纹粒度信任 + 止血兜底 + 旧档兼容 ───
+
+/** 生成一个 Ed25519 测试客户端（pkcs8/base64 与 seed 两种密钥原料 + 签名/指纹假件） */
+function edClient(): {
+  material: string;
+  seedMaterial: string;
+  publicKeyB64: string;
+  fingerprint: string;
+  sign: (d: EvidenceDigest) => EvidenceDigest & { pubkey: string; sig: string };
+} {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const material = privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64');
+  const seedMaterial = Buffer.from((privateKey.export({ format: 'jwk' }) as { d?: string }).d ?? '', 'base64url').toString('base64');
+  const spki = publicKey.export({ format: 'der', type: 'spki' }) as Buffer;
+  const fingerprint = createHash('sha256').update(spki).digest('hex').slice(0, 16);
+  const publicKeyB64 = spki.toString('base64');
+  const sign = (d: EvidenceDigest): EvidenceDigest & { pubkey: string; sig: string } => {
+    // 与 signEvidenceDigest 同签名域：核心四域 canonical 字节（pubkey/sig 不入域）
+    const domain = canonicalFederationJson({ v: d.v, mintedAt: d.mintedAt, epsilon: d.epsilon, keys: d.keys });
+    const sig = ed25519SignTest(null, Buffer.from(domain, 'utf8'), privateKey as KeyObject).toString('base64');
+    return { ...d, pubkey: publicKeyB64, sig };
+  };
+  return { material, seedMaterial, publicKeyB64, fingerprint, sign };
+}
+
+test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独立；无签名降级；同毫秒批量；止血限额；旧档兼容', async () => {
+  resetFederationRuntime();
+  try {
+    const K = 'fed.sig';
+    const self = edClient();
+    const honest = (mintedAt: number): EvidenceDigest => digestOf(K, uniformBins(50), 50, mintedAt);
+    const poison = (mintedAt: number): EvidenceDigest => digestOf(K, uniformBins(1000), 1000, mintedAt);
+
+    // (a) 密钥解析与指纹：seed 与 pkcs8 双形态同指纹；垃圾/空 ⇒ null；生成命令指路 env
+    assert.equal(FEDERATION_SIGNING_KEY_ENV, 'DSH_FED_SIGNING_KEY', 'env 名锁定（协议契约）');
+    const idPkcs8 = federationSigningIdentity(self.material);
+    assert.ok(idPkcs8, 'pkcs8/base64 形态可解析');
+    assert.equal(idPkcs8!.fingerprint, self.fingerprint, '指纹 = sha256(SPKI) 前 16 hex');
+    assert.equal(idPkcs8!.publicKey, self.publicKeyB64, '公钥 = base64 SPKI');
+    assert.equal(federationSigningIdentity(self.seedMaterial)?.fingerprint, self.fingerprint, '32 字节 seed 形态同指纹（PKCS8 前缀包装）');
+    assert.equal(federationSigningIdentity('definitely-not-a-key'), null, '垃圾密钥 ⇒ null（绝不抛）');
+    assert.equal(federationSigningIdentity(''), null, '空 ⇒ null（未配置）');
+    assert.equal(federationSigningIdentity(null), null, 'null ⇒ 显式禁用');
+    assert.ok(federationSigningKeyHint().includes('DSH_FED_SIGNING_KEY'), '一次性生成命令指路 env 名');
+
+    // (b) 无密钥 ⇒ 上行逐字节旧路径；有密钥 ⇒ 附 {pubkey,sig} 且往返验签成立
+    const EPB = 'https://agg-b.example/fed';
+    let bodyNoKey = '';
+    const fakeNoKey = (async (_u: string, init: { body: string }) => {
+      bodyNoKey = init.body;
+      return { json: async () => ({ digests: [honest(20)] }) };
+    }) as unknown as FederationFetch;
+    const resNoKey = federationSync({ endpoint: EPB, fetchImpl: fakeNoKey, ledger: seedLedger(K, 10), robust: true, now: () => 50, signingKey: null });
+    await resNoKey.settled;
+    assert.equal(bodyNoKey, JSON.stringify(resNoKey.digest), '无密钥 ⇒ 上行载荷逐字节 = 本地摘要（零回归律）');
+    assert.equal(verifyEvidenceDigestSignature(JSON.parse(bodyNoKey)).ok, false, '未签件验签不成立（无身份源）');
+
+    let bodySigned = '';
+    const fakeSigned = (async (_u: string, init: { body: string }) => {
+      bodySigned = init.body;
+      return { json: async () => ({ digests: [honest(20)] }) }; // 无签远端 ⇒ 全剔除（见 (e) 同律）
+    }) as unknown as FederationFetch;
+    const resSigned = federationSync({ endpoint: EPB, fetchImpl: fakeSigned, ledger: seedLedger(K, 10), robust: true, now: () => 51, signingKey: self.material });
+    await resSigned.settled;
+    const uplink = JSON.parse(bodySigned) as { pubkey?: string; sig?: string };
+    assert.equal(uplink.pubkey, self.publicKeyB64, '上行附公钥');
+    assert.ok(typeof uplink.sig === 'string' && uplink.sig !== '', '上行附签名');
+    const vUp = verifyEvidenceDigestSignature(uplink);
+    assert.equal(vUp.ok, true, '上行件验签成立（往返口径）');
+    assert.equal(vUp.fingerprint, self.fingerprint, '验签回指同一指纹');
+    assert.equal(signEvidenceDigest(honest(1), null), null, 'signEvidenceDigest 无密钥 ⇒ null（诚实空手）');
+    assert.ok(lastFederationSync()!.note?.includes('验签不过 1'), `无签远端全剔除注记（${lastFederationSync()!.note}）`);
+
+    // (c) 假源剔除：本地 + 2 签名诚实源 + 5 无签假源 ⇒ 假源绝不混入中位数（= 诚实 50）
+    const EPC = 'https://agg-c.example/fed';
+    const peerA = edClient();
+    const peerB = edClient();
+    const fakeMix = (async () => ({
+      json: async () => ({
+        digests: [
+          peerA.sign(honest(11)), peerB.sign(honest(12)),
+          poison(13), poison(14), poison(15), poison(16), poison(17), // 恶意端自造 5 份（无签）
+        ],
+      }),
+    })) as unknown as FederationFetch;
+    const targetC = seedLedger(K, 10);
+    const resC = federationSync({ endpoint: EPC, fetchImpl: fakeMix, ledger: targetC, robust: true, now: () => 52, signingKey: self.material, maxRemoteShare: 0.5 });
+    await resC.settled;
+    assert.equal(resC.robust!.unverifiableSources, 5, '5 份无签假源剔除并计数');
+    assert.equal(resC.robust!.mergedFrom, 3, '本地 + 2 签名源 = 3 源');
+    assert.equal(resC.robust!.method, 'median', '3 源中位数');
+    assert.equal(resC.robust!.excessiveSources ?? 0, 0, '未触止血限额');
+    assert.equal(resC.robust!.batchedSources ?? 0, 0, '未触批量护栏');
+    assert.deepEqual(Object.keys(resC.robust!.quarantined), ['local'], '检疫票键只剩 local（签名源零票；票键域 = endpoint#指纹）');
+    assert.equal(resC.robust!.quarantined['local'], 16, '本地偏离共识 16 票（不喂账）');
+    assert.equal(resC.applied!.applied, 1, '合并面 = 诚实 50 ⇒ 新端点试用期 quota = floor(5×0.35) = 1');
+    assert.equal(targetC.stats(K).n, 11, '账本 10 → 11（中位数未被 5 假源污染）');
+    const tailC = targetC.entries(K).slice(-1)[0];
+    const tailCm = tailC.margin ?? Number.NaN;
+    assert.ok(Number.isFinite(tailCm) && tailCm >= -1 - 1e-9 && tailCm <= -0.75 + 1e-9, `掺入 margin 落 bin0（均匀 50 合并面 ⇒ quota 1 落首格；实测 ${tailCm} —— 5 份 1000 假源未入中位）`);
+
+    // (d) 指纹粒度试用期独立：毒指纹 16 票 ⇒ 0.25 记 endpoint#指纹；诚实指纹 3 干净轮毕业；端点账不吃指纹票
+    const EPD = 'https://agg-d.example/fed';
+    const peerP = edClient(); // 毒客户端（真实持钥 —— 验签过、但摘要灌毒）
+    const peerH = edClient(); // 诚实客户端
+    const acctP = federationFingerprintSourceId(EPD, peerP.fingerprint);
+    const acctH = federationFingerprintSourceId(EPD, peerH.fingerprint);
+    assert.equal(acctP, `${EPD}#${peerP.fingerprint}`, '账键 = endpoint#指纹');
+    const round = (resp: unknown[], nowT: number, ledger: EvidenceLedger) => {
+      const fake = (async () => ({ json: async () => ({ digests: resp }) })) as unknown as FederationFetch;
+      return federationSync({ endpoint: EPD, fetchImpl: fake, ledger, robust: true, now: () => nowT, signingKey: self.material, maxRemoteShare: 0.5 });
+    };
+    const ledgerD = seedLedger(K, 10);
+    await round([peerP.sign(poison(21)), peerH.sign(honest(22))], 70, ledgerD).settled; // 轮 1：毒+诚实
+    assert.equal(federationTrustOf(acctP), 0.25, '毒指纹 16 票 ⇒ 3 regressed ⇒ 1/(1+3) = 0.25（记指纹账）');
+    assert.ok(Math.abs(federationTrustOf(acctH) - 0.35) < 1e-12, '诚实指纹试用期封顶 0.35（cleanMerges=1 < 3）');
+    const recP = federationTrustReport().find(r => r.sourceId === acctP)!;
+    const recH = federationTrustReport().find(r => r.sourceId === acctH)!;
+    assert.equal(recP.regressed, 3, '毒指纹 regressed=3');
+    assert.equal(recP.cleanMerges, 0, '带票轮不计干净（R6 同律）');
+    assert.equal(recH.regressed, 0, '诚实指纹零票');
+    assert.equal(recH.cleanMerges, 1, '诚实指纹干净轮 +1（毕业通道平移到指纹主体）');
+    const recEP = federationTrustReport().find(r => r.sourceId === EPD)!;
+    assert.equal(recEP.regressed, 0, '端点账不吃指纹票（ΑΩ-R6 平移到正确主体粒度）');
+    assert.ok(Math.abs(federationTrustOf(EPD) - 0.35) < 1e-12, '端点账停在掺入侧试用期（未被毒源连坐）');
+    await round([peerH.sign(honest(23)), self.sign(honest(24))], 71, ledgerD).settled; // 轮 2：3 源（本地+2 签名）
+    await round([peerH.sign(honest(25)), self.sign(honest(26))], 72, ledgerD).settled; // 轮 3
+    assert.equal(federationTrustOf(acctH), 1, '诚实指纹 3 干净轮 ⇒ 毕业（trust=1，ΑΩ-R6 毕业永久）');
+    assert.equal(federationTrustOf(acctP), 0.25, '毒指纹仍 0.25（两账独立 —— Sybil 无法搭邻居信用）');
+
+    // (e) 无签名旧格式 ⇒ 诚实降级全剔除：绝不混入中位数、零掺入、账本零污染
+    const EPE = 'https://agg-e.example/fed';
+    const fakeUnsigned = (async () => ({ json: async () => ({ digests: [honest(31), honest(32)] }) })) as unknown as FederationFetch;
+    const targetE = seedLedger(K, 10);
+    const resE = federationSync({ endpoint: EPE, fetchImpl: fakeUnsigned, ledger: targetE, robust: true, now: () => 60, signingKey: self.material });
+    await resE.settled;
+    assert.equal(resE.applied, null, '全剔除 ⇒ 不掺入（恶意端点不得经本地回环掺入赚干净轮）');
+    assert.equal(targetE.stats(K).n, 10, '账本零污染');
+    assert.ok(lastFederationSync()!.note?.includes('验签不过 2'), `降级注记（${lastFederationSync()!.note}）`);
+
+    // (f) mintedAt 同毫秒批量特征：不同指纹但同毫秒铸造 ⇒ 整组剔除并计数
+    const EPF = 'https://agg-f.example/fed';
+    const batchA = edClient();
+    const batchB = edClient();
+    const good = edClient();
+    const fakeBatch = (async () => ({
+      json: async () => ({
+        digests: [
+          batchA.sign(digestOf(K, uniformBins(1000), 1000, 777)),
+          batchB.sign(digestOf(K, uniformBins(1000), 1000, 777)), // 同毫秒（不同指纹）⇒ 批量特征
+          good.sign(honest(778)),
+        ],
+      }),
+    })) as unknown as FederationFetch;
+    const resF = federationSync({ endpoint: EPF, fetchImpl: fakeBatch, ledger: seedLedger(K, 10), robust: true, now: () => 61, signingKey: self.material });
+    await resF.settled;
+    assert.equal(resF.robust!.batchedSources, 2, '同毫秒两源整组剔除');
+    assert.equal(resF.robust!.unverifiableSources, 0, '验签全过（剔除发生在护栏层）');
+    assert.equal(resF.robust!.mergedFrom, 2, '本地 + 1 存活源');
+    assert.equal(resF.robust!.method, 'mean', '2 源均值（诚实注记：无鲁棒性）');
+
+    // (g) 止血限额：响应源数 > 本地已知客户端数×2+4 ⇒ 超额拒绝（首轮已知 = 仅本机 ⇒ 上限 6）
+    resetFederationRuntime(); // 名册清零 ⇒ 已知 = 仅 self ⇒ 1×2+4 = 6
+    const EPG = 'https://agg-g.example/fed';
+    const flood = Array.from({ length: 8 }, () => edClient()); // 8 个互异持钥源（全过验签）
+    const fakeFlood = (async () => ({
+      json: async () => ({ digests: flood.map((p, i) => p.sign(honest(100 + i))) }), // mintedAt 互异（避开批量护栏）
+    })) as unknown as FederationFetch;
+    const resG = federationSync({ endpoint: EPG, fetchImpl: fakeFlood, ledger: seedLedger(K, 10), robust: true, now: () => 62, signingKey: self.material });
+    await resG.settled;
+    assert.equal(resG.robust!.unverifiableSources, 0, '验签全过');
+    assert.equal(resG.robust!.excessiveSources, 2, '8 源 > 6 ⇒ 超额 2 拒绝');
+    assert.equal(resG.robust!.mergedFrom, 7, '本地 + 6 存活源');
+    assert.equal(resG.robust!.method, 'median', '7 源中位数');
+
+    // (h) 签后改体 / 剥签名 ⇒ 拒收（签名域覆盖 canonical 四域）
+    const evil = edClient();
+    const tampered = evil.sign(honest(41));
+    tampered.keys[0].bins[0][0] = 9999; // 签名后改体
+    assert.equal(verifyEvidenceDigestSignature(tampered).ok, false, '签后改体 ⇒ 验签不成立');
+    assert.equal(verifyEvidenceDigestSignature(tampered).reason, 'bad-signature', '归因 = 签名失配');
+    const stripped = { ...evil.sign(honest(42)) } as Record<string, unknown>;
+    delete stripped.sig;
+    assert.equal(verifyEvidenceDigestSignature(stripped).ok, false, '剥签名 ⇒ unverifiable（missing-signature）');
+    assert.equal(verifyEvidenceDigestSignature(stripped).reason, 'missing-signature', '归因 = 缺签名');
+    assert.equal(verifyEvidenceDigestSignature(42).ok, false, '垃圾入参不抛');
+    assert.equal(verifyEvidenceDigestSignature({ get pubkey(): string { throw new Error('boom'); } }).ok, false, '陷阱属性不抛');
+
+    // (i) 旧档兼容：v=2 档混裸 endpoint 键与 endpoint#指纹键 ⇒ 照常恢复与执法（键域自由字符串）
+    const restored = restoreFederationTrust({
+      v: 2,
+      savedAt: 1,
+      accounts: [
+        { sourceId: 'https://old.example/fed', applied: 9, regressed: 0, merges: 3, cleanMerges: 3, dirty: false },
+        { sourceId: 'https://old.example/fed#ab12cd34ef56ab12', applied: 1, regressed: 0, merges: 1, cleanMerges: 1, dirty: false },
+      ],
+    });
+    assert.equal(restored.restored, 2, '新旧键同档恢复');
+    assert.equal(federationTrustOf('https://old.example/fed'), 1, '毕业裸端点键照常执法');
+    assert.ok(Math.abs(federationTrustOf('https://old.example/fed#ab12cd34ef56ab12') - 0.35) < 1e-12, '指纹键试用期照常执法');
+    const doc = JSON.parse(serializeFederationTrust(() => 99)) as { v: number; accounts: Array<{ sourceId: string }> };
+    assert.equal(doc.v, 2, 'schema 版本不动（旧档零迁移）');
+    assert.ok(doc.accounts.some(a => a.sourceId === 'https://old.example/fed#ab12cd34ef56ab12'), '序列化保持指纹键');
+  } finally {
+    resetFederationRuntime();
+  }
+});
+
+// ─── Μ2-10（ΝΩ-19）：参考聚合端签名中继 —— 转发保留签名域 + 端到端验签存活 ───
+
+test('Μ2-10: 带签摘要原样入环回传（pubkey/sig 不被剥）；回传件验签成立、改体拒绝；客户端环回端到端', async t => {
+  let srv: Awaited<ReturnType<typeof startReferenceServer>>;
+  try {
+    srv = await startReferenceServer();
+  } catch (e) {
+    return t.skip(`环境不支持子进程/环回监听：签名中继测试诚实跳过（${(e as Error).message}）`);
+  }
+  const base = `http://127.0.0.1:${srv.port}`;
+  try {
+    const K = 'fed.sigsrv';
+    const client = edClient();
+
+    // (a) 端到端：federationSync（signingKey 注入 + 真全局 fetch）⇒ 自己的带签摘要入环
+    //     回传、验签存活（fp = 自己）⇒ 2 源均值掺入（迁移期哨兵不触发 —— 本机已配钥）
+    resetFederationRuntime();
+    try {
+      const ledger = new EvidenceLedger();
+      for (let i = 0; i < 10; i++) ledger.record({ key: K, success: i % 2 === 0, margin: 0.1 * i - 0.5, ts: i });
+      const res = federationSync({
+        endpoint: `${base}/aggregate`,
+        ledger,
+        robust: true,
+        signingKey: client.material,
+        maxRemoteShare: 0.5,
+      });
+      assert.equal(res.network, 'fired', '带签请求已发');
+      await res.settled;
+      assert.equal(res.applied !== null, true, '环内唯一源 = 自己的带签摘要 ⇒ 验签存活 ⇒ 掺入');
+      assert.equal(res.applied!.applied, 1, '2 源均值 + 新端点试用期 0.35 ⇒ quota = floor(5×0.35) = 1');
+      assert.equal(res.robust!.mergedFrom, 2, 'mergedFrom = local + 环内自己 1 份');
+      assert.equal(res.robust!.method, 'mean', 'local + 自己回环 = 2 源均值');
+      assert.equal(res.robust!.unverifiableSources, 0, '验签零剔除');
+      assert.equal(ledger.stats(K).n, 11, '账本 10 → 11');
+    } finally {
+      resetFederationRuntime();
+    }
+
+    // (b) 手工 POST 带签摘要 ⇒ 响应 digests 原样回传（pubkey/sig 域不被剥 —— 中继不签证）
+    const signed = client.sign(digestOf(K, uniformBins(10), 10, 1));
+    const r = await fetch(`${base}/aggregate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(signed), signal: AbortSignal.timeout(8_000),
+    });
+    assert.equal(r.status, 200, 'aggregate 200');
+    const j = (await r.json()) as { digests: Array<Record<string, unknown>> };
+    assert.equal(j.digests.length, 2, '环内 2 份（端到端自己的 + 手工这份）');
+    const relayed = j.digests[j.digests.length - 1];
+    assert.deepEqual(relayed, signed as unknown as Record<string, unknown>, '聚合端转发保留签名域（ΝΩ-19）');
+    assert.equal(verifyEvidenceDigestSignature(relayed).ok, true, '回传件验签成立（指纹可续账）');
+
+    // (c) 恶意聚合端改体模拟：回传件被改 ⇒ 客户端验签拒绝（毒摘要进不了中位数）
+    const tampered = JSON.parse(JSON.stringify(relayed)) as { keys: Array<{ n: number }> };
+    tampered.keys[0].n = 999;
+    assert.equal(verifyEvidenceDigestSignature(tampered).ok, false, '改体 ⇒ 验签拒（bad-signature）');
+  } finally {
+    await srv.stop();
+  }
 });

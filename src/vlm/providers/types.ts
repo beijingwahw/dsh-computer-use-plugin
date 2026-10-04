@@ -15,6 +15,7 @@
 
 import {
   extractBalancedJson,
+  HTTP_STATUS_BAD_REQUEST,
   HTTP_STATUS_SERVER_ERROR_FLOOR,
   HTTP_STATUS_TOO_MANY_REQUESTS,
   isAbortError,
@@ -58,6 +59,24 @@ export interface VisionChatRequest {
   temperature?: number;
   /** true 时请求结构化输出（openai: response_format；anthropic/gemini 由提示词约定） */
   jsonMode?: boolean;
+  /**
+   * ΝΩ-44（结构化输出约束解码）：请求级 opt-in JSON Schema（JSON Schema 子集，
+   * 由调用方自持 —— ProviderOptions 不动，这是请求级开关而非装配期配置）。
+   * 字段缺席 ⇒ 三家适配器逐字节走旧路径（openai json_object / anthropic·gemini
+   * 提示词约定），零回归铁律；在场时按各方言落地原生约束解码：
+   *   - openai：与 jsonMode 同开 ⇒ response_format 升级
+   *     {type:'json_schema', json_schema:{name:'dsh_response', strict:true, schema}}；
+   *     网关 400 点名 json_schema/response_format ⇒ 依 ΝΩ-18 回退链降级
+   *     json_object → prompt-only（每级恰重发一次）
+   *   - anthropic：改走 tool_use 强 schema（tools:[{name:'emit', input_schema}] +
+   *     tool_choice 强制；输出取 content 里 tool_use 块的 input）；失败 ⇒
+   *     提示词后缀模式回退并注记
+   *   - gemini：generationConfig.responseSchema + responseMimeType（schema 经
+   *     OpenAPI 子集最小转换器收窄，不支持的字段丢弃并注记）；失败 ⇒ 提示词
+   *     后缀模式回退并注记
+   * 约束解码失败绝不上抛 —— 一律诚实回退提示词模式（运行层零异常铁律）。
+   */
+  jsonSchema?: Record<string, unknown>;
   /** 单次 fetch 尝试的超时（毫秒）—— 默认 30000 */
   timeoutMs?: number;
   /** 重试次数上限 —— 默认 2（仅 429/5xx/网络错，全抖动 500·2^n 封顶 8s；超时不重试） */
@@ -203,6 +222,8 @@ export interface ProviderOptions {
  * 成功返回解析值（可为 null/false 等合法 JSON 值）；失败返回 undefined。
  * 永不抛异常 —— 入参为 null/undefined 等脏值同样安静返回 undefined。
  */
+export { HTTP_STATUS_BAD_REQUEST };
+
 export function extractProviderJson(text: string): unknown | undefined {
   return extractBalancedJson(text);
 }
@@ -377,6 +398,14 @@ export function jitterDelayMs(attempt: number, baseMs = 500, capMs = 8000): numb
 }
 
 /**
+ * ΑΩ-R15（重试律单一立法）：fetchWithRetry 终败的机器可读分类 —— 消费方
+ * （原生 glmClient 路径等）按类映射自家错误串，替代对错误文案的正则嗅探
+ * （文案会演化，分类不会）。'network' 覆盖一切传输面终败：网络异常耗尽、
+ * doFetch 不可用与理论不可达的内核内错。成功（ok:true）时缺省。
+ */
+export type FetchFailureKind = 'http' | 'network' | 'aborted';
+
+/**
  * 带重试的 fetch（全适配器共享的传输底座 —— 重试律的唯一定义点）：
  *  - 仅 429/5xx/网络异常可重试；AbortError/TimeoutError（超时止损）不重试
  *  - 每次重试前回调 onRetry(attempt, reason)（attempt 为刚失败尝试的 0 起序号，
@@ -384,9 +413,9 @@ export function jitterDelayMs(attempt: number, baseMs = 500, capMs = 8000): numb
  *  - 每次尝试注入独立的超时 AbortSignal（覆盖 init.signal；timeoutMs 归此函数管）
  *  - 重试间隔 = jitterDelayMs(attempt)（全抖动 500·2^n 封顶 8s）
  *  - 成功（2xx）⇒ { ok:true, status, body, attempts }
- *  - HTTP 终败 ⇒ { ok:false, status, body, error:'http <s> after <n> attempts', attempts }
- *  - 传输终败 ⇒ { ok:false, error:'fetch failed after <n> attempts: ...', attempts }
- *  - 超时/中止 ⇒ { ok:false, error:'request aborted after <timeoutMs>ms', attempts }
+ *  - HTTP 终败 ⇒ { ok:false, status, body, error:'http <s> after <n> attempts', attempts, failureKind:'http' }
+ *  - 传输终败 ⇒ { ok:false, error:'fetch failed after <n> attempts: ...', attempts, failureKind:'network' }
+ *  - 超时/中止 ⇒ { ok:false, error:'request aborted after <timeoutMs>ms', attempts, failureKind:'aborted' }
  *  attempts 恒为实际发出的 fetch 次数（1 = 未重试）；绝不抛异常。
  */
 export async function fetchWithRetry(opts: {
@@ -396,11 +425,11 @@ export async function fetchWithRetry(opts: {
   maxRetries: number;
   timeoutMs: number;
   onRetry?: (attempt: number, reason: string) => void;
-}): Promise<{ ok: boolean; status?: number; body?: string; error?: string; attempts: number }> {
+}): Promise<{ ok: boolean; status?: number; body?: string; error?: string; attempts: number; failureKind?: FetchFailureKind }> {
   try {
     const doFetch = typeof opts?.doFetch === 'function' ? opts.doFetch : undefined;
     if (!doFetch) {
-      return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0 }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
+      return { ok: false, error: 'fetch is not available (Node >= 18 required)', attempts: 0, failureKind: 'network' }; // doctor-exempt: 文案字符串，非阈值比较（W6-2）
     }
     let url: string;
     try {
@@ -428,7 +457,7 @@ export async function fetchWithRetry(opts: {
       } catch (e) {
         // 超时：调用方主动止损 —— 不重试，立即诚实归因
         if (isAbortError(e)) {
-          return { ok: false, error: `request aborted after ${timeoutMs}ms`, attempts: attempt + 1 };
+          return { ok: false, error: `request aborted after ${timeoutMs}ms`, attempts: attempt + 1, failureKind: 'aborted' };
         }
         // 网络错误（连接拒绝 / DNS / 断流）：可重试
         if (attempt < maxRetries) {
@@ -441,6 +470,7 @@ export async function fetchWithRetry(opts: {
           ok: false,
           error: `fetch failed after ${attempt + 1} attempts: ${stringifyError(e).slice(0, 300)}`,
           attempts: attempt + 1,
+          failureKind: 'network',
         };
       }
 
@@ -465,11 +495,17 @@ export async function fetchWithRetry(opts: {
         body: await safeBodyText(resp),
         error: `http ${status} after ${n} attempt${n > 1 ? 's' : ''}`,
         attempts: n,
+        failureKind: 'http',
       };
     }
   } catch (e) {
     // 不抛铁律的最终兜底（理论不可达 —— init 展开等同步面故障）
-    return { ok: false, error: `fetchWithRetry internal error: ${stringifyError(e).slice(0, 200)}`, attempts: 1 };
+    return {
+      ok: false,
+      error: `fetchWithRetry internal error: ${stringifyError(e).slice(0, 200)}`,
+      attempts: 1,
+      failureKind: 'network',
+    };
   }
 }
 

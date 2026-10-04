@@ -463,6 +463,66 @@ test('Σ-1o: createEnsembleCourt 铸造 —— env 控制法下的进席/跳过/
   }
 });
 
+// ─── ΑΩ-R35 成本闸：maxParallel / maxSessionCalls（缺省 = 全量并问不变） ───
+
+test('ΑΩ-R35: maxParallel 成本闸 —— 座次序占席、超席零拨号、普查记 skipped due to budget', async () => {
+  const a = fake('a', [{ ok: true, text: '占席答案' }]);
+  const b = fake('b', [{ ok: true, text: '占席答案' }]);
+  const c = fake('c', [{ ok: true, text: '席三' }]);
+  const court = new EnsembleCourt([a, b, c], { maxParallel: 2 });
+  const r = await court.askText(q());
+  assert.equal(a.calls, 1, '座次序在前者先占席');
+  assert.equal(b.calls, 1);
+  assert.equal(c.calls, 0, '第三席超闸 ⇒ 零拨号');
+  assert.deepEqual(
+    r.members.map(m => [m.id, m.ok]),
+    [['a', true], ['b', true], ['c', false]],
+    '普查表仍与庭员数等长（诚实透传，绝不静默丢席）',
+  );
+  assert.match(r.members[2]!.error!, /skipped due to budget/, 'skipped-due-budget 归因在普查条目');
+  assert.match(r.members[2]!.error!, /maxParallel 2 reached/);
+  assert.equal(r.members[2]!.latencyMs, 0);
+  assert.equal(r.quorum, 'unanimous', '占席两家照常合议');
+
+  // 未配置席不占预算：dead 在首位不烧 maxParallel 名额
+  const dead = fake('dead', [{ ok: true }], { configured: false });
+  const alive1 = fake('a1', [{ ok: true, text: 'x' }]);
+  const alive2 = fake('a2', [{ ok: true, text: 'x' }]);
+  const gated = new EnsembleCourt([dead, alive1, alive2], { maxParallel: 2 });
+  const r2 = await gated.askText(q());
+  assert.equal(dead.calls, 0);
+  assert.equal(alive1.calls, 1);
+  assert.equal(alive2.calls, 1, '未配置席不占预算 ⇒ 两席配置脑全数拨号');
+  assert.match(r2.members[0]!.error!, /not configured/);
+
+  // 脏值安静缺席 = 不设限（全量并问，既往行为不变）
+  const dirty = new EnsembleCourt([a, b, c], { maxParallel: 0, maxSessionCalls: -3 });
+  await dirty.askText(q());
+  assert.equal(a.calls + b.calls + c.calls >= 3, true, '脏闸值忽略 ⇒ 全员照拨');
+});
+
+test('ΑΩ-R35: maxSessionCalls 会话预算 —— 庭生命周期拨号封顶、耗尽后全员 skipped-due-budget', async () => {
+  const a = fake('a', [{ ok: true, text: '一次' }]);
+  const b = fake('b', [{ ok: true, text: '一次' }]);
+  const court = new EnsembleCourt([a, b], { maxSessionCalls: 3 });
+  const q1 = await court.askText(q());
+  assert.equal(q1.quorum, 'unanimous', '第 1 问（2 次拨号）预算内全量并问');
+  assert.equal(a.calls, 1);
+  assert.equal(b.calls, 1);
+  const q2 = await court.askText(q());
+  assert.equal(a.calls, 2, '第 2 问只剩 1 席预算 —— 座次序 a 占席再拨一次');
+  assert.equal(b.calls, 1, '预算只容 1 席 ⇒ b 第 2 问零拨号');
+  assert.equal(q2.members[0]!.ok, true);
+  assert.match(q2.members[1]!.error!, /skipped due to budget/);
+  assert.match(q2.members[1]!.error!, /session call budget exhausted \(3\/3\)/);
+  assert.equal(q2.quorum, 'degraded', '单家直通降级档');
+  const q3 = await court.askText(q());
+  assert.equal(a.calls, 2, '预算耗尽 ⇒ 零拨号');
+  assert.equal(b.calls, 1, 'b 两问合计仍只拨过 1 次');
+  assert.ok(q3.members.every(m => m.ok === false && /skipped due to budget/.test(m.error ?? '')), '全员 skipped 记账');
+  assert.deepEqual({ text: '', agreement: 0, quorum: 'degraded' }, { text: q3.text, agreement: q3.agreement, quorum: q3.quorum });
+});
+
 // ─── Σ-1p 恶意桩绝不抛（脏返回 + 双路违约上抛） ───
 
 test('Σ-1p: 恶意桩绝不抛 —— 脏返回与双路违约上抛全收敛为成员失败', async () => {
@@ -501,4 +561,39 @@ test('Σ-1p: 恶意桩绝不抛 —— 脏返回与双路违约上抛全收敛�
   );
   const re = await court.askElements(q());
   assert.deepEqual(re, { elements: [], fusedFrom: 0 });
+});
+
+// ─── ΝΩ-47 loglinear 折叠模式：连折置信膨胀修正（opt-in，缺省 classic 饱和律不动） ───
+
+test('ΝΩ-47: askElements loglinear —— 基线 0.8 五家连折不饱和（数值断言新公式）；classic 对照组仍饱和', async () => {
+  const element = (conf: number): { json: unknown; ok: boolean } => ({
+    ok: true,
+    json: { elements: [{ label: '确定', role: 'button', bbox: [0, 0, 100, 100], confidence: conf }] },
+  });
+  const mkCourt = (o: { fuseMode?: 'classic' | 'loglinear' }) =>
+    new EnsembleCourt(
+      ['a', 'b', 'c', 'd', 'e'].map(id => fake(id, [element(0.8)])),
+      o,
+    );
+  // loglinear 手算（c1 = 0.8；c_k = (c_{k-1} + 0.8)/2 + 0.15/√k）：
+  //   c2 = 0.8 + 0.15/√2                 = 0.9060660172
+  //   c3 = (c2+0.8)/2 + 0.15/√3          = 0.9396355490
+  //   c4 = (c3+0.8)/2 + 0.075            = 0.9448177745
+  //   c5 = (c4+0.8)/2 + 0.15/√5          = 0.9394909266 —— 收敛于基线上方的有界小增益
+  const r = await mkCourt({ fuseMode: 'loglinear' }).askElements(q({ prompt: '列出元素' }));
+  assert.equal(r.fusedFrom, 5);
+  assert.equal(r.elements.length, 1, '同位框五家合一');
+  const e = r.elements[0]!;
+  assert.ok(near(e.confidence, 0.9394909265668524), `实际 ${e.confidence} ≈ 手算 0.9394909266`);
+  assert.ok(e.confidence < 1, '五家连折不饱和至 1（classic 两折即触顶）');
+  assert.deepEqual(e.bbox, { x0: 0, y0: 0, x1: 100, y1: 100 }, '同位框凸组合不动');
+  assert.equal(e.label, '确定');
+  assert.equal(e.role, 'button', '折叠后 role 原位继承');
+
+  // classic 对照组（缺省）：同五家仍按旧律饱和（Σ-1n 已钉死 0.8→0.95→1 的膨胀）
+  const classic = await mkCourt({}).askElements(q({ prompt: '列出元素' }));
+  assert.equal(classic.elements[0]!.confidence, 1, '缺省 classic 旧行为逐字节保持');
+  // 脏 fuseMode 字面量安静归 classic（不抛铁律）
+  const dirty = await mkCourt({ fuseMode: 'banana' as never }).askElements(q({ prompt: '列出元素' }));
+  assert.equal(dirty.elements[0]!.confidence, 1, '脏模式归 classic');
 });

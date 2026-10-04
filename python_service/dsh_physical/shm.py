@@ -23,12 +23,23 @@
     释放 = 显式 DELETE / TTL GC / lifespan cleanup 三道兜底。
   - 注册表键与 ``ShmHandle.name`` 严格一致（mmap-file 模式即文件全路径），
     DELETE 端点按 handle.name 释放永不 miss。
+
+磁盘治理（ΑΩ-R26，仅 mmap-file —— POSIX shm 无磁盘占用）：
+  - 磁盘配额 ``mmap_quota_mb``（缺省 512MB，``DSH_PHYSICAL_MMAP_QUOTA_MB``
+    可调，0 = 关闭）：注册新 handle 时检查，超限先 oldest-first 回收过期
+    handle 并清过期孤儿，仍超则 stderr 诚实上报（活跃 handle 不硬删）。
+  - 启动清扫：首次 mmap-file 写入时懒触发（亦可 lifespan 显式调用
+    ``startup_sweep``），清除超过 TTL 且不在注册表中的孤儿文件 ——
+    防上次运行崩溃遗留文件在长时间空闲下驻留。
+  - 运行中合计 + 每 60s 轻量目录盘点校准（``_inventory_mmap_dir``），
+    unlink 失败（Windows 句柄占用）不炸、只记账，由下次盘点自愈。
 """
 from __future__ import annotations
 
 import io
 import os
 import sys
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +77,174 @@ class ShmHandle:
 # 注意：fd 关闭后 mmap 仍可读；此处仅保留 mmap 与路径以便释放
 _active_handles: dict[str, dict] = {}
 
+# ─── ΑΩ-R26：mmap-file 磁盘治理（配额 + 孤儿清扫）───
+# POSIX shm 由内核随 fd 关闭回收，无磁盘驻留问题；本节只针对 mmap-file。
+# 运行中合计（``mmap_bytes``）是快速路径的账面值；每 60s 一次轻量目录盘点
+# （scandir + stat）校准漂移（unlink 失败 / 目录被外部改动），并顺手清过期孤儿。
+_quota_lock = threading.RLock()  # RLock：_enforce 持锁调用 _release_handle 时可重入
+_INVENTORY_INTERVAL_S = 60.0  # 盘点节流：注册新 handle 时至多触发一次 scandir
+_TTL_FALLBACK_S = 60.0        # 孤儿判定 TTL，与 write_image ttl_seconds 缺省对齐
+_quota_stats = {
+    "mmap_bytes": 0,             # mmap-file 运行中字节合计（盘点校准）
+    "last_inventory_at": 0.0,    # 上次目录盘点时刻（unix 秒）
+    "startup_swept": False,      # 启动清扫是否已做（每进程一次）
+    "orphans_removed": 0,        # 孤儿文件清除成功计数
+    "orphan_remove_failed": 0,   # 清除失败计数（防御式：不炸，只记账）
+    "quota_reclaims": 0,         # 配额触发的过期 handle 回收次数
+    "quota_reclaimed_bytes": 0,  # 对应回收字节数
+}
+
+
+def _iter_own_mmap_files(config: ScreenshotConfig):
+    """枚举 mmap 目录中**本服务命名模式**的文件（prefix*.bin）。
+
+    防御边界：mmap_dir 可由用户配置指向共享目录 —— 绝不碰非本模式文件。
+    生成 (绝对路径, st_mtime, st_size)；stat 失败的条目跳过（不炸）。
+    """
+    root = Path(config.mmap_dir)
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(config.shm_prefix) or not entry.name.endswith(".bin"):
+            continue
+        try:
+            if not entry.is_file():
+                continue
+            st = entry.stat()
+        except OSError:
+            continue  # 条目消失/无权限：跳过（盘点永不抛错）
+        yield str(root / entry.name), st.st_mtime, st.st_size
+
+
+def _remove_orphan(path: str) -> bool:
+    """删除一个孤儿文件。成功返回 True；失败计数不炸（ΑΩ-R26 防御式）。"""
+    try:
+        os.unlink(path)
+        _quota_stats["orphans_removed"] += 1
+        return True
+    except OSError:
+        # Windows：Node 端仍握着句柄时 unlink 报 PermissionError ——
+        # 记账留给下一次盘点/清扫，绝不炸穿运行层
+        _quota_stats["orphan_remove_failed"] += 1
+        return False
+
+
+def startup_sweep(config: ScreenshotConfig, ttl_seconds: float = _TTL_FALLBACK_S) -> None:
+    """启动清扫：清除 mmap 目录中的孤儿文件（ΑΩ-R26）。
+
+    孤儿 = 不在 ``_active_handles`` 注册表中且 mtime 超过 TTL 的本模式文件
+    （上次运行崩溃遗留 —— 进程内注册表为空，TTL 兜底防误删并发实例的活跃文件）。
+    每进程只做一次（幂等旗标）；由首次 mmap-file 写入懒触发（server lifespan
+    未接线时依然生效），也可由 lifespan 显式调用。永不抛错。
+    """
+    with _quota_lock:
+        if _quota_stats["startup_swept"]:
+            return
+        _quota_stats["startup_swept"] = True
+    import time
+
+    now = time.time()
+    removed = failed = 0
+    for path, mtime, _size in _iter_own_mmap_files(config):
+        if path in _active_handles or now - mtime <= ttl_seconds:
+            continue
+        if _remove_orphan(path):
+            removed += 1
+        else:
+            failed += 1
+    if removed or failed:
+        print(
+            f"[dsh-physical] shm startup sweep ({config.mmap_dir}): "
+            f"removed {removed} orphan(s), failed {failed} (ΑΩ-R26)",
+            file=sys.stderr,
+        )
+
+
+def _inventory_mmap_dir(config: ScreenshotConfig, now: float) -> None:
+    """轻量盘点：scandir 校准运行合计 + 顺手清过期孤儿（ΑΩ-R26）。
+
+    以目录实况为准重置 ``mmap_bytes``（注册表内文件按 st_size 计入 ——
+    与账面一致；unlink 失败的已释放文件也会被如实计回，等待下次过期清除）。
+    调用方持锁或接受统计竞态（盘点本身永不抛错，漂移由下次盘点自愈）。
+    """
+    total = 0
+    for path, mtime, size in _iter_own_mmap_files(config):
+        total += size
+        # 短路序：先判孤儿（不在注册表 + 超 TTL），再尝试删除（成功才从合计扣除）
+        if (
+            path not in _active_handles
+            and now - mtime > _TTL_FALLBACK_S
+            and _remove_orphan(path)
+        ):
+            total -= size
+    _quota_stats["mmap_bytes"] = total
+    _quota_stats["last_inventory_at"] = now
+
+
+def _enforce_mmap_quota(config: ScreenshotConfig) -> None:
+    """注册新 mmap-file handle 后的配额检查（ΑΩ-R26）。
+
+    三步，全部运行层（永不抛错）：
+      1. 盘点节流窗口到点 → 轻量盘点校准合计并清过期孤儿；
+      2. 超配额 → oldest-first 兜底回收**已过期** handle（``write_image`` 入口
+         GC 通常已抢先，此处防御性兜底 —— 配额路径不依赖上游 GC 时机）；
+         活跃 handle 在 TTL 内不硬删 —— Node 端可能正在读，硬删 = ENOENT 破坏契约；
+      3. 仍超 → stderr 诚实上报（配额、当前占用、活跃数）。
+    """
+    quota = getattr(config, "mmap_quota_mb", 512) * 1024 * 1024
+    if quota <= 0:
+        return  # 0 = 显式关闭配额
+    import time
+
+    now = time.time()
+    with _quota_lock:
+        inventoried = False
+        if now - _quota_stats["last_inventory_at"] >= _INVENTORY_INTERVAL_S:
+            _inventory_mmap_dir(config, now)
+            inventoried = True
+        if _quota_stats["mmap_bytes"] <= quota:
+            return
+        before = _quota_stats["mmap_bytes"]
+        expired = sorted(
+            (info.get("expires_at", 0), name)
+            for name, info in _active_handles.items()
+            if info.get("transport") == "mmap-file" and info.get("expires_at", 0) < now
+        )
+        for _expires_at, name in expired:
+            _quota_stats["quota_reclaims"] += 1
+            _release_handle(name)  # 内部同步扣减 mmap_bytes
+        if not inventoried:
+            _inventory_mmap_dir(config, now)  # 释放后仍超 → 盘点兜底清过期孤儿
+        freed = max(0, before - _quota_stats["mmap_bytes"])
+        _quota_stats["quota_reclaimed_bytes"] += freed
+        if _quota_stats["mmap_bytes"] > quota:
+            live = sum(
+                1
+                for info in _active_handles.values()
+                if info.get("transport") == "mmap-file"
+            )
+            print(
+                f"[warn] shm mmap-file quota {quota // (1024 * 1024)}MB exceeded: "
+                f"{_quota_stats['mmap_bytes'] / (1024 * 1024):.1f}MB on disk, "
+                f"{live} live handle(s) within TTL not evicted (ΑΩ-R26)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[dsh-physical] shm quota reclaim: {len(expired)} expired handle(s), "
+                f"{freed / (1024 * 1024):.1f}MB freed, now "
+                f"{_quota_stats['mmap_bytes'] / (1024 * 1024):.1f}MB (ΑΩ-R26)",
+                file=sys.stderr,
+            )
+
+
+def get_stats() -> dict:
+    """治理状态快照（ΑΩ-R26，测试/诊断用）。返回浅拷贝防外部篡改。"""
+    with _quota_lock:
+        return dict(_quota_stats)
+
 
 def _gc_expired_handles() -> None:
     """过期 shm 对象懒 GC（默认 60s 兜底回收，防 Node 端崩溃泄漏）。"""
@@ -94,17 +273,25 @@ def _release_handle(name: str) -> None:
             pass
     # 再 shm_unlink（POSIX）或删文件（mmap-file）
     transport = info.get("transport", "shm")
+    unlinked = False
     if transport == "shm" and hasattr(os, "shm_unlink"):
         try:
             os.shm_unlink(info.get("shm_name", ""))
+            unlinked = True
         except OSError:
             pass  # 已被回收是正常路径
     elif transport == "mmap-file":
         path = info.get("path", "")
         try:
             os.unlink(path)
+            unlinked = True
         except OSError:
             pass
+    # ΑΩ-R26：文件确认删除后才扣减磁盘账面（unlink 失败 —— 如 Windows 上
+    # Node 仍持句柄 —— 磁盘并未真正释放，扣了就是撒谎；残留文件由盘点按孤儿收）。
+    if transport == "mmap-file" and unlinked:
+        with _quota_lock:
+            _quota_stats["mmap_bytes"] = max(0, _quota_stats["mmap_bytes"] - info.get("size", 0))
 
 
 def release_by_name(name: str) -> bool:
@@ -260,6 +447,7 @@ def _write_via_posix_shm(
         "shm_name": shm_name,
         "mmap": mm,
         "expires_at": expires_at,
+        "size": size,  # ΑΩ-R26：配额账面用（shm 传输无磁盘占用，不计数）
     }
 
     return ShmHandle(
@@ -295,6 +483,9 @@ def _write_via_mmap_file(
     import mmap
 
     Path(config.mmap_dir).mkdir(parents=True, exist_ok=True)
+    # ΑΩ-R26：本进程首次 mmap-file 写入 → 懒启动清扫（清上次运行崩溃遗留的
+    # 孤儿文件；server lifespan 未显式接线时依然生效，接线后因幂等旗标为 no-op）
+    startup_sweep(config)
     file_path = str(Path(config.mmap_dir) / f"{name}.bin")
 
     try:
@@ -346,7 +537,13 @@ def _write_via_mmap_file(
         "path": file_path,
         "mmap": mm,
         "expires_at": expires_at,
+        "size": size,
     }
+    # ΑΩ-R26：磁盘账面 + 配额检查（新 handle 已计入后检查 —— 新来者自身
+    # 也受配额约束；超限时先回收过期 handle，活跃 handle 不硬删，stderr 诚实上报）
+    with _quota_lock:
+        _quota_stats["mmap_bytes"] += size
+    _enforce_mmap_quota(config)
 
     return ShmHandle(
         transport="mmap-file",

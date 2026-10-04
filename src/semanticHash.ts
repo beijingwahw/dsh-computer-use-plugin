@@ -9,6 +9,10 @@
 // J 纪元修正：删除从未被使用的 `DIMS = 256` 死常量 —— embed() 实际用 32 位
 // FNV-1a 全域做桶键（无 mod 压缩），头注"哈希到固定桶空间"描述的语义从未实现。
 import { tokenize } from './uiMemory';
+import { toEnglish } from './dialects/bilingual';
+// ΝΩ-41（方言克隆律）：本地 FNV-1a 副本退役 —— 单源 src/dialects/random.ts
+// （逐字节同实现，桶键不变；金样 test/no41.dialectClones.test.ts）。
+import { fnv1a } from './dialects/random';
 
 const NGRAM_MIN = 2;    // 字符 n-gram 下界（中文 bigram / 英文子词）
 const NGRAM_MAX = 4;    // 上界：太长泛化弱，太短碰撞多
@@ -17,16 +21,6 @@ export interface SparseVector {
   /** [桶号, 权重] 有序对（桶号升序，JSON 数组天然可序列化） */
   dims: Array<[number, number]>;
   norm: number;
-}
-
-/** FNV-1a：短字符串分布均匀且实现只有几行 —— 哈希界的极简主义 */
-function fnv1a(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
 }
 
 /** 提取一个 token 的全部字符 n-gram */
@@ -47,7 +41,11 @@ function ngrams(token: string): string[] {
 /** 文本 → 稀疏向量。词级 1.0 权重 + n-gram 0.5 权重（词形相近但非同词的贡献减半） */
 export function embed(text: string): SparseVector {
   const buckets = new Map<number, number>();
-  for (const token of tokenize(text)) {
+  // ΝΩ-29（跨语系语义盲区修复）：字符级 n-gram 对中英跨语系对零共享子串（'整理' vs
+  // 'filter' ⇒ FNV 桶零相交 ⇒ cosine 恒 0）。分词后先经零依赖双语词表桥把中文 UI
+  // 高频词归一到英文侧再 n-gram；未命中 token 原样透传，故同语系无命中输入的
+  // 输出逐字节不变（test/no29.bilingual.test.ts 执法）。
+  for (const token of toEnglish(tokenize(text))) {
     const tb = fnv1a(token);
     buckets.set(tb, (buckets.get(tb) ?? 0) + 1.0);
     for (const g of ngrams(token)) {

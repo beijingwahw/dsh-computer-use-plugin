@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getSharp, type SharpLike } from '../src/_legacyDeps.ts';
-import { dhash, hammingDistance, similarity } from '../src/perceptualHash.ts';
+import { dhash, hammingDistance, similarity, hexToBits, normalizeHash } from '../src/perceptualHash.ts';
 
 let sharp: SharpLike | null = null;
 async function requireSharp(): Promise<SharpLike> {
@@ -72,4 +72,31 @@ test('hammingDistance & similarity: identity and length mismatch', () => {
   assert.equal(similarity(a, a), 1);
   assert.equal(similarity(a, b), 0);
   assert.equal(similarity('0'.repeat(63) + '1', a), 63 / 64);
+});
+
+// ─── ΝΩ-24：hexToBits 长度校验（非法 null 上浮 unverifiable）───
+
+test('ΝΩ-24: hexToBits 合法域 —— 恰 16 位 hex → 64 位串；64 位位串透传', () => {
+  assert.equal(hexToBits('ffffffffffffffff'), '1'.repeat(64), '16 位全 f → 全 1');
+  assert.equal(hexToBits('0000000000000001'), '0'.repeat(63) + '1');
+  assert.equal(hexToBits('0'.repeat(16)), '0'.repeat(64));
+  assert.equal(hexToBits('DeadBeefDeadBeef'), '11011110101011011011111011101111'.repeat(2), '大小写 hex 同值');
+  assert.equal(hexToBits('01'.repeat(32)), '01'.repeat(32), '64 位位串原样透传');
+});
+
+test('ΝΩ-24: hexToBits 非法输入 → null（旧实现按 hex.length*4 补位静默产非 64 位串）', () => {
+  assert.equal(hexToBits('f'.repeat(15)), null, '15 位 hex（截断）⇒ null');
+  assert.equal(hexToBits('f'.repeat(17)), null, '17 位 hex（超长）⇒ null');
+  assert.equal(hexToBits(''), null, '空串 ⇒ null');
+  assert.equal(hexToBits('not-hex!'), null, '脏串 ⇒ null');
+  assert.equal(hexToBits('0'.repeat(62) + '1'), null, '63 位位串（非 64 位透域）⇒ null');
+  assert.equal(hexToBits('0'.repeat(65)), null, '65 位位串 ⇒ null');
+});
+
+test('ΝΩ-24: normalizeHash 调用方防御 —— 非法 hex 收敛全零哨兵（Δ-7 zero 臂契约）', () => {
+  assert.equal(normalizeHash('f'.repeat(15)), '0'.repeat(64), '非法 hex → 全零（下游 reportEffect 判 unverifiable）');
+  assert.equal(normalizeHash('not-hex!'), '0'.repeat(64));
+  assert.equal(normalizeHash(''), '0'.repeat(64), '空串语义与旧实现一致（全零）');
+  assert.equal(normalizeHash('f'.repeat(16)), '1'.repeat(64), '合法 hex 照常换算');
+  assert.equal(normalizeHash('0101'), '0101', '位串原样透传（宽容域保持）');
 });

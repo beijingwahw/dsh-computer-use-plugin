@@ -6,6 +6,10 @@
   - Linux：``pyautogui.screenshot()``（基于 scrot / ImageMagick；需 X server）
     - 无 X 时降级到 Xvfb 虚拟屏（容器场景）
     - 完全无显示时 ``raise`` → 转为 ``SCREEN_CAPTURE_FAILED``
+  - ΝΩ-51 可选 backend：``DSH_PHYSICAL_SHOT_BACKEND=dxgi`` 时 Windows 主屏
+    优先走 DXGI Desktop Duplication（GPU 直取 + 脏区矩形，ctypes 零新依赖，
+    见 ``dxgi_capture.py``）；缺席/失败诚实降级上方 GDI 路径并 ``note``
+    申报。缺省 ``gdi`` —— 行为与此前逐字节一致（兼容铁律）。
 
 输出格式：
   - ``PNG``（缺省）：无损，适合 OCR / VLM 分析；体积大
@@ -25,6 +29,7 @@ import io
 import os
 import platform
 import sys
+import threading
 import time
 from collections import deque
 from typing import Callable, Literal
@@ -34,6 +39,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import ScreenshotConfig
 from .errors import ErrorKind, PhysicalError
+from .executors import DEVICE_POOL, SCREEN_POOL, get as get_pool  # ΑΩ-R25 专属池
 from .shm import ShmHandle, make_handle
 
 # W4-5 移动 Surface：外部帧源（android 设备）—— server 期注入；返回
@@ -52,16 +58,22 @@ ImageFormat = Literal["png", "jpeg"]
 
 
 def compute_dhash(img: Image.Image) -> str:
-    """dHash：9x8 灰度相邻列比较 → 64bit 十六进制。"""
-    g = img.convert("L").resize((9, 8))
-    px = list(g.getdata())
-    bits = 0
-    for row in range(8):
-        base = row * 9
-        for col in range(8):
-            if px[base + col] > px[base + col + 1]:
-                bits |= 1 << (row * 8 + col)
-    return f"{bits:016x}"
+    """dHash：9x8 灰度相邻列比较 → 64bit 十六进制。
+
+    ΝΩ-35 numpy 向量化：``px[:, :-1] > px[:, 1:]`` 一趟比较 → 行主序
+    (row*8+col) 位平面 → ``np.packbits(bitorder="little")``（首元素=LSB）
+    + ``int.from_bytes(little)`` 还原整数 —— 与旧纯 Python 位循环逐位等值
+    （uint8 整数比较无舍入；TS perceptualHash 已知值用例在 test_screen 钉死：
+    平图全零 / 0xAA 行 / 0xD5 行主序 / 阶梯 0x24）。实测（perf_counter，
+    本机）：位打包段 13.1µs → 9.6µs；200px 区域裁剪整函数 77µs → 70µs；
+    1080p 端到端 2.90ms → 2.92ms（持平 —— 热点在 PIL 灰度化+resize 的
+    2.93ms C 段，诚实记录）。uvc.py / scrcpyStream.py 与本函数对齐方言
+    —— 结果位级不变是硬约束。
+    """
+    px = np.asarray(img.convert("L").resize((9, 8)), dtype=np.uint8)
+    bits = (px[:, :-1] > px[:, 1:]).flatten()  # (8,8) 行主序，[row][col]
+    packed = np.packbits(bits, bitorder="little")  # 首=LSB → byte_k = bits[8k:8k+8]
+    return f"{int.from_bytes(packed.tobytes(), 'little'):016x}"
 
 
 _DCT_CACHE: dict[int, np.ndarray] = {}
@@ -79,18 +91,23 @@ def _dct_matrix(n: int) -> np.ndarray:
 
 
 def compute_phash(img: Image.Image) -> str:
-    """pHash：32x32 灰度二维 DCT → 左上 8x8（去 DC）中位阈值 → 64bit。"""
+    """pHash：32x32 灰度二维 DCT → 左上 8x8（去 DC）中位阈值 → 64bit。
+
+    ΝΩ-35：DCT 自 ΑΩ-R32 起已是 numpy 矩阵乘；残余的 64 次 Python 位循环
+    改 packbits（bit i = flatten 序，``v > med`` 严格比较同律 —— 与 dhash
+    同一小端打包方言）。评估结论：本函数热点本就在 resize（PIL C，1080p
+    ~3ms），位循环仅 ~0.01ms 量级，实测整函数 3.21ms → 3.10ms —— 向量化
+    为打包方言一致性而做，非性能必需。
+    """
     g = np.asarray(img.convert("L").resize((32, 32)), dtype=np.float64)
     c32 = _dct_matrix(32)
     dct = c32 @ g @ c32.T
     low = dct[:8, :8].copy()
     low[0, 0] = 0.0  # DC 排除：亮度不变性（与 Node 端 Q-2 同律）
     med = float(np.median(low))
-    bits = 0
-    for i, v in enumerate(low.flatten()):
-        if v > med:
-            bits |= 1 << i
-    return f"{bits:016x}"
+    bits = (low > med).flatten()  # bit i = 行主序 flatten 序（旧 enumerate 同律）
+    packed = np.packbits(bits, bitorder="little")
+    return f"{int.from_bytes(packed.tobytes(), 'little'):016x}"
 
 
 def hamming_hex(a: str, b: str) -> int:
@@ -257,14 +274,28 @@ def compute_salience(
 
     bh = mag.shape[0] // grid[1]
     bw = mag.shape[1] // grid[0]
-    entropies: list[float] = []
-    for by in range(grid[1]):
-        for bx in range(grid[0]):
-            block = mag[by * bh:(by + 1) * bh, bx * bw:(bx + 1) * bw]
-            hist, _ = np.histogram(block, bins=bins, range=(0, mag.max() + 1e-9))
-            p = hist.astype(np.float64) + 1e-9
-            p /= p.sum()
-            entropies.append(float(-(p * np.log2(p)).sum()))
+    # ΝΩ-35：96 次 np.histogram 纯 Python 循环 → 单趟向量化。等值根基：
+    # 旧代码每块 histogram 的 range=(0, mag.max()+1e-9) 用的是**全图** max
+    # ⇒ 桶边界是全局的 —— 先一次性算出每像素桶索引（np.histogram 对均匀桶
+    # 的定义即 linspace 边界、左闭右开、末桶闭合：searchsorted(edges,'right')-1
+    # + 两端夹取同律），再以「桶索引 + 块偏移」的 bincount 一趟收全部 96 块
+    # ×16 桶计数（整型等值，test_screen 等值用例对随机/平图/阶梯图钉死）。
+    # 块切片边界 [:grid*bh, :grid*bw] 与旧循环的 (by+1)*bh 切片严格同界
+    # （尾部余数行/列本就被旧循环忽略）。实测 1080p 8.2ms → 5.1ms（-38%；
+    # 残余 3.8ms 是 PIL resize(192x128)+asarray 的 C 段，熵循环段
+    # ~4ms → ~1.6ms，诚实记录）。
+    n_blocks = grid[1] * grid[0]
+    hi = float(mag.max()) + 1e-9
+    edges = np.linspace(0.0, hi, bins + 1)
+    idx = np.searchsorted(edges, mag, side="right").astype(np.int64) - 1
+    np.clip(idx, 0, bins - 1, out=idx)  # v==0 → -1 夹回 0（首桶左闭）；v==hi 不可能（+1e-9 严格大）
+    sub = idx[: grid[1] * bh, : grid[0] * bw]
+    sub = sub.reshape(grid[1], bh, grid[0], bw).transpose(0, 2, 1, 3).reshape(-1)
+    codes = sub + np.repeat(np.arange(n_blocks, dtype=np.int64) * bins, bh * bw)
+    counts = np.bincount(codes, minlength=n_blocks * bins).reshape(n_blocks, bins)
+    p = counts.astype(np.float64) + 1e-9
+    p /= p.sum(axis=1, keepdims=True)
+    entropies: list[float] = list(-(p * np.log2(p)).sum(axis=1))
 
     mean = float(np.mean(entropies))
     std = float(np.std(entropies))
@@ -372,7 +403,8 @@ async def list_displays(screen_ctrl: "ScreenCapture | None" = None) -> list[dict
     result: list[dict] = []
     if platform.system() == "Windows":
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _enum_monitors_win32)
+        # ΑΩ-R25：显示器枚举（Win32 COM 回调）走 screen 池 —— 不与 adb/编码共池
+        result = await loop.run_in_executor(get_pool(SCREEN_POOL), _enum_monitors_win32)
     if not result:
         if screen_ctrl is not None:
             size = await screen_ctrl.get_screen_size()
@@ -439,6 +471,11 @@ class ScreenCapture:
         # popup 几何传感 / frame_diff 全部在此计算 —— Node 端零图像解码依赖。
         self._frames: deque[tuple[int, np.ndarray, tuple[int, int]]] = deque()
         self._frame_seq = 0
+        # ΝΩ-9：帧环跨线程无锁 —— capture（事件循环线程）append/popleft 与
+        # frame_stats/frame_diff（SCREEN_POOL 线程）reversed 迭代并发，deque
+        # 迭代中变异偶发 RuntimeError。O(1) 粒度锁：持锁只做入环/引用快照，
+        # numpy 统计与图像编码在锁外跑。
+        self._frames_lock = threading.Lock()
 
     def set_dry_run(self, dry: bool) -> None:
         self._dry_run = dry
@@ -529,36 +566,86 @@ class ScreenCapture:
             display_used = None
 
         surface_note: str | None = None
+        # ΝΩ-51：dxgi backend 记账容器（经 _capture_image 出参回填 —— 成功收
+        # meta、失败收 degraded 原因；避免共享实例状态的跨线程串扰）
+        dxgi_meta: dict = {}
         if android_serial is not None:
+            # ΑΩ-R25：android 帧源是 adb/scrcpy 子进程（command_timeout 15s
+            # 量级的长阻塞 I/O）⇒ device 池；绝不能与主机截图/编码共池 ——
+            # 否则一台失联设备能把整个图像面拖住 15s（head-of-line blocking）。
             full, surface_note = await loop.run_in_executor(
-                None, self._grab_surface, android_serial,
+                get_pool(DEVICE_POOL), self._grab_surface, android_serial,
             )
         else:
-            full = await loop.run_in_executor(None, self._capture_image, None, display_used)
+            # ΑΩ-R25：主机抓帧（ImageGrab/pyautogui/ddxgi，百 ms 级 CPU+GDI）⇒ screen 池
+            full = await loop.run_in_executor(
+                get_pool(SCREEN_POOL), self._capture_image, None, display_used, dxgi_meta,
+            )
+        # ΝΩ-51：dxgi 成功 ⇒ extras["dxgi"] meta 透出（脏区矩形供 frame_diff
+        # 通道注记；默认 gdi 路径此键缺席 —— 响应字节零变化）。降级 ⇒ 并入
+        # note（与 display/surface 语义 note 拼接共存，不互相覆盖）。
+        if dxgi_meta.get("backend") == "dxgi":
+            extras_note_dxgi: str | None = None
+            dxgi_extras = dict(dxgi_meta)
+        elif dxgi_meta.get("degraded"):
+            extras_note_dxgi = str(dxgi_meta["degraded"])
+            dxgi_extras = None
+        else:
+            extras_note_dxgi = None
+            dxgi_extras = None
+        # dxgi MVP = 主屏单输出：多显示器请求走 GDI（诚实申报，不静默）
+        if (
+            getattr(self.cfg, "backend", "gdi") == "dxgi"
+            and display_used is not None
+            and platform.system() == "Windows"
+        ):
+            mvp_note = ("dxgi backend is primary-output only (ΝΩ-51 MVP); "
+                        "multi-display capture via gdi")
+            extras_note_dxgi = (
+                mvp_note if extras_note_dxgi is None else f"{extras_note_dxgi}; {mvp_note}"
+            )
 
         extras: dict = {
             "dhash": None, "phash": None, "region_dhash": None,
             "unchanged": False, "frame_id": None, "frame_count": len(self._frames),
             "salience": None,
         }
+        if dxgi_extras is not None:
+            extras["dxgi"] = dxgi_extras
         if degrade_note is not None:
             extras["note"] = degrade_note
+        # ΝΩ-51：dxgi 降级/MVP 边界 note —— 追加语义，与 display/surface 语义
+        # note 共存不覆盖（degrade_note 与 surface_note 本互斥，追加对既有
+        # 组合无行为变化）。
+        if extras_note_dxgi is not None:
+            extras["note"] = (
+                f"{extras['note']}; {extras_note_dxgi}" if "note" in extras else extras_note_dxgi
+            )
         if surface_note is not None:
-            extras["note"] = surface_note
+            extras["note"] = (
+                f"{extras['note']}; {surface_note}" if "note" in extras else surface_note
+            )
         if surface is not None:
             extras["surface"] = surface
         if display is not None:
             extras["display"] = display_used
 
-        if want_hashes or gate:
-            extras["dhash"] = compute_dhash(full)
+        if want_hashes or gate or want_region_hash:
+            def _fingerprints() -> None:
+                # ΝΩ-35（体检 T4）：灰度化+resize+位打包是 CPU 图像工作（1080p
+                # 三指纹合计 ~3ms，stable 轮询 want_hashes 每帧都跑）—— 原先在
+                # 事件循环同步计算 ⇒ SCREEN_POOL（与抓帧同池、顺序 await，无
+                # 同池嵌套死锁面）。异常语义不变：_crop_region 的 PhysicalError
+                # 经 await 原样上抛（safe_call 信封照旧兜底）。
+                if want_hashes or gate:
+                    extras["dhash"] = compute_dhash(full)
+                if want_hashes:
+                    extras["phash"] = compute_phash(full)
+                if want_region_hash:
+                    crop = self._crop_region(full, self._center_to_rect(want_region_hash))
+                    extras["region_dhash"] = compute_dhash(crop)
 
-        if want_hashes:
-            extras["phash"] = compute_phash(full)
-
-        if want_region_hash:
-            crop = self._crop_region(full, self._center_to_rect(want_region_hash))
-            extras["region_dhash"] = compute_dhash(crop)
+            await loop.run_in_executor(get_pool(SCREEN_POOL), _fingerprints)
 
         # 变化门控：新鲜指纹与参考几乎相同 ⇒ 屏幕未变，跳过整条下游管线
         if gate and extras["dhash"]:
@@ -569,21 +656,30 @@ class ScreenCapture:
                 return None, extras
 
         if keep_frame:
-            self._frame_seq += 1
-            half = full.convert("RGB").resize(
-                (max(1, full.width // 2), max(1, full.height // 2)),
-            )
-            self._frames.append(
-                (self._frame_seq, np.asarray(half, dtype=np.uint8), (full.width, full.height))
-            )
-            while len(self._frames) > self.MAX_CACHED_FRAMES:
-                self._frames.popleft()
-            extras["frame_id"] = self._frame_seq
-            extras["frame_count"] = len(self._frames)
+            def _half_frame() -> np.ndarray:
+                # ΝΩ-35（体检 T4）：1080p 半分辨率重采样 + ndarray 拷贝
+                # （LANCZOS-free 的 bilinear 也要 ~10ms 量级）原在事件循环 ⇒
+                # SCREEN_POOL。入环/清环与 extras 记账仍在循环线程持帧锁
+                # （ΝΩ-9 锁不变量不动）。
+                half = full.convert("RGB").resize(
+                    (max(1, full.width // 2), max(1, full.height // 2)),
+                )
+                return np.asarray(half, dtype=np.uint8)
+
+            half_arr = await loop.run_in_executor(get_pool(SCREEN_POOL), _half_frame)
+            with self._frames_lock:  # ΝΩ-9：与 SCREEN_POOL 线程的 frame_* 读互斥
+                self._frame_seq += 1
+                self._frames.append(
+                    (self._frame_seq, half_arr, (full.width, full.height))
+                )
+                while len(self._frames) > self.MAX_CACHED_FRAMES:
+                    self._frames.popleft()
+                extras["frame_id"] = self._frame_seq
+                extras["frame_count"] = len(self._frames)
 
         # Y-1/Y-2：显著度图（干净帧上计算 —— 叠加网格不得污染熵估计）
         if want_salience or (overlay and overlay.get("auto_foveate")):
-            sal = await loop.run_in_executor(None, compute_salience, full)
+            sal = await loop.run_in_executor(get_pool(SCREEN_POOL), compute_salience, full)
             extras["salience"] = sal
 
         # 纯指纹模式（稳定轮询）：不编码不传图 —— 指纹与帧缓存已就绪
@@ -636,7 +732,9 @@ class ScreenCapture:
                 img = img.resize((max_width, max(1, int(img.height * ratio))), Image.LANCZOS)
             return img
 
-        img = await loop.run_in_executor(None, _compose)
+        # ΑΩ-R25：组装/编码是 CPU-bound 图像工作 ⇒ screen 池（与抓帧同池：
+        # 顺序 await，worker 在每次提交间释放 —— 无同池嵌套死锁面）
+        img = await loop.run_in_executor(get_pool(SCREEN_POOL), _compose)
 
         def _encode() -> tuple[bytes, int, int]:
             buf = io.BytesIO()
@@ -648,11 +746,18 @@ class ScreenCapture:
                 q = quality if quality is not None else self.cfg.jpeg_quality
                 src.save(buf, format="JPEG", quality=q, optimize=True)
                 return buf.getvalue(), src.width, src.height
-            img.save(buf, format="PNG", optimize=True)
+            # ΝΩ-35：PNG optimize=True → False。量化（1080p 类真机截屏，
+            # perf_counter ×10）：23.4ms → 10.2ms（-56%）；体积 8039B → 8638B
+            # （+7%，绝对量 <1KB —— shm 通道走本地 mmap，带宽不敏感）。最坏
+            # 不可压缩内容（纯噪声）179→205ms（+15%，zlib 主导，罕见工况，
+            # 诚实记录）。thumbnail 路径（max_width 缩放后）同改：4.8→1.8ms。
+            img.save(buf, format="PNG", optimize=False)
             return buf.getvalue(), img.width, img.height
 
         try:
-            image_bytes, width, height = await loop.run_in_executor(None, _encode)
+            image_bytes, width, height = await loop.run_in_executor(
+                get_pool(SCREEN_POOL), _encode,
+            )
         except Exception as e:  # noqa: BLE001
             raise PhysicalError(
                 ErrorKind.SCREEN_CAPTURE_FAILED,
@@ -660,13 +765,20 @@ class ScreenCapture:
             ) from e
 
         # 写入共享内存通道
-        handle = make_handle(
-            image_bytes,
-            width,
-            height,
-            format=format.upper(),
-            config=self.cfg,
-        )
+        # ΝΩ-35（体检 T4）：make_handle 是 MB 级 mmap memcpy（1080p PNG
+        # 1-6MB，~2-8ms/MB）+ mmap-file 落盘 —— 原在事件循环 ⇒ SCREEN_POOL
+        # （shm 注册表自带 _quota_lock/uuid 命名，多 worker 并发安全）。
+        # PhysicalError 语义不变：经 await 原样上抛。
+        def _store() -> ShmHandle:
+            return make_handle(
+                image_bytes,
+                width,
+                height,
+                format=format.upper(),
+                config=self.cfg,
+            )
+
+        handle = await loop.run_in_executor(get_pool(SCREEN_POOL), _store)
         return handle, extras
 
     async def capture_png_bytes(self, region: dict | None = None) -> tuple[bytes, int, int]:
@@ -674,17 +786,24 @@ class ScreenCapture:
 
         旧实现里 get_ui_tree 内联了一份独立截屏代码：不走本类 ⇒ 不享受
         ``DSH_PHYSICAL_TEST_SCREEN`` 合成图降级，且异常被静默 ``pass`` 吞掉。
+
+        ΝΩ-51：backend=dxgi 时同样走 DXGI 分流（同 ``capture``）；本路径无
+        extras 面，dxgi meta（脏区）与降级 note 在此丢弃 —— 调用方只消费
+        图像字节，诚实降级本身仍生效（失败自动回 GDI）。
         """
         loop = asyncio.get_running_loop()
-        img = await loop.run_in_executor(None, self._capture_image, region)
+        # ΑΩ-R25：抓帧 + 编码均 CPU 图像工作 ⇒ screen 专属池
+        img = await loop.run_in_executor(get_pool(SCREEN_POOL), self._capture_image, region)
 
         def _encode() -> tuple[bytes, int, int]:
             buf = io.BytesIO()
-            img.save(buf, format="PNG", optimize=True)
+            # ΝΩ-35：同 capture._encode 的 PNG optimize=False 决策（数字见彼处
+            # 注释）；本路径字节供 ui_tree L2 OCR 解码 —— 延迟敏感、体积无关。
+            img.save(buf, format="PNG", optimize=False)
             return buf.getvalue(), img.width, img.height
 
         try:
-            return await loop.run_in_executor(None, _encode)
+            return await loop.run_in_executor(get_pool(SCREEN_POOL), _encode)
         except Exception as e:  # noqa: BLE001
             raise PhysicalError(
                 ErrorKind.SCREEN_CAPTURE_FAILED,
@@ -706,8 +825,45 @@ class ScreenCapture:
             )
         return self._surface_source(serial)
 
-    def _capture_image(self, region: dict | None, display: int | None = None) -> Image.Image:
+    def _grab_dxgi_frame(self) -> tuple[Image.Image | None, str | None, dict | None]:
+        """ΝΩ-51：DXGI DDA 抓帧（SCREEN_POOL 线程内执行，锁由 grabber 持有）。
+
+        返回 ``(帧, None, meta)`` 或 ``(None, 降级原因, None)``。绝不抛 ——
+        缺席/失败一律转诚实降级说明（运行层铁律），由 ``_capture_image`` 落
+        ``dxgi_meta['degraded']`` ⇒ ``capture`` 的 ``note``。meta 仅
+        ``capture`` 透出（``capture_png_bytes`` 无 extras 面，丢弃 —— 该路径
+        只消费图像本体）。
+        """
+        try:
+            from .dxgi_capture import get_grabber
+        except Exception as e:  # noqa: BLE001 —— 模块缺席（理论不可达）也降级
+            return None, f"dxgi backend unavailable (import: {type(e).__name__}: {e}); degraded to gdi", None
+        try:
+            img, meta = get_grabber().grab(
+                max(0, int(getattr(self.cfg, "dxgi_acquire_timeout_ms", 0)))
+            )
+        except PhysicalError as e:
+            return None, f"{e.detail}; degraded to gdi", None
+        except Exception as e:  # noqa: BLE001 —— 兜底铁律：运行层绝不裸抛
+            return None, f"dxgi capture failed ({type(e).__name__}: {e}); degraded to gdi", None
+        return img, None, meta
+
+    def _capture_image(
+        self,
+        region: dict | None,
+        display: int | None = None,
+        dxgi_meta: dict | None = None,
+    ) -> Image.Image:
         """同步截屏（线程池内执行）：真实截屏 → 测试降级 → 裁剪。
+
+        ΝΩ-51 backend 分流（``cfg.backend=='dxgi'`` 且显式配置开启）：
+        Windows 在场且 ``display`` 未指定（MVP 主屏单输出）时优先走 DXGI
+        Desktop Duplication（``dxgi_capture.get_grabber``）；任何失败/缺席
+        （DLL、无显示器会话、权限、旋转屏）⇒ **诚实降级**下方既有 GDI 路径，
+        原因写入 ``dxgi_meta['degraded']``（``capture`` 转 ``note``）。成功则
+        ``dxgi_meta`` 收到 dxgi meta（脏区矩形/fresh —— frame_diff 通道注记
+        面）。``region`` 裁剪两路同在后置 —— 下游管线（指纹/gate/SOM/编码）
+        方言不变。缺省 backend=gdi 时本分支零触达（兼容铁律：逐字节不变）。
 
         Σ-5 多屏感知：``display`` = 显示器索引（``list_displays`` 清单序，0 起）。
         非 None 且 Windows 在场时：``PIL.ImageGrab.grab(all_screens=True)`` 抓
@@ -721,6 +877,20 @@ class ScreenCapture:
           - ``display=i``：``region`` 归一化 [0,1]² 的基准矩形 = **显示器 i**
             （而非主屏）—— overlay 全屏归一化坐标同理。
         """
+        if (
+            getattr(self.cfg, "backend", "gdi") == "dxgi"
+            and display is None
+            and platform.system() == "Windows"
+        ):
+            img, degraded, dmeta = self._grab_dxgi_frame()
+            if img is not None:
+                if dxgi_meta is not None and dmeta:
+                    dxgi_meta.update(dmeta)
+                if region:
+                    img = self._crop_region(img, region)
+                return img
+            if dxgi_meta is not None and degraded:
+                dxgi_meta["degraded"] = degraded
         if display is not None and platform.system() == "Windows":
             (mx, my, mw, mh), (vx0, vy0, vw, vh) = _display_capture_rect(display)
             try:
@@ -821,8 +991,9 @@ class ScreenCapture:
         try:
             import pyautogui
 
+            # ΑΩ-R25：尺寸读取（快）走 screen 池 —— 不排在 adb/编码队尾
             size = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: pyautogui.size()
+                get_pool(SCREEN_POOL), lambda: pyautogui.size()
             )
             return {"width": int(size.width), "height": int(size.height)}
         except Exception as e:  # noqa: BLE001
@@ -880,12 +1051,16 @@ class ScreenCapture:
 
     def _get_frame(self, frame_id: int) -> tuple[np.ndarray, tuple[int, int]]:
         """按 id 取缓存帧（半分辨率 RGB + 原始全屏尺寸）。"""
-        for fid, arr, full_size in reversed(self._frames):
-            if fid == frame_id:
-                return arr, full_size
+        # ΝΩ-9：持锁迭代（入环/清环在事件循环线程并发）—— deque 迭代中变异
+        # 会抛 RuntimeError；命中即返回（with 块退出自动放锁），numpy 统计在锁外。
+        with self._frames_lock:
+            for fid, arr, full_size in reversed(self._frames):
+                if fid == frame_id:
+                    return arr, full_size
+            kept = [f[0] for f in self._frames]
         raise PhysicalError(
             ErrorKind.INVALID_ARGS,
-            f"frame {frame_id} not in cache (kept: {[f[0] for f in self._frames]})",
+            f"frame {frame_id} not in cache (kept: {kept})",
         )
 
     def frame_stats(self, frame_id: int, regions: list[dict]) -> list[dict]:
@@ -1015,4 +1190,98 @@ class ScreenCapture:
         }
 
     def frame_ids(self) -> list[int]:
-        return [f[0] for f in self._frames]
+        with self._frames_lock:  # ΝΩ-9：帧环跨线程 —— 快照式读
+            return [f[0] for f in self._frames]
+
+
+# ─── ΝΩ-51 自测入口：python -m dsh_physical.screen --selftest ───
+# 覆盖：视觉指纹已知值（不变式哨）+ backend 分流三态（默认 gdi 零变化 /
+# dxgi 成功 meta 透出 / dxgi 失败诚实降级 GDI）。全部离线可跑（dxgi 真机
+# 冒烟在 dxgi_capture --selftest 的 dxci 探针）。
+
+def _run_selftest() -> int:
+    import os
+    from unittest import mock
+
+    failures: list[str] = []
+
+    def check(name: str, cond: bool) -> None:
+        print(f"[{'PASS' if cond else 'FAIL'}] {name}")
+        if not cond:
+            failures.append(name)
+
+    # 1. 视觉指纹不变式（既有热路径哨 —— dhash 平图全零 / 阶梯 0x24）
+    flat = Image.new("RGB", (64, 64), (128, 128, 128))
+    check("dhash flat all-zero", compute_dhash(flat) == "0" * 16)
+    arr = np.full((64, 64, 3), 128, dtype=np.uint8)
+    arr[:, 32:] = 248
+    check("dhash ladder 0x24", compute_dhash(Image.fromarray(arr)) == "24" * 8)
+
+    # 2. 默认 backend=gdi：dxgi 分支零触达（哨兵若被调即 FAIL）
+    from .config import ScreenshotConfig
+
+    def _dxgi_sentinel():
+        raise AssertionError("dxgi must not be touched with default gdi backend")
+
+    ctrl_gdi = ScreenCapture(ScreenshotConfig())
+    ctrl_gdi._grab_dxgi_frame = _dxgi_sentinel  # type: ignore[assignment]
+    async def _run_gdi() -> tuple[str | None, bool]:
+        with mock.patch.dict(os.environ, {"DSH_PHYSICAL_TEST_SCREEN": "1"}):
+            _h, ex = await ctrl_gdi.capture(want_hashes=True, meta_only=True)
+        return ex.get("note"), "dxgi" in ex
+    note_gdi, has_dxgi = asyncio.run(_run_gdi())
+    check("default gdi: capture untouched by dxgi (note absent, no dxgi extras)",
+          note_gdi is None and not has_dxgi)
+
+    # 3. backend=dxgi 成功：注入帧经全管线，meta 透 extras["dxgi"]
+    injected = Image.fromarray(
+        (np.arange(96 * 128 * 3, dtype=np.uint8) % 251).reshape(96, 128, 3))
+    ctrl_dx = ScreenCapture(ScreenshotConfig(backend="dxgi"))
+    meta_in = {"backend": "dxgi", "width": 128, "height": 96, "fresh": True,
+               "dirty_rects": [{"x": 0.25, "y": 0.0, "width": 0.5, "height": 1.0}],
+               "move_count": 1, "cursor": False}
+    ctrl_dx._grab_dxgi_frame = lambda: (injected, None, meta_in)  # type: ignore[assignment]
+    async def _run_dx() -> dict:
+        _h, ex = await ctrl_dx.capture(want_hashes=True, keep_frame=True, meta_only=True)
+        return ex
+    ex_dx = asyncio.run(_run_dx())
+    check("dxgi success: extras['dxgi'] surfaced with dirty_rects",
+          ex_dx.get("dxgi", {}).get("backend") == "dxgi"
+          and len(ex_dx["dxgi"]["dirty_rects"]) == 1
+          and ex_dx.get("note") is None)
+    check("dxgi success: frame flows existing pipeline (dhash of injected)",
+          ex_dx.get("dhash") == compute_dhash(injected))
+
+    # 4. backend=dxgi 失败：诚实降级既有 GDI 路径 + note 申报原因
+    # （pyautogui.screenshot 强制失败 → TEST_SCREEN 合成图；无 pyautogui 的
+    # 环境走 ImportError 侧的自然失败降级 —— 两种环境同断言）
+    ctrl_fail = ScreenCapture(ScreenshotConfig(backend="dxgi"))
+    ctrl_fail._grab_dxgi_frame = lambda: (None, "dxgi exploded; degraded to gdi", None)  # type: ignore[assignment]
+
+    async def _fail_once() -> dict:
+        with mock.patch.dict(os.environ, {"DSH_PHYSICAL_TEST_SCREEN": "1"}):
+            try:
+                import pyautogui as _pag
+            except ImportError:
+                _h, ex = await ctrl_fail.capture(want_hashes=True, meta_only=True)
+                return ex
+            with mock.patch.object(_pag, "screenshot", side_effect=RuntimeError("forced")):
+                _h, ex = await ctrl_fail.capture(want_hashes=True, meta_only=True)
+                return ex
+
+    ex_fail = asyncio.run(_fail_once())
+    check("dxgi failure: honest degrade note + gdi frame still served",
+          isinstance(ex_fail.get("note"), str) and "degraded to gdi" in ex_fail["note"]
+          and "dxgi" not in ex_fail and ex_fail.get("dhash"))
+
+    print(f"\nscreen selftest: {'OK' if not failures else 'FAILED: ' + '; '.join(failures)}")
+    return 0 if not failures else 1
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    if "--selftest" in _sys.argv:
+        raise SystemExit(_run_selftest())
+    print("usage: python -m dsh_physical.screen --selftest")
+    raise SystemExit(2)

@@ -7,6 +7,9 @@ function translateFailureKind(kind) {
         case 'gate-rejected': return 'gate-rejected';
         case 'host-error': return 'host-error';
         case 'timeout': return 'timeout';
+        // ΝΩ-8：止损型超时（编排器主动 abort 后的归因）—— 本端口只翻译不产生；
+        // 防御性映射为 timeout（主动叫停的超时仍是超时，绝不误归 host-error）
+        case 'timeout-aborted': return 'timeout';
         case 'timed-out': return 'timed-out';
         case 'sandbox-degraded': return 'sandbox-degraded';
         case 'cancelled': return 'cancelled';
@@ -34,7 +37,9 @@ function translateFailureKind(kind) {
  * J 纪元纵深防御（纯函数）：屏幕尺寸的有限正数闸。
  * 旧链路的 NaN 事故（health 曾把 tuple 序列化成数组 → Node 端 undefined 除数
  * → 归一化产出 NaN 坐标，静默毒化决策链）在消费侧永久免疫：坏数据 ⇒ null
- * ⇒ perceive 诚实 fault。宁可失明，不可说谎。
+ * ⇒ 消费方诚实 fault。宁可失明，不可说谎。
+ * ΑΩ-R27：d7HostPort 内部消费方已随 screenSize 缓存退役归零 —— 保留为公开
+ * 导出（epochJ J-11 执法在册），供未来持屏幕尺寸的消费方复用同一防御闸。
  */
 export function sanitizeScreenSize(screen) {
     const w = Number(screen?.width);
@@ -50,7 +55,18 @@ export class D7PhysicalHostPort {
     _capability;
     adapter = null;
     router = null;
-    screenSize = null;
+    // ΑΩ-R27 定谳（screenSize 僵尸状态处决）：本类曾缓存 health 探测的屏幕尺寸，
+    // 供 perceive 归一化（像素 rect ÷ screenSize）与「就绪判据」消费。J 纪元
+    // 坐标统一后 Python 漏斗直接输出全屏归一化坐标，本端 _translateTree 零换算
+    // 直通 —— 字段就此失去全部读方（全库检索 src/ + test/ 仅余就绪判据自食）。
+    // 归一化基准的**活**依赖早已单源在服务端：/v1/get_ui_tree 每请求现场重探
+    // screen size，缺席时漏斗诚实 fault（"L1 screen size unavailable (cannot
+    // normalize pixel rects)"）—— 新鲜度由真正需要该值的一层负责。
+    // 两案取舍：「TTL 活化」= 为无人读取的值在感知热路径引入周期 health 轮询，
+    // 纯开销；且旧判据会在「health.screen 探测失败但 L2 OCR 可用」的环境把可用
+    // 感知错杀成 fault。故删字段 + 删判据，perceive 的诚实边界由 getUiTree 的
+    // fault/empty 结果单一裁决。sanitizeScreenSize 纯函数保留（公开导出，
+    // epochJ J-11 执法在册，消费方自用防御闸）。
     seqCounter = 0;
     initPromise = null;
     disposed = false;
@@ -66,16 +82,30 @@ export class D7PhysicalHostPort {
         D7PhysicalHostPort._finalizer.register(this, { mgr: this.mgr }, this);
     }
     /**
-     * 执行原子动作（HostExecutePort 接口）。
+     * 执行原子动作（HostExecutePort 接口；ΝΩ-8 增补可选止损 signal —— 接口臂缺参
+     * 不破坏可赋值性，外部注入端口零感知）。
      *
      * 首次调用会触发：spawn Python → 健康探活 → 构造 adapter → 构造 router → 探活 capability 同步。
      * 启动失败 / 运行失败一律诚实返回 failure，永不抛错。
+     *
+     * ΝΩ-8 止损语义：signal 在场且已 abort ⇒ 立即 cancelled 归因返回（不为已取消的
+     * 动作 spawn Python / 发请求）；在途 abort 经 dispatch → adapter → microFetch
+     * 组合断流（Python 收到断连即中断 —— 服务器侧无需改动）。
+     * signal 缺席 ⇒ 旧路径（逐字节）。
      */
-    async execute(action) {
+    async execute(action, signal) {
         if (this.disposed) {
             return {
                 status: 'failure',
                 failure: { kind: 'host-error', detail: 'D7PhysicalHostPort already disposed' },
+            };
+        }
+        const stop = signal instanceof AbortSignal ? signal : undefined; // 防御性收窄（garbage 按缺席）
+        if (stop?.aborted) {
+            // 取消先于派发：cancelled 归因直达（消费侧路由铁律：cancelled 不入重试）
+            return {
+                status: 'failure',
+                failure: { kind: 'cancelled', detail: 'D7PhysicalHostPort execute aborted before dispatch (external signal)' },
             };
         }
         try {
@@ -83,7 +113,11 @@ export class D7PhysicalHostPort {
             const seq = ++this.seqCounter;
             // 剥离 rationale（执行工位物理上看不见规划理由 —— 类型层已隔离，这里是保险）
             const sandboxAction = { kind: action.kind, args: action.args ?? {} };
-            const result = await router.dispatch(sandboxAction, seq);
+            // ΝΩ-8：止损信号透传 dispatch（seam 类型见 SignalDispatch 注）——
+            // 在场即随路由直达 adapter 调用 / microFetch（HTTP 层已吃 signal）；
+            // 缺席即旧路径（无第三实参语义差）。
+            const dispatch = router.dispatch.bind(router);
+            const result = await dispatch(sandboxAction, seq, stop);
             // 翻译：orchestration ExecutionResult → knowledge ExecutionResult (Omit)
             if (result.failure) {
                 return {
@@ -120,7 +154,9 @@ export class D7PhysicalHostPort {
      * 感知端口（SceneSourcePort 契约）：屏幕 → ScenePatch[]。
      *
      * 通道：D-5 getUiTree 反双盲漏斗（L1 结构树 > L2 OCR；forceL3 语义授权 ⇒ 开 L3）。
-     * 坐标翻译：Python 端像素 rect → 归一化（÷ 屏幕尺寸，尺寸来自 health 单次缓存）。
+     * 坐标翻译：Python 端漏斗直接输出全屏归一化 rect（J 纪元），本端零换算直通。
+     * ΑΩ-R27：旧「screenSize 就绪判据」已删 —— 归一化基准的活依赖在服务端
+     * 每请求现场重探（见类内 ΑΩ-R27 定谳注），本端不再持有屏幕尺寸缓存。
      * 异常诚实：任何故障 ⇒ fault 补丁（形状与 capability 源统一），绝不抛错毒化流水线。
      */
     async perceive(req, signal) {
@@ -130,13 +166,8 @@ export class D7PhysicalHostPort {
         }
         try {
             await this._ensureInitialized();
-            if (!this.screenSize)
-                await this._syncScreenSize();
             if (!this.adapter)
                 throw new Error('adapter not ready after init');
-            if (!this.screenSize) {
-                return faultPatches(req.grid, 'screen size unavailable (health screen probe failed)');
-            }
             // 止损信号直通 getUiTree fetch（流水线感知步超时 ⇒ 立即断流，
             // 不再等 15s 内层超时自然到账 —— 感知是热路径，浪费窗口按步计）
             const r = await this.adapter.getUiTree({ funnelCeiling: req.forceL3 ? 'L3' : 'L2', signal });
@@ -173,22 +204,6 @@ export class D7PhysicalHostPort {
         const source = depth === 'L3' ? 'L3-vlm' : depth === 'L2' ? 'L2-ocr' : 'L1-tree';
         return dispatchElementsToGrid(els, req.grid, depth, source);
     }
-    /** 屏幕尺寸缓存（health 单次探测；失败保持 null ⇒ perceive 诚实 fault）。
-     *  尺寸统一过 `sanitizeScreenSize` 有限正数闸（见该函数注）。 */
-    async _syncScreenSize() {
-        if (!this.adapter)
-            return;
-        const health = await this.adapter.health();
-        if (health.ok && !('error' in health.value.screen)) {
-            const sanitized = sanitizeScreenSize(health.value.screen);
-            if (!sanitized) {
-                console.warn(`[D7PhysicalHostPort] health reported non-finite screen size ` +
-                    `(${JSON.stringify(health.value.screen)}) — keeping null (honest fault over NaN coords)`);
-                return;
-            }
-            this.screenSize = sanitized;
-        }
-    }
     /** 当前是否已完成初始化（router 可路由） */
     get initialized() { return this.router !== null; }
     /** 暴露 capability cache —— 外部可查询当前路由策略 */
@@ -207,7 +222,6 @@ export class D7PhysicalHostPort {
         catch { /* noop：reset 失败不阻断关停 */ }
         this.router = null;
         this.adapter = null;
-        this.screenSize = null;
         await this.mgr.dispose();
     }
     async _ensureInitialized() {
@@ -274,20 +288,13 @@ export class D7PhysicalHostPort {
         this.adapter = adapter;
         // 3. 构造 router
         this.router = new PhysicalActionRouterImpl(adapter, this._capability);
-        // 4. (可选) 启动期探活 + 同步 capability 与屏幕尺寸（perceive 端口的归一化基准）
+        // 4. (可选) 启动期探活 + 同步 capability（ΑΩ-R27：屏幕尺寸不再缓存 ——
+        //    J 纪元后本端零消费，活依赖在服务端每请求重探，见类内定谳注）
         if (this.opts.syncCapabilityOnStartup !== false && !this.disposed) {
             try {
                 const health = await adapter.health();
                 if (health.ok) {
                     syncCapabilityFromHealth(this._capability, health.value);
-                    if (!('error' in health.value.screen)) {
-                        // J 纪元纵深防御：有限正数闸（坏数据 ⇒ 保持 null 诚实 fault，绝不 NaN）
-                        this.screenSize = sanitizeScreenSize(health.value.screen);
-                        if (health.value.screen && !this.screenSize) {
-                            console.warn(`[D7PhysicalHostPort] startup health reported non-finite screen size ` +
-                                `(${JSON.stringify(health.value.screen)}) — screenSize stays null`);
-                        }
-                    }
                 }
             }
             catch { /* 不阻断：capability cache 懒同步也 OK */ }

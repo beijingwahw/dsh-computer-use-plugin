@@ -11,7 +11,10 @@
 //   点击类：探针点击目标后立即回点（幂等切换场景：展开/收起、菜单开合 ——
 //           目标标签须命中幂等词汇表 isIdempotentToggleLabel，命中不了就没有
 //           可逆探针可言，诚实跳过）；
-//   输入类：输入 1 个字符后立即退格（任何可编辑上下文里状态恒复原）。
+//   输入类：输入 1 个字符后立即退格（可编辑上下文里字符状态恒复原。ΑΩ-R38
+//           副作用先验闸：目标字符串证据带 search/自动补全/即时筛选类信号 ⇒
+//           单字符可能已触发 oninput 网络请求等不可逆副作用，该探针降级
+//           「不可论证」—— 词表执法在 canaryLogic.classifyCanaryTrigger 第 7 步）。
 //
 //   预测-验证比对（compareCanaryObservation）：探针的实际视觉响应（三帧区域
 //   指纹：基线 h0 → 探针中 h1 → 复位后 h2，经注入的帧哈希端口）与
@@ -56,7 +59,14 @@ import { approval } from '../approval';
 import { telemetry } from '../telemetry';
 import { focusTracker } from '../focusTracker';
 import * as physicalBackend from '../physicalBackend';
+// ΝΩ-2（物理探针互斥）：试演探针与用户/其他会话动作在同一 D-1 躯体队列排队
+//（ioMutex 只读引入 —— 探针步/复位步/帧通道不再与并发物理派发交错，三帧
+// 取证证据 h0→h1→h2 的每次派发原子串行，不再被并发动作污染）
+import { serialize } from '../ioMutex';
 import { getPopupState } from './popupGuard';
+// ΑΩ-R4（审计盲区消除）：物理探针派发的 GUARD_PROBE 存证提交（fail-open ——
+// 探针是安全机制本身，审计失败只打点不拦截，立法论证见 probeAudit.ts 文件头）
+import { auditGuardProbe, type GuardProbeContext } from './probeAudit';
 // W6-1（doctor 债清偿·smell.over-engineering）：契约类型 + 幂等词汇表 + 触发分类 +
 // 反事实预测 + 预测-验证比对三个纯函数区逐字节搬至 ./canaryLogic —— 导入面不变
 // （本文件原位再导出全部公共面）。
@@ -70,7 +80,7 @@ import type { PolicyAction } from '../autonomy/policyEngine';
 import type { WorldSnapshot } from '../autonomy/worldSnapshot';
 export {
   CANARY_ACTION_TOOLS, CANARY_PROBE_BUDGET_DEFAULT, CANARY_RESTORE_FLOOR_DEFAULT,
-  isIdempotentToggleLabel, classifyCanaryTrigger, compareCanaryObservation,
+  isIdempotentToggleLabel, isInstantReactionLabel, classifyCanaryTrigger, compareCanaryObservation,
 } from './canaryLogic';
 export type {
   CanaryProbeKind, CanaryProbePlan, CanaryObservation, CanaryProbePorts, CanaryEvent,
@@ -150,29 +160,45 @@ bindCanaryEpistemicPorts({
 
 // ─── 探针编排（防御式：一切端口异常收敛为状态，绝不抛、绝不悬挂） ───
 
-/** 端口调用包装：异常 / 非真值 ⇒ false（世界侧是否被触碰由调用序保证） */
-async function tryStep(name: string, fn: () => Promise<boolean>, steps: string[]): Promise<boolean> {
+/** 端口调用包装：异常 / 非真值 ⇒ false（世界侧是否被触碰由调用序保证）。
+ *  ΑΩ-R4：每次物理派发（探针步 + 复位重试步）结算后立即补 GUARD_PROBE 审计
+ *  行入防篡改链 —— 此前这些绕过宿主管线的微动作链上无痕。审计 fail-open：
+ *  auditGuardProbe 绝不抛，探针行为与既有三帧取证零变化。 */
+async function tryStep(
+  name: string,
+  fn: () => Promise<boolean>,
+  steps: string[],
+  auditCtx: GuardProbeContext,
+): Promise<boolean> {
   try {
     const ok = (await fn()) === true;
     steps.push(`${name}: ${ok ? 'ok' : 'dispatch-failed'}`);
+    await auditGuardProbe('canary', name, ok ? 'ok' : 'failed', auditCtx);
     return ok;
   } catch (e: any) {
     steps.push(`${name}: threw(${e?.message ?? 'unknown'})`);
+    await auditGuardProbe('canary', name, 'threw', auditCtx);
     return false;
   }
 }
 
-/** 帧哈希端口包装：异常/非串/空串 ⇒ null（帧通道缺席） */
+/** 帧哈希端口包装：异常/非串/空串 ⇒ null（帧通道缺席）。
+ *  ΑΩ-R4：帧通道也是物理派发（captureProcessed）—— 同律入链（结果三态
+ *  ok=指纹在手 / failed=通道缺席 / threw=端口抛错）；端口未注入属未派发，
+ *  无审计行。 */
 async function tryHash(
   ports: CanaryProbePorts,
   point: { x: number; y: number } | null,
   radius: number,
 ): Promise<string | null> {
   try {
-    if (typeof ports.regionHash !== 'function') return null;
+    if (typeof ports.regionHash !== 'function') return null; // 未派发 ⇒ 无审计行
     const h = await ports.regionHash(point, radius);
-    return typeof h === 'string' && h.length > 0 ? h : null;
+    const usable = typeof h === 'string' && h.length > 0;
+    await auditGuardProbe('canary', 'region-hash', usable ? 'ok' : 'failed', { point, radius });
+    return usable ? h : null;
   } catch {
+    await auditGuardProbe('canary', 'region-hash', 'threw', { point, radius });
     return null;
   }
 }
@@ -208,11 +234,11 @@ export async function attemptCanaryProbe(
     if (p === null) return { status: 'unavailable', notes: ['点击探针无目标点'] };
     const h0 = await tryHash(ports, p, radius);
     if (h0 === null) return { status: 'unavailable', notes: ['基线帧通道缺席（无 h0 不可比）'] };
-    const ok1 = await tryStep('probe-click', () => ports.click!(p), steps);
+    const ok1 = await tryStep('probe-click', () => ports.click!(p), steps, { point: p });
     if (!ok1) return { status: 'unavailable', notes: [...steps, '首步点击派发失败 —— 世界未被触碰'] };
     const h1 = await tryHash(ports, p, radius);
-    const ok2 = await tryStep('probe-click-back', () => ports.click!(p), steps) ||
-      await tryStep('probe-click-back-retry', () => ports.click!(p), steps);
+    const ok2 = await tryStep('probe-click-back', () => ports.click!(p), steps, { point: p }) ||
+      await tryStep('probe-click-back-retry', () => ports.click!(p), steps, { point: p });
     if (!ok2) degradedNotes.push('回点派发失败（已尽力重试）—— 世界可能停留在展开态');
     const h2 = await tryHash(ports, p, radius);
     if (!ok2) return { status: 'failed', notes: [...steps, ...degradedNotes] };
@@ -227,18 +253,22 @@ export async function attemptCanaryProbe(
     };
   }
 
-  // type-char：输入 1 字符 → 立即退格（任何可编辑上下文状态恒复原）
+  // type-char：输入 1 字符 → 立即退格（任何可编辑上下文状态恒复原）。
+  // ΑΩ-R38：能到达编排层的 type 探针已在 classifyCanaryTrigger 第 7 步过即时
+  // 反应词表闸（带 search/自动补全信号的目标在分类层已降级不可论证）—— 此处
+  // 不重复判词表（单一事实源，canaryLogic.isInstantReactionLabel）。
   if (typeof ports.typeChar !== 'function' || typeof ports.backspace !== 'function') {
     return { status: 'unavailable', notes: ['输入/退格物理端口缺席'] };
   }
   const h0 = await tryHash(ports, null, radius);
   if (h0 === null) return { status: 'unavailable', notes: ['基线帧通道缺席（无 h0 不可比）'] };
   const ch = typeof plan.char === 'string' && plan.char.length > 0 ? plan.char : 'x';
-  const ok1 = await tryStep('probe-type-char', () => ports.typeChar!(ch), steps);
+  // ΑΩ-R4 脱敏纪律：type 探针的审计行只记 charCount（单字符事实），字符内容零明文
+  const ok1 = await tryStep('probe-type-char', () => ports.typeChar!(ch), steps, { charCount: ch.length });
   if (!ok1) return { status: 'unavailable', notes: [...steps, '首步输入派发失败 —— 世界未被触碰'] };
   const h1 = await tryHash(ports, null, radius);
-  const ok2 = await tryStep('probe-backspace', () => ports.backspace!(), steps) ||
-    await tryStep('probe-backspace-retry', () => ports.backspace!(), steps);
+  const ok2 = await tryStep('probe-backspace', () => ports.backspace!(), steps, {}) ||
+    await tryStep('probe-backspace-retry', () => ports.backspace!(), steps, {});
   if (!ok2) degradedNotes.push('退格派发失败（已尽力重试）—— 焦点元素可能残留 1 个探针字符');
   const h2 = await tryHash(ports, null, radius);
   if (!ok2) return { status: 'failed', notes: [...steps, ...degradedNotes] };
@@ -256,30 +286,46 @@ export async function attemptCanaryProbe(
 // ─── 生产端口（零孵化 + dry-run 纪律，与 interactivityProbe/rootCauseGuard 同律） ───
 
 /**
+ * ΝΩ-2：试演探针的物理 IO 缝 —— 缺省 D-1 全局互斥队列（ioMutex.serialize，
+ * 与 system.ts 的用户动作同一队列），测试注入假件计数（时序断言的观察面）。
+ */
+export type CanaryProbeIo = { serialize: typeof serialize };
+
+/**
  * 生产探针端口：physicalBackend 的薄包装。
  *   · 派发闸：healthSnapshot() 在场（绝不因试演孵化服务）且非 dry-run；
  *   · 帧通道：click 用目标邻域 wantRegionHash；type 用焦点槽
  *     （focusTracker，过期即缺席）—— 焦点缺席退全屏 dhash。
+ * ΝΩ-2（物理探针互斥）：四个端口的**整个派发体**（含零孵化/dry-run 门控）
+ * 经 io.serialize 入队 —— 探针步（点击/单字符/退格）与帧通道（采帧）和用户/
+ * 其他会话的物理动作（system.ts 同队列）原子串行：三帧取证（h0→h1→h2）的
+ * 每次派发不再被并发点击/输入交错污染。门控在临界区内裁决 —— 拒绝派发也占
+ * 一次队列轮转（诚实：探针是否触世界由队列序保证）；排队超时走 ioMutex 的
+ * IoTimeoutError → tryStep 收口为 'threw' → 既有降级语义（可用性优先不变）。
+ * 原子性边界（诚实声明）：互斥粒度是**单次派发**，不是整个试演序列 —— 探针
+ * 两步之间的队列空隙理论上可插入并发动作；彻底的序列级互斥需把编排整体
+ * 入队，但 rootCause 冻结探针（300ms 帧间隔）证明「长持锁」会饿死全部用户
+ * IO，故按派发粒度立法（与 system.ts 用户的动作粒度对等 —— 不越权插队）。
  */
-export function productionCanaryPorts(config: Config): CanaryProbePorts {
+export function productionCanaryPorts(config: Config, io: CanaryProbeIo = { serialize }): CanaryProbePorts {
   const dispatchOk = (): boolean => physicalBackend.healthSnapshot() !== null && config.dryRun !== true;
   return {
-    click: async p => {
+    click: async p => io.serialize(async () => {
       if (!dispatchOk()) return false;
       await physicalBackend.clickMouse(p.x, p.y, 'left', false);
       return true;
-    },
-    typeChar: async ch => {
+    }),
+    typeChar: async ch => io.serialize(async () => {
       if (!dispatchOk()) return false;
       await physicalBackend.typeText(ch, false, false);
       return true;
-    },
-    backspace: async () => {
+    }),
+    backspace: async () => io.serialize(async () => {
       if (!dispatchOk()) return false;
       await physicalBackend.pressHotkey(['backspace'], false);
       return true;
-    },
-    regionHash: async (p, r) => {
+    }),
+    regionHash: async (p, r) => io.serialize(async () => {
       if (physicalBackend.healthSnapshot() === null) return null; // 零孵化：帧通道诚实缺席
       const focus = p ?? focusTracker.get(config.focusMaxAgeMs);
       const cap = await physicalBackend.captureProcessed({
@@ -289,7 +335,7 @@ export function productionCanaryPorts(config: Config): CanaryProbePorts {
           : { wantHashes: true }),
       });
       return (focus !== null ? cap.regionDhash : cap.dhash) ?? null;
-    },
+    }),
   };
 }
 

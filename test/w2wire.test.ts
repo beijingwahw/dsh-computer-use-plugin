@@ -35,7 +35,7 @@ import type { GlmClient } from '../src/vlm/glmClient.ts';
 // ─── 假件工坊 ───
 
 /** system 键鼠 monkey-patch（system 是可变对象字面量 —— 恢复器还原原样） */
-type SystemPatch = Partial<Record<'clickMouse' | 'typeText' | 'scroll' | 'pressHotkey' | 'getScreenSize', unknown>>;
+type SystemPatch = Partial<Record<'clickMouse' | 'typeText' | 'scroll' | 'pressHotkey' | 'getScreenSize' | 'dragMouse', unknown>>;
 function patchSystem(over: SystemPatch): () => void {
   const saved: Record<string, unknown> = {};
   const host = system as unknown as Record<string, unknown>;
@@ -504,6 +504,44 @@ test('W2-D②: ask_vlm 缺省路径 —— requote 建议档 original ⇒ 编码
     assert.ok(bytes.length > 0, '出图非空');
   } finally {
     contextManager.clearTaskAnchor();
+    restore();
+  }
+});
+
+// ─── ΑΩ-R12：drag 端口接线（buildAutonomyStack → system.dragMouse 适配） ───
+
+test('ΑΩ-R12: buildAutonomyStack 就地补挂 deps.drag —— system.dragMouse 像素直通、失败收敛不抛', async () => {
+  const drags: Array<{ start: { x: number; y: number }; end: { x: number; y: number } }> = [];
+  let mode: 'ok' | 'fail' = 'ok';
+  const restore = patchSystem({
+    dragMouse: async (start: { x: number; y: number }, end: { x: number; y: number }) => {
+      drags.push({ start, end });
+      if (mode === 'fail') throw new Error('四拍时序失步');
+    },
+  });
+  try {
+    // ① 缺席补挂：铸栈后 deps.drag 在场（接线层 import system 破环，器官本体不碰）
+    const deps: RuntimeDeps = {};
+    buildAutonomyStack(makeConfig(), deps);
+    assert.equal(typeof deps.drag, 'function', 'drag 端口就地补挂');
+
+    // ② 像素四元组直通 system.dragMouse（start/end 对象方言），成功 ⇒ {ok:true}
+    const okRes = await deps.drag!(11, 22, 333, 444);
+    assert.deepEqual(okRes, { ok: true });
+    assert.deepEqual(drags, [{ start: { x: 11, y: 22 }, end: { x: 333, y: 444 } }]);
+
+    // ③ 底层抛错 ⇒ 收敛 {ok:false, error}（运行层铁律 —— 绝不抛）
+    mode = 'fail';
+    const badRes = await deps.drag!(1, 2, 3, 4);
+    assert.equal(badRes.ok, false);
+    assert.ok(badRes.error?.includes('四拍时序失步'), '错误归因透传');
+
+    // ④ 显式注入优先：调用方自带端口不被顶掉（只填缺席位同律）
+    const own = async () => ({ ok: true });
+    const deps2: RuntimeDeps = { drag: own };
+    buildAutonomyStack(makeConfig(), deps2);
+    assert.equal(deps2.drag, own, '显式注入的假件优先');
+  } finally {
     restore();
   }
 });

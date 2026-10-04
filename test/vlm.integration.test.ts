@@ -315,6 +315,68 @@ test('Ω-II: ask_screen 未配置降级 —— 无 Key 零截屏零网络诚实 
   }
 });
 
+// ─── ΝΩ-31：ask_screen unchanged 门控（缓存帧复用）───
+
+test('ΝΩ-31: ask_screen unchanged 门 —— 复用闸命中 ⇒ 零新截屏复用缓存帧；未命中 ⇒ 全新截屏', async () => {
+  const saved = snapshotEnv();
+  try {
+    clearEnvKeys();
+    resetGlmClient();
+    const png = await makePng(320, 240);
+    const vlm = fakeChatClient(() => ({
+      ok: true, text: '缓存的登录页仍在。', latencyMs: 21, model: 'fake-model',
+    }));
+
+    // 复用臂：闸说 unchanged ⇒ 截屏供给一次也不被调用，缓存帧直供云脑
+    let captured = 0;
+    let gateCalls = 0;
+    const reuseTool = createAskScreenTool({} as Config, {
+      capture: async () => { captured++; return png; },
+      reuseGate: async () => {
+        gateCalls++;
+        return { unchanged: true, buffer: png, sourceId: 42 };
+      },
+      client: vlm.client,
+    });
+    for (let i = 0; i < 2; i++) {
+      const out = await runTool(reuseTool, { question: '现在是什么页面？' });
+      assert.equal(out.status, 'SUCCESS');
+      assert.equal(out.state_anchor.answer, '缓存的登录页仍在。');
+      assert.match(out.state_anchor.frame_source, /reused cached screenshot #42/, '锚点如实申报缓存帧来源');
+    }
+    assert.equal(gateCalls, 2, '每次调用都先问复用闸');
+    assert.equal(captured, 0, 'unchanged ⇒ 零新截屏（复用计数钉死）');
+    assert.equal(vlm.calls.length, 2, '问答照常两回合');
+    assert.equal(vlm.calls.every(c => c.images === 1), true, '云脑每回合收到单张截图');
+
+    // 未命中臂：闸说 changed ⇒ 走全新截屏
+    let fresh = 0;
+    const freshTool = createAskScreenTool({} as Config, {
+      capture: async () => { fresh++; return png; },
+      reuseGate: async () => ({ unchanged: false }),
+      client: vlm.client,
+    });
+    const out2 = await runTool(freshTool, { question: '页面变了吗？' });
+    assert.equal(out2.status, 'SUCCESS');
+    assert.equal(fresh, 1, 'changed ⇒ 全新截屏一次');
+    assert.equal(out2.state_anchor.frame_source, 'fresh capture');
+
+    // 闸抛错臂：门控故障 ⇒ 诚实退回全新截屏（绝不以缓存冒充新鲜）
+    let rescued = 0;
+    const failGateTool = createAskScreenTool({} as Config, {
+      capture: async () => { rescued++; return png; },
+      reuseGate: async () => { throw new Error('gate probe down'); },
+      client: vlm.client,
+    });
+    const out3 = await runTool(failGateTool, { question: '还在吗？' });
+    assert.equal(out3.status, 'SUCCESS');
+    assert.equal(rescued, 1, '闸故障 ⇒ 全新截屏兜底');
+  } finally {
+    restoreEnv(saved);
+    resetGlmClient();
+  }
+});
+
 // ─── Ω-III semanticConfirm 第三路径 ───
 
 test('Ω-III: semanticConfirm VLM 兜底 —— 本地双路径皆败后命中/模糊同律/不命中三臂', async () => {

@@ -464,10 +464,95 @@ test('M-4: SO_PEERCRED 服务半边 —— scope 注入器 + pid 刻度（跨平
   assert.ok(srv.includes('SO_PEERCRED peer pid'), 'auth 中间件 pid 逐位相等校验');
 });
 
-test('M-5: 虚拟屏 scroll/hotkey —— K 终章已交付（本项清单核对，零改动）', async () => {
-  // K-7a/K-7b 在本文件上方 —— 此处仅确认两项存在（清账表口径修正）
-  assert.ok(true, 'scroll/hotkey 证据 = K 终章 K-7a/b（清单第 3 项实际剩余：drag/switch）');
+// ΝΩ-38 诚实度修正：原唯一断言 assert.ok(true)（永真）——清单核对非可执行断言，改 {skip} 计数诚实。
+test('M-5: 虚拟屏 scroll/hotkey —— K 终章已交付（本项清单核对，零改动）', { skip: '申报性清单核对：原唯一断言 assert.ok(true) 永真——scroll/hotkey 实证在上方 K-7a/K-7b，本项无可执行断言（清单第 3 项实际剩余：drag/switch）（ΝΩ-38）' });
+
+// ─── ΝΩ-30：虚拟屏证据强度 —— z-order/遮挡、scroll 方向化、长 name 对照 ───
+
+test('ΝΩ-30a: z-order/遮挡 —— popup 铸高层点击不可穿透；显式 z 同律；无 z 场景零回归', () => {
+  const UNDER: VirtualWidget = { role: 'button', name: 'under', rect: { x: 0.3, y: 0.3, width: 0.4, height: 0.3 } };
+  const POPUP_OVER: VirtualWidget = { role: 'dialog', name: 'modal', rect: { x: 0.35, y: 0.35, width: 0.2, height: 0.15 }, popup: true };
+  // 弹窗排场景序**之后**也遮下层 —— 旧行为穿透命中 under（本工单修复的缺陷）
+  const vs = new VirtualScreen([UNDER, POPUP_OVER]);
+  assert.equal(vs.widgetAt(0.45, 0.42)?.name, 'modal', '命中自顶向下：popup 缺省铸高层');
+  const ev = vs.applyAction({ kind: 'click_mouse', args: { x: 0.45, y: 0.42 } } as never);
+  assert.ok(ev.note.includes('modal'), `点击命中弹窗而非穿透：${ev.note}`);
+  // 被遮挡控件在弹窗覆盖区不可点；覆盖区外下层仍可点
+  assert.equal(vs.widgetAt(0.32, 0.55)?.name, 'under', '弹窗覆盖区外下层可点');
+  // 显式 z：非 popup 控件亦可铸层（调用方主权）—— 高 z 遮低 z
+  const vs2 = new VirtualScreen([
+    { role: 'button', name: 'base', rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.2 }, z: 1 },
+    { role: 'button', name: 'top', rect: { x: 0.15, y: 0.12, width: 0.2, height: 0.1 }, z: 5 },
+  ]);
+  assert.equal(vs2.widgetAt(0.2, 0.15)?.name, 'top', '显式 z 高者在上');
+  // 无 z 场景零回归：同层按场景序（首个命中 = 旧行为逐字节不变）
+  const vs3 = new VirtualScreen([UNDER, { role: 'button', name: 'over', rect: { x: 0.35, y: 0.35, width: 0.2, height: 0.15 } }]);
+  assert.equal(vs3.widgetAt(0.45, 0.42)?.name, 'under', '无 z 同层 = 场景序');
 });
+
+test('ΝΩ-30b: esc 关最上层弹窗（非场景序首个）+ 逐层剥离', () => {
+  const BACKDROP: VirtualWidget = { role: 'dialog', name: 'backdrop', rect: { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }, popup: true };
+  const TOAST: VirtualWidget = { role: 'dialog', name: 'toast', rect: { x: 0.3, y: 0.3, width: 0.3, height: 0.2 }, popup: true, z: 20 };
+  // BACKDROP 场景序在前，但 TOAST 显式 z=20 在最上 —— 旧实现会关 backdrop（缺陷）。
+  // BTN 作背景（两弹窗消亡后世界非空 —— esc 反证路径可判）
+  const vs = new VirtualScreen([BTN, BACKDROP, TOAST]);
+  const e1 = vs.applyAction({ kind: 'press_hotkey', args: { keys: ['esc'] } } as never);
+  assert.ok(e1.note.includes('dismissed popup toast'), `esc 关最上层（z 最高）：${e1.note}`);
+  const e2 = vs.applyAction({ kind: 'press_hotkey', args: { keys: ['esc'] } } as never);
+  assert.ok(e2.note.includes('dismissed popup backdrop'), `剥离后次层成最上：${e2.note}`);
+  const e3 = vs.applyAction({ kind: 'press_hotkey', args: { keys: ['esc'] } } as never);
+  assert.equal(e3.effectDetected, false, '弹窗全消 ⇒ esc 反证（K-7b 语义零回归）');
+  // 同 z 弹窗（同为缺省铸层）⇒ 同层场景序首个 = 旧方言不变
+  const twin = new VirtualScreen([
+    { role: 'dialog', name: 'first', rect: { x: 0.2, y: 0.2, width: 0.5, height: 0.5 }, popup: true },
+    { role: 'dialog', name: 'second', rect: { x: 0.3, y: 0.3, width: 0.3, height: 0.3 }, popup: true },
+  ]);
+  const t1 = twin.applyAction({ kind: 'press_hotkey', args: { keys: ['esc'] } } as never);
+  assert.ok(t1.note.includes('dismissed popup first'), `同层按场景序：${t1.note}`);
+});
+
+test('ΝΩ-30c: scroll 方向化 —— 带符号分轴记账 + 落点坐标参与证据', () => {
+  const LIST: VirtualWidget = { role: 'list', name: 'records', rect: { x: 0.1, y: 0.3, width: 0.8, height: 0.5 }, scrollable: true };
+  const vs = new VirtualScreen([LIST]);
+  const d1 = vs.applyAction({ kind: 'scroll_page', args: { direction: 'down', amount: 3 } } as never);
+  assert.ok(d1.note.includes('offset 3'), `down 加：${d1.note}`);
+  const u1 = vs.applyAction({ kind: 'scroll_page', args: { direction: 'up', amount: 2 } } as never);
+  assert.ok(u1.note.includes('offset 1'), `up 减（3−2=1，旧恒增模型得 5）：${u1.note}`);
+  const u2 = vs.applyAction({ kind: 'scroll_page', args: { direction: 'up', amount: 1 } } as never);
+  assert.ok(u2.note.includes('offset 0'), `回到原点：${u2.note}`);
+  const r1 = vs.applyAction({ kind: 'scroll_page', args: { direction: 'right', amount: 4 } } as never);
+  assert.ok(/offset x=4/.test(r1.note), `横轴分轴（left/right 同理）：${r1.note}`);
+  // 落点坐标参与证据：落点在可滚动容器 ⇒ 证据且落点入注；落在非滚动控件 ⇒ 反证
+  const at = vs.applyAction({ kind: 'scroll_page', args: { direction: 'down', amount: 1, x: 0.5, y: 0.5 } } as never);
+  assert.equal(at.effectDetected, true, '落点在容器内');
+  assert.ok(at.note.includes('at (0.50,0.50)'), `落点入注：${at.note}`);
+  const miss = new VirtualScreen([LIST, { role: 'button', name: 'b', rect: { x: 0.1, y: 0.02, width: 0.2, height: 0.05 } }]);
+  const me = miss.applyAction({ kind: 'scroll_page', args: { direction: 'down', amount: 1, x: 0.15, y: 0.04 } } as never);
+  assert.equal(me.effectDetected, false, '落点在非滚动控件 ⇒ 反证（不可隔空找容器）');
+  // 未知方向：无世界模型 ⇒ 诚实缺席（非反证）
+  const weird = vs.applyAction({ kind: 'scroll_page', args: { direction: 'sideways', amount: 1 } } as never);
+  assert.equal(weird.effectDetected, null, '未知方向 = 诚实缺席');
+});
+
+test('ΝΩ-30d: 长 name 对照 —— 截断 20→64（>20 字 expectedText 不再结构性失败）', () => {
+  const name50 = 'submit the quarterly financial report summary'; // 45 字（旧截断 20 时 L3 必假）
+  const vs = new VirtualScreen([{ role: 'button', name: name50, rect: { x: 0.3, y: 0.3, width: 0.3, height: 0.08 } }]);
+  const ev = vs.applyAction({
+    kind: 'click_mouse', args: { x: 0.4, y: 0.34 },
+    expect: { scale: 'text-level', expectedText: name50 },
+  } as never);
+  assert.equal(ev.expectationMet, true, `45 字名全文入 L3 瞄准对照：${ev.note}`);
+  assert.ok(ev.layers.includes('L3-semantic'), 'L3 层激活');
+  // 防御上限仍在：>64 字截断 ⇒ 超出部分读不出（65+ 字 expectedText 诚实反证）
+  const name70 = 'y'.repeat(70);
+  const vs2 = new VirtualScreen([{ role: 'button', name: name70, rect: { x: 0.3, y: 0.3, width: 0.3, height: 0.08 } }]);
+  const ev2 = vs2.applyAction({
+    kind: 'click_mouse', args: { x: 0.4, y: 0.34 },
+    expect: { scale: 'text-level', expectedText: name70 },
+  } as never);
+  assert.equal(ev2.expectationMet, false, '70 字名截 64 ⇒ 超出部分不可对照');
+});
+
 
 // ─── N 纪元：三项残差根除的执法 ───
 

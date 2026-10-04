@@ -3,11 +3,15 @@
 // 工具区与常量 —— 分词/缓存/词法风险预分类/候选构建/并列破平/僵局探测/提示词
 // 铸造。逐字节搬运（零逻辑/零数值变更）；policyEngine.ts 保留契约类型与决策中枢
 // 类，导入面不变（extractGoalKeywords 原位再导出）。
+// ΑΩ-R10（方言三重复制单源化）：本地 tokenizeText 副本（连同其 CJK_RE/停用词表）
+// 已迁出至 ../dialects/tokenizer 单源模块 —— 本文件改为 import，行为逐字节等价。
 import type { SnapshotElement, WorldSnapshot } from './worldSnapshot';
 import type { CriterionStatus, GoalProgress, GoalSpec } from './goalState';
 import { kernelRegistry } from '../kernel/registry';
 import { scoreOptions, actionSignature } from './counterfactual';
 import type { AutonomyActionKind, PolicyAction, StepOutcome } from './policyEngine';
+import { CJK_RE, tokenizeText } from '../dialects/tokenizer';
+import { extractQuotedSpans } from '../intentGrammar';
 
 // ─── 常量 ───
 
@@ -24,18 +28,6 @@ export const BUDGET_MS_LOW = 15_000;
  *  纪元 Δ 扫描面修正：补「确定/是/同意/yes」——只认 确认/ok/allow 时，四类
  *  高频确认按钮会反落 Esc 分支（Esc 对模态确认框常等于「取消」，语义相反）。 */
 export const POPUP_CONFIRM_RE = /确认|确定|同意|允许|继续|是|\bok\b|\ballow\b|\byes\b/;
-/** 中日韩统一表意字符（含扩展 A / 兼容区）—— 2-gram 切分对象 */
-const CJK_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
-/** 双语停用词 —— 目标/判据分词后的功能词滤除（判定性弱、误匹配率高） */
-const STOPWORDS = new Set([
-  '的', '了', '和', '与', '及', '或', '在', '是', '对', '从', '被', '把', '这', '那',
-  '也', '又', '就', '都', '而', '则', '请', '不', '无', '于', '以', '为', '有', '个',
-  '中', '并', '其', '之', '该', '当', '至', '给', '它', '你', '我',
-  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'at', 'by',
-  'is', 'are', 'be', 'been', 'was', 'were', 'this', 'that', 'these', 'those',
-  'it', 'its', 'as', 'from', 'into', 'if', 'then', 'when', 'than', 'so', 'not',
-  'no', 'yes', 'all', 'any', 'must', 'should', 'will', 'can',
-]);
 /** 破坏性词表（点击目标的词法预分类；英文按整词、中文按子串） */
 const DESTRUCTIVE_ZH = ['删除', '卸载', '清空', '格式化', '重置', '抹掉'];
 const DESTRUCTIVE_EN = ['delete', 'remove', 'uninstall', 'format', 'erase', 'destroy'];
@@ -59,43 +51,6 @@ export function clamp01(v: unknown): number {
 /** 保留两位小数的得分（供 payload/rationale 展示，避免浮点尾噪） */
 export function round2(v: number): number {
   return Math.round(v * 100) / 100;
-}
-
-/**
- * 轻量分词（本模块自带，不依赖 fuzzy.ts）：
- * 中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字切开取词；
- * 滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
- */
-function tokenizeText(text: unknown): string[] {
-  const norm = normalizeWs(text);
-  if (!norm) return [];
-  const tokens: string[] = [];
-  const push = (t: string): void => {
-    if (t.length === 0) return;
-    if (/^\d+$/.test(t)) return;                    // 纯数字：坐标/序号噪声
-    if (STOPWORDS.has(t)) return;                   // 停用词
-    if (!CJK_RE.test(t) && t.length < 2) return;    // 单个英文字母噪声
-    tokens.push(t);
-  };
-  let cjkRun = '';
-  let wordRun = '';
-  const flushCjk = (): void => {
-    if (!cjkRun) return;
-    if (cjkRun.length === 1) push(cjkRun);
-    else for (let i = 0; i + 1 < cjkRun.length; i += 1) push(cjkRun.slice(i, i + 2));
-    cjkRun = '';
-  };
-  const flushWord = (): void => {
-    if (wordRun) { push(wordRun); wordRun = ''; }
-  };
-  for (const ch of norm) {
-    if (CJK_RE.test(ch)) { flushWord(); cjkRun += ch; }
-    else if (/[a-z0-9]/.test(ch)) { flushCjk(); wordRun += ch; }
-    else { flushCjk(); flushWord(); }               // 空白/标点皆切段
-  }
-  flushCjk();
-  flushWord();
-  return tokens;
 }
 
 /**
@@ -267,6 +222,11 @@ export function breakTieBand(
       goalKeywords: extractGoalKeywords(spec as GoalSpec),
       snapshot: snapshot as WorldSnapshot,
       triedActionKeys: (Array.isArray(history) ? history : []).map(h => actionSignature(h?.action)),
+      // ΝΩ-10（infoGain 新鲜度）：把「点过且 no_effect」签名透传给 Φ-9 —— 带内
+      // 候选全部来自快照（陌生度恒 0.3 单维），新鲜度让破平真正分出高下。
+      noEffectActionKeys: (Array.isArray(history) ? history : [])
+        .filter(h => h?.outcome === 'no_effect')
+        .map(h => actionSignature(h?.action)),
     });
     if (!plan) return candidates;
     // 胜者回位：scoreOptions 的 chosen 是 sandbox 数组内的同一引用（indexOf 恒命中）
@@ -276,6 +236,202 @@ export function breakTieBand(
     return [...reordered, ...candidates.slice(bandEnd)];
   } catch {
     return candidates; // 并列破平是裁决增强不是裁决前提 —— 异常时原序直通
+  }
+}
+
+// ─── ΝΩ-10（决策面五合一）：②′ type/drag 产生通道 + 候选透出 ───
+
+/** ②′a type 语义锚词（判据含其一才允许产生通道；含多字变体优先锚定，防「填写」
+ *  被裸「填」截半后把「写…」误当载荷）。工单词面：输入/填/enter/密码（password
+ *  为「密码」的英文对位，防 'enter your password' 把说明文字误当载荷）。 */
+const TYPE_SEMANTIC_ANCHORS = ['输入', '键入', '填入', '填写', '填上', '填', '密码', 'enter', 'password'];
+/** ②′b drag 动词词面（判据含其一才允许产生通道）。工单词面：拖/移动到。 */
+const DRAG_VERBS = ['拖', '移动到'];
+/** 后缀提取的续接标记：载荷里出现「后/然后/再/并/…」说明切出来的是句子残段不是载荷 */
+const CONTINUATION_MARKERS = [
+  '后', '然后', '再', '接着', '并且', '并', '且', '及', '或', '直到', '和',
+  '，', '、', '。', ',', ';', '；',
+];
+/** 后缀载荷的长度上限：超过 20 字符的是句子不是键入内容（保守拒绝） */
+const TYPE_SUFFIX_MAX_LEN = 20;
+/** click 动词守卫（英文按整词，中文按子串） */
+const CLICK_VERB_RE = /点击|单击|双击|点按|\bclick\b/;
+
+/** 语义锚词命中（英文 enter/password 按整词，中文按子串）；返回命中末端，未命中 −1 */
+function typeAnchorEnd(text: string, w: string): number {
+  if (w === 'enter' || w === 'password') {
+    const m = new RegExp(`\\b${w}\\b`).exec(text);
+    return m ? m.index + m[0].length : -1;
+  }
+  const idx = text.lastIndexOf(w);
+  return idx >= 0 ? idx + w.length : -1;
+}
+
+/**
+ * ②′a type 载荷提取（纯函数、绝不抛）：优先仓内 intentGrammar 的引号锚定提取
+ * （精确性优先 —— 与书写内容编辑距离为 0）；无引号段时退最小后缀提取器 ——
+ * 取最后一个语义锚词之后的残段，残段必须：非空、≤20 字符、不含语义锚词（拒绝
+ * 「输入密码」这类纯标签判据）、不含续接标记（拒绝「填写表单后提交」句子残段）、
+ * 且不是单个 CJK 字符（拒绝「点击输入框」被切出的「框」）。
+ * 任一守卫不过 ⇒ null（拿不准不产 —— escalate 兜底仍在）。
+ */
+function extractTypeText(criterion: string): string | null {
+  if (typeof criterion !== 'string' || criterion.trim() === '') return null;
+  const norm = normalizeWs(criterion);
+  if (norm === '' || CLICK_VERB_RE.test(norm)) return null;
+  // 语义锚词在场性：无锚词 ⇒ 不是键入判据
+  if (!TYPE_SEMANTIC_ANCHORS.some(w => typeAnchorEnd(norm, w) >= 0)) return null;
+  // 引号优先：intentGrammar 的无损提取（"…" / '…' / 「…」等六种引号风格）
+  const spans = extractQuotedSpans(criterion);
+  const first = spans.find(s => typeof s.content === 'string' && s.content.trim() !== '');
+  if (first) return first.content;
+  // 后缀兜底：最后一个语义锚词之后
+  let cutAt = -1;
+  for (const w of TYPE_SEMANTIC_ANCHORS) {
+    const end = typeAnchorEnd(norm, w);
+    if (end > cutAt) cutAt = end;
+  }
+  if (cutAt < 0) return null;
+  const suffix = norm.slice(cutAt).trim();
+  if (suffix === '' || suffix.length > TYPE_SUFFIX_MAX_LEN) return null;
+  if (suffix.length === 1 && CJK_RE.test(suffix)) return null;
+  if (TYPE_SEMANTIC_ANCHORS.some(w => typeAnchorEnd(suffix, w) >= 0)) return null;
+  if (CONTINUATION_MARKERS.some(m => suffix.includes(m))) return null;
+  return suffix;
+}
+
+/** 元素角色判定：role 归一后恰为 'input'（worldSnapshot 的可交互角色词表成员） */
+function isInputRole(el: Partial<SnapshotElement> | undefined | null): boolean {
+  return !!el && typeof el.role === 'string' && el.role.toLowerCase() === 'input';
+}
+
+/** 中心点卫兵：x/y 均有限数才算可用落点 */
+function finiteCenter(el: Partial<SnapshotElement> | undefined | null): { x: number; y: number } | null {
+  const c = el?.center;
+  if (!c || typeof c !== 'object') return null;
+  const { x, y } = c as { x?: unknown; y?: unknown };
+  if (typeof x !== 'number' || !Number.isFinite(x)) return null;
+  if (typeof y !== 'number' || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+/** 引号段 → 快照元素：归一标签包含归一段文的第一个可交互元素（interactive !== false） */
+function elementContainingText(
+  elements: SnapshotElement[],
+  spanText: string,
+): SnapshotElement | null {
+  const needle = normalizeWs(spanText);
+  if (needle === '') return null;
+  for (const el of elements) {
+    if (!el || el.interactive === false) continue;
+    const label = normalizeWs(el.label);
+    if (label !== '' && label.includes(needle)) return el;
+  }
+  return null;
+}
+
+/**
+ * ΝΩ-10 ②′（type/drag 产生通道，② 级点击之前的保守窄门）：
+ *   · type —— 判据含「输入/填/enter/密码」语义锚词、且判据匹配候选中有
+ *     role=input 的可交互元素、且载荷可提取（引号内容或合格后缀）⇒ 产
+ *     {kind:'type', target, payload:{text}}；键入凭据判据（含「密码」）riskTier
+ *     记 sensitive（执行层风险闸门预分类），其余 benign。
+ *   · drag —— 判据含「拖/移动到」动词、且判据含两个引号锚定落点（源/目的地，
+ *     即「两坐标语义词」）且各自可在快照中按标签包含匹配到不同元素 ⇒ 产
+ *     {kind:'drag', target=源, payload:{end:{x,y}, toLabel}}（执行层契约：
+ *     target.center 起点、payload.end 终点）。
+ *   拿不准不产（返回 null ⇒ 决策序继续走 ② 点击，escalate 兜底仍在）；产出的
+ *   动作与 ② 级真实动作同构，下游统一过宪法与验证层。
+ */
+export function composeTypeOrDragAction(
+  candidates: ScoredCandidate[],
+  unmet: CriterionStatus[],
+  elements: SnapshotElement[],
+): PolicyAction | null {
+  try {
+    if (!Array.isArray(candidates) || !Array.isArray(elements)) return null;
+    // ②′a type：按排名序找首个「input 角色 + 其匹配判据可提取键入载荷」的候选
+    for (const c of candidates) {
+      const el = c?.element;
+      if (!el || el.interactive === false || !isInputRole(el)) continue;
+      if (typeof c.criterion !== 'string' || c.criterion === '') continue;
+      const text = extractTypeText(c.criterion);
+      if (text === null) continue;
+      const label = typeof el.label === 'string' ? el.label : '';
+      return {
+        kind: 'type',
+        target: {
+          bbox: el.bbox,
+          center: finiteCenter(el) ?? { x: 0, y: 0 },
+          label,
+        },
+        payload: { text },
+        rationale: `判据「${c.criterion}」要求输入内容，向输入框「${label}」键入「${text}」`,
+        expectedEffect: `输入框「${label}」获得文本，判据「${c.criterion}」可被验证`,
+        utility: clamp01(el.confidence),
+        riskTier: c.criterion.includes('密码') ? 'sensitive' : 'benign',
+      };
+    }
+    // ②′b drag：判据拖动词 + 两个引号落点（源/目的地）皆可在快照锚定
+    if (Array.isArray(unmet)) {
+      for (const u of unmet) {
+        const criterion = typeof u?.criterion === 'string' ? u.criterion : '';
+        const norm = normalizeWs(criterion);
+        if (norm === '' || !DRAG_VERBS.some(v => norm.includes(v))) continue;
+        const spans = extractQuotedSpans(criterion).filter(
+          s => typeof s.content === 'string' && s.content.trim() !== '',
+        );
+        if (spans.length < 2) continue;
+        const src = elementContainingText(elements, spans[0].content);
+        const dst = elementContainingText(elements, spans[1].content);
+        if (!src || !dst || src === dst) continue;
+        const dstCenter = finiteCenter(dst);
+        if (!dstCenter) continue;
+        const srcLabel = typeof src.label === 'string' ? src.label : '';
+        const dstLabel = typeof dst.label === 'string' ? dst.label : '';
+        return {
+          kind: 'drag',
+          target: { bbox: src.bbox, center: finiteCenter(src) ?? { x: 0, y: 0 }, label: srcLabel },
+          payload: { end: dstCenter, toLabel: dstLabel },
+          rationale: `判据「${criterion}」要求拖拽，把「${srcLabel}」拖至「${dstLabel}」`,
+          expectedEffect: `「${srcLabel}」被移动到「${dstLabel}」的位置，判据「${criterion}」可被验证`,
+          utility: Math.min(clamp01(src.confidence), clamp01(dst.confidence)),
+          // 词法风险预分类扫源+目的双标签（「拖到删除区」类落点须过风险闸门）
+          riskTier: classifyClickRisk(`${srcLabel} ${dstLabel}`),
+        };
+      }
+    }
+    return null;
+  } catch {
+    return null; // 产生通道是裁决增强不是裁决前提 —— 异常时走 ② 原路
+  }
+}
+
+/**
+ * ΝΩ-10（候选透出）：② 级 breakTieBand 后的排名候选 → 与真实点击动作同构的
+ * PolicyAction 清单（岔路账消费面）。截前 VLM_CANDIDATE_CAP（8）名 —— 与云脑
+ * 咨询的候选上限同一带宽礼仪；防御律：脏输入/异常 ⇒ 空清单（调用方按缺席处理）。
+ */
+export function candidatesToActions(candidates: ScoredCandidate[]): PolicyAction[] {
+  try {
+    if (!Array.isArray(candidates)) return [];
+    const out: PolicyAction[] = [];
+    for (const c of candidates.slice(0, VLM_CANDIDATE_CAP)) {
+      const el = c?.element;
+      if (!el || typeof el.label !== 'string') continue;
+      out.push({
+        kind: 'click',
+        target: { bbox: el.bbox, center: el.center, label: el.label },
+        payload: { criterion: c.criterion, matchScore: round2(c.score) },
+        rationale: `候选「${el.label}」：判据「${c.criterion}」关键词重合（得分 ${round2(c.score)}）`,
+        expectedEffect: `「${el.label}」被激活，推进判据「${c.criterion}」`,
+        utility: clamp01(el.confidence),
+        riskTier: classifyClickRisk(el.label),
+      });
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 
@@ -305,15 +461,51 @@ export function detectStagnation(
   return best;
 }
 
-/** history 中最近一次策略切换动作（scroll / inspect 家族）—— 用于轮换抉择 */
+/**
+ * 策略切换家族与三级轮换环（ΝΩ-10 僵局三级退避）：scroll → inspect → hotkey Tab
+ * 焦点周游 → scroll。hotkey 家族成员仅限 Tab 焦点周游（payload.keys 含 'tab'，
+ * 与探索层 explorationCore 的 hotkey#tab 全局候选同先例）—— ① 级弹窗 Esc 热键
+ * 不是切换动作，不进轮换状态。
+ */
+export const SWITCH_CYCLE = ['scroll', 'inspect', 'hotkey'] as const;
+/** 策略切换家族成员 */
+export type SwitchKind = (typeof SWITCH_CYCLE)[number];
+
+/**
+ * history 中最近一次策略切换动作（scroll / inspect / hotkey Tab 焦点周游家族）——
+ * 用于三级轮换抉择。ΝΩ-10：由二元（scroll/inspect）扩为三元 —— hotkey 仅当其
+ * keys 含 'tab'（大小写折叠）才算切换家族；其余 hotkey（如弹窗 Esc）被跳过。
+ */
 export function lastSwitchKind(
   history: Array<{ action: PolicyAction; outcome: StepOutcome }>,
-): 'scroll' | 'inspect' | null {
+): SwitchKind | null {
   for (let i = history.length - 1; i >= 0; i--) {
-    const k = history[i]?.action?.kind;
+    const a = history[i]?.action;
+    const k = a?.kind;
     if (k === 'scroll' || k === 'inspect') return k;
+    if (k === 'hotkey') {
+      const payload =
+        a?.payload && typeof a.payload === 'object' ? (a.payload as { keys?: unknown }) : null;
+      const keys = Array.isArray(payload?.keys) ? (payload?.keys as unknown[]) : [];
+      if (keys.some(x => typeof x === 'string' && x.toLowerCase() === 'tab')) return 'hotkey';
+    }
   }
   return null;
+}
+
+/**
+ * 三级轮换的下一棒（ΝΩ-10）：上次切换是 scroll ⇒ inspect；inspect ⇒ hotkey Tab；
+ * hotkey Tab ⇒ scroll（环回）；无切换史 ⇒ scroll（与旧二元轮换的缺省一致）。
+ * 纯函数、脏 history 按「无切换史」记（lastSwitchKind 卫兵式返回 null）。
+ */
+export function nextSwitchKind(
+  history: Array<{ action: PolicyAction; outcome: StepOutcome }>,
+): SwitchKind {
+  const last = lastSwitchKind(history);
+  if (last === null) return 'scroll';
+  const idx = SWITCH_CYCLE.indexOf(last);
+  if (idx < 0) return 'scroll';
+  return SWITCH_CYCLE[(idx + 1) % SWITCH_CYCLE.length];
 }
 
 /** 技能描述与目标的关键词重合数（token 集交集大小；描述 tokens 由调用方单次分词复用） */

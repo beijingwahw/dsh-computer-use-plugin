@@ -166,7 +166,16 @@ export class PhysicalActionRouterImpl {
                     return result;
                 }
                 // 请求失败：若是 capability 探测过的 native 失败，回退到 hotkey（防硬阻塞）
+                // ΝΩ-27：回退前先探活 —— 旧实现对任何失败无条件再发一次 hotkey 请求，
+                // 服务已死/不应答时第二跳必再吃满超时（双倍超时）。先 /v1/health 轻量
+                // 探活：死服务连接拒绝即时回、活服务毫秒级应答 —— 不活则如实回传原
+                // 错误，不再发起注定超时的 hotkey（adapter.health 的缓存受 TTL 约束，
+                // 缓存过期后死服务必现形；缓存新鲜时误判「活」的代价只是一次快速
+                // ECONNREFUSED，非超时）。
                 if (route === 'native' && result.error.kind !== PhysicalErrorKind.WINDOW_UNAVAILABLE) {
+                    if (!(await this.serviceAlive())) {
+                        return result; // 服务已死：hotkey 走同一服务，发了也白发
+                    }
                     const mod = process.platform === 'darwin' ? 'cmd' : 'alt';
                     const hotkeyResult = await this.adapter.pressHotkey({ keys: [mod, 'tab'] });
                     if (hotkeyResult.ok) {
@@ -205,27 +214,53 @@ export class PhysicalActionRouterImpl {
             },
         };
     }
-    /** PhysicalErrorKind → ExecutionFailureKind 映射（对齐 D-7 §173） */
+    /** PhysicalErrorKind → ExecutionFailureKind 映射（对齐 D-7 §173）。
+     *  ΝΩ-27：细分透传 —— 与 PhysicalErrorKind 同构（旧实现 14 压 2，
+     *  unauthorized/element_not_found/internal_error 不可区分，上层重试策略
+     *  失去判据）。timeout 二元保留（D-7 超时预算语义同一性）；其余 12 种
+     *  snake_case → kebab-case 一一对应；detail 保留 [snake_case] 结构化前缀。 */
     mapErrorKind(kind) {
         switch (kind) {
             case 'client_timeout':
             case 'action_timeout':
                 return 'timeout';
-            case 'transport_error':
-            case 'internal_error':
-            case 'unauthorized':
             case 'invalid_args':
+                return 'invalid-args';
             case 'out_of_bounds':
+                return 'out-of-bounds';
             case 'unknown_button':
+                return 'unknown-button';
             case 'unknown_key':
+                return 'unknown-key';
             case 'element_not_found':
+                return 'element-not-found';
             case 'screen_capture_failed':
+                return 'screen-capture-failed';
             case 'ocr_unavailable':
+                return 'ocr-unavailable';
             case 'vlm_unavailable':
+                return 'vlm-unavailable';
             case 'window_unavailable':
-                return 'host-error';
+                return 'window-unavailable';
+            case 'unauthorized':
+                return 'unauthorized';
+            case 'internal_error':
+                return 'internal-error';
+            case 'transport_error':
+                return 'transport-error';
             default:
                 return 'host-error';
+        }
+    }
+    /** ΝΩ-27：回退前探活 —— 服务是否仍应答（/v1/health 轻量往返）。
+     *  adapter 契约永不抛错；此处 try/catch 兜底（防御深度，探活失败=不活）。 */
+    async serviceAlive() {
+        try {
+            const health = await this.adapter.health();
+            return health.ok;
+        }
+        catch {
+            return false;
         }
     }
 }

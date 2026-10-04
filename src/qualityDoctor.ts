@@ -97,6 +97,60 @@ function atomicWrite(filePath: string, data: string): void {
   renameSync(tmp, filePath);
 }
 
+// ─── ΝΩ-22（热路径 IO 放大④）：walkSource 的 mtime 内容缓存 ───
+//
+// 问题：全量 diagnose 的 walkSource 同步全量读源码树 —— 每次出诊把整个
+// src/ 逐文件 readFileSync（IO 放大：绝大多数文件自上次出诊以来未变）。
+// 修法：内容按 (绝对路径, mtimeMs, size) 缓存（模块级 Map，容量上限 + FIFO
+// 驱逐）—— 全量 diagnose 只重读变更文件。
+// 防御式：读故障不缓存（catch 面产出空内容 —— 旧行为原样）；缓存键含绝对
+// 路径（跨 sourceRoot 的同相对路径不串档）；heal 写盘会翻转 mtime ⇒ 自然失效。
+
+interface SourceCacheEntry {
+  mtimeMs: number;
+  size: number;
+  content: string;
+}
+
+/** 缓存容量上限（插入序 FIFO 驱逐 —— 容量护栏，非 LRU：可预测、零簿记） */
+const SOURCE_CACHE_MAX = 4096;
+
+const sourceContentCache = new Map<string, SourceCacheEntry>();
+const sourceCacheStats = { hits: 0, misses: 0, evictions: 0 };
+
+/** 带缓存的源码读取：键未变 ⇒ 零重读（读故障上抛由调用方 catch —— 不缓存失败） */
+function readSourceCached(full: string, st: { mtimeMs: number; size: number }): string {
+  const hit = sourceContentCache.get(full);
+  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    sourceCacheStats.hits++;
+    return hit.content;
+  }
+  sourceCacheStats.misses++;
+  const content = readFileSync(full, 'utf8');
+  if (sourceContentCache.size >= SOURCE_CACHE_MAX) {
+    const oldest = sourceContentCache.keys().next().value;
+    if (oldest !== undefined) {
+      sourceContentCache.delete(oldest);
+      sourceCacheStats.evictions++;
+    }
+  }
+  sourceContentCache.set(full, { mtimeMs: st.mtimeMs, size: st.size, content });
+  return content;
+}
+
+/** ΝΩ-22（测试/观测面）：源码缓存簿记 —— misses = 实际 readFileSync 次数 */
+export function doctorSourceCacheStats(): { entries: number; hits: number; misses: number; evictions: number } {
+  return { entries: sourceContentCache.size, ...sourceCacheStats };
+}
+
+/** ΝΩ-22（测试面）：缓存整体失效 */
+export function resetDoctorSourceCache(): void {
+  sourceContentCache.clear();
+  sourceCacheStats.hits = 0;
+  sourceCacheStats.misses = 0;
+  sourceCacheStats.evictions = 0;
+}
+
 function emptyReport(warnings: string[]): DiagnosisReport {
   return {
     timestamp: Date.now(), incremental: false, score: 100, genesisVerdict: 'intact',
@@ -185,7 +239,9 @@ class Doctor implements QualityDoctor {
         if (st.isDirectory()) walk(full);
         else if (name.endsWith('.ts')) {
           const rel = relative(root, full).split(sep).join('/');
-          try { out.push({ path: rel, content: readFileSync(full, 'utf8') }); }
+          // ΝΩ-22：mtime 缓存读取 —— 未变文件零重读；读故障上抛由 catch 吞为
+          // 空内容（旧行为），且不缓存失败（下次出诊重试真实读取）
+          try { out.push({ path: rel, content: readSourceCached(full, st) }); }
           catch (e: any) { out.push({ path: rel, content: '' }); }
         }
       }

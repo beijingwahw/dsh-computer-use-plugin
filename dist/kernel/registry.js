@@ -290,6 +290,10 @@ export class EvidenceLedger {
         };
         if (Number.isFinite(o.margin))
             entry.margin = o.margin;
+        // ΑΩ-R41 origin 消毒（水合/恢复的防御带）：仅两已知字面量入账；未知值（异版
+        // 字符串 / 非串垃圾）一律缺席 —— 缺席即既有语义 local，账本永不持未知来源。
+        if (o.origin === 'local' || o.origin === 'federation')
+            entry.origin = o.origin;
         const win = this.windows.get(o.key) ?? [];
         win.push(entry);
         if (win.length > LEDGER_WINDOW)
@@ -319,14 +323,25 @@ export class EvidenceLedger {
      * 动机：stats() 只给汇总（n / successRate / margins），「成败 × margin」联合
      * 分布无法从汇总重建 —— 联邦摘要铸造（src/federation/index.ts 的
      * mintEvidenceDigest）需要逐条读账才能铸出真联合直方图。
-     * 契约：未知 key / 垃圾 key ⇒ 空数组；返回防御副本（改返回值不穿透账本）；
-     * 零副作用、不触任何既有路径（纯增量立法，既有字节逐位不变）。
+     * ΑΩ-R41：副本带 origin（缺席 = local —— 掺入审计与水合往返的分离面；防御式
+     * 逐字段拷贝，未知字段不穿透）。契约：未知 key / 垃圾 key ⇒ 空数组；返回防御
+     * 副本（改返回值不穿透账本）；零副作用、不触任何既有路径（纯增量立法）。
      */
     entries(key) {
         const win = typeof key === 'string' ? this.windows.get(key) : undefined;
         if (!win)
             return [];
-        return win.map(e => (e.margin !== undefined ? { ...e } : { success: e.success, ts: e.ts }));
+        return win.map(e => {
+            const out = {
+                success: e.success,
+                ts: e.ts,
+            };
+            if (e.margin !== undefined)
+                out.margin = e.margin;
+            if (e.origin !== undefined)
+                out.origin = e.origin;
+            return out;
+        });
     }
     /** 有入账的 key 目录（插入序副本 —— 与注册表入册序解耦） */
     keys() {

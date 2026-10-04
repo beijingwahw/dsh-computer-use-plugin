@@ -26,7 +26,7 @@ import { kernelRegistry } from '../kernel/registry.js';
 // 词法风险预分类/候选构建/并列破平/僵局探测/提示词铸造）逐字节搬至
 // ./policyEngineUtil —— 导入面不变（extractGoalKeywords 原位再导出）。
 export { extractGoalKeywords } from './policyEngineUtil.js';
-import { BUDGET_MS_LOW, BUDGET_STEPS_LOW, MATCH_CONFIDENT, POPUP_CONFIRM_RE, TIE_GAP, VLM_CANDIDATE_CAP, buildCandidates, buildPickPrompt, breakTieBand, classifyClickRisk, clamp01, detectStagnation, digestHas, lastSwitchKind, normalizeWs, round2, skillOverlap, tokenizeCached, unmetCriteria, } from './policyEngineUtil.js';
+import { BUDGET_MS_LOW, BUDGET_STEPS_LOW, MATCH_CONFIDENT, POPUP_CONFIRM_RE, TIE_GAP, VLM_CANDIDATE_CAP, buildCandidates, buildPickPrompt, breakTieBand, candidatesToActions, classifyClickRisk, clamp01, composeTypeOrDragAction, detectStagnation, digestHas, nextSwitchKind, normalizeWs, round2, skillOverlap, tokenizeCached, unmetCriteria, } from './policyEngineUtil.js';
 // ─── 决策中枢 ───
 /**
  * Φ-3 自主判断中枢 —— 无状态、确定性优先、绝不抛异常。
@@ -36,10 +36,15 @@ import { BUDGET_MS_LOW, BUDGET_STEPS_LOW, MATCH_CONFIDENT, POPUP_CONFIRM_RE, TIE
  *     允许/继续/是/ok/allow/yes）或按 Esc（payload {keys:['esc']}），utility 0.9；
  *  ② 判据匹配点击：未 met 判据关键词与元素标签重合（覆盖率打分）且
  *     interactive !== false ⇒ click 最佳候选，utility = 元素 confidence；
+ *     ΝΩ-10 ②′（紧邻 ② 之前）：判据含「输入/填/enter/密码」语义锚词且匹配候选
+ *     为 role=input ⇒ type（payload.text 取判据引号内容或合格后缀）；判据含
+ *     「拖/移动到」且两个引号落点可在快照锚定 ⇒ drag。拿不准不产（保守窄门，
+ *     ② 点击与 escalate 兜底仍在）。
  *  ③ 文本宣称：无元素匹配但 textDigest 已含某判据全部关键词 ⇒ declare
  *     （宣称达成，交验证层核对），utility 0.6；
- *  ④ 僵局切换：尾部同类动作连续 ≥2 次 no_effect ⇒ scroll（{direction:'down'}）
- *     与 inspect（聚焦区域放大）轮换，utility 0.5；
+ *  ④ 僵局切换（ΝΩ-10 三级退避）：尾部同类动作连续 ≥2 次 no_effect ⇒
+ *     scroll（{direction:'down'}）→ inspect（聚焦区域放大）→ hotkey Tab
+ *     焦点周游 三级轮换，utility 0.5；
  *  ⑤ 技能召回：skills 描述与目标关键词重合 ⇒ recall_skill，
  *     utility = reliability × 0.8；
  *  ⑥ 预算升级：剩余步数 ≤2 或剩余毫秒 ≤15000 ⇒ escalate，utility 0.4；
@@ -163,6 +168,20 @@ export class PolicyEngine {
             // ② 判据匹配点击：未达成判据的关键词在可交互元素标签上的最佳覆盖
             //    （纪元 Η-4：并列带内经 Φ-9 反事实效用分破平 —— 见 breakTieBand）
             const candidates = breakTieBand(buildCandidates(elements, unmet), spec, snapshot, history);
+            // ΝΩ-10（候选透出）：② 级裁决随行携带排名候选（岔路账消费面，其余级缺席）
+            const candidateActions = candidatesToActions(candidates);
+            // ②′ ΝΩ-10（type/drag 产生通道）：type 此前只在行动词汇表、无产生路径 ——
+            //    判据含「输入/填/enter/密码」语义锚词且匹配候选为 role=input ⇒ 产 type；
+            //    判据含「拖/移动到」+ 两个引号锚定落点 ⇒ 产 drag。键入语义比点击更具体，
+            //    故排在 ② 点击之前；拿不准不产（通道内部保守守卫），escalate 兜底仍在。
+            const composed = composeTypeOrDragAction(candidates, unmet, elements);
+            if (composed) {
+                return {
+                    action: composed,
+                    uncertain: false,
+                    degraded: false,
+                };
+            }
             if (candidates.length > 0) {
                 const best = candidates[0];
                 const second = candidates[1];
@@ -209,6 +228,8 @@ export class PolicyEngine {
                     },
                     uncertain,
                     degraded,
+                    // ΝΩ-10：候选透出（仅 ② 级；云脑改选只动 action，candidates 保持确定性排名）
+                    ...(candidateActions.length > 0 ? { candidates: candidateActions } : {}),
                     ...(note ? { note } : {}),
                 };
             }
@@ -233,10 +254,12 @@ export class PolicyEngine {
                     }
                 }
             }
-            // ④ 僵局切换：尾部同类动作连续 ≥2 次无效果 ⇒ scroll / inspect 轮换
+            // ④ 僵局切换（ΝΩ-10 三级退避）：尾部同类动作连续 ≥2 次无效果 ⇒ 三级轮换
+            //    scroll → inspect → hotkey Tab 焦点周游 → scroll（与探索层全局候选
+            //    hotkey#tab 同先例）；轮换状态按最近一次切换家族动作（见 nextSwitchKind）
             const stagnation = detectStagnation(history);
             if (stagnation) {
-                const next = lastSwitchKind(history) === 'scroll' ? 'inspect' : 'scroll';
+                const next = nextSwitchKind(history);
                 if (next === 'scroll') {
                     return {
                         action: {
@@ -251,21 +274,36 @@ export class PolicyEngine {
                         degraded: false,
                     };
                 }
-                const fr = snapshot.focusedRegion;
-                const region = fr && typeof fr === 'object'
-                    ? fr
-                    : {
-                        x0: 0,
-                        y0: 0,
-                        x1: typeof snapshot.width === 'number' && snapshot.width > 0 ? snapshot.width : 1920,
-                        y1: typeof snapshot.height === 'number' && snapshot.height > 0 ? snapshot.height : 1080,
+                if (next === 'inspect') {
+                    const fr = snapshot.focusedRegion;
+                    const region = fr && typeof fr === 'object'
+                        ? fr
+                        : {
+                            x0: 0,
+                            y0: 0,
+                            x1: typeof snapshot.width === 'number' && snapshot.width > 0 ? snapshot.width : 1920,
+                            y1: typeof snapshot.height === 'number' && snapshot.height > 0 ? snapshot.height : 1080,
+                        };
+                    return {
+                        action: {
+                            kind: 'inspect',
+                            payload: { region },
+                            rationale: `「${stagnation.kind}」连续 ${stagnation.count} 次无效果，切换策略：聚焦区域放大细察`,
+                            expectedEffect: '聚焦区域被放大细察，识别出更精细的元素或文本',
+                            utility: 0.5,
+                            riskTier: 'benign',
+                        },
+                        uncertain: false,
+                        degraded: false,
                     };
+                }
+                // 第三级：hotkey Tab 焦点周游 —— 视口滚动与放大细察都失灵后，换键盘通路
                 return {
                     action: {
-                        kind: 'inspect',
-                        payload: { region },
-                        rationale: `「${stagnation.kind}」连续 ${stagnation.count} 次无效果，切换策略：聚焦区域放大细察`,
-                        expectedEffect: '聚焦区域被放大细察，识别出更精细的元素或文本',
+                        kind: 'hotkey',
+                        payload: { keys: ['tab'] },
+                        rationale: `「${stagnation.kind}」连续 ${stagnation.count} 次无效果，切换策略：Tab 周游焦点寻找可达路径`,
+                        expectedEffect: '焦点移至下一可交互元素，键盘通路被探测',
                         utility: 0.5,
                         riskTier: 'benign',
                     },

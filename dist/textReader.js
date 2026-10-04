@@ -15,37 +15,44 @@ import { fuzzyIncludes } from './fuzzy.js';
 import { getSharp, getTesseract, } from './_legacyDeps.js';
 import * as backend from './physicalBackend.js';
 import { kernelRegistry } from './kernel/registry.js';
-let workerPromise = null;
-let workerLang = '';
-async function getWorker(lang) {
-    if (workerPromise && workerLang === lang)
-        return workerPromise;
-    workerLang = lang;
-    const prev = workerPromise;
-    // 同步占位：并发首次调用共享同一个创建中的 worker（否则会各建一个，泄漏其一）
-    const creating = getTesseract().then(tess => tess.createWorker(lang));
-    workerPromise = creating;
-    creating.catch(() => {
-        if (workerPromise === creating)
-            workerPromise = null; // 失败后允许重试（网络恢复时）
-    });
-    // 语言切换：新 worker 接班后终止旧 worker（否则旧实例存活到 disposeOcr）
-    if (prev) {
-        try {
-            (await prev).terminate();
-        }
-        catch { /* already dead */ }
-    }
-    return creating;
+/** ΝΩ-24：worker 池按语言键控 —— 旧实现单例 + 语言切换即 terminate 先到者：
+ *  并发不同 lang 的两次取字，后到者会 terminate 先到者正在 recognize 的 worker
+ * （先到者的 in-flight 调用随即炸在死 worker 上）。Map<lang, Promise<Worker>>
+ *  各 lang 各得其一；terminate 延迟到 disposeOcr（生命周期归属清理，不归语言
+ *  切换）。同 lang 并发首次调用共享同一个创建中的 worker（防重复铸造泄漏）；
+ *  创建失败的语言键即时出册（网络恢复时允许重试）。 */
+const workers = new Map();
+/** 测试钩子：替换 worker 铸造（离线注入假 worker —— 绝不联网/下语言包）；
+ *  null 还原生产路径。命名对齐 _setServerOcrFailedAt_forTest 的 _forTest 约定。 */
+let workerFactory_forTest = null;
+export function _setWorkerFactory_forTest(factory) {
+    workerFactory_forTest = typeof factory === 'function' ? factory : null;
 }
-/** 生命周期清理：插件卸载时终止 OCR worker（DSH 注册即效果模型的良好公民） */
+async function getWorker(lang) {
+    let w = workers.get(lang);
+    if (!w) {
+        // 同步占位后入册：并发同 lang 首调共享同一创建中的 worker（否则各建一个，泄漏其一）
+        w = workerFactory_forTest
+            ? workerFactory_forTest(lang)
+            : getTesseract().then(tess => tess.createWorker(lang));
+        workers.set(lang, w);
+        w.catch(() => {
+            if (workers.get(lang) === w)
+                workers.delete(lang); // 失败后允许重试（网络恢复时）
+        });
+    }
+    return w;
+}
+/** 生命周期清理：插件卸载时终止全部 OCR worker（DSH 注册即效果模型的良好公民）。
+ *  ΝΩ-24：终止是池级清算（逐 lang terminate），不再由语言切换代行。 */
 export async function disposeOcr() {
-    if (workerPromise) {
+    const all = [...workers.values()];
+    workers.clear();
+    for (const w of all) {
         try {
-            (await workerPromise).terminate();
+            (await w).terminate();
         }
         catch { /* already dead */ }
-        workerPromise = null;
     }
 }
 const normalize = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();

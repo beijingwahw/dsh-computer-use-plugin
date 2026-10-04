@@ -7,7 +7,8 @@
 //   1. 预案先行铸造 —— 危险动作派发前（approval.beginAttempt 前置挂点）必须
 //      铸造逆转预案入托管：焦点窗口引用 + 动作前屏幕感知哈希（经注入端口）+
 //      剪贴板备份句柄（经注入端口，可缺席）+ 补偿路径（按动作语义从补偿策略表
-//      选取，内置 + 可注入扩展）。预案本身先行落盘（tmp+fsync+rename 原子写，
+//      选取，内置 + 可注入扩展）。预案本身先行落盘（ΝΩ-22 起为行式 append-only
+//      WAL：每事件一行、独立 fsync；首写/迁移/压缩走 tmp+fsync+rename 原子重写，
 //      独立文件 —— 不碰 journal.ts 的防篡改链）：宁可世界多一次无害的 Ctrl+Z，
 //      不可世界少一份「该怎么撤销」的知识。
 //   2. 补偿可验证 —— 派发后 TTL 内验收失败（no_effect/错误）或用户喊停（经注入
@@ -176,10 +177,42 @@ const DEFAULT_ESCROW_TTL_MS = 30_000;
 const DEFAULT_VERIFY_THRESHOLD = 0.9;
 /** 账册封顶（无界账册 = 无界 WAL —— 封顶后丢最旧，恢复报告优先保新） */
 const MAX_LEDGER_ENTRIES = 256;
-/** WAL 档版本 */
+/** WAL 档版本（旧整档格式 v1 —— ΝΩ-22 起写入行式事件流，读取面兼容两代） */
 const ESCROW_WAL_VERSION = 1;
+// ─── ΝΩ-22（热路径 IO 放大②）：行式 append-only WAL ───
+//
+// 问题：closePlan / mintPlan 每次触发 persistWal 全量重写（整档
+// JSON.stringify + tmp + fsync + rename ×2 fsync）—— 账册越厚，每次结算
+// 的写放大越大（O(全量)）。
+// 修法：append-only 行式 WAL —— 每行一个事件 {planId, event, ts, payload}，
+// 追加单行（open('a') + write + fsync + close），构造期重放重建内存态：
+//   · 事件标签：mint（铸造/顶替合并行）/ settle（无补偿结算：verified、
+//     aborted-pre-dispatch）/ compensate（补偿结算：compensated-*、
+//     compensation-failed、degraded-record-only）/ close（兜底关闭：
+//     recovered-human-attention 等）/ ack（人工确认注记）—— settle/close/
+//     compensate 三标签的重放语义同律（出在途 + 入账册），标签保留审计语义；
+//   · mint 顶替：同令牌旧预案流产 + 新预案注册合并为**单事件行**
+//    （payload.superseded 携带流产账 —— 旧实现的双次全量重写并作一次追加）；
+//   · 崩溃一致性不降级：每行独立 fsync（行可见即行已持久），崩溃至多留一条
+//     尾部半行 ⇒ 重放侧坏行跳过计数（防御式：好行不连坐）；
+//   · 压缩：行数远超活跃态（2×(账册+在途)+256）⇒ 下次落盘点做一次原子全量
+//     重写（tmp+fsync+rename），把亡账与跳过行挤出 —— 摊还后仍 O(增量)；
+//   · 旧档兼容：装载面探测整档 JSON 形状（version/inFlight/ledger）⇒ 旧档
+//     只读迁移 —— 旧档内容原样读入重建内存态后，一次性原子改写为行式
+//    （不改写则后续追加会污染旧档语义；改写是整档原子换名，数据零丢失）。
+/** ΝΩ-22：行式 WAL 魔数头（与旧整档 JSON 分流的探测锚） */
+const ESCROW_WAL_MAGIC = 'dsh-escrow-wal';
+/** ΝΩ-22：行式 WAL 档版本 */
+const ESCROW_WAL_EVENTS_VERSION = 2;
+/** ΝΩ-22：压缩阈值 —— 追加行数超过 2×(账册+在途)+256 ⇒ 触发一次全量压缩重写 */
+const WAL_COMPACT_OVERHEAD = 256;
 // ─── 文件存储实现（tmp + fsync + rename —— checkpoint.ts / approval.ts 同律） ───
-/** W3-1：托管 WAL 的文件实现（原子写：tmp + fsync + rename —— 绝无半档） */
+/**
+ * W3-1：托管 WAL 的文件实现（原子写：tmp + fsync + rename —— 绝无半档）。
+ * ΝΩ-22：增产行式追加面 append —— 单事件行 open('a')+write+fsync+close，
+ * 每行独立持久（行可见即行已落盘 —— 与整档 fsync+rename 等强；崩溃至多留
+ * 一条尾部半行，重放侧跳过计数）。
+ */
 export function createEscrowFileStorage(filePath) {
     return {
         load() {
@@ -219,6 +252,32 @@ export function createEscrowFileStorage(filePath) {
                 return { ok: false, error: e instanceof Error ? e.message : String(e) };
             }
         },
+        append(line) {
+            if (!filePath)
+                return { ok: false, error: 'escrow wal path is empty' };
+            let fd = null;
+            try {
+                mkdirSync(path.dirname(filePath), { recursive: true });
+                fd = openSync(filePath, 'a');
+                try {
+                    writeSync(fd, Buffer.from(line, 'utf8'));
+                    fsyncSync(fd); // ΝΩ-22：每行独立 fsync —— 行写入即持久，不等整档压缩
+                }
+                finally {
+                    closeSync(fd);
+                }
+                return { ok: true };
+            }
+            catch (e) {
+                if (fd !== null) {
+                    try {
+                        closeSync(fd);
+                    }
+                    catch { /* 已关或未开 */ }
+                }
+                return { ok: false, error: e instanceof Error ? e.message : String(e) };
+            }
+        },
     };
 }
 // ─── 模块态（全部经 arm 注入；缺省 = 无端口 + 内置表 + 真钟 + 仅内存） ───
@@ -239,6 +298,13 @@ let tokenPlan = new Map(); // approvalToken → planId
 let ledger = [];
 let walLoaded = false;
 let walPersistError;
+// ── ΝΩ-22：行式 WAL 簿记 ──
+/** 当前档格式：none=无档/仅内存；legacy=旧整档（迁移写失败时滞留）；events=行式 */
+let walFormat = 'none';
+/** 重放防御观测：坏行/半行跳过计数（透明化面 stats() 暴露） */
+let walSkippedLines = 0;
+/** 压缩阈值簿记：上次压缩以来的追加行数 */
+let walLinesSinceCompact = 0;
 /** approval 钩子注册标记（arm 注册 / escrow.reset 后回 false —— 透明化事实源） */
 let hooksRegistered = false;
 /** 在途异步工作（fire-and-forget 结算的追踪面 —— idle() 供测试/宿主排空） */
@@ -361,6 +427,8 @@ function sanitizePlan(raw) {
  * 现在的屏幕执行热键是新一轮破坏；saga 的 in-doubt 事务在恢复期只做一件事：
  * 醒目地交给人。每条在途预案转为 recovered-human-attention 账册记录 +
  * 升级报告（pendingHumanAttention 持续可见，直到宿主 acknowledge）。
+ * ΝΩ-22：装载面格式分流 —— 整档 JSON 形状（version/inFlight/ledger）⇒ 旧档
+ * 只读迁移；否则按行式事件流重放（坏行/崩溃半行跳过计数，好行不连坐）。
  */
 function ensureWalLoaded() {
     if (walLoaded)
@@ -369,72 +437,223 @@ function ensureWalLoaded() {
     inFlightPlans = new Map();
     tokenPlan = new Map();
     ledger = [];
+    walFormat = 'none';
+    walSkippedLines = 0;
+    walLinesSinceCompact = 0;
     if (escrowStorage === null)
         return; // 仅内存（跨进程不保 —— 诚实降级）
     try {
         const text = escrowStorage.load();
         if (text === null)
             return;
-        const parsed = JSON.parse(text);
-        if (!parsed || typeof parsed !== 'object')
-            return; // 垃圾档 ⇒ 归零
-        const root = parsed;
-        const now = eNow();
-        if (Array.isArray(root.ledger)) {
-            for (const raw of root.ledger.slice(-MAX_LEDGER_ENTRIES)) {
-                const rec = sanitizeLedgerRecord(raw);
-                if (rec)
-                    ledger.push(rec);
+        const trimmed = text.trim();
+        if (trimmed === '')
+            return;
+        // ΝΩ-22 格式分流：先尝试整档 JSON（旧 v1 整档是单 JSON 文档；行式档首行
+        // 是魔数头、多行整体不可单解析 —— 单头行档落进行式分支由魔数识别）。
+        let whole;
+        try {
+            whole = JSON.parse(trimmed);
+        }
+        catch {
+            whole = undefined;
+        }
+        if (whole !== undefined && whole !== null && typeof whole === 'object' && !Array.isArray(whole)) {
+            const root = whole;
+            if (Array.isArray(root.inFlight) || Array.isArray(root.ledger) || root.version === ESCROW_WAL_VERSION) {
+                loadLegacyWal(root);
+                return;
             }
         }
-        if (Array.isArray(root.inFlight)) {
-            let recovered = 0;
-            for (const raw of root.inFlight) {
-                const plan = sanitizePlan(raw);
-                if (plan === null)
-                    continue; // 垃圾预案弃置（好预案不连坐）
-                const rec = {
-                    planId: plan.planId,
-                    semantics: plan.semantics,
-                    ...(plan.description !== undefined ? { description: plan.description } : {}),
-                    ...(plan.approvalToken !== undefined ? { approvalToken: plan.approvalToken } : {}),
-                    mintedAt: plan.mintedAt,
-                    settledAt: now,
-                    outcome: 'recovered-human-attention',
-                    trigger: 'crash-recovery',
-                    reason: 'in-flight escrow plan found in WAL after restart — world state unknown, auto-compensation refused',
-                    executedSteps: [],
-                    escalation: {
-                        severity: 'critical',
-                        headline: 'REVERSAL ESCROW: in-flight plan recovered from WAL — HUMAN ATTENTION REQUIRED',
-                        planId: plan.planId,
-                        semantics: plan.semantics,
-                        whatHappened: `A dangerous "${plan.semantics}" action had a minted reversal escrow plan when the process stopped. ` +
-                            'Whether the action took effect is UNKNOWN. Automated compensation on the post-crash screen was refused ' +
-                            '(acting on a stale plan against an unknown world state is a new hazard, not a remedy).',
-                        compensationAttempted: [],
-                        suggestedHumanAction: plan.description
-                            ? `Inspect the world manually for: ${plan.description}. If the action took effect and is unwanted, ` +
-                                `apply the compensation path by hand: ${plan.compensation.map(s => s.label).join('; ')}.`
-                            : `Inspect the world manually for the "${plan.semantics}" action; if unwanted, compensate by hand: ` +
-                                plan.compensation.map(s => s.label).join('; ') + '.',
-                        mintedAt: plan.mintedAt,
-                        raisedAt: now,
-                    },
-                };
-                ledger.push(rec);
-                recovered++;
-            }
-            if (recovered > 0) {
-                // 恢复结算立即落盘：恢复动作本身崩溃 ⇒ 下次恢复重读原档（幂等 ——
-                // 原档未被改写，同批预案再次浮现；宁可重复唠叨，不可静默蒸发）
-                persistWal();
-            }
-        }
+        replayEventWal(trimmed);
     }
     catch {
         /* 解析故障 ⇒ 归零（防御式：坏档不炸托管，也不冒充恢复） */
     }
+}
+/**
+ * ΝΩ-22：行式事件流重放 —— 逐行解析重建内存态（在途表/令牌索引/账册）。
+ * 防御式：坏行（垃圾/崩溃尾部半行）跳过计数，好行不连坐；重放后账册封顶
+ * 与旧档装载同律；在途残留 ⇒ 崩溃恢复语义（recoverInFlight）。
+ */
+function replayEventWal(text) {
+    walFormat = 'events';
+    for (const raw of text.split('\n')) {
+        const line = raw.trim();
+        if (line === '')
+            continue;
+        let parsed;
+        try {
+            parsed = JSON.parse(line);
+        }
+        catch {
+            walSkippedLines++;
+            continue;
+        } // 崩溃半行/垃圾行
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            walSkippedLines++;
+            continue;
+        }
+        const r = parsed;
+        if (r.wal === ESCROW_WAL_MAGIC)
+            continue; // 魔数头行（非事件）
+        if (typeof r.planId !== 'string' || typeof r.event !== 'string') {
+            walSkippedLines++;
+            continue;
+        }
+        applyWalEvent(r);
+    }
+    if (ledger.length > MAX_LEDGER_ENTRIES)
+        ledger = ledger.slice(-MAX_LEDGER_ENTRIES);
+    recoverInFlight();
+}
+/** ΝΩ-22：单事件行的重放应用面（mint / settle / close / compensate / ack） */
+function applyWalEvent(r) {
+    const planId = String(r.planId);
+    const event = String(r.event);
+    const payload = r.payload !== null && typeof r.payload === 'object' && !Array.isArray(r.payload)
+        ? r.payload
+        : {};
+    if (event === 'mint') {
+        const plan = sanitizePlan(payload.plan);
+        if (plan === null) {
+            walSkippedLines++; // 坏预案行弃置（好行不连坐）
+            return;
+        }
+        // mint 顶替：单事件行先应用被顶替预案的流产账（旧预案出在途+入账册），
+        // 再注册新预案 —— 与铸造侧的簿记序一致
+        const superseded = sanitizeLedgerRecord(payload.superseded);
+        if (superseded !== null)
+            applyCloseRecord(superseded);
+        inFlightPlans.set(plan.planId, plan);
+        if (plan.approvalToken !== undefined)
+            tokenPlan.set(plan.approvalToken, plan.planId);
+        return;
+    }
+    if (event === 'settle' || event === 'close' || event === 'compensate') {
+        // 三标签重放语义同律：出在途 + 入账册（标签是审计语义，不是控制流）
+        const rec = sanitizeLedgerRecord(payload.record);
+        if (rec === null) {
+            walSkippedLines++;
+            return;
+        }
+        applyCloseRecord(rec);
+        return;
+    }
+    if (event === 'ack') {
+        const ackAt = typeof r.ts === 'number' && Number.isFinite(r.ts) ? Math.floor(r.ts) : eNow();
+        const target = [...ledger].reverse()
+            .find(x => x.planId === planId && x.escalation !== undefined);
+        if (target !== undefined && target.escalation !== undefined && target.escalation.acknowledgedAt === undefined) {
+            target.escalation.acknowledgedAt = ackAt;
+        }
+        else {
+            walSkippedLines++; // 无可确认对象（重复 ack / 账册封顶挤出）⇒ 跳过计数
+        }
+        return;
+    }
+    walSkippedLines++; // 未知事件标签（前向兼容：跳过不炸）
+}
+/** ΝΩ-22：关闭事件的应用面 —— 出在途（含令牌索引清理）+ 入账册 */
+function applyCloseRecord(rec) {
+    inFlightPlans.delete(rec.planId);
+    if (rec.approvalToken !== undefined && tokenPlan.get(rec.approvalToken) === rec.planId) {
+        tokenPlan.delete(rec.approvalToken);
+    }
+    ledger.push(rec);
+}
+/**
+ * ΝΩ-22：在途残留的崩溃恢复记录构造（不自动补偿 —— 世界状态未知，醒目交给
+ * 人；与旧整档装载路径逐字同律，供行式重放与旧档迁移共用）。
+ */
+function buildRecoveryRecord(plan, now) {
+    return {
+        planId: plan.planId,
+        semantics: plan.semantics,
+        ...(plan.description !== undefined ? { description: plan.description } : {}),
+        ...(plan.approvalToken !== undefined ? { approvalToken: plan.approvalToken } : {}),
+        mintedAt: plan.mintedAt,
+        settledAt: now,
+        outcome: 'recovered-human-attention',
+        trigger: 'crash-recovery',
+        reason: 'in-flight escrow plan found in WAL after restart — world state unknown, auto-compensation refused',
+        executedSteps: [],
+        escalation: {
+            severity: 'critical',
+            headline: 'REVERSAL ESCROW: in-flight plan recovered from WAL — HUMAN ATTENTION REQUIRED',
+            planId: plan.planId,
+            semantics: plan.semantics,
+            whatHappened: `A dangerous "${plan.semantics}" action had a minted reversal escrow plan when the process stopped. ` +
+                'Whether the action took effect is UNKNOWN. Automated compensation on the post-crash screen was refused ' +
+                '(acting on a stale plan against an unknown world state is a new hazard, not a remedy).',
+            compensationAttempted: [],
+            suggestedHumanAction: plan.description
+                ? `Inspect the world manually for: ${plan.description}. If the action took effect and is unwanted, ` +
+                    `apply the compensation path by hand: ${plan.compensation.map(s => s.label).join('; ')}.`
+                : `Inspect the world manually for the "${plan.semantics}" action; if unwanted, compensate by hand: ` +
+                    plan.compensation.map(s => s.label).join('; ') + '.',
+            mintedAt: plan.mintedAt,
+            raisedAt: now,
+        },
+    };
+}
+/**
+ * ΝΩ-22：在途残留 ⇒ 崩溃恢复（recoverInFlight）：逐条转 recovered-human-
+ * attention 并立即落盘 —— 恢复动作本身崩溃 ⇒ 下次恢复重读原事件（幂等：
+ * 恢复 close 行已入档；宁可重复唠叨，不可静默蒸发）。
+ */
+function recoverInFlight() {
+    if (inFlightPlans.size === 0)
+        return;
+    const now = eNow();
+    const recovered = [];
+    for (const plan of [...inFlightPlans.values()]) {
+        const rec = buildRecoveryRecord(plan, now);
+        inFlightPlans.delete(plan.planId);
+        if (plan.approvalToken !== undefined && tokenPlan.get(plan.approvalToken) === plan.planId) {
+            tokenPlan.delete(plan.approvalToken);
+        }
+        ledger.push(rec);
+        recovered.push(rec);
+    }
+    for (const rec of recovered) {
+        appendWalEvent({ planId: rec.planId, event: 'close', ts: rec.settledAt, payload: { record: rec } });
+    }
+}
+/**
+ * ΝΩ-22：旧整档装载（只读迁移）—— 沿 W3-1 的整档语义重建内存态（账册 +
+ * 在途恢复），随后一次性原子改写为行式事件档：旧档内容原样读入（只读），
+ * 迁移是整档 tmp+fsync+rename（数据零丢失）；迁移写失败 ⇒ 档滞留 legacy
+ * 格式，后续落盘全量重写即是迁移重试（绝不向旧档半途追加污染格式）。
+ */
+function loadLegacyWal(root) {
+    walFormat = 'legacy';
+    if (Array.isArray(root.ledger)) {
+        for (const raw of root.ledger.slice(-MAX_LEDGER_ENTRIES)) {
+            const rec = sanitizeLedgerRecord(raw);
+            if (rec)
+                ledger.push(rec);
+        }
+    }
+    if (Array.isArray(root.inFlight)) {
+        for (const raw of root.inFlight) {
+            const plan = sanitizePlan(raw);
+            if (plan === null)
+                continue; // 垃圾预案弃置（好预案不连坐）
+            inFlightPlans.set(plan.planId, plan);
+            if (plan.approvalToken !== undefined)
+                tokenPlan.set(plan.approvalToken, plan.planId);
+        }
+    }
+    // 在途残留 ⇒ 崩溃恢复（legacy 格式下 appendWalEvent 自动回落全量重写 ——
+    // 恢复结算随迁移一并落盘，与旧实现的「恢复即 persistWal」同律）
+    recoverInFlight();
+    if (!walIsEvents())
+        persistWal(); // 无在途也要迁移格式（append 前置条件）
+}
+/** ΝΩ-22：当前档是否已是行式事件格式（跨函数簿记读 —— 恢复路径可能已翻转） */
+function walIsEvents() {
+    return walFormat === 'events';
 }
 /** 账册记录净化（垃圾 ⇒ null 弃置） */
 function sanitizeLedgerRecord(raw) {
@@ -510,21 +729,78 @@ function sanitizeLedgerRecord(raw) {
     }
     return rec;
 }
-/** WAL 落盘（存储缺席 = 仅内存恒 ok；失败记 walPersistError —— 绝不抛） */
+/** 账册结果 → 事件标签（重放语义三标签同律 —— 标签保留审计语义） */
+function eventLabelOf(outcome) {
+    if (outcome === 'verified' || outcome === 'aborted-pre-dispatch')
+        return 'settle';
+    if (outcome === 'compensated-verified' || outcome === 'compensated-unverified'
+        || outcome === 'compensation-failed' || outcome === 'degraded-record-only')
+        return 'compensate';
+    return 'close'; // recovered-human-attention 等兜底关闭
+}
+/** ΝΩ-22：当前内存态 → 行式 WAL 全量文本（首写建档 / 旧档迁移 / 压缩的
+ *  原子重写面 —— 头行魔数 + 在途 mint 行 + 账册结算行） */
+function serializeEventWal() {
+    const lines = [JSON.stringify({ wal: ESCROW_WAL_MAGIC, version: ESCROW_WAL_EVENTS_VERSION }) + '\n'];
+    for (const p of inFlightPlans.values()) {
+        lines.push(JSON.stringify({ planId: p.planId, event: 'mint', ts: p.mintedAt, payload: { plan: p } }) + '\n');
+    }
+    for (const rec of ledger) {
+        lines.push(JSON.stringify({
+            planId: rec.planId, event: eventLabelOf(rec.outcome), ts: rec.settledAt, payload: { record: rec },
+        }) + '\n');
+    }
+    return lines.join('');
+}
+/**
+ * WAL 全量落盘（存储缺席 = 仅内存恒 ok；失败记 walPersistError —— 绝不抛）。
+ * ΝΩ-22：整档原子重写面（tmp + fsync + rename）—— 行式事件档格式。调用点：
+ * 首写建档、旧档迁移、压缩、以及存储无 append 面时的等效全量写（旧注入面）。
+ */
 function persistWal() {
     if (escrowStorage === null)
         return { ok: true };
     try {
-        const r = escrowStorage.save(JSON.stringify({
-            version: ESCROW_WAL_VERSION,
-            savedAt: eNow(),
-            inFlight: [...inFlightPlans.values()],
-            ledger: ledger.slice(-MAX_LEDGER_ENTRIES),
-        }));
+        const r = escrowStorage.save(serializeEventWal());
         if (!r.ok)
             walPersistError = r.error ?? 'unknown storage error';
-        else
+        else {
             walPersistError = undefined;
+            walFormat = 'events';
+            walLinesSinceCompact = 0;
+        }
+        return r;
+    }
+    catch (e) {
+        walPersistError = e instanceof Error ? e.message : String(e);
+        return { ok: false, error: walPersistError };
+    }
+}
+/**
+ * ΝΩ-22：追加单事件行（O(1) —— 行式 WAL 的增量面；调用点内存态已提交）。
+ * 分流：尚未是行式格式（无档/旧整档滞留）或存储无 append 面 ⇒ 全量原子重写
+ * （首写建档 / 迁移重试 / 旧注入面等效语义）；已是行式 ⇒ 单行追加 + 独立
+ * fsync，追加行数超压缩阈值 ⇒ 同点位做一次全量压缩重写（亡账与跳过行挤出，
+ * 摊还后仍 O(增量)）。绝不抛。
+ */
+function appendWalEvent(evt) {
+    if (escrowStorage === null)
+        return { ok: true };
+    if (walFormat !== 'events' || typeof escrowStorage.append !== 'function') {
+        return persistWal(); // 首写建档 / 旧档迁移重试 / 旧存储注入面 —— 全量重写
+    }
+    try {
+        const r = escrowStorage.append(JSON.stringify(evt) + '\n');
+        if (!r.ok) {
+            walPersistError = r.error ?? 'unknown storage error';
+            return r;
+        }
+        walPersistError = undefined;
+        walLinesSinceCompact++;
+        // 压缩阈值：追加行数远超活跃态 ⇒ 原子全量重写封顶文件膨胀
+        if (walLinesSinceCompact > 2 * (ledger.length + inFlightPlans.size) + WAL_COMPACT_OVERHEAD) {
+            persistWal(); // 压缩失败不回滚追加行（事件已持久 —— 下次落盘点重试压缩）
+        }
         return r;
     }
     catch (e) {
@@ -609,27 +885,61 @@ async function mintPlan(info) {
                 ? { verifyThreshold: strategy.verify.threshold ?? DEFAULT_VERIFY_THRESHOLD } : {}),
             ...(degraded.length > 0 ? { degraded } : {}),
         };
-        // 同令牌旧在途预案流产（见函数头注释的论证）
+        // 同令牌旧在途预案流产（见函数头注释的论证）。
+        // ΝΩ-22：顶替双写合并为单事件行 —— 旧实现先 closePlan（全量重写①）再
+        // persistWal（全量重写②）；现在流产账随 mint 行携带（payload.superseded），
+        // 一次追加同时翻转两笔簿记。
+        let supersededStale;
+        let supersededRecord;
         if (plan.approvalToken !== undefined) {
             const staleId = tokenPlan.get(plan.approvalToken);
             if (staleId !== undefined && inFlightPlans.has(staleId)) {
-                closePlan(inFlightPlans.get(staleId), {
+                supersededStale = inFlightPlans.get(staleId);
+                supersededRecord = buildCloseRecord(supersededStale, {
                     outcome: 'aborted-pre-dispatch', trigger: 'superseded',
                     reason: 'superseded by a newer mint for the same approval token (single in-flight dispatch per token)',
                 });
             }
         }
-        // 铁律 4（WAL 语义）：预案先行落盘 —— 失败 ⇒ 不入托管即拒绝派发
+        // 铁律 4（WAL 语义）：预案先行落盘 —— 失败 ⇒ 不入托管即拒绝派发。
+        // 内存先提交、追加失败 ⇒ 逐项回滚（与旧实现的回滚语义同形；账册封顶
+        // 延后到成功路径 —— 回滚 pop 干净）。
+        if (supersededStale !== undefined) {
+            inFlightPlans.delete(supersededStale.planId); // 顶替：旧预案流产出在途
+        }
         inFlightPlans.set(plan.planId, plan);
         if (plan.approvalToken !== undefined)
             tokenPlan.set(plan.approvalToken, plan.planId);
-        const persisted = persistWal();
+        if (supersededRecord !== undefined)
+            ledger.push(supersededRecord); // 暂不封顶（成功后统一封顶）
+        const persisted = appendWalEvent({
+            planId: plan.planId, event: 'mint', ts: now,
+            payload: { plan, ...(supersededRecord !== undefined ? { superseded: supersededRecord } : {}) },
+        });
         if (!persisted.ok) {
+            // 回滚：盘未翻转 ⇒ 内存逐项还原（新预案摘除 + 顶替流产撤销）
             inFlightPlans.delete(plan.planId);
-            if (plan.approvalToken !== undefined)
+            if (plan.approvalToken !== undefined && tokenPlan.get(plan.approvalToken) === plan.planId) {
                 tokenPlan.delete(plan.approvalToken);
+            }
+            if (supersededStale !== undefined) {
+                inFlightPlans.set(supersededStale.planId, supersededStale);
+                if (plan.approvalToken !== undefined)
+                    tokenPlan.set(plan.approvalToken, supersededStale.planId);
+            }
+            if (supersededRecord !== undefined && ledger[ledger.length - 1] === supersededRecord)
+                ledger.pop();
+            // 防御式再同步：追加路径若中途触发过压缩（全量重写）而追加失败 ⇒ 盘上
+            // 可能残留已提交假象 —— best-effort 全量重写回滚态（失败仅记 error）；
+            // 重写成功不清除原失败证据（stats 的 persistError 面向调用方如实汇报）
+            const originalError = persisted.error;
+            persistWal();
+            if (originalError !== undefined)
+                walPersistError = originalError;
             return { ok: false, reason: 'persist-failed', detail: persisted.error };
         }
+        if (ledger.length > MAX_LEDGER_ENTRIES)
+            ledger = ledger.slice(-MAX_LEDGER_ENTRIES);
         return { ok: true, plan: clonePlan(plan) };
     }
     catch {
@@ -716,32 +1026,37 @@ function settleByToken(token, kind, reason) {
         await runCompensation(plan, reason === 'no-effect' ? 'no-effect' : 'acceptance-failed', reason);
     })());
 }
-/** 关闭预案入账册（WAL 随行；结算落盘失败 ⇒ 内存账册仍准确 —— 见 persistWal 注释） */
-function closePlan(plan, fields) {
-    inFlightPlans.delete(plan.planId);
-    if (plan.approvalToken !== undefined && tokenPlan.get(plan.approvalToken) === plan.planId) {
-        tokenPlan.delete(plan.approvalToken);
-    }
+/** ΝΩ-22：结算记录构造（closePlan 与 mint 顶替共用 —— 纯构造，不落盘） */
+function buildCloseRecord(plan, fields) {
     // 降级标记合并面：铸造时缺席清单 ∪ 结算时新增（如 no-verify-channel）
     const mergedDegraded = [...new Set([...(plan.degraded ?? []), ...(fields.degraded ?? [])])];
-    const now = eNow();
-    ledger.push({
+    return {
         planId: plan.planId,
         semantics: plan.semantics,
         ...(plan.description !== undefined ? { description: plan.description } : {}),
         ...(plan.approvalToken !== undefined ? { approvalToken: plan.approvalToken } : {}),
         mintedAt: plan.mintedAt,
-        settledAt: now,
+        settledAt: eNow(),
         outcome: fields.outcome,
         ...(fields.trigger !== undefined ? { trigger: fields.trigger } : {}),
         ...(fields.reason !== undefined ? { reason: fields.reason } : {}),
         ...(fields.executedSteps !== undefined && fields.executedSteps.length > 0 ? { executedSteps: fields.executedSteps } : {}),
         ...(mergedDegraded.length > 0 ? { degraded: mergedDegraded } : {}),
         ...(fields.escalation !== undefined ? { escalation: fields.escalation } : {}),
-    });
+    };
+}
+/** 关闭预案入账册（WAL 随行；结算落盘失败 ⇒ 内存账册仍准确 —— 见 persistWal 注释）。
+ *  ΝΩ-22：全量重写降单事件行追加（O(增量)；每行独立 fsync —— 崩溃一致性不降级）。 */
+function closePlan(plan, fields) {
+    inFlightPlans.delete(plan.planId);
+    if (plan.approvalToken !== undefined && tokenPlan.get(plan.approvalToken) === plan.planId) {
+        tokenPlan.delete(plan.approvalToken);
+    }
+    const rec = buildCloseRecord(plan, fields);
+    ledger.push(rec);
     if (ledger.length > MAX_LEDGER_ENTRIES)
         ledger = ledger.slice(-MAX_LEDGER_ENTRIES);
-    persistWal();
+    appendWalEvent({ planId: rec.planId, event: eventLabelOf(rec.outcome), ts: rec.settledAt, payload: { record: rec } });
 }
 /** 构造补偿失败的升级报告（醒目 —— 绝不静默的落点） */
 function buildEscalation(plan, whatHappened, attempted, failureDetail, suggestedHumanAction) {
@@ -1018,6 +1333,10 @@ export const reversalEscrow = {
             ledger = [];
             walLoaded = false;
             walPersistError = undefined;
+            // ΝΩ-22：行式 WAL 簿记随武装归零（重装后 ensureWalLoaded 重新分流探测）
+            walFormat = 'none';
+            walSkippedLines = 0;
+            walLinesSinceCompact = 0;
             // 单点接线：approval 的托管钩子（缺省武装后即接管 fail-closed 派发闸门）
             setDispatchEscrowHook(dispatchGate);
             setEscrowSettlementHook((token, verdict, reason) => {
@@ -1080,7 +1399,8 @@ export const reversalEscrow = {
             return false;
         if (rec.escalation.acknowledgedAt === undefined) {
             rec.escalation.acknowledgedAt = eNow();
-            persistWal();
+            // ΝΩ-22：确认注记追加单 ack 事件行（重放侧应用到匹配记录 —— 免全量重写）
+            appendWalEvent({ planId, event: 'ack', ts: rec.escalation.acknowledgedAt });
         }
         return true;
     },
@@ -1115,6 +1435,7 @@ export const reversalEscrow = {
             ...(walPersistError !== undefined ? { persistError: walPersistError } : {}),
             builtinStrategies: BUILTIN_STRATEGIES.size,
             extensionStrategies: extensionStrategies.size,
+            walSkippedLines,
         };
     },
     /** 隔离缝（测试 beforeEach / 插件卸载）：一切模块态归零回缺省。
@@ -1135,6 +1456,10 @@ export const reversalEscrow = {
         ledger = [];
         walLoaded = false;
         walPersistError = undefined;
+        // ΝΩ-22：行式 WAL 簿记随隔离缝归零
+        walFormat = 'none';
+        walSkippedLines = 0;
+        walLinesSinceCompact = 0;
         hooksRegistered = false;
         activeWork.clear();
     },

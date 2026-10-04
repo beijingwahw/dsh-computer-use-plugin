@@ -79,9 +79,15 @@ function sameBbox(a, b) {
  * 仲裁输出回映 GroundedElement：前 acc.length 个输出与 acc 按序一一对应
  * （融合或直通，role 原位继承 acc）；其后追加的右席单源元素 bbox 原样直通，
  * 以 bbox 指纹回查 next 找回 role（查无兜底 'unknown'）。id 统一重排 'e1'..。
+ * ΝΩ-47：opts 透传 arbitrateElements 的融合置信模式（fuseMode 'classic' 缺省
+ * 旧行为 / 'loglinear' 连折有界累积）与已折家数（foldedFamilies —— askElements
+ * 累进折叠时供加成衰减因子；缺省 2 = 单对融合，零行为变化）。
  */
-export function fusePair(acc, next) {
-    const verdict = arbitrateElements(acc, next);
+export function fusePair(acc, next, opts) {
+    const verdict = arbitrateElements(acc, next, {
+        ...(opts?.fuseMode !== undefined ? { fuseMode: opts.fuseMode } : {}),
+        ...(opts?.foldedFamilies !== undefined ? { foldedFamilies: opts.foldedFamilies } : {}),
+    });
     return verdict.elements.map((el, i) => {
         let role;
         if (i < acc.length) {

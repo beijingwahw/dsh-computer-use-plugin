@@ -21,6 +21,7 @@ import {
   compareCanaryObservation,
   attemptCanaryProbe,
   isIdempotentToggleLabel,
+  isInstantReactionLabel,
   registerCanaryGuard,
   recentCanaryEvents,
   canaryBudgetSnapshot,
@@ -33,6 +34,7 @@ import { costPriorOfCall } from '../src/autonomy/uncertainty.ts';
 import { kernelRegistry } from '../src/kernel/registry.ts';
 import { approval, resetApproval, setConfirmCodeChannel, type ConfirmCodeDelivery } from '../src/approval.ts';
 import { telemetry } from '../src/telemetry.ts';
+import { journal } from '../src/journal.ts'; // ΑΩ-R4：GUARD_PROBE 探针审计执法面
 import { focusTracker } from '../src/focusTracker.ts';
 import { updatePopupState } from '../src/guards/popupGuard.ts';
 import type { Config } from '../src/config.ts';
@@ -135,6 +137,7 @@ beforeEach(() => {
   resetApproval();
   focusTracker.clear();
   updatePopupState(false);
+  journal.reset(); // ΑΩ-R4：探针审计链测试隔离
 });
 
 /** W6R fail-closed：带外码采集 + 携码授予（无码 grant 已废除 —— 授予面一律走此助手） */
@@ -526,6 +529,89 @@ test('W2-7⑤: 事件环有界（16 条环形淘汰）+ resetCanaryGuard 归零'
 
 // ─── 6. 生产端口：零孵化纪律 ───
 
+// ─── 5c. ΑΩ-R4：物理探针派发入防篡改审计链（GUARD_PROBE）───
+
+test('ΑΩ-R4: 探针派发 ⇒ journal 出现 GUARD_PROBE 条目（守卫名+脱敏参数+结果三态；链不断）', async () => {
+  relaxHighProceed();
+  const ctx = fakeCtx();
+  const fp = fakePorts({ h0: 'aaaaaaaa', h1: '00000000', h2: 'aaaaaaaa' });
+  registerCanaryGuard(ctx, CFG, fp.ports);
+  const out = await drivePre(ctx, exec('click_mouse', HIGH_RISK_CLICK));
+  assert.equal(out.kind, 'accept');
+
+  const rows = journal.list(false).filter(e => e.tool === 'GUARD_PROBE');
+  assert.equal(rows.length, 5, '点击 + 回点两次派发 + 三帧指纹采集，每次派发一行');
+  const clicks = rows.filter(e => e.args.probe === 'probe-click' || e.args.probe === 'probe-click-back');
+  assert.equal(clicks.length, 2);
+  assert.ok(clicks.every(e => e.args.guard === 'canary' && e.args.result === 'ok'), '守卫名 + 结果三态');
+  assert.ok(clicks.every(e => e.args.point && e.args.point.x === 0.5 && e.args.point.y === 0.5), '脱敏参数：只记区域坐标');
+  assert.equal(rows.filter(e => e.args.probe === 'region-hash').length, 3, '帧通道物理派发同律入链');
+  assert.equal(journal.verify().ok, true, '标记入哈希链，verify 不断链');
+  // 白名单隔离（与 AGENT_NOTE/AUDIT_PRE 同律）：GUARD_PROBE 永不进动作重放视图
+  assert.equal(journal.list(true).some(e => e.tool === 'GUARD_PROBE'), false);
+});
+
+test('ΑΩ-R4: type 探针只记单字符事实（charCount=1），零文本/字符明文', async () => {
+  relaxHighProceed();
+  const ctx = fakeCtx();
+  const fp = fakePorts({ h0: 'aaaaaaaa', h1: '00000000', h2: 'aaaaaaaa' });
+  registerCanaryGuard(ctx, CFG, fp.ports);
+  const out = await drivePre(ctx, exec('type_text', {
+    text: 'quarterly report summary',
+    expected_change: 'typed text appears in the focused field',
+    confidence: 0.95,
+  }));
+  assert.equal(out.kind, 'accept');
+  const rows = journal.list(false).filter(e => e.tool === 'GUARD_PROBE' && e.args.probe === 'probe-type-char');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].args.charCount, 1, '只记单字符事实');
+  assert.ok(!('text' in rows[0].args) && !('char' in rows[0].args), '无文本/字符载荷键');
+  const blob = JSON.stringify(journal.list(false).filter(e => e.tool === 'GUARD_PROBE'));
+  assert.ok(!blob.includes('quarterly'), '脱敏纪律：探针审计行零文本明文');
+});
+
+test('ΑΩ-R4: 结果三态如实入链 —— failed（派发被拒）/ threw（端口抛错）', async () => {
+  relaxHighProceed();
+  const ctx = fakeCtx();
+  const fp = fakePorts({ failFirstDispatch: true });
+  registerCanaryGuard(ctx, CFG, fp.ports);
+  await drivePre(ctx, exec('click_mouse', HIGH_RISK_CLICK));
+  const failed = journal.list(false).filter(e => e.tool === 'GUARD_PROBE' && e.args.probe === 'probe-click');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].args.result, 'failed', '首步派发失败 ⇒ failed（世界未被触碰）');
+
+  // threw：端口直接抛错（防御式收口路径 —— attemptCanaryProbe 直调也入链）
+  const throwing: CanaryProbePorts = {
+    click: async () => { throw new Error('dispatch-boom'); },
+    regionHash: async () => 'aaaaaaaa',
+  };
+  assert.equal((await attemptCanaryProbe({ kind: 'click-toggle', point: { x: 0.5, y: 0.5 }, char: 'x' }, throwing, {})).status, 'unavailable');
+  const threw = journal.list(false).filter(e => e.tool === 'GUARD_PROBE' && e.args.probe === 'probe-click');
+  assert.equal(threw.at(-1)!.args.result, 'threw', '端口抛错 ⇒ threw');
+});
+
+test('ΑΩ-R4: 审计失败 ⇒ fail-open —— 探针仍执行 + audit_failed 打点（不拦截不降级）', async () => {
+  relaxHighProceed();
+  const ctx = fakeCtx();
+  const fp = fakePorts({ h0: 'aaaaaaaa', h1: '00000000', h2: 'aaaaaaaa' });
+  registerCanaryGuard(ctx, CFG, fp.ports);
+  // 注入审计通道故障：appendMarker 一律抛（模拟磁盘满/路径权限/病态载荷等提交失败）
+  (journal as any).appendMarker = async () => { throw new Error('audit-channel-boom'); };
+  try {
+    const out = await drivePre(ctx, exec('click_mouse', HIGH_RISK_CLICK));
+    assert.equal(out.kind, 'accept', '审计失败不拦截主动作');
+    assert.equal(fp.calls.click, 2, '探针照常派发（fail-open：探针是安全机制，不被审计故障瘫痪）');
+    assert.equal(recentCanaryEvents()[0].action, 'passed', '金丝雀结论不受审计通道故障影响');
+    assert.equal(journal.list(false).filter(e => e.tool === 'GUARD_PROBE').length, 0, '失败审计零残留');
+    assert.ok(
+      telemetry.snapshot().counters.some(c => c.counter === 'canary:probe-audit-failed' && c.hits >= 1),
+      'audit_failed 遥测打点在册（缺席可见）',
+    );
+  } finally {
+    delete (journal as any).appendMarker; // 恢复原型方法（测试隔离）
+  }
+});
+
 // ─── 5b. W6R 收口：令牌路径（审批域活口）探针缺席/失败 ⇒ fail-closed ───
 
 test('W6R: 携带审批令牌的调用 + 探针缺席 ⇒ fail-closed 拦截（出路指明；非令牌调用不受扰）', async () => {
@@ -583,4 +669,128 @@ test('W2-7⑥: productionCanaryPorts —— 后端不在场 ⇒ 派发拒绝 + �
   assert.equal(await ports.regionHash!({ x: 0.5, y: 0.5 }, 0.06), null, '帧通道诚实缺席');
   // type 探针的焦点槽：焦点缺席 ⇒ regionHash(null) 仍诚实缺席（不伪造）
   assert.equal(await ports.regionHash!(null, 0.06), null);
+});
+
+// ─── 7. ΑΩ-R38：type 探针副作用先验闸（疑似即时反应词表，与幂等词表闸同构） ───
+
+test('ΑΩ-R38: isInstantReactionLabel —— 即时反应词表准入判据（与 isIdempotentToggleLabel 同构）', () => {
+  assert.equal(isInstantReactionLabel('GitHub search box'), true);
+  assert.equal(isInstantReactionLabel('搜索框'), true);
+  assert.equal(isInstantReactionLabel('autosuggest input'), true);
+  assert.equal(isInstantReactionLabel('自动补全输入框'), true);
+  assert.equal(isInstantReactionLabel('live filter panel'), true, 'filter 借自 TOGGLE_LEXICON 同域即筛语义');
+  assert.equal(isInstantReactionLabel('即时筛选'), true);
+  // 无信号 ⇒ false（保守按可论证 —— 现行为不变）；防御式同律
+  assert.equal(isInstantReactionLabel('quarterly report summary field'), false);
+  assert.equal(isInstantReactionLabel(''), false);
+  assert.equal(isInstantReactionLabel(undefined), false);
+  assert.equal(isInstantReactionLabel(123), false);
+});
+
+test('ΑΩ-R38: 分类面 —— 目标带即时反应信号 ⇒ type 探针降级不可论证；无信号 ⇒ 现行为不变', () => {
+  relaxHighProceed();
+  const dp = { dangerPatterns: CFG.dangerPatterns };
+  // target_description 通道：search 信号 ⇒ 单字符探针可能触发不可逆 oninput 副作用
+  const t = classifyCanaryTrigger('type_text', {
+    text: 'quarterly report',
+    target_description: 'GitHub search box',
+    expected_change: 'typed text appears in the focused field',
+    confidence: 0.95,
+  }, dp);
+  assert.equal(t.kind, 'skip');
+  assert.equal((t as any).why, 'no-reversible-probe', '降级不可论证 —— 跳过试演');
+  // expected_text 通道同律（J-14 双通道：desc ∪ expected_text）
+  const t2 = classifyCanaryTrigger('type_text', {
+    text: 'hi', expected_text: '搜索框自动补全候选出现', expected_change: 'x', confidence: 0.95,
+  }, dp);
+  assert.equal((t2 as any).why, 'no-reversible-probe');
+  // 无信号 ⇒ 恒可论证（现状零变化）
+  const t3 = classifyCanaryTrigger('type_text', {
+    text: 'quarterly report', expected_change: 'typed text appears', confidence: 0.95,
+  }, dp);
+  assert.equal(t3.kind, 'rehearse');
+  assert.equal((t3 as Extract<typeof t3, { kind: 'rehearse' }>).probe.kind, 'type-char');
+  // click 类不受牵连：TOGGLE_LEXICON 幂等词表闸保持原样（search 不在幂等词表 ⇒ click 照旧不可论证）
+  const c = classifyCanaryTrigger('click_mouse', {
+    x: 0.5, y: 0.5, target_description: 'GitHub search box',
+    expected_change: 'panel expands', confidence: 0.95,
+  }, dp);
+  assert.equal((c as any).why, 'no-reversible-probe', 'click 闸词表未动（同构不合并）');
+  const c2 = classifyCanaryTrigger('click_mouse', { ...HIGH_RISK_CLICK }, dp);
+  assert.equal(c2.kind, 'rehearse', '幂等标签点击照常试演');
+});
+
+test('ΑΩ-R38: 全链 —— search 目标的 type_text 高危调用跳过试演 + 旁路记账（探针零消费）', async () => {
+  relaxHighProceed();
+  const ctx = fakeCtx();
+  const fp = fakePorts();
+  registerCanaryGuard(ctx, CFG, fp.ports);
+  const out = await drivePre(ctx, exec('type_text', {
+    text: 'quarterly report summary',
+    target_description: 'GitHub search box',
+    expected_change: 'typed text appears in the focused field',
+    confidence: 0.95,
+  }));
+  assert.equal(out.kind, 'accept', '降级不可论证 ⇒ 让位放行（旁路，不拦截主路径）');
+  assert.equal(fp.calls.typeChar + fp.calls.backspace + fp.calls.click, 0, '探针零消费 —— 单字符不落在真实焦点元素上');
+  assert.equal(recentCanaryEvents().length, 0, '让位不产生试演事件');
+  assert.equal(canaryBudgetSnapshot().size, 0, '预算不记账（未试演）');
+  assert.ok(
+    telemetry.snapshot().counters.some(c => c.counter === 'canary:skip-no-reversible-probe' && c.misses >= 1),
+    '旁路记账：让位以 miss 计数入遥测',
+  );
+});
+
+test('ΑΩ-R38: 出厂内核零变化 —— highProceed 不可达 ⇒ 词表闸（第 7 步）先被 not-proceed（第 6 步）短路', () => {
+  // 分类面：出厂阈下 proceed×high 数学不可达，词表闸不可见
+  const t = classifyCanaryTrigger('type_text', {
+    text: 'x', target_description: 'GitHub search box', expected_change: 'y', confidence: 1,
+  }, { dangerPatterns: CFG.dangerPatterns });
+  assert.equal(t.kind, 'skip');
+  assert.equal((t as any).why, 'not-proceed', '出厂参数下金丝雀纯旁路（既有论证保持）');
+});
+
+// ─── ΝΩ-2：物理探针互斥（试演探针与用户/其他会话动作同一 D-1 躯体队列）───
+
+test('ΝΩ-2: 生产探针端口经 ioMutex 串行化 —— 四端口派发体全过互斥缝', async () => {
+  // 假互斥缝：计数 + 峰值并发（不实现排队 —— 排队语义由真件时序测试执法）
+  let enters = 0;
+  let active = 0;
+  let maxActive = 0;
+  const io = {
+    serialize: async <T,>(fn: () => Promise<T>): Promise<T> => {
+      enters++; active++; maxActive = Math.max(maxActive, active);
+      try { return await fn(); } finally { active--; }
+    },
+  };
+  const ports = productionCanaryPorts(CFG, io);
+  // 后端缺席（零孵化）：派发拒绝，但**派发体**已入缝（门控在临界区内裁决）
+  const rs = await Promise.all([
+    ports.click!({ x: 0.5, y: 0.5 }),
+    ports.typeChar!('x'),
+    ports.backspace!(),
+    ports.regionHash!(null, 0.06),
+  ]);
+  assert.deepEqual(rs, [false, false, false, null], '零孵化/dry-run 拒派 + 帧通道诚实缺席（行为零变化）');
+  assert.equal(enters, 4, '点击/输入/退格/帧通道各过一次互斥缝');
+  assert.equal(maxActive >= 1 && maxActive <= 4, true, `假缝直通语义（峰值 ${maxActive}；真排队由 ioMutex 执法）`);
+});
+
+test('ΝΩ-2: 试演探针与并发用户动作串行化 —— 真件时序（三帧取证不被并发派发插队）', async () => {
+  const { serialize } = await import('../src/ioMutex.ts');
+  const ports = productionCanaryPorts(CFG); // 缺省缝 = 真 ioMutex.serialize（与 system.ts 用户动作同队列）
+  // 用户点击先占队列 40ms —— 旧实现探针直调 physicalBackend 不排队，可与该点击并发
+  let userDoneAt = 0;
+  const userClick = serialize(async () => {
+    await new Promise<void>(r => setTimeout(r, 40));
+    userDoneAt = Date.now();
+  });
+  await new Promise<void>(r => setTimeout(r, 5)); // 让用户动作先入队开跑
+  const t0 = Date.now();
+  const ok = await ports.click!({ x: 0.5, y: 0.5 }); // 探针步排队等待
+  const probeDoneAt = Date.now();
+  await userClick;
+  assert.equal(ok, false, '零孵化纪律不变：后端缺席 ⇒ 拒派（排队不孵服务）');
+  assert.ok(userDoneAt > 0 && probeDoneAt >= userDoneAt,
+    `探针派发在在途用户 IO 落定后才出队（probe=${probeDoneAt - t0}ms ≥ user hold 40ms —— 物理互斥成立）`);
 });

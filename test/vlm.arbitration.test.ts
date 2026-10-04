@@ -6,8 +6,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 // 浮点断言：容差式比较（融合置信含 0.15 等非二进制小数，拒绝逐位巧合）
-const close = (actual: number, expected: number, tol = 1e-9) =>
-  assert.ok(Math.abs(actual - expected) <= tol, `期望 ${actual} ≈ ${expected}（容差 ${tol}）`)
+const close = (actual: number, expected: number, tol = 1e-9, msg?: string) =>
+  assert.ok(Math.abs(actual - expected) <= tol, `${msg ? msg + '：' : ''}期望 ${actual} ≈ ${expected}（容差 ${tol}）`)
 
 // GroundedElement 形状便捷构造（兄弟模块契约：id/label/role/bbox/center/confidence/source）
 const ve = (id: string, label: string, box: [number, number, number, number], confidence: number) => ({
@@ -205,4 +205,82 @@ test('Ω-9-8: 边界与纯度 —— 双空输入不抛错、单侧空直通、�
   assert.ok(!/\brequire\s*\(/.test(src), '零 require')
   assert.ok(!/export\s+default/.test(src), '禁止 default export')
   assert.ok(!/\bfrom\s+['"]sharp['"]|node:(http|https|net|tls|dgram)|\bfetch\s*\(/.test(src), '零图像/网络依赖')
+})
+
+// ─── ΝΩ-47 loglinear 融合模式：连折置信膨胀修正（opt-in，缺省 classic 旧行为） ───
+
+test('ΝΩ-47a: loglinear 单对融合 —— conf = min(1,(cv+cl)/2 + bonus/√2)；classic 缺省/显式与旧行为逐字节一致', async () => {
+  const { arbitrateElements } = await import('../src/vlm/arbitration.ts')
+  const mk = () => [ve('v1', '登录', [0, 0, 100, 50], 0.8), le('登录', [0, 0, 100, 50], 0.8)] as const
+  // classic 缺省（旧行为，Ω-9-2 已钉死 0.95）与显式 classic 逐字节一致
+  close(arbitrateElements([mk()[0]], [mk()[1]]).elements[0].confidence, 0.95, 1e-12)
+  close(
+    arbitrateElements([mk()[0]], [mk()[1]], { fuseMode: 'classic' }).elements[0].confidence,
+    0.95,
+    1e-12,
+    '显式 classic = 缺省',
+  )
+  // loglinear（foldedFamilies 缺省 2 = 单对双源）：0.8 + 0.15/√2
+  const ll = arbitrateElements([mk()[0]], [mk()[1]], { fuseMode: 'loglinear' })
+  close(ll.elements[0].confidence, 0.8 + 0.15 / Math.sqrt(2), 1e-12, '加成按 1/√2 衰减')
+  // 模式只动置信：bbox / label / source / winner 与 classic 全同
+  const clas = arbitrateElements([mk()[0]], [mk()[1]])
+  const a = ll.elements[0]
+  const b = clas.elements[0]
+  assert.deepEqual(a.bbox, b.bbox, '凸组合框不动')
+  assert.equal(a.label, b.label)
+  assert.equal(a.source, b.source)
+  assert.equal(ll.winner, clas.winner, 'winner 判决不动')
+})
+
+test('ΝΩ-47b: foldedFamilies 衰减因子 + agreementBonus 组合 + 脏值安静归缺省', async () => {
+  const { arbitrateElements } = await import('../src/vlm/arbitration.ts')
+  const one = (conf: number) => [ve('v', '确定', [0, 0, 10, 10], conf), le('确定', [0, 0, 10, 10], conf)] as const
+  // 5 家连折的末折：0.8 + 0.15/√5
+  close(
+    arbitrateElements([one(0.8)[0]], [one(0.8)[1]], { fuseMode: 'loglinear', foldedFamilies: 5 }).elements[0].confidence,
+    0.8 + 0.15 / Math.sqrt(5),
+    1e-12,
+    '加成按 1/√families 衰减',
+  )
+  // agreementBonus 选项与衰减因子正交组合：bonus 0.5、家数 4 ⇒ 0.6 + 0.25
+  close(
+    arbitrateElements([one(0.6)[0]], [one(0.6)[1]], {
+      fuseMode: 'loglinear', foldedFamilies: 4, agreementBonus: 0.5,
+    }).elements[0].confidence,
+    0.6 + 0.5 / 2,
+    1e-12,
+  )
+  // 脏 foldedFamilies（0 / -3 / NaN）⇒ 归 2（单对缺省）
+  for (const bad of [0, -3, Number.NaN]) {
+    close(
+      arbitrateElements([one(0.8)[0]], [one(0.8)[1]], {
+        fuseMode: 'loglinear', foldedFamilies: bad,
+      }).elements[0].confidence,
+      0.8 + 0.15 / Math.sqrt(2),
+      1e-12,
+      `脏值 ${bad} 安静归 2`,
+    )
+  }
+  // 非整数向下取整：2.9 ⇒ 2
+  close(
+    arbitrateElements([one(0.8)[0]], [one(0.8)[1]], {
+      fuseMode: 'loglinear', foldedFamilies: 2.9,
+    }).elements[0].confidence,
+    0.8 + 0.15 / Math.sqrt(2),
+    1e-12,
+  )
+  // 非法 fuseMode 字面量安静归 classic（不抛铁律）
+  close(
+    arbitrateElements([one(0.8)[0]], [one(0.8)[1]], { fuseMode: 'banana' as never }).elements[0].confidence,
+    0.95,
+    1e-12,
+    '脏模式归 classic',
+  )
+  // 封顶仍执法：高基线 + 大 bonus ⇒ 恰 1 绝不过界
+  assert.equal(
+    arbitrateElements([one(1)[0]], [one(1)[1]], { fuseMode: 'loglinear', agreementBonus: 0.9 }).elements[0].confidence,
+    1,
+    'loglinear 封顶于 1',
+  )
 })

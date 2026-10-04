@@ -27,7 +27,7 @@ import type {
   VisionChatResult,
   VisionProvider,
 } from './types';
-import { extractProviderJson, fetchWithRetry, sanitizeError } from './types';
+import { extractProviderJson, fetchWithRetry, HTTP_STATUS_BAD_REQUEST, sanitizeError } from './types';
 
 /** Gemini 适配器专属配置 —— 在共享 ProviderOptions 之上补三个缺省值注入口 */
 export interface GeminiProviderConfig extends ProviderOptions {
@@ -117,6 +117,82 @@ function scrubSecret(text: string, secret: string): string {
   return text.split(secret).join('***redacted***');
 }
 
+// ─── ΝΩ-44（结构化输出约束解码）：Gemini OpenAPI 子集转换器 ───
+
+/**
+ * jsonMode 提示词追加行（ΝΩ-44 回退态用，与 anthropic.JSON_MODE_SUFFIX 同文）：
+ * responseSchema 模式被网关 400 拒后的「提示词后缀模式」纪律行 —— 剥
+ * responseSchema/responseMimeType，约束改由提示词约定承担。
+ */
+const JSON_MODE_SUFFIX = '\n\nOutput strict JSON only. 只输出严格 JSON，不要围栏。';
+
+/** Gemini responseSchema 认识的 JSON Schema 键（OpenAPI 3.0 Schema 子集白名单）：
+ *  白名单之外的一切键（$schema/$ref/additionalProperties/minLength/pattern/
+ *  allOf…）丢弃并注记 —— 宁可少约束，不可发被拒的载荷。 */
+const GEMINI_SCHEMA_KEYS: ReadonlySet<string> = new Set([
+  'type', 'format', 'description', 'nullable', 'enum', 'items', 'properties', 'required',
+]);
+
+/** JSON Schema type（小写）→ Gemini Type 枚举（大写）—— 未知名安静丢弃
+ *  （'null' 等无 Gemini 对应形态，不臆造）。 */
+const GEMINI_TYPE_MAP: Readonly<Record<string, string>> = {
+  string: 'STRING',
+  number: 'NUMBER',
+  integer: 'INTEGER',
+  boolean: 'BOOLEAN',
+  array: 'ARRAY',
+  object: 'OBJECT',
+};
+
+/**
+ * JSON Schema → Gemini responseSchema 最小转换器（ΝΩ-44）：
+ *  - 递归收窄到 OpenAPI 子集白名单；不支持键收集进 dropped（调用方注记面）
+ *  - type 小写→大写枚举；format 仅认 'enum'/'date-time'（官方支持面）
+ *  - enum 仅保留字符串成员（Gemini Schema.enum 为 string 数组面）
+ *  - required 仅保留字符串成员；脏节点（非纯对象/数组）转换结果 undefined ——
+ *    properties 下即整属性丢弃（诚实少约束，绝不臆造类型）
+ *  - 空节点/全丢弃 ⇒ undefined（调用方据此回退提示词后缀模式）
+ *  绝不抛异常 —— 一切脏值安静降级为「该节点不可表达」。
+ */
+function toGeminiResponseSchema(
+  node: unknown,
+  dropped: Set<string>,
+): Record<string, unknown> | undefined {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return undefined;
+  const src = node as Record<string, unknown>;
+  for (const k of Object.keys(src)) {
+    if (!GEMINI_SCHEMA_KEYS.has(k)) dropped.add(k);
+  }
+  const out: Record<string, unknown> = {};
+  const mappedType = typeof src.type === 'string' ? GEMINI_TYPE_MAP[src.type] : undefined;
+  if (mappedType !== undefined) out.type = mappedType;
+  if (src.format === 'enum' || src.format === 'date-time') out.format = src.format;
+  if (typeof src.description === 'string' && src.description !== '') out.description = src.description;
+  if (typeof src.nullable === 'boolean') out.nullable = src.nullable;
+  if (Array.isArray(src.enum)) {
+    const strs = src.enum.filter((v): v is string => typeof v === 'string');
+    if (strs.length > 0) out.enum = strs;
+  }
+  if (src.items !== null && typeof src.items === 'object' && !Array.isArray(src.items)) {
+    const conv = toGeminiResponseSchema(src.items, dropped);
+    if (conv !== undefined) out.items = conv;
+  }
+  const props = src.properties;
+  if (props !== null && typeof props === 'object' && !Array.isArray(props)) {
+    const converted: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(props)) {
+      const conv = toGeminiResponseSchema(v, dropped);
+      if (conv !== undefined) converted[k] = conv;
+    }
+    if (Object.keys(converted).length > 0) out.properties = converted;
+  }
+  if (Array.isArray(src.required)) {
+    const reqs = src.required.filter((s): s is string => typeof s === 'string');
+    if (reqs.length > 0) out.required = reqs;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /**
  * 创建 Gemini 协议适配器 —— 无状态、线程安全（每次 chat 独立请求）。
  * 构造期快照配置，之后不回读任何外部状态（测试依赖此确定性）。
@@ -180,6 +256,30 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
         });
       }
 
+      // ΝΩ-44（结构化输出约束解码）：jsonSchema 在场 ⇒ generationConfig 补
+      // responseMimeType:'application/json' + responseSchema（schema 经 OpenAPI
+      // 子集转换器收窄，不支持字段丢弃并注记 degradeNote —— 终败时并入 error
+      // 诚实归因，旧路径恒 undefined ⇒ 旧 error 串逐字节不变）。schema 脏值/
+      // 收窄到空 ⇒ 无法表达 ⇒ 诚实回退提示词后缀模式（prompt 补 JSON 约定行，
+      // 运行层绝不抛）。缺席 ⇒ 旧 payload 逐字节保持（零回归铁律）。
+      let degradeNote: string | undefined;
+      let responseSchema: Record<string, unknown> | undefined;
+      let promptText = req.prompt;
+      if (req.jsonSchema !== undefined) {
+        const dropped = new Set<string>();
+        const converted = toGeminiResponseSchema(req.jsonSchema, dropped);
+        if (converted !== undefined) {
+          responseSchema = converted;
+          if (dropped.size > 0) {
+            degradeNote = `schema fields not supported by gemini responseSchema dropped: ${[...dropped].sort().join(', ')}`;
+          }
+        } else {
+          degradeNote = 'jsonSchema not representable as gemini responseSchema - fell back to prompt-suffix json mode';
+          promptText = `${req.prompt}${JSON_MODE_SUFFIX}`;
+        }
+      }
+      const schemaIntent = req.jsonSchema !== undefined; // 结构化意图在场（提取门槛/注记面）
+
       // Gemini generateContent 请求体 —— undefined 字段经条件展开，绝不进序列化
       const payload: Record<string, unknown> = {
         ...(req.system !== undefined && req.system !== ''
@@ -191,13 +291,14 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
             ...req.images.map(img => ({
               inline_data: { mime_type: img.mime ?? 'image/jpeg', data: img.base64 },
             })),
-            { text: req.prompt },
+            { text: promptText },
           ],
         }],
         generationConfig: {
           maxOutputTokens: maxTokens,
           temperature,
-          ...(req.jsonMode ? { responseMimeType: 'application/json' } : {}),
+          ...(responseSchema !== undefined || req.jsonMode ? { responseMimeType: 'application/json' } : {}),
+          ...(responseSchema !== undefined ? { responseSchema } : {}),
         },
       };
 
@@ -211,7 +312,7 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
       const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
 
       // 传输底座（重试律唯一定义点）：429/5xx/网络错可重试，超时不重试
-      const outcome = await fetchWithRetry({
+      let outcome = await fetchWithRetry({
         doFetch: config.fetchImpl ?? fetch,
         url,
         init: {
@@ -223,10 +324,55 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
         timeoutMs,
       });
 
+      // ΝΩ-44 回退（responseSchema 不被网关支持）：400 类配置性失败（429/5xx
+      // 已由 fetchWithRetry 重试域处置，传输面失败换模式无义）⇒ 剥 responseSchema/
+      // responseMimeType、prompt 尾部补 JSON 约定行重发**恰一次**（提示词后缀
+      // 模式 —— 约束解码失败的诚实回退，运行层绝不抛）；重发再败按终败处置
+      //（回退只挂在这一处顺序代码上，无循环）。旧路径（无 jsonSchema）恒不进
+      // 此分支 ⇒ 旧 400 行为逐字节不变（零回归铁律）。
+      if (
+        !outcome.ok &&
+        outcome.failureKind === 'http' &&
+        outcome.status === HTTP_STATUS_BAD_REQUEST &&
+        responseSchema !== undefined
+      ) {
+        degradeNote = degradeNote !== undefined
+          ? `${degradeNote}; responseSchema rejected - fell back to prompt-suffix json mode`
+          : 'responseSchema rejected by gateway (HTTP 400) - fell back to prompt-suffix json mode';
+        outcome = await fetchWithRetry({
+          doFetch: config.fetchImpl ?? fetch,
+          url,
+          init: {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              ...payload,
+              contents: [{
+                role: 'user',
+                parts: [
+                  ...req.images.map(img => ({
+                    inline_data: { mime_type: img.mime ?? 'image/jpeg', data: img.base64 },
+                  })),
+                  { text: `${req.prompt}${JSON_MODE_SUFFIX}` },
+                ],
+              }],
+              generationConfig: {
+                maxOutputTokens: maxTokens,
+                temperature,
+              },
+            }),
+          },
+          maxRetries,
+          timeoutMs,
+        });
+      }
+
       if (!outcome.ok) {
         if (outcome.status === undefined) {
-          // 传输终败 / 超时 —— fetchWithRetry 已产出归因串，再过一遍密钥卫生
-          return finish({ ok: false, text: '', error: sanitizeError(outcome.error, providerId) });
+          // 传输终败 / 超时 —— fetchWithRetry 已产出归因串，再过一遍密钥卫生；
+          // ΝΩ-44 注记（仅 schema 路径可非空）随 error 诚实归因
+          const noted0 = degradeNote !== undefined ? `${outcome.error} [ΝΩ-44: ${degradeNote}]` : outcome.error;
+          return finish({ ok: false, text: '', error: sanitizeError(noted0, providerId) });
         }
         // HTTP 终败：Gemini 错误体 {error:{message}} —— 归因优先取 error.message
         const parsed = tryParseJson(outcome.body);
@@ -236,12 +382,12 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
           ? apiMsg
           : (outcome.body ?? '').replace(/\s+/g, ' ').trim();
         const attemptsSuffix = outcome.attempts > 1 ? ` after ${outcome.attempts} attempts` : '';
+        const noted = degradeNote !== undefined
+          ? `HTTP ${outcome.status}${attemptsSuffix}${inner !== '' ? `: ${inner}` : ''} [ΝΩ-44: ${degradeNote}]`
+          : `HTTP ${outcome.status}${attemptsSuffix}${inner !== '' ? `: ${inner}` : ''}`;
         return finish({
           ok: false, text: '',
-          error: sanitizeError(
-            `HTTP ${outcome.status}${attemptsSuffix}${inner !== '' ? `: ${inner}` : ''}`,
-            providerId,
-          ),
+          error: sanitizeError(noted, providerId),
         });
       }
 
@@ -264,7 +410,9 @@ export function createGeminiProvider(config: GeminiProviderConfig = {}): VisionP
       const usage = mapUsageMetadata((body as { usageMetadata?: unknown }).usageMetadata);
       const r: Omit<VisionChatResult, 'providerId' | 'latencyMs' | 'model'> = { ok: true, text };
       if (usage) r.usage = usage;
-      if (req.jsonMode) {
+      // ΝΩ-44：json 提取门槛放行 schemaIntent（jsonSchema 在场即结构化意图，
+      // 不苛求 jsonMode 同开）；旧路径（无 jsonSchema）行为逐字节不变。
+      if (req.jsonMode || schemaIntent) {
         const j = extractProviderJson(text);
         if (j !== undefined) r.json = j;
       }

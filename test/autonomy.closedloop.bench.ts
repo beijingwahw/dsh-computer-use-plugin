@@ -585,10 +585,12 @@ test('B5: 进化生效 —— 同一向导连跑两次 ⇒ 蒸馏技能可靠度
     assert.equal(report1.distilledSkill?.reliability, 0.5);
     assert.equal(report2.distilledSkill?.reliability, 0.6);
     assert.deepEqual(report2.distilledSkill?.steps, ['click → click → declare']);
-    assert.deepEqual(engine.heuristics(), { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1.2 },
-      '成功两轮 ⇒ click 去重奖励 +0.1×2，其余策略不动');
+    // ΝΩ-11 HCA 折扣手算：[click,click,declare] N=3，click 最晚 i=1 ⇒ γ^(3-1-1)=γ¹
+    // ⇒ 每轮 +0.07（declare 非 KNOWN 不入账）—— 两轮 1.0 + 0.07×2 = 1.14
+    assert.deepEqual(engine.heuristics(), { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1.14 },
+      '成功两轮 ⇒ click 去重折扣奖励 +0.07×2，其余策略不动');
     assert.equal(report2.lessons.length, 0, '纯成功历史零教训');
-    assert.ok(report2.nextRunAdvice[0]?.includes('click'), '最高权重者先行（click 1.2）');
+    assert.ok(report2.nextRunAdvice[0]?.includes('click'), '最高权重者先行（click 1.14）');
     assert.ok(report2.nextRunAdvice.some(s => s.includes('recall_skill')));
   });
 });

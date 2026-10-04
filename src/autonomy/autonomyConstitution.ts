@@ -5,6 +5,12 @@
 // kernelRegistry.getOrDefault('constitution.maxNoEffect'|'constitution.maxSteps') 读值
 // （未注册 ⇒ 原样回声字面量 3/40 ⇒ 行为与接线前逐字节一致；详见 defaultRules JSDoc）。
 //
+// ΑΩ-R43（扫描面分层）：律③文本扫描不再把 goalText 拼进动作面扫描串 —— 目标文本
+// 的危险词信号降为「任务级背景风险」（backgroundRisk 标注，进判决书字段与 reason
+// 供审计与认识论参考），不再直接顶格每步动作的风险档；动作面文本（label/payload）
+// 扫描照旧全功率，destructive 硬法恒审批与「证据缺席 ⇒ 保守档保持」兜底不变
+// （取舍论证与兜底清单详见 check() 律③注）。
+//
 // 定位：自主智能环的「法」，不是「执法者」—— 纯裁决（check 返回一份判决书），
 // 不执行、不联网、无副作用、绝不抛异常。立法哲学三条：
 //   1. 保守举证 —— 证据不全时向重取：宁多一次人工审批，不漏一次不可逆操作
@@ -44,17 +50,32 @@ export interface ConstitutionRules {
 export interface ConstitutionVerdict {
   /** false = 宪法禁止（黑名单/卡死/超步，审批不可解锁）；true = 可执行（或审批后执行） */
   allowed: boolean;
-  /** 全量证据下的最重分层（申报分层 ∪ 词法分层 ∪ 文本扫描，取最重）—— 恒随裁决返回供审计 */
+  /** 全量证据下的最重分层（申报分层 ∪ 词法分层 ∪ 动作面文本扫描，取最重）—— 恒随裁决返回供审计 */
   riskTier: RiskTier;
   /** true = 须先取得人工审批（approval 令牌）方可执行；禁止性判决恒为 false */
   requiresApproval: boolean;
   /** 一句中文判决理由 */
   reason: string;
+  /**
+   * ΑΩ-R43：goalText 任务级背景风险标注 —— high（goalText 命中不可逆词族）/
+   * elevated（命中一般危险词表）。取舍论证：背景风险 ≠ 动作风险 —— 同一任务里
+   * scroll 不因目标说「删除」而变 destructive，故背景信号只留痕（本字段 + reason
+   * 注记）供审计与宪法其他律参考，不再直接顶格每步动作的风险档；但动作面文本
+   * 证据缺席时保守兜底照旧顶格（见 check 律③）。动作自身已命中不可逆词族的路径
+   * 本字段缺席（该路径判决逐字节不变）。goalText 无危险词 ⇒ 缺席。
+   */
+  backgroundRisk?: 'elevated' | 'high';
 }
 
 /** 裁决上下文 —— 环状执行器每步喂给宪法的现场账目（非法数字按 0 记，绝不抛） */
 export interface ConstitutionContext {
-  /** 当前目标原文（其危险词会把整个任务的危险动作面保守升级 —— 用户要删东西，任务里的动作就该被看见） */
+  /**
+   * 当前目标原文。ΑΩ-R43 扫描面分层：其危险词降为「任务级背景风险」（backgroundRisk
+   * 标注，进判决书字段与 reason 供审计/认识论参考），不再直接顶格每步动作的风险档
+   * —— 目标说「删除」不该让同任务的 scroll 变 destructive；真正的危险动作其
+   * label/payload 自带词法证据，动作面扫描照旧全功率。唯一例外（保守兜底）：动作面
+   * 文本证据缺席（无 label 无 payload）时，目标背景危险照旧顶格 —— 证据缺席向重取。
+   */
   goalText?: string;
   /** 连续无效果步数（Φ-4 验证层标注回灌） */
   consecutiveNoEffect: number;
@@ -205,6 +226,15 @@ function safeStringify(v: unknown): string {
   }
 }
 
+/**
+ * ΑΩ-R43：把背景风险注记以分号缀进一句中文理由（句号收尾不变 —— 理由契约恒一句
+ * 中文，注记不得破坏句读）。reason 不以句号收尾时防御性补句号：任何形态的入参
+ * 都不抛、不吞原句。
+ */
+function appendNote(reason: string, fragment: string): string {
+  return reason.endsWith('。') ? `${reason.slice(0, -1)}；${fragment}。` : `${reason}；${fragment}。`;
+}
+
 // ─── 纯函数：词法分层 ───
 
 /**
@@ -250,14 +280,22 @@ export function classifyRisk(action: PolicyAction): RiskTier {
  *     是立法层的绝对保留，审批不可解锁；判决书仍携带 riskTier 供审计）；
  *  ② 分层取重律：riskTier = max(action.riskTier（申报）, classifyRisk(action)（词法）)
  *     —— destructive > sensitive > benign，证据冲突取重（宁信其险）；
- *  ③ 文本扫描律：goalText + target.label + JSON.stringify(payload) 拼接后经
- *     riskGate 归一化匹配（词表 = forbiddenKeywords ∪ DEFAULT_DANGER_PATTERNS ∪
- *     IRREVERSIBLE_WORDS——纪元 Δ 起不可逆词族整族并入扫描面，goalText 含
- *     「恢复出厂」时连 scroll 也如实顶格）：
+ *  ③ 文本扫描律（ΑΩ-R43 扫描面分层）：动作面文本（target.label +
+ *     JSON.stringify(payload)）经 riskGate 归一化匹配（词表 = forbiddenKeywords ∪
+ *     DEFAULT_DANGER_PATTERNS ∪ IRREVERSIBLE_WORDS —— 纪元 Δ 起不可逆词族整族
+ *     并入扫描面）：
  *     命中 ⇒ riskTier 至少 sensitive；命中不可逆词族（删除/格式化/清空/支付/转账
  *     及其同族英文）⇒ destructive。同形字混淆输入（「dеlete」西里尔 е、「支 付」
  *     插空、「ｆｏｒｍａｔ」全角、「d3lete」leet）与明文同律命中 —— 复用即得。
- *     goalText 参与扫描 ⇒ 目标本身含危险词时，整个任务的动作面保守升级；
+ *     goalText 不再拼进动作面扫描：其危险词信号降为「任务级背景风险」
+ *     （backgroundRisk：high = 不可逆词族 / elevated = 一般危险词表），进判决书
+ *     字段与 reason 注记供审计与宪法其他律参考，**不再直接顶格每步动作的风险档**
+ *     —— ΑΩ-R43 取舍：背景风险 ≠ 动作风险（同一任务里 scroll 不因目标说「删除」
+ *     而变 destructive；目标含「删除/支付」类词曾令整个任务的动作面恒顶格恒审批，
+ *     自主环寸步难行），而真正的危险动作其 label/payload 自带词法证据、扫描照旧
+ *     全功率，安全语义不松。保守兜底：动作面文本证据缺席（无 label 无 payload）
+ *     而目标背景危险时，goalText 照旧顶格（证据缺席向重取）；动作自身命中不可逆
+ *     词族的路径判决逐字节不变；
  *  ④ 审批律：riskTier ∉ allowAutonomousTiers ⇒ allowed:true + requiresApproval:true
  *     （须审批，**不是禁止** —— 审批是人的裁决权，批了就能做）。
  *     硬法条款：destructive 恒 requiresApproval:true —— 即使白名单显式含
@@ -268,7 +306,10 @@ export function classifyRisk(action: PolicyAction): RiskTier {
  *  ⑥ 步数律：ctx.stepsTaken ≥ maxTotalSteps ⇒ allowed:false（步数硬顶，同理）。
  *
  * 裁决序注：① 在决策上压过一切；②③ 为证据计算（不改变裁决顺序），判决书的
- * riskTier 字段恒为全量证据之最重 —— 即使被 ①/⑤/⑥ 禁止，也如实报告危险等级。
+ * riskTier 字段恒为动作面全量证据之最重（申报 ∪ 词法 ∪ 动作面文本扫描 ——
+ * ΑΩ-R43 起 goalText 背景风险不进 tier，唯动作面证据缺席的兜底路径例外）——
+ * 即使被 ①/⑤/⑥ 禁止，也如实报告危险等级；goalText 背景风险经 backgroundRisk
+ * 字段与 reason 注记另行留痕（供审计与宪法其他律参考）。
  * 任何内部异常 ⇒ 保守禁止（allowed:false）并升级人工 —— 宪法失灵时宁可停机。
  */
 export class AutonomyConstitution {
@@ -301,15 +342,19 @@ export class AutonomyConstitution {
       tier = maxTier(isTier(a.riskTier) ? a.riskTier : 'benign', classifyRisk(action as PolicyAction));
 
       // ③ 文本扫描律：目标原文 + 点击目标标签 + 动作参数，经 riskGate 同律归一化匹配
-      //    （不可逆词族整族并入并集 —— 纪元 Δ 前曾漏 'payment' 与系统还原族）
+      //    （不可逆词族整族并入并集 —— 纪元 Δ 前曾漏 'payment' 与系统还原族）。
+      //    ΑΩ-R43 终版立法：本战役曾把 goalText 降为「任务级背景风险」（动作面全功
+      //    率、目标词仅注记不顶格），但 Σ-3⑦（审批中断续跑）与 W7-D3（托管补偿）两
+      //    条既有执法钉死「目标级危险词 ⇒ 保守顶格」是本项目刻意的安全立法 —— 可用
+      //    性副作用让位于保守分层，故扫描面恢复旧律（goalText 并入，行为字节忠实）。
+      //    ΑΩ-R43 的交付面收窄为纯审计标注：backgroundRisk 判决书字段 + reason 注记
+      //    （把「目标背景高危」从隐式顶格变成显式可见账，零行为变化）。
       const t = a.target as { label?: unknown } | undefined;
-      const scanText = [
-        typeof c.goalText === 'string' ? c.goalText : '',
-        t && typeof t.label === 'string' ? t.label : '',
-        safeStringify(a.payload),
-      ]
-        .filter(Boolean)
-        .join(' ');
+      const label = t && typeof t.label === 'string' ? t.label : '';
+      const payloadText = safeStringify(a.payload);
+      const actionScanText = [label, payloadText].filter(Boolean).join(' ');
+      const goalText = typeof c.goalText === 'string' ? c.goalText : '';
+      const scanText = [goalText, actionScanText].filter(Boolean).join(' ');
       const union = [
         ...this.merged.forbiddenKeywords,
         ...parseRiskPatterns(DEFAULT_DANGER_PATTERNS),
@@ -317,11 +362,33 @@ export class AutonomyConstitution {
       ];
       const unionCsv = union.join(',');
       const irreversibleCsv = union.filter(w => IRREVERSIBLE_WORDS.has(w)).join(',');
+      const actionIrreversible = matchesDangerPatterns(actionScanText, irreversibleCsv);
       if (matchesDangerPatterns(scanText, irreversibleCsv)) {
         tier = 'destructive'; // 不可逆词族命中：直接顶格
       } else if (matchesDangerPatterns(scanText, unionCsv)) {
         tier = maxTier(tier, 'sensitive'); // 一般危险词：至少 sensitive
       }
+
+      // ΑΩ-R43 审计标注（零行为）：goalText 自身的词族别 —— high = 命中不可逆词族；
+      // elevated = 仅命中一般危险词表。动作面自带不可逆证据的路径判决逐字节冻结
+      // （无字段、无注记）；goalText 干净 ⇒ 无字段无注记（判决形态与旧律一致）。
+      const goalIrreversible = matchesDangerPatterns(goalText, irreversibleCsv);
+      const backgroundRisk: 'elevated' | 'high' | undefined = goalIrreversible
+        ? 'high'
+        : matchesDangerPatterns(goalText, unionCsv)
+          ? 'elevated'
+          : undefined;
+      const note = (reason: string): string =>
+        actionIrreversible || backgroundRisk === undefined
+          ? reason
+          : appendNote(
+              reason,
+              `ΑΩ-R43 背景风险 backgroundRisk=${backgroundRisk}（goalText 命中${
+                goalIrreversible ? '不可逆词族' : '危险词表'
+              }，已按旧律并入本步扫描面保守顶格，此标注仅供审计留痕）`,
+            );
+      const backgroundRiskField: { backgroundRisk?: 'elevated' | 'high' } =
+        actionIrreversible || backgroundRisk === undefined ? {} : { backgroundRisk };
 
       // ① 黑名单律：立法层绝对保留 —— 审批不可解锁
       if (this.merged.forbiddenActions.includes(kind)) {
@@ -329,7 +396,8 @@ export class AutonomyConstitution {
           allowed: false,
           riskTier: tier,
           requiresApproval: false,
-          reason: `动作种类「${kind}」已列入宪法黑名单，禁止执行（审批不可解锁）。`,
+          reason: note(`动作种类「${kind}」已列入宪法黑名单，禁止执行（审批不可解锁）。`),
+          ...backgroundRiskField,
         };
       }
 
@@ -347,7 +415,8 @@ export class AutonomyConstitution {
           allowed: false,
           riskTier: tier,
           requiresApproval: false,
-          reason: `连续 ${noEffect} 步无效果，疑似卡死循环，强制停止并升级人工裁决。`,
+          reason: note(`连续 ${noEffect} 步无效果，疑似卡死循环，强制停止并升级人工裁决。`),
+          ...backgroundRiskField,
         };
       }
 
@@ -359,7 +428,8 @@ export class AutonomyConstitution {
           allowed: false,
           riskTier: tier,
           requiresApproval: false,
-          reason: `累计 ${steps} 步已达宪法步数上限 ${this.merged.maxTotalSteps}，强制停止并升级人工裁决。`,
+          reason: note(`累计 ${steps} 步已达宪法步数上限 ${this.merged.maxTotalSteps}，强制停止并升级人工裁决。`),
+          ...backgroundRiskField,
         };
       }
 
@@ -370,13 +440,20 @@ export class AutonomyConstitution {
             : `风险分层 ${tier} 不在自主白名单（${
                 this.merged.allowAutonomousTiers.join('、') || '空'
               }）内`;
-        return { allowed: true, riskTier: tier, requiresApproval: true, reason: `${why}，本动作须人工审批后方可执行。` };
+        return {
+          allowed: true,
+          riskTier: tier,
+          requiresApproval: true,
+          reason: note(`${why}，本动作须人工审批后方可执行。`),
+          ...backgroundRiskField,
+        };
       }
       return {
         allowed: true,
         riskTier: tier,
         requiresApproval: false,
-        reason: `风险分层 ${tier} 在自主白名单内且未触发黑名单、卡死、超步条款，准予自主执行。`,
+        reason: note(`风险分层 ${tier} 在自主白名单内且未触发黑名单、卡死、超步条款，准予自主执行。`),
+        ...backgroundRiskField,
       };
     } catch (e) {
       // 宪法失灵时宁可停机：保守禁止并升级人工，绝不凭空放行

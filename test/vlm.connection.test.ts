@@ -5,9 +5,10 @@
 // 环境变量（DSH_VLM_CONNECTION）一律「保存 → 临时写入 → try/finally 恢复」。
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
+import type { ConnectionLoadDetail } from '../src/vlm/connection.ts';
 
 const {
   defaultConnectionPath,
@@ -45,6 +46,20 @@ function withConnEnv(value: string | undefined, fn: () => void): void {
   } finally {
     if (saved === undefined) delete process.env.DSH_VLM_CONNECTION;
     else process.env.DSH_VLM_CONNECTION = saved;
+  }
+}
+
+// ΑΩ-R9（密钥静态加密）：受控执行 DSH_VLM_STORE_PASSPHRASE（与 withConnEnv 同律）
+/** undefined = 确保删除；fn 抛错也必恢复 */
+function withPassphraseEnv(value: string | undefined, fn: () => void): void {
+  const saved = process.env.DSH_VLM_STORE_PASSPHRASE;
+  try {
+    if (value === undefined) delete process.env.DSH_VLM_STORE_PASSPHRASE;
+    else process.env.DSH_VLM_STORE_PASSPHRASE = value;
+    fn();
+  } finally {
+    if (saved === undefined) delete process.env.DSH_VLM_STORE_PASSPHRASE;
+    else process.env.DSH_VLM_STORE_PASSPHRASE = saved;
   }
 }
 
@@ -250,6 +265,164 @@ test('Λ-1h: maskKey —— 未设置、空串、≤12 前2+****、>12 前4…�
   assert.equal(maskKey('abcdefghijkl'), 'ab****', '恰 12 字符（边界含）⇒ 前2+****');
   assert.equal(maskKey('abcdefghijklm'), 'abcd…jklm', '恰 13 字符（边界破）⇒ 前4…后4');
   assert.equal(maskKey('sk-1234567890abcdef9876'), 'sk-1…9876', '24 字符长 key ⇒ 前4…后4');
+});
+
+// ═══════════════ ΑΩ-R9：apiKey 可选静态加密（DSHENC1: 信封） ═══════════════
+
+/** R9 系列共用的明文密钥样本（断言「落盘无此串」即加密生效的铁证） */
+const R9_KEY = 'sk-r9-topsecret-abcdef-9999';
+
+// ─── R9-1 设口令：落盘无明文、DSHENC1: 信封、元数据 aes-256-gcm、往返无损 ───
+
+test('R9-1: 设口令 save —— 落盘文件不含明文 key、apiKey 为 DSHENC1: 四段信封、元数据申报 aes-256-gcm、同口令往返无损', () => {
+  const file = path.join(dir, 'enc.json');
+  const store = new ConnectionStore(file);
+  const conn = {
+    platform: 'glm',
+    apiKey: R9_KEY,
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    model: 'glm-4v-plus',
+    updatedAt: 1700000000000,
+    via: 'wizard' as const,
+  };
+  withPassphraseEnv('r9-正确口令-pass', () => {
+    assert.equal(store.save(conn).ok, true, 'save 成功（口令在场走加密面）');
+    const disk = readFileSync(file, 'utf8');
+    assert.ok(!disk.includes(R9_KEY), '落盘文件不含明文 key（静态加密生效）');
+    const j = JSON.parse(disk) as Record<string, unknown>;
+    assert.equal(j.encryption, 'aes-256-gcm', '元数据如实申报 aes-256-gcm');
+    assert.ok(typeof j.apiKey === 'string' && j.apiKey.startsWith('DSHENC1:'), 'apiKey 为版本化魔数信封');
+    assert.equal((j.apiKey as string).split(':').length, 5, '信封 = 魔数 + salt/iv/tag/cipher 四段载荷');
+    assert.equal(j.baseUrl, conn.baseUrl, '非密钥字段明文照存（加密面只收 apiKey）');
+    // 同口令 load：全字段无损往返（解密仅在内存瞬时存在）
+    assert.deepEqual(store.load(), conn, 'save → load 全字段无损往返');
+    const detail: ConnectionLoadDetail = {};
+    assert.notEqual(store.load(detail), null);
+    assert.equal(detail.encryption, 'aes-256-gcm', 'detail 回报档案申报');
+    assert.equal(detail.error, undefined, '成功读档无归因');
+    // 随机 salt/iv 证据：同明文两次落盘，信封必不同（不落可重放字典陷阱）
+    assert.equal(store.save(conn).ok, true);
+    const again = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    assert.notEqual(again.apiKey, j.apiKey, '两次加密信封不同（随机 salt/iv）');
+  });
+});
+
+// ─── R9-2 不设口令：明文现状不变 + 元数据诚实申报 'none' ───
+
+test('R9-2: 不设口令 save —— 明文现状不变、元数据 encryption:"none"（诚实申报）；口令在场但无 apiKey ⇒ 如实 none', () => {
+  const file = path.join(dir, 'plain.json');
+  const store = new ConnectionStore(file);
+  withPassphraseEnv(undefined, () => {
+    assert.equal(store.save({ platform: 'qwen', apiKey: R9_KEY, updatedAt: 42, via: 'tool' as const }).ok, true);
+    const j = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    assert.equal(j.apiKey, R9_KEY, '口令缺席 ⇒ 明文照存（现状不变）');
+    assert.equal(j.encryption, 'none', '元数据如实申报 none（不虚报加密）');
+    assert.deepEqual(store.load(), {
+      platform: 'qwen',
+      apiKey: R9_KEY,
+      baseUrl: undefined,
+      model: undefined,
+      updatedAt: 42,
+      via: 'tool',
+    }, '往返语义与既往一致');
+    const detail: ConnectionLoadDetail = {};
+    assert.notEqual(store.load(detail), null);
+    assert.equal(detail.encryption, 'none');
+  });
+  // 口令在场但 apiKey 缺席（本地免密平台）：无密可加密 ⇒ 不虚报，如实 none
+  withPassphraseEnv('r9-pass', () => {
+    const f2 = path.join(dir, 'nokey.json');
+    assert.equal(new ConnectionStore(f2).save({
+      platform: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', updatedAt: 7, via: 'auto-adopt' as const,
+    }).ok, true);
+    const j2 = JSON.parse(readFileSync(f2, 'utf8')) as Record<string, unknown>;
+    assert.equal(j2.encryption, 'none', '无密可加密 ⇒ 如实 none');
+  });
+});
+
+// ─── R9-3 错口令：null + detail 归因，绝不抛、绝不把密文当明文 ───
+
+test('R9-3: 错口令 load —— null（空配置语义）+ detail 归因口令/解密；不带 detail 的既有调用面行为就是 null', () => {
+  const file = path.join(dir, 'wrongpass.json');
+  const store = new ConnectionStore(file);
+  withPassphraseEnv('r9-right-pass', () => {
+    assert.equal(store.save({ platform: 'glm', apiKey: R9_KEY, updatedAt: 1, via: 'wizard' as const }).ok, true);
+  });
+  withPassphraseEnv('r9-WRONG-pass', () => {
+    const detail: ConnectionLoadDetail = {};
+    let r: unknown = 'unset';
+    assert.doesNotThrow(() => { r = store.load(detail); }, '绝不抛异常');
+    assert.equal(r, null, '错口令 ⇒ null（与坏档视为无档同语义）');
+    assert.ok(typeof detail.error === 'string' && detail.error !== '', '归因在场（诚实失败）');
+    assert.ok(detail.error!.includes('解密') || detail.error!.includes('口令'), '归因指向口令/解密');
+    assert.ok(!JSON.stringify(detail).includes(R9_KEY), '归因文本不含明文 key');
+    // 既有调用面（不传 detail）：行为就是 null —— 绝不把解密失败伪装成别的
+    assert.equal(store.load(), null);
+  });
+});
+
+// ─── R9-4 密文损坏 ⇒ GCM 认证不过；口令缺席遇密文 ⇒ 归因缺口令 ───
+
+test('R9-4: 密文被篡改 ⇒ 同口令也 null + 归因；密文在场而口令缺席 ⇒ null + 归因点名 DSH_VLM_STORE_PASSPHRASE', () => {
+  const file = path.join(dir, 'tamper.json');
+  const store = new ConnectionStore(file);
+  withPassphraseEnv('r9-pass', () => {
+    assert.equal(store.save({ platform: 'glm', apiKey: R9_KEY, updatedAt: 2, via: 'tool' as const }).ok, true);
+  });
+  // 定向篡改密文段一个字节（GCM 认证必然不过 —— 非符号级翻转的歧义）
+  const j = JSON.parse(readFileSync(file, 'utf8')) as { apiKey: string };
+  const segs = j.apiKey.split(':');
+  const cipherBuf = Buffer.from(segs[3] as string, 'base64');
+  cipherBuf[cipherBuf.length - 2] ^= 0xff;
+  writeFileSync(file, JSON.stringify({
+    ...j,
+    apiKey: [...segs.slice(0, 3), cipherBuf.toString('base64')].join(':'),
+  }), 'utf8');
+  withPassphraseEnv('r9-pass', () => {
+    const detail: ConnectionLoadDetail = {};
+    assert.equal(store.load(detail), null, '密文被改 ⇒ 正确口令也解不开（GCM 认证）');
+    assert.ok(detail.error !== undefined && detail.error !== '', '损坏归因在场');
+  });
+  // 口令整体缺席（换进程删 env 的等价面）：归因点名缺口令，而非笼统坏档
+  withPassphraseEnv(undefined, () => {
+    const detail: ConnectionLoadDetail = {};
+    assert.equal(store.load(detail), null, '密文在场 + 口令缺席 ⇒ null');
+    assert.ok(detail.error!.includes('DSH_VLM_STORE_PASSPHRASE'), '归因点名缺口令');
+  });
+});
+
+// ─── R9-5 旧明文档向后兼容：口令在场也照常读；未申报 ⇒ detail 不虚设 ───
+
+test('R9-5: 旧明文档（无 encryption 字段）—— 口令在场也照常读；detail.encryption 为 undefined（不虚设申报）', () => {
+  const file = path.join(dir, 'legacy.json');
+  writeFileSync(file, JSON.stringify({
+    platform: 'glm',
+    apiKey: 'sk-legacy-plain-7777',
+    baseUrl: 'https://x.example',
+    updatedAt: 3,
+    via: 'wizard',
+  }), 'utf8');
+  withPassphraseEnv('r9-pass', () => {
+    const detail: ConnectionLoadDetail = {};
+    const c = new ConnectionStore(file).load(detail);
+    assert.notEqual(c, null, '旧明文档照常读（不因口令在场而拒读）');
+    assert.equal(c!.apiKey, 'sk-legacy-plain-7777', '旧明文 key 原样读回');
+    assert.equal(detail.encryption, undefined, '旧档未申报 ⇒ 不虚设');
+    assert.equal(detail.error, undefined, '无失败归因');
+  });
+});
+
+// ─── R9-6 空白口令视为缺席（不可用的口令 = 没有口令） ───
+
+test('R9-6: 纯空白 DSH_VLM_STORE_PASSPHRASE —— 视为缺席：明文现状 + 申报 none（不虚造假安全）', () => {
+  const file = path.join(dir, 'blank.json');
+  const store = new ConnectionStore(file);
+  withPassphraseEnv('   ', () => {
+    assert.equal(store.save({ platform: 'glm', apiKey: R9_KEY, updatedAt: 4, via: 'config' as const }).ok, true);
+    const j = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    assert.equal(j.apiKey, R9_KEY, '空白口令 = 没有口令：明文现状');
+    assert.equal(j.encryption, 'none', '如实申报 none');
+  });
 });
 
 // ═════════════════════════ autoAdopt.ts ═════════════════════════

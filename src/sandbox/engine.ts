@@ -20,13 +20,20 @@ import type { DoctorVerdictPayload } from '../doctorEvents';
 import { makeScore } from '../doctorEvents';
 import {
   emitHostReplayEnd, emitMemoryConsolidated, emitRehearsalBegin, emitRehearsalEnd,
+  isBinaryFingerprint,
 } from './events';
+// ΝΩ-1（第五门接线）：步级安全扫描直接引入 tools/actionGate 的唯一事实源 ——
+// 与宿主 replayActions.replayOneTraced 同一判定函数（重放不豁免安全闸）。
+// 破环审计：actionGate 的导入闭包 = {riskGate, fuzzy, approval.*, focusTracker}，
+// 无一 import 沙箱面 ⇒ 无环（engine 既有 '../doctorEvents' 根层先例同律）。
+import { assertActionAllowed, SAFETY_GATE_BLOCK } from '../tools/actionGate';
 import { MuscleMemoryStore } from './memory';
 import { VirtualScreen, asVirtualWidget } from './virtualScreen';
 import { sandboxLog, REHEARSAL_FP_FORMAT } from './log';
 import {
   createDefaultIdGenerator, muscleReliability, resolveConsolidation,
-  type ActionChain, type HostReplayOutcome, type IdGenerator,
+  type ActionChain, type HostExecutor, type HostExecutorStepResult,
+  type HostReplayDivergence, type HostReplayOutcome, type IdGenerator,
   type RehearsalOutcome, type RehearsalStepResult, type RehearsalVerdict,
   type Result, type SandboxAction, type SandboxConfig, type SandboxEngine,
   type SandboxSnapshot, type VerificationLayer, type VirtualWidget,
@@ -45,13 +52,30 @@ const REPLAY_TOKENS_MAX = 64;
 /** 待配对排练结果容量（chainId → 最近 outcome；医生判决迟到时的配对面） */
 const PENDING_OUTCOMES_MAX = 32;
 
-/** 64 位指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
- *  D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖） */
-function fpSimilarity(a: string, b: string): number {
-  if (a.length !== b.length) return 0;
+/** 指纹比对结果（ΑΩ-R19：相似度 + 位宽注记） */
+export interface FpComparison {
+  /** 0-1 域相似度（比对长度上的汉明距离归一） */
+  similarity: number;
+  /** 截断位宽注记：两侧位宽不等时的公共前缀长度（诚实降级 —— 宿主指纹格式
+   *  演进（64→128 位等）不再静默全拒；undefined = 等宽全量比对） */
+  truncatedTo?: number;
+}
+
+/** 指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
+ *  D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖）。
+ *  ΑΩ-R19 位宽鲁棒：等宽 ⇒ 按实际位宽逐位比对（除数为长度而非硬编码 64 ——
+ *  对现行 64 位串数值逐字节不变）；不等宽 ⇒ 按较短侧前缀比对并注记 truncatedTo
+ *  （诚实降级优于静默 0 —— 格式演进静默全拒 = 把升级伪装成全局失配）；
+ *  空串（0 位证据）仍 0。纯函数、永不抛。 */
+export function fpSimilarity(a: string, b: string): FpComparison {
+  if (a.length === 0 || b.length === 0) return { similarity: 0 };
+  const n = Math.min(a.length, b.length);
   let dist = 0;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) dist++;
-  return 1 - dist / 64;
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) dist++;
+  return {
+    similarity: 1 - dist / n,
+    ...(a.length !== b.length ? { truncatedTo: n } : {}),
+  };
 }
 
 /** 验证层典范序（铸造点排序依据：验证栈自底向上，序即语义） */
@@ -84,6 +108,9 @@ export class SandboxEngineImpl implements SandboxEngine {
   /** 最近排练结果（chainId → outcome，容量执法 FIFO —— 判决迟到时的配对面） */
   private pendingOutcomes = new Map<string, import('./types').RehearsalOutcome>();
   private readonly ctx: Context | null;
+  /** ΑΩ-R19：宿主执行器端口（结构注入 —— 缺席 = 既有诚实 failed 语义零回归；
+   *  注入主权在 index.ts apply 装配层，engine 零根层 import） */
+  private hostExecutor: HostExecutor | null = null;
 
   // 显式字段赋值（非参数属性）：Node strip-only 运行时契约 —— 现世源码同方言
   constructor(ctx: Context | null) {
@@ -101,6 +128,11 @@ export class SandboxEngineImpl implements SandboxEngine {
     if (sim !== undefined && (!Number.isFinite(sim) || sim < 0 || sim > 1)) {
       errors.push(`entrySceneMinSimilarity must be in [0,1], got ${sim}`);
     }
+    // ΑΩ-R19：执行接线开关的加载层执法（类型伪装的开关 = 带病配置，拒绝上线）
+    if (config.enableHostReplayExecution !== undefined
+      && typeof config.enableHostReplayExecution !== 'boolean') {
+      errors.push(`enableHostReplayExecution must be a boolean, got ${typeof config.enableHostReplayExecution}`);
+    }
     if (errors.length > 0) {
       throw new Error(`[SandboxEngine] invalid configuration:\n  - ${errors.join('\n  - ')}`);
     }
@@ -110,13 +142,16 @@ export class SandboxEngineImpl implements SandboxEngine {
     this.memory.load();
   }
 
-  /** 宿主观察登记（index.ts 的 onHostToolPost 嗅探后喂数据；实现类公开面） */
+  /** 宿主观察登记（index.ts 的 onHostToolPost 嗅探后喂数据；实现类公开面）。
+   *  ΝΩ-1：摄取位宽放宽为 [01]{32,256}（events.isBinaryFingerprint 单源）——
+   *  ΑΩ-R19 修了比对侧（fpSimilarity 不等宽前缀比对）却把摄取侧留在 64 位，
+   *  truncatedTo 分支因此永不可达。128 位宿主指纹从此可入缓存，与比对侧协同。 */
   noteHostObservation(fingerprint: string | null): void {
     if (fingerprint === null) {
       this.hostFingerprint = null;
       return;
     }
-    if (/^[01]{64}$/.test(fingerprint)) {
+    if (isBinaryFingerprint(fingerprint)) {
       this.hostFingerprint = fingerprint;
     }
   }
@@ -464,6 +499,43 @@ export class SandboxEngineImpl implements SandboxEngine {
     return token;
   }
 
+  /**
+   * ΑΩ-R19：宿主执行器端口注入（结构注入）。运行层方法：形状非法不 throw ——
+   * 静默视为未接线（注入一个不是可调用 executeAction 的对象 = 没接线，诚实降级）。
+   */
+  wireHostExecutor(executor: HostExecutor | null): void {
+    this.hostExecutor = executor !== null
+      && typeof (executor as HostExecutor | null)?.executeAction === 'function'
+      ? executor
+      : null;
+  }
+
+  /**
+   * ΝΩ-1 第五门原语：步级安全扫描（纯扫描、永不抛、不派发）。只扫闸门约束的
+   * 动作种类（click_mouse / type_text —— 与 replayOneTraced 的 `entry.tool ===
+   * 'click_mouse' || entry.tool === 'type_text'` 同律）；其余种类（scroll/hotkey/
+   * drag/switch/dismiss/noop）不在审批/风险语义面内，与宿主重放同口径。
+   * 返回首犯步（index + kind + 拒因）；全过 ⇒ null。判定器崩溃 ⇒ 首犯步 +
+   * 'gate-threw'（fail-closed：不可判定的步按危险处理，绝不放行）。
+   */
+  private scanStepsForSafety(
+    steps: ReadonlyArray<SandboxAction>,
+  ): { stepIndex: number; kind: string; reason: string } | null {
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (!step || (step.kind !== 'click_mouse' && step.kind !== 'type_text')) continue;
+      try {
+        const d = assertActionAllowed(step.kind, step.args);
+        if (!d.allowed) {
+          return { stepIndex: i, kind: step.kind, reason: String(d.reason ?? 'unknown') };
+        }
+      } catch (e: any) {
+        return { stepIndex: i, kind: step.kind, reason: `gate-threw:${e?.message ?? 'unknown'}` };
+      }
+    }
+    return null;
+  }
+
   async replayOnHost(entryId: string, opts: { confirmToken: string }): Promise<HostReplayOutcome> {
     const createdAt = Date.now();
     const gate = (reason: string): HostReplayOutcome => ({
@@ -502,43 +574,129 @@ export class SandboxEngineImpl implements SandboxEngine {
       return gate(`reliability ${rel.toFixed(3)} below threshold ${minRel}`);
     }
     // 门禁四B：TRUST IS A FINGERPRINT —— 宿主最新观察与排练入口同屏方可放行
+    // ΑΩ-R19：比对位宽鲁棒（等宽全量 / 不等宽前缀 + truncated 注记入链 ——
+    // 拒绝理由可见降级证据，而非静默 0 黑箱）
     const minSim = this.cfg.entrySceneMinSimilarity ?? DEFAULT_SCENE_SIMILARITY;
-    if (!entry.entrySceneFingerprint || !this.hostFingerprint ||
-        fpSimilarity(entry.entrySceneFingerprint, this.hostFingerprint) < minSim) {
+    const entryFp: string = entry.entrySceneFingerprint ?? '';
+    const hostFp: string = this.hostFingerprint ?? '';
+    const cmp = entryFp.length > 0 && hostFp.length > 0 ? fpSimilarity(entryFp, hostFp) : null;
+    if (!cmp || cmp.similarity < minSim) {
       await sandboxLog.append('host-replay-gate', {
         entryId, gate: 'fingerprint-mismatch',
-        entryHasFp: !!entry.entrySceneFingerprint, hostObserved: !!this.hostFingerprint,
+        entryHasFp: entryFp.length > 0, hostObserved: hostFp.length > 0,
+        ...(cmp ? {
+          similarity: Math.round(cmp.similarity * 1000) / 1000, minSim,
+          ...(cmp.truncatedTo !== undefined
+            ? { truncatedToBits: cmp.truncatedTo, entryBits: entryFp.length, hostBits: hostFp.length }
+            : {}),
+        } : {}),
       });
       return gate('host state does not match rehearsal entry scene (stale rehearsal is a lie)');
     }
 
+    // 门禁五（ΝΩ-1 步级安全扫描门）：重放不豁免安全闸 —— entry.steps 逐条过
+    // assertActionAllowed（与宿主 replayOneTraced 同一事实源：危险词 ⇒ 需宿主侧
+    // 已授予的 approval 令牌，步参数经 args.approval_token 携带；无令牌/未描述/
+    // 敏感输入等拒绝并归因到首犯步）。扫描先于任何派发 —— 危险步在链中段也绝不
+    // 产生部分执行。判定器自身异常 ⇒ 按危险处理拒绝（fail-closed，运行层铁律：
+    // 收敛为拒绝理由，绝不抛）。四门既有语义不变（本门只在其全过之后新增）。
+    const safety = this.scanStepsForSafety(entry.steps);
+    if (safety !== null) {
+      await sandboxLog.append('host-replay-gate', {
+        entryId, gate: 'safety-scan',
+        stepIndex: safety.stepIndex, kind: safety.kind, reason: safety.reason,
+      });
+      return gate(
+        `[${SAFETY_GATE_BLOCK}] step ${safety.stepIndex} (${safety.kind}) blocked by safety gate: ` +
+        `${safety.reason} — replayed muscle-memory steps pass through the SAME approval/risk gates ` +
+        'as live tool calls; carry a granted approval_token in step args for dangerous targets',
+      );
+    }
+
     // （令牌已在门禁二验证通过时即刻消费 —— 用后即焚，无双花窗口）
 
-    // 宿主执行器未接线（开发者预览）⇒ 诚实 failed（对齐现世 orchestrator Actor 未接线先例：
-    // 诚实失败优于虚假成功）。未来纪元：此处经宿主管线逐动作执行并收集 journalRefs。
-    const outcome: HostReplayOutcome = {
-      muscleMemoryId: entryId,
-      verdict: 'failed',
-      journalRefs: [],
-      divergences: [{
+    // ΑΩ-R19：四门全过后的岔口 —— 执行器缺席 ⇒ 既有诚实 failed（对齐现世
+    // orchestrator Actor 未接线先例：诚实失败优于虚假成功），逐字节零回归。
+    if (!this.hostExecutor) {
+      return this.settleHostReplay(entryId, createdAt, 'failed', [{
         stepIndex: -1,
         kind: 'effect-missing',
         sandboxSaid: `authorized (${entry.steps.length} steps, reliability ${rel.toFixed(3)})`,
         hostDid: 'no host executor wired (developer preview)',
-      }],
-      reliabilityAfter: muscleReliability(entry),
-      reportPath: this.persistReport(`replay-${entryId}-${createdAt}.json`, {
+      }], muscleReliability(entry), {
         gate: 'passed', executor: 'not-wired', entryId, createdAt,
-      }),
+      });
+    }
+
+    // 执行器在场 ⇒ 真派发：逐步执行（首败即停 —— 部分执行是事实，后续步绝不
+    // 盲跑）；结局如实入 divergence 与可靠度计数（宿主重放计数是唯一可信源，
+    // 成功与否都记 —— 失败也是校准）。
+    const divergences: HostReplayDivergence[] = [];
+    let executed = 0;
+    for (let i = 0; i < entry.steps.length; i++) {
+      const step = entry.steps[i];
+      let r: HostExecutorStepResult;
+      try {
+        r = await this.hostExecutor.executeAction(step);
+      } catch (e: any) {
+        // 端口契约本就永不抛 —— 双保险：执行器实现违约也不击穿数据流
+        r = { ok: false, note: `executor threw: ${e?.message ?? 'unknown'}` };
+      }
+      if (!r || r.ok !== true) {
+        divergences.push({
+          stepIndex: i,
+          kind: 'effect-missing',
+          sandboxSaid: `step ${i} (${step.kind}) should land on the host`,
+          hostDid: r && typeof r.note === 'string' && r.note ? r.note : 'unattributed step failure',
+        });
+        break;
+      }
+      executed++;
+    }
+    const dispatchOk = divergences.length === 0;
+    const updatedEntry = this.memory.recordHostReplay(entryId, dispatchOk);
+    return this.settleHostReplay(
+      entryId, createdAt, dispatchOk ? 'confirmed' : 'failed', divergences,
+      muscleReliability(updatedEntry ?? entry),
+      {
+        gate: 'passed', executor: 'wired', entryId, executed, steps: entry.steps.length,
+        divergences, createdAt,
+        // journalRefs 诚实空注记：宿主动作面不回 journal 哈希 —— 伪造引用即伪造
+        // 因果链成员籍，宁可空且如实说明。ΝΩ-1：每次派发已在装配层适配器内经
+        // journal.appendMarker 提交 SANDBOX_HOST_REPLAY 存证行（三态脱敏）——
+        // 链上轨迹在宿主账本侧，引用哈希仍不可得（appendMarker 无回执）。
+        journalRefs: 'host action surface exposes no journal hashes (honest empty; '
+          + 'per-dispatch SANDBOX_HOST_REPLAY markers submitted via appendMarker)',
+      },
+    );
+  }
+
+  /** 重放收尾：战报铸造 + 落盘 + 入链 + 事件（not-wired 与真派发共用 ——
+   *  两路的观测面形状逐字节同构）。运行层方法：永不抛 */
+  private async settleHostReplay(
+    entryId: string,
+    createdAt: number,
+    verdict: HostReplayOutcome['verdict'],
+    divergences: HostReplayDivergence[],
+    reliabilityAfter: number,
+    reportData: Record<string, unknown>,
+  ): Promise<HostReplayOutcome> {
+    const outcome: HostReplayOutcome = {
+      muscleMemoryId: entryId,
+      verdict,
+      journalRefs: [],
+      divergences,
+      reliabilityAfter,
+      reportPath: this.persistReport(`replay-${entryId}-${createdAt}.json`, reportData),
       createdAt,
     };
     await sandboxLog.append('host-replay-end', {
-      entryId, verdict: outcome.verdict, divergences: outcome.divergences.length,
+      entryId, verdict: outcome.verdict, divergences: divergences.length,
     });
     if (this.ctx) {
       emitHostReplayEnd(this.ctx, {
         muscleMemoryId: entryId, verdict: outcome.verdict,
-        divergenceCount: outcome.divergences.length,
+        divergenceCount: divergences.length,
         reportPath: outcome.reportPath, endedAt: createdAt,
       });
     }

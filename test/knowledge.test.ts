@@ -18,6 +18,9 @@ import { makeScore } from '../src/doctorEvents.ts';
 import {
   emitKnowledgeAttempt, emitKnowledgeRunEnd,
 } from '../src/knowledge/events.ts';
+// ΝΩ-28（M5 决策接线 + 奖励闭环）：内核键可调性 + run-end 收割记账的断言面
+import { registerMemoryOpKernels } from '../src/knowledge/memoryOps.ts';
+import { kernelRegistry, evidenceLedger, resetKernelRuntime } from '../src/kernel/registry.ts';
 import type {
   AtomicAction, ExecutionOutcome, ExecutionResult, KnowledgeBase, KnowledgeEntry,
   KnowledgeResult, PipelineConfig, Result,
@@ -621,4 +624,130 @@ test('免疫 #4 类别鸡尾酒：同类扎堆的检索结果 ⇒ 蒸馏摘要�
   assert.deepEqual(order, ['[ui-pattern]', '[system-quirk]', '[error-pattern]', '[ui-pattern]', '[ui-pattern]'],
     '注入摘要先铺满类别多样性，再回填同类 —— 组合推理优于复读');
   assert.equal(injection.categories.length, 3);
+});
+
+// ─── ΝΩ-28（M5 复活 + 知识库修缮）：决策接线 / 驱逐分 / 语义去重 / 奖励闭环 ───
+
+test('ΝΩ-28 M5 决策接线：铸造/强化阈值经内核键可调（缺省 = 现行字面量零漂移）', () => {
+  resetKernelRuntime(); // 隔离生产单例（本用例独占 kernelRegistry / evidenceLedger）
+  try {
+    const kb = new InMemoryKnowledgeBase();
+    const action: AtomicAction = { kind: 'click_mouse', args: { x: 0.5, y: 0.5 }, rationale: 'r' };
+    const failOf = (desc: string): ExecutionOutcome => ({
+      intent: { id: 'i-m5', description: desc },
+      action,
+      result: { action, status: 'failure', durationMs: 1, failure: { kind: 'host-error', detail: 'programmed' } },
+      retryCount: 0, totalDurationMs: 1,
+    });
+
+    // 零漂移锚：键未入册 ⇒ getOrDefault 回声现行字面量（AUTO_LEARN_FAILURE_CONFIDENCE = 0.3）
+    assert.ok(kb.learnFromOutcome(failOf('m5 topic alpha')).ok);
+    const minted = kb.snapshot().find(e => e.scenario === 'm5 topic alpha');
+    assert.ok(minted, '失败学习铸造 error-pattern 条目');
+    assert.ok(Math.abs(minted!.confidence - 0.3) < 1e-12, `缺省臂零漂移（期望 0.3，实际 ${minted!.confidence}）`);
+
+    // 经内核键可调：insert 臂 0.5 ⇒ 铸造置信 0.5（sleep 第④幕收敛的同一键）
+    registerMemoryOpKernels(kernelRegistry);
+    assert.ok(kernelRegistry.set('memory.op.error-pattern.insert', 0.5).ok);
+    assert.ok(kb.learnFromOutcome(failOf('m5 topic beta')).ok);
+    const beta = kb.snapshot().find(e => e.scenario === 'm5 topic beta');
+    assert.ok(beta && Math.abs(beta.confidence - 0.5) < 1e-12, '铸造置信经 memory.op.error-pattern.insert 内核键可调');
+
+    // boost 臂 0.5 ⇒ 复证强化 0.5 + 0.5×0.5 = 0.75（同臂第二个动作参数）
+    assert.ok(kernelRegistry.set('memory.op.error-pattern.boost', 0.5).ok);
+    assert.ok(kb.learnFromOutcome(failOf('m5 topic beta')).ok);
+    assert.equal(kb.snapshot().filter(e => e.scenario === 'm5 topic beta').length, 1, '复证强化不新建条目');
+    const boosted = kb.snapshot().find(e => e.scenario === 'm5 topic beta')!;
+    assert.ok(Math.abs(boosted.confidence - 0.75) < 1e-12, `强化步长经 memory.op.error-pattern.boost 内核键可调（期望 0.75，实际 ${boosted.confidence}）`);
+  } finally {
+    resetKernelRuntime(); // 归还纯净单例（后续用例的缺省臂不受污染）
+  }
+});
+
+test('ΝΩ-28 驱逐分修正：usageCount × 有效置信 —— 高频陈年错知识让位新鲜证据', () => {
+  const kb = new InMemoryKnowledgeBase();
+  // 满库 1000 条 auto-learn：第 0 条 = 高频陈年（usage 50 / conf 0.9 / 365 天前，
+  // 有效置信 ≈ 0.9×2⁻¹²·¹⁷ ≈ 0.0002 ⇒ 驱逐分 ≈ 0.0098）；其余 = 新鲜低频
+  //（usage 1 / conf 0.9 / 今日 ⇒ 驱逐分 ≈ 0.9）。旧判据（裸 usageCount）会驱逐
+  // usage=1 的新鲜条目、让 usage=50 的陈年条目永久占座 —— 新判据反转为驱逐陈年。
+  for (let i = 0; i < 1000; i++) {
+    assert.ok(kb.insert({ category: 'workflow', content: `entry-${i}`, scenario: `scene-${i}`, confidence: 0.9, source: 'auto-learn' }).ok);
+  }
+  const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+  const [stale, freshNeighbor] = kb.snapshot();
+  for (const e of kb.snapshot()) e.usageCount = 1; // 全库基线 usage=1（防 0×c=0 地板分抢跑被逐）
+  stale.usageCount = 50;
+  stale.updatedAt = Date.now() - YEAR_MS; // 时间旅行（snapshot 引用是测试后门）
+
+  const overflow = kb.insert({ category: 'workflow', content: 'newcomer evidence', scenario: 'scene-overflow', confidence: 0.9, source: 'auto-learn' });
+  assert.ok(overflow.ok, '满库但有可驱逐 auto-learn ⇒ 插入成功');
+  const after = kb.snapshot();
+  assert.equal(after.length, 1000, '容量守恒（逐 1 进 1）');
+  assert.ok(!after.some(e => e.id === stale.id), '高频陈年（驱逐分 ≈0.01）被逐 —— 不再永久占座');
+  assert.ok(after.some(e => e.id === freshNeighbor.id), '新鲜低频（驱逐分 ≈0.9）保座');
+  assert.ok(after.some(e => e.id === overflow.value), '新证据在场');
+});
+
+test('ΝΩ-28 语义去重锚：同题两夜一条语义记忆 —— 第二夜强化不新建', () => {
+  const kb = new InMemoryKnowledgeBase();
+  const scenarios = ['close the save dialog', 'close save dialog popup', 'dismiss the save dialog'];
+  // 第一夜：三个同题情景 ⇒ 蒸馏一条语义记忆（共识 conf = 0.4 + 0.1×√3 ⇒ 0.573）
+  for (const sc of scenarios) {
+    kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: sc, confidence: 0.4, source: 'auto-learn' });
+  }
+  const night1 = kb.consolidate();
+  assert.ok(night1.ok && night1.value.consolidated === 1);
+  const sem1 = kb.snapshot().find(e => e.content.startsWith('consolidated pattern'));
+  assert.ok(sem1 && Math.abs(sem1.confidence - 0.573) < 1e-9, `第一夜共识 0.573（实际 ${sem1?.confidence}）`);
+
+  // 第二夜：同主题同内容的新情景（未皮层化的新条目）再次成簇
+  for (const sc of scenarios) {
+    kb.insert({ category: 'error-pattern', content: 'confirm button is broken', scenario: sc, confidence: 0.4, source: 'auto-learn' });
+  }
+  const night2 = kb.consolidate();
+  assert.ok(night2.ok);
+  assert.equal(night2.value.clusters, 1, '第二夜同题情景照样成簇');
+  assert.equal(night2.value.consolidated, 0, '语义去重锚命中 ⇒ 不新建（报告口径 = 新铸数）');
+  assert.equal(night2.value.episodedDecayed, 3, '簇成员照常皮层化（被既有语义记忆吸收）');
+  const semanticMemories = kb.snapshot().filter(e => e.content.startsWith('consolidated pattern'));
+  assert.equal(semanticMemories.length, 1, '同题两夜一条 —— 皮层不增殖');
+  // 免疫应答强化路径：0.573 + (1−0.573)×0.3 = 0.7011 + 复证即亲证
+  assert.ok(Math.abs(semanticMemories[0].confidence - 0.7011) < 1e-9, `锚强化升滴度（期望 0.7011，实际 ${semanticMemories[0].confidence}）`);
+  assert.ok(typeof semanticMemories[0].verifiedAt === 'number', '复证即亲证（verifiedAt 刷新 —— 与免疫应答同律）');
+});
+
+test('ΝΩ-28 M5 闭环：run-end 收割库存×仪表盘 → insert 臂记账（beta 臂计数变化）', async () => {
+  resetKernelRuntime();
+  const dir = mkdtempSync(join(tmpdir(), 'nw28-m5-'));
+  try {
+    const kb = new InMemoryKnowledgeBase();
+    kb.insert({ category: 'system-quirk', content: 'settings gear is top-right', scenario: 'open settings', confidence: 0.9, source: 'manual' });
+    const o = new KnowledgePipelineOrchestrator();
+    o.configure(VALID_CONFIG);
+    o.wire(fakeStations(kb) as any, { reportDir: join(dir, 'reports'), metricsPath: join(dir, 'metrics.jsonl') });
+
+    assert.equal(evidenceLedger.stats('memory.op.system-quirk.insert').n, 0, '跑前 insert 臂零账');
+    const report = await o.run({ id: 'i-m5a', description: 'open settings' });
+    assert.equal(report.verdict, 'completed');
+
+    // 手工种子：被检索命中（usageCount>0）× 注入在场且 completed（窗口布尔回退臂）⇒ success
+    const seedArm = evidenceLedger.stats('memory.op.system-quirk.insert');
+    assert.equal(seedArm.n, 1, 'run-end 收割入库试验（此前全库零生产调用的通道接通）');
+    assert.equal(seedArm.successRate, 1);
+    // 本轮新学的 workflow 条目：usageCount=0 ⇒ 未命中 ⇒ failure（机会成本记账）
+    const learnedArm = evidenceLedger.stats('memory.op.workflow.insert');
+    assert.equal(learnedArm.n, 1);
+    assert.equal(learnedArm.successRate, 0, '占库未变现 ⇒ 败');
+    // 台账律：registry 证据计数与账本同增（单源双视图）
+    const spec = kernelRegistry.list().find(p => p.key === 'memory.op.system-quirk.insert');
+    assert.ok(spec && spec.evidence === 1, `registry.addEvidence 同步（实际 ${spec?.evidence}）`);
+
+    const report2 = await o.run({ id: 'i-m5b', description: 'open settings' });
+    assert.equal(report2.verdict, 'completed');
+    assert.equal(evidenceLedger.stats('memory.op.system-quirk.insert').n, 2, '第二个 run-end 再收割 ⇒ beta 臂计数持续变化');
+    assert.ok(o.dispose().ok);
+  } finally {
+    resetKernelRuntime();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

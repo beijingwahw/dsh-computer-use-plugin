@@ -2,16 +2,18 @@
 // W6-2 结构性保留（doctor smell.over-engineering 登记）：click_mouse 工具面 —— 审批域/公证取证/接地新鲜度/验收消费在同一点击链路上线性串联（W 系列安全层逐环叠加），拆分即拆安全链。
 // 世界级升级：三坐标换算锚点 + dHash 效果验证（盲点检测）+ 置信度自报 +
 // 验证生效自动写入 UI 记忆。模型第一次能「感知自己是否点中了」。
+// ΝΩ-32 帧票据：安全链阶段序一字不动 —— 只把派发前各阶段的独立截屏收敛为
+// 一张共享帧（票据复用；after 帧绝不复用），见「帧票据」立法块。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import { system } from '../system';
-import { captureBefore, settleAndVerify, type CombinedEffect } from '../actionVerifier';
+import { captureBefore, settleAndVerify, type BeforeState, type CombinedEffect } from '../actionVerifier';
 import { focusTracker } from '../focusTracker';
 import { semanticConfirm, readTextAny, type SemanticConfirm } from '../textReader';
 import { matchesRiskPatterns, reversibilityRegistry, dispatchLaneFor, type ReversibilityVerdict, type DispatchLane } from '../riskGate';
 import { approval } from '../approval';
 import { uiMemory } from '../uiMemory';
-import { regionDhash, similarity } from '../perceptualHash';
+import { regionDhash, similarity, normalizeHash } from '../perceptualHash';
 import { parseExpectation } from '../intent';
 import { quantum } from '../quantumSense';
 import { probePoints, gateTextClick } from '../interactivityProbe';
@@ -120,6 +122,10 @@ export const notaryEvidence = {
   /** OCR 实读：点击点邻域区域读屏（失败/缺席 ⇒ null 诚实降级，绝不抛） */
   async readOcrLabel(config: Config, nx: number, ny: number): Promise<string | null> {
     if (!notaryOcrAvailable(config)) return null;
+    // ΝΩ-32 诚实边界：readTextAny（服务端 L2 OCR 优先）不接受外部帧 —— 服务端
+    // 自截 region（getUiTree 无「带 buffer 的 region API」），故公证阶段保持
+    // 自截、不接入帧票据；待服务端补该 API 后此处可改吃票据（届时同步更新
+    // ΝΩ-32 测试组的捕获计数断言）。
     try {
       // 邻域窗口：与效果验证的区域半径同源（regionVerifyRadius，缺省 0.15），
       // 夹取 [0.05, 0.25] —— 太小漏标签上下文，太大把整屏正文都读进来
@@ -301,9 +307,11 @@ export function laneAnchorOf(gate: LaneGateResult): Record<string, unknown> | un
 // 与 ask_screen 同一编码纪律）；编码失败（sharp 缺席/残图）回退原图直送。
 // 取证失败一律 null（诚实缺席）—— 法院不审无据之案，但绝不因取证失败阻塞
 // 点击主流程（askRefutation 收到空证据 ⇒ 缺席审判 uncertain ⇒ 不拦）。
-async function captureRefuteEvidence(): Promise<{ base64: string; mime: string } | null> {
+// ΝΩ-32：preCaptured 在场（帧票据）⇒ 零自截 —— 反驳证据与记忆预验/captureBefore
+// 共享同一「派发前世界」帧；缺席 ⇒ 原自截路径逐字节保持。
+async function captureRefuteEvidence(preCaptured?: Buffer): Promise<{ base64: string; mime: string } | null> {
   try {
-    const buf = await system.captureScreen();
+    const buf = preCaptured ?? await system.captureScreen();
     if (!Buffer.isBuffer(buf) || buf.length === 0) return null;
     try {
       const enc = await encodeForVlm(buf);
@@ -316,6 +324,118 @@ async function captureRefuteEvidence(): Promise<{ base64: string; mime: string }
     return null; // 截屏通道缺席 —— 缺席审判，不阻塞
   }
 }
+
+// ─── ΝΩ-32（帧票据 frame ticket）：截图帧贯穿管线 ───
+//
+// 病灶：一次 dangerous+token 的 click_mouse 在派发前独立截屏最多 4 次
+//（notary OCR 服务端自截 / 反驳法院证据全屏 / 记忆预验全屏 / captureBefore
+// 基线）+ settleAndVerify 的 after 帧 —— 同一个「本链尚未触碰的派发前世界」
+// 被重复拍摄，每次都是一整轮服务端往返。立法：
+//   · 帧票据 = 派发前世界的唯一共享帧 {buffer, dhash, capturedAt, width, height}
+//    （铸票一次服务端往返，携带指纹/区域指纹/帧环 id 供下游阶段消费）；
+//   · 懒铸造：最早需要帧的阶段（反驳法院/记忆预验）铸票一次，后续派发前
+//     阶段复用；单次点击链至多铸一票（铸败不重试 —— 最坏退化为旧逐阶段自截）；
+//   · 新鲜度判据：capturedAt 距使用点 ≤ FRAME_TICKET_FRESH_MS 且未被本链动作
+//     污染（交互性探针的悬停实验 = 显式污染源 —— 点击点 hover 高亮/光标移动
+//     会污染「无变化」基线，探针之后票据作废）；过期/缺席/污染 ⇒ 该阶段回退
+//     原自截路径（票据是增量优化，不是依赖）；
+//   · 绝对边界（立法）：**票据只在派发前阶段共享 —— settleAndVerify 的 after
+//     帧必须新截**。派发后世界已变，复用旧帧 = 用旧世界冒充新世界 = 效果验证
+//     失效（详见 verifyEffectStage 立法注释）；
+//   · 诚实边界：notary OCR（readTextAny）不接受外部帧（服务端 L2 OCR 无
+//     「带 buffer 的 region API」，getUiTree 只收 region 自截）—— 该阶段保持
+//     自截并登记「待服务端 region API」，不虚报覆盖面；
+//   · 零孵化：铸票仅在 D-5 服务已在场时发生（healthSnapshot 在场判定，与
+//     notaryStructuralAvailable 同律）—— 帧票据绝不成为服务孵化入口；
+//     dry-run 无物理世界，不铸票。
+// 本对象是可注入缝（notaryEvidence 同律）：测试注入假铸票面断言捕获计数，
+// 生产路径不经任何替换。
+
+/** ΝΩ-32：新鲜度阈值（算法形状字面量）—— 票据距使用点超过 2s 即视为过期
+ *  （自截回退）。2s ≈ 反驳法院最坏 8s 硬止损与记忆预验/探针的正常耗时上界
+ *  之间：基线帧太旧会把与本点击无关的外部世界变化（动画/时钟）误记为点击
+ *  效果，宁可贵一截不可误一判。 */
+const FRAME_TICKET_FRESH_MS = 2000;
+
+/** ΝΩ-32：帧票据 —— 派发前世界的共享帧（capturedAt 是新鲜度时间戳，非 id：
+ *  Date.now() 禁令只针对 id 语义） */
+export interface FrameTicket {
+  /** 干净帧字节（png，与 captureCleanPng 同形）—— 反驳证据/记忆预验消费 */
+  buffer: Buffer;
+  /** 服务端干净帧 dhash（hex）—— captureBefore 复用时作 BeforeState.screen */
+  dhash: string | null;
+  /** 服务端干净帧 pHash（佐证指纹；BeforeState.phash 同位） */
+  phash: string | null;
+  /** 点击点邻域区域 dhash（铸票时按 focus+radius 求；BeforeState.region 同位） */
+  regionDhash: string | null;
+  /** 帧环 id（keptFrame 铸票时在场 —— 物理规则的 before 帧引用锚） */
+  frameId: number | null;
+  /** 铸票时刻（新鲜度判据） */
+  capturedAt: number;
+  width: number;
+  height: number;
+  /** 铸票是否入帧环（captureBefore 复用须与 expectation 的 keepFrame 判据对齐） */
+  keptFrame: boolean;
+}
+
+/** ΝΩ-32：铸票面（模块级可注入缝）。mintable 纯在场判定（零物理调用零孵化）；
+ *  mint 一次服务端往返，失败/缺席 ⇒ null（绝不抛）。 */
+export const frameTicketing = {
+  /** 铸票口在场判定：D-5 服务已存活（healthSnapshot 在场 —— 零孵化） */
+  mintable(): boolean {
+    return physicalBackend.healthSnapshot() !== null;
+  },
+  /** 铸票：与 captureCleanPng 同形（png / maxWidth 1600）+ 指纹/区域指纹/帧环 */
+  async mint(
+    focus: { x: number; y: number },
+    regionRadius: number,
+    keepFrame: boolean,
+  ): Promise<FrameTicket | null> {
+    try {
+      const cap = await physicalBackend.captureProcessed({
+        format: 'png',
+        maxWidth: 1600,
+        wantHashes: true,
+        ...(regionRadius > 0
+          ? { wantRegionHash: { x: focus.x, y: focus.y, r: regionRadius } }
+          : {}),
+        ...(keepFrame ? { keepFrame: true } : {}),
+      });
+      if (!cap.buffer || cap.buffer.length === 0) return null;
+      return {
+        buffer: cap.buffer,
+        dhash: cap.dhash,
+        phash: cap.phash,
+        regionDhash: cap.regionDhash,
+        frameId: cap.frameId,
+        capturedAt: Date.now(),
+        width: cap.width,
+        height: cap.height,
+        keptFrame: keepFrame,
+      };
+    } catch {
+      return null; // 旁路宪法：铸票失败 = 票据缺席，各阶段回退自截
+    }
+  },
+};
+
+/** ΝΩ-32：sharp 在场探测 —— 与 actionVerifier.captureBefore 的 wantBuf 判据同源
+ * （ticket 复用铸 BeforeState 时保持 buffer 字段的同判据：expectation 且 sharp
+ *  可用才保留字节引用）。 */
+async function sharpProbeAvailable(): Promise<boolean> {
+  try {
+    const { getSharp } = await import('../_legacyDeps');
+    await getSharp();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** ΝΩ-32：验收取证面的可注入包装（clickElement.elementVerify 同律 —— 直接
+ *  具名导入的模块绑定不可替换，包装对象给测试一个计数缝；生产经同一函数
+ *  引用转发，行为零变化）。 */
+export const mouseVerify = { captureBefore, settleAndVerify };
 
 export function createClickMouseTool(config: Config) {
   return defineTool({
@@ -387,27 +507,62 @@ export function createClickMouseTool(config: Config) {
       const rawTarget: string | undefined =
         typeof args.target_description === 'string' ? args.target_description : undefined;
 
-      // 双保险校验（Guard 已在前线，工具自查兜底）
-      if (rawX < 0 || rawX > 1 || rawY < 0 || rawY > 1) {
-        return toolErr(
-          'Click validation failed.',
-          `Invalid normalized coordinates (${rawX}, ${rawY}). X and Y must be between 0.0 and 1.0.`,
-          'Re-estimate the target center from the latest screenshot; zoom_inspect can refine the estimate.',
-        );
-      }
+      // ΑΩ-R11 结构重构：巨型 execute 拆为具名阶段函数（本文件内的局部工厂，
+      // 闭包共享管线数据），主 execute 收敛为安全链编排序列。阶段序 = 原执行序
+      // （W6-2 顺序敏感铁律，拆分即拆安全链 —— 本重构把每一环显式命名为阶段）：
+      // 坐标校验 → 批注消费 → 危险词闸门 → 双钥公证锁 → 可逆性分道 → 反驳法院 →
+      // 像素解析 → 记忆预验 → 交互性闸门 → 双尺度基线 → 接地新鲜度 →
+      // 验证旁路收口 → 派发预留 → 物理派发 → 焦点登记 → 效果验证 → UI 记忆 →
+      // OCR 核对 → 下一步指引 → 验收式令牌消费 → 成功回执。
+      // 纯结构重构：执行顺序 / 条件分支 / 错误文案 / 输出 JSON 形状逐字节保持。
+      // ΑΩ-R11 toolResult 工厂收编决策：本工具的非 toolErr 方言**不**迁移工厂 ——
+      // ACTION_REQUIRED 各方言无顶层 action 键且 reason 落位 state_anchor.reason
+      // （toolActionRequired 会注入 action 并把 reason 顶层合并，形状变化）；
+      // SUCCESS 回执含 toolOk 四件套之外的 memory / pre_verified 顶层键；
+      // stale-click FAILED 方言无 action / state_anchor.error。既有测试钉死这些
+      // 形状（零回归优先），故维持 JSON.stringify 现状。
 
+      // ΑΩ-R11 阶段函数·坐标校验：归一化域自查兜底，越界即拒。
+      // 双保险校验（Guard 已在前线，工具自查兜底）
+      const validateCoordinatesStage = (): string | undefined => {
+        if (rawX < 0 || rawX > 1 || rawY < 0 || rawY > 1) {
+          return toolErr(
+            'Click validation failed.',
+            `Invalid normalized coordinates (${rawX}, ${rawY}). X and Y must be between 0.0 and 1.0.`,
+            'Re-estimate the target center from the latest screenshot; zoom_inspect can refine the estimate.',
+          );
+        }
+        return undefined;
+      };
+      const invalidCoordinates = validateCoordinatesStage();
+      if (invalidCoordinates !== undefined) return invalidCoordinates;
+
+      // ΑΩ-R11 阶段函数·批注消费：把用户批注 patch 合并进点击计划，产出钳定后坐标/描述。
       // ── W1-2 批注消费接线：派发前读 amendment patch 修正计划 ──
       // 位置刻意在 assertActionAllowed **之前**（「beginAttempt 前」的最强形式）：
       // 用户批注修正后的 target_description 参与危险判定 —— 修正出危险语义的
       // 计划同样要过审批闸门，批注不得成为绕闸通道。无令牌/无批注 ⇒ 零行为。
-      const amendment = consumeApprovalAmendment(
-        approval_token,
-        { tool: 'click_mouse', x: rawX, y: rawY, target_description: rawTarget },
-      );
-      const x = amendment.x ?? rawX;
-      const y = amendment.y ?? rawY;
-      const target_description = amendment.target_description ?? rawTarget;
+      const consumeAmendmentStage = (): {
+        amendment: AmendmentOutcome;
+        x: number;
+        y: number;
+        target_description: string | undefined;
+      } => {
+        const amendment = consumeApprovalAmendment(
+          approval_token,
+          { tool: 'click_mouse', x: rawX, y: rawY, target_description: rawTarget },
+        );
+        return {
+          amendment,
+          x: amendment.x ?? rawX,
+          y: amendment.y ?? rawY,
+          target_description: amendment.target_description ?? rawTarget,
+        };
+      };
+      const { amendment, x, y, target_description } = consumeAmendmentStage();
 
+      // ΑΩ-R11 阶段函数·危险词闸门：第一遍 assertActionAllowed —— 危险/未授予/未描述
+      // 点击在此拒绝（取证之前，阻断路径零新增物理/网络副作用，逐字节旧方言）。
       // ── 不可逆操作闸门（第六轮 + B-3 两阶段 + J 纪元授予门 + N 纪元硬前置）──
       // 危险目标必须持**已授予**的有效令牌（grant_approval 落点 approval.grant ——
       // "从未 grant" 与 "grant=true" 不再等价）。
@@ -421,33 +576,45 @@ export function createClickMouseTool(config: Config) {
       // （危险信号计算 / 拒绝归因 / sweep 副作用 / undescribed-click 硬前置）。
       // 阶段一 validate：只查不烧 —— 点击若抛异常，令牌仍可用于重试；
       // 阶段二 consume 在动作成功返回前调用（见下方 finally 前的成功路径）。
-      const gate = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config);
-      if (!gate.allowed) {
+      const dangerGateStage = (): { gate: ActionGateDecision; blocked: string | undefined } => {
+        const gate = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config);
+        if (gate.allowed) return { gate, blocked: undefined };
         if (gate.reason === 'undescribed-click') {
-          return JSON.stringify({
-            status: 'ACTION_REQUIRED',
-            state_anchor: { reason: 'undescribed-click', note: 'approval gate cannot judge an undescribed target' },
-            next_step: 'Re-invoke click_mouse with target_description (what you are clicking) or expected_text ' +
-              '(text you expect to appear) — the approval gate requires one description channel to judge irreversibility.',
-          }, null, 2);
+          return {
+            gate,
+            blocked: JSON.stringify({
+              status: 'ACTION_REQUIRED',
+              state_anchor: { reason: 'undescribed-click', note: 'approval gate cannot judge an undescribed target' },
+              next_step: 'Re-invoke click_mouse with target_description (what you are clicking) or expected_text ' +
+                '(text you expect to appear) — the approval gate requires one description channel to judge irreversibility.',
+            }, null, 2),
+          };
         }
-        return JSON.stringify({
-          status: 'ACTION_REQUIRED',
-          state_anchor: {
-            target: target_description ?? expected_text ?? '(undescribed target)',
-            danger_signal: gate.dangerSignalChannel,
-            reason: gate.reason,
-            note: approval_token
-              ? 'The token exists but the user has not granted it yet (or it expired).'
-              : 'This target looks irreversible (send/delete/pay/submit...).',
-          },
-          next_step: 'PAUSE: this action needs explicit user approval. Call request_approval with a clear ' +
-            'description, tell the user what you are about to do, wait for their consent, call ' +
-            'grant_approval(token, true), then re-invoke click_mouse with the returned approval_token. ' +
-            'Never proceed without consent.',
-        }, null, 2);
-      }
+        return {
+          gate,
+          blocked: JSON.stringify({
+            status: 'ACTION_REQUIRED',
+            state_anchor: {
+              target: target_description ?? expected_text ?? '(undescribed target)',
+              danger_signal: gate.dangerSignalChannel,
+              reason: gate.reason,
+              note: approval_token
+                ? 'The token exists but the user has not granted it yet (or it expired).'
+                : 'This target looks irreversible (send/delete/pay/submit...).',
+            },
+            next_step: 'PAUSE: this action needs explicit user approval. Call request_approval with a clear ' +
+              'description, tell the user what you are about to do, wait for their consent, call ' +
+              'grant_approval(token, true), then re-invoke click_mouse with the returned approval_token. ' +
+              'Never proceed without consent.',
+          }, null, 2),
+        };
+      };
+      const gateDecision = dangerGateStage();
+      if (gateDecision.blocked !== undefined) return gateDecision.blocked;
+      const gate = gateDecision.gate;
 
+      // ΑΩ-R11 阶段函数·双钥公证锁：放行路径上的多通道取证重审（落点邻域 OCR 实读 +
+      // 白盒控件名），任一通道见危险 ⇒ 审批域执法；OCR 实读与自述不符 ⇒ notary-mismatch。
       // ── 纪元 Ρ（双钥公证锁·第二遍）：放行路径上的多通道公证 ──
       // 第一遍（上方）保持 Ρ 之前的全部阻断语义 —— 危险/未授予/未描述的点击
       // 在取证之前就被拒（阻断路径零新增物理/网络副作用，逐字节旧方言）。
@@ -455,87 +622,137 @@ export function createClickMouseTool(config: Config) {
       // 携证据重审 —— 任一通道见危险 ⇒ 审批域执法；OCR 实读与模型自述不符 ⇒
       // notary-mismatch（注入谎报目标的根除点）。取证失败一律 null（诚实降级），
       // 绝不因公证取证失败而阻塞正常点击：锁只在「通道在场且见危险/不符」时收紧。
-      let gate2: ActionGateDecision = gate;
-      let notarization: Record<string, unknown> | undefined;
-      if (config.enableNotarizationLock && !config.dryRun) {
-        const avail = notaryEvidence.channelsAvailable(config);
-        if (avail.ocr || avail.structural) {
-          let evidence: NotaryEvidence | undefined;
-          try {
-            evidence = {
-              ocrLabel: avail.ocr ? await notaryEvidence.readOcrLabel(config, x, y) : null,
-              structuralName: avail.structural ? await notaryEvidence.readStructuralName(config, x, y) : null,
-            };
-            gate2 = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config, evidence);
-          } catch {
-            // 宪法：运行层永不抛 —— 取证自身失败 = 通道缺席，维持第一遍判决
-            evidence = undefined;
-            gate2 = gate;
-          }
-          notarization = notaryAnchorOf(gate2.notarization, evidence, gate2.notaryNote);
-          if (!gate2.allowed) {
-            // 审计留痕：公证拦截入防篡改链（GUARD_BLOCKED 方言，circuitBreaker 同律）
-            void journal.appendMarker({
-              kind: 'GUARD_BLOCKED',
-              guard: 'notary-lock',
-              reason: gate2.reason === 'notary-mismatch'
-                ? 'notary-mismatch'
-                : `danger:${gate2.dangerSignalChannel ?? 'unknown'}`,
-            }).catch(() => { /* 存证旁路 */ });
-            if (gate2.reason === 'notary-mismatch') {
-              const ocrSnippet = (evidence?.ocrLabel ?? '').slice(0, 60);
-              return JSON.stringify({
-                status: 'ACTION_REQUIRED',
-                state_anchor: {
-                  target: target_description ?? expected_text ?? '(undescribed target)',
-                  reason: 'notary-mismatch',
-                  notarization,
-                  note: 'The text actually READ FROM THE SCREEN at this point does not match your description ' +
-                    '(semantic handshake failed) — the target may have moved, or the description is wrong.',
-                },
-                next_step: `NOTARY MISMATCH: this point actually reads "${ocrSnippet}". RE-DESCRIBE the target ` +
-                  'using the text ACTUALLY SHOWN ON SCREEN (put it in target_description) and retry the click. ' +
-                  "If the screen has changed, call 'take_screenshot' first and re-locate the target. " +
-                  'Do not reuse the mismatched description.',
-              }, null, 2);
+      const notaryStage = async (): Promise<{
+        gate2: ActionGateDecision;
+        notarization: Record<string, unknown> | undefined;
+        blocked: string | undefined;
+      }> => {
+        let gate2: ActionGateDecision = gate;
+        let notarization: Record<string, unknown> | undefined;
+        if (config.enableNotarizationLock && !config.dryRun) {
+          const avail = notaryEvidence.channelsAvailable(config);
+          if (avail.ocr || avail.structural) {
+            let evidence: NotaryEvidence | undefined;
+            try {
+              evidence = {
+                ocrLabel: avail.ocr ? await notaryEvidence.readOcrLabel(config, x, y) : null,
+                structuralName: avail.structural ? await notaryEvidence.readStructuralName(config, x, y) : null,
+              };
+              gate2 = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config, evidence);
+            } catch {
+              // 宪法：运行层永不抛 —— 取证自身失败 = 通道缺席，维持第一遍判决
+              evidence = undefined;
+              gate2 = gate;
             }
-            return JSON.stringify({
-              status: 'ACTION_REQUIRED',
-              state_anchor: {
-                target: target_description ?? expected_text ?? '(undescribed target)',
-                danger_signal: gate2.dangerSignalChannel,
-                reason: gate2.reason,
-                notarization,
-                note: approval_token
-                  ? 'The token exists but the user has not granted it yet (or it expired).'
-                  : 'This target looks irreversible (send/delete/pay/submit...) — the danger was NOTARIZED FROM ' +
-                    'THE SCREEN (OCR-read label / whitebox control name), not taken from your description.',
-              },
-              next_step: 'PAUSE: this action needs explicit user approval. Call request_approval with a clear ' +
-                'description (quote the text actually shown on the target), tell the user what you are about to ' +
-                'do, wait for their consent, call grant_approval(token, true), then re-invoke click_mouse with ' +
-                'the returned approval_token. Never proceed without consent.',
-            }, null, 2);
+            // ΑΩ-R11：字段名对齐 actionGate 现行 ActionGateDecision.notaryNote
+            //（原 notarizationNote 为更名前的陈旧引用 —— dist 既有构建与 clickElement 同用 notaryNote）
+            notarization = notaryAnchorOf(gate2.notarization, evidence, gate2.notaryNote);
+            if (!gate2.allowed) {
+              // 审计留痕：公证拦截入防篡改链（GUARD_BLOCKED 方言，circuitBreaker 同律）
+              void journal.appendMarker({
+                kind: 'GUARD_BLOCKED',
+                guard: 'notary-lock',
+                reason: gate2.reason === 'notary-mismatch'
+                  ? 'notary-mismatch'
+                  : `danger:${gate2.dangerSignalChannel ?? 'unknown'}`,
+              }).catch(() => { /* 存证旁路 */ });
+              if (gate2.reason === 'notary-mismatch') {
+                const ocrSnippet = (evidence?.ocrLabel ?? '').slice(0, 60);
+                return {
+                  gate2, notarization,
+                  blocked: JSON.stringify({
+                    status: 'ACTION_REQUIRED',
+                    state_anchor: {
+                      target: target_description ?? expected_text ?? '(undescribed target)',
+                      reason: 'notary-mismatch',
+                      notarization,
+                      note: 'The text actually READ FROM THE SCREEN at this point does not match your description ' +
+                        '(semantic handshake failed) — the target may have moved, or the description is wrong.',
+                    },
+                    next_step: `NOTARY MISMATCH: this point actually reads "${ocrSnippet}". RE-DESCRIBE the target ` +
+                      'using the text ACTUALLY SHOWN ON SCREEN (put it in target_description) and retry the click. ' +
+                      "If the screen has changed, call 'take_screenshot' first and re-locate the target. " +
+                      'Do not reuse the mismatched description.',
+                  }, null, 2),
+                };
+              }
+              return {
+                gate2, notarization,
+                blocked: JSON.stringify({
+                  status: 'ACTION_REQUIRED',
+                  state_anchor: {
+                    target: target_description ?? expected_text ?? '(undescribed target)',
+                    danger_signal: gate2.dangerSignalChannel,
+                    reason: gate2.reason,
+                    notarization,
+                    note: approval_token
+                      ? 'The token exists but the user has not granted it yet (or it expired).'
+                      : 'This target looks irreversible (send/delete/pay/submit...) — the danger was NOTARIZED FROM ' +
+                        'THE SCREEN (OCR-read label / whitebox control name), not taken from your description.',
+                  },
+                  next_step: 'PAUSE: this action needs explicit user approval. Call request_approval with a clear ' +
+                    'description (quote the text actually shown on the target), tell the user what you are about to ' +
+                    'do, wait for their consent, call grant_approval(token, true), then re-invoke click_mouse with ' +
+                    'the returned approval_token. Never proceed without consent.',
+                }, null, 2),
+              };
+            }
+          } else {
+            notarization = notaryAnchorOf('degraded', undefined, 'notary-channels-unavailable');
           }
-        } else {
-          notarization = notaryAnchorOf('degraded', undefined, 'notary-channels-unavailable');
         }
-      }
-      const dangerous = gate2.dangerous;
+        return { gate2, notarization, blocked: undefined };
+      };
+      const notaryOutcome = await notaryStage();
+      if (notaryOutcome.blocked !== undefined) return notaryOutcome.blocked;
+      const dangerous = notaryOutcome.gate2.dangerous;
+      const notarization = notaryOutcome.notarization;
       const gateCoverage = config.enableApprovalGate ? 'described' : 'gate-disabled';
+      // ΑΩ-R11 阶段函数·可逆性分道：物理派发前的三路执法（快道/托管道/人道），
+      // 阻断即原样返回其结构化回执。
       // ── W5-0（C 接线 · W4-3 S5）：可逆性分道 —— 物理派发前的三路执法 ──
       // 位置在全部既有闸门（危险词/公证/批注）之后、beginAttempt 之前：
       // compensable 的逆转预案必须先于派发预留铸造（dispatchLaneFor 的字面序）。
       // 开关关（缺省）⇒ applied:false 零行为；未知语义交回危险词闸门（保守律 ②）。
-      const laneGate = await gateByReversibility(config, {
-        tool: 'click_mouse',
-        description: target_description ?? expected_text,
-        ...(approval_token !== undefined ? { approvalToken: approval_token } : {}),
-        enforceEscrow: !!(dangerous && approval_token),
-      });
+      const reversibilityStage = (): Promise<LaneGateResult> =>
+        gateByReversibility(config, {
+          tool: 'click_mouse',
+          description: target_description ?? expected_text,
+          ...(approval_token !== undefined ? { approvalToken: approval_token } : {}),
+          enforceEscrow: !!(dangerous && approval_token),
+        });
+      const laneGate = await reversibilityStage();
       if (laneGate.applied && laneGate.blocked !== null) {
         return laneGate.blocked;
       }
+      // ΑΩ-R11 阶段函数·帧票据（ΝΩ-32）：本回合派发前的共享帧持有者。
+      // 铸票口 = 最早需要帧的阶段（下方反驳法院/记忆预验，懒铸造）；票据只在
+      // 派发前阶段共享 —— settleAndVerify 的 after 帧绝不复用（见 verifyEffectStage
+      // 立法注释）。过期/缺席/污染 ⇒ 各阶段回退原自截路径（零回归兜底）。
+      let frameTicket: FrameTicket | null = null;
+      let ticketMintTried = false;      // 单链至多铸一票（铸败不重试）
+      let ticketPolluted = false;       // 污染标记：交互性探针悬停触碰过世界
+      const freshTicket = (): FrameTicket | null =>
+        frameTicket !== null
+        && !ticketPolluted
+        && (Date.now() - frameTicket.capturedAt) <= FRAME_TICKET_FRESH_MS
+          ? frameTicket
+          : null;
+      const ensureFrameTicket = async (): Promise<FrameTicket | null> => {
+        const held = freshTicket();
+        if (held) return held;
+        if (ticketMintTried) return null; // 已铸过（败/过期）—— 不再重试
+        ticketMintTried = true;
+        if (config.dryRun) return null;                    // dry-run 无物理世界
+        if (!frameTicketing.mintable()) return null;       // 服务不在场：零孵化，各阶段自截
+        // keepFrame 与 beforeCaptureStage 的 expectation 判据同源（物理规则需要
+        // before 帧入环；parseExpectation 纯函数，铸票时即可判定）
+        const keepFrame = config.intentVerify && parseExpectation(expected_effect) !== null;
+        frameTicket = await frameTicketing.mint({ x, y }, config.regionVerifyRadius, !!keepFrame);
+        return freshTicket(); // 铸后重判新鲜度（防御式：注入面/极端慢铸不越过阈值）
+      };
+      // ΑΩ-R11 阶段函数·反驳法院：不可逆动作派发前的跨模型对抗核验
+      // （refuted 拦 / upheld 注记 / uncertain 缺席审判零行为）。
       // ── 纪元 Β（反驳法院）：不可逆动作派发前的跨模型对抗核验 ──
       // 窄门执法三前置（缺一不开庭，非危险动作零法院调用 —— 性能铁律：法院只审
       // 不可逆）：危险词命中（能走到这里的危险点击必已持有效令牌，即将物理派发）
@@ -550,90 +767,121 @@ export function createClickMouseTool(config: Config) {
       //               同路。法院是旁路增益不是依赖：故障（无第二脑/调用失败/
       //               超时 8s 单次不重试）绝不下沉为点击主流程的阻塞。askRefutation
       //               自身永不抛，本块对主流程的唯一可见副作用是上述两分支。
-      let refuteStamp: string | undefined;
-      if (dangerous && config.enableRefuteCourt === true && !config.dryRun && refuteCourtInSession()) {
-        const evidence = await captureRefuteEvidence();
-        // 目标区域聚焦注记：与 notary 邻域窗口同源（regionVerifyRadius 夹取）
-        const rr = Math.min(0.25, Math.max(0.05, config.regionVerifyRadius > 0 ? config.regionVerifyRadius : 0.15));
-        const rLeft = Math.max(0, x - rr);
-        const rTop = Math.max(0, y - rr);
-        const verdict = await askRefutation({
-          imageBase64: evidence ? evidence.base64 : '',
-          mime: evidence?.mime,
-          description: target_description ?? expected_text ?? 'the point being clicked',
-          region: {
-            x: rLeft,
-            y: rTop,
-            width: Math.min(1 - rLeft, rr * 2),
-            height: Math.min(1 - rTop, rr * 2),
-          },
-        });
-        if (verdict.verdict === 'refuted') {
-          // 审计留痕：反驳拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
-          void journal.appendMarker({
-            kind: 'GUARD_BLOCKED',
-            guard: 'refute-court',
-            reason: `second-brain-refuted:${verdict.secondOpinionId ?? 'unknown'}`,
-          }).catch(() => { /* 存证旁路 */ });
-          return toolErr(
-            `Irreversible click on "${target_description ?? 'undescribed target'}" blocked by the refutation court.`,
-            `An independent second brain (${verdict.secondOpinionId ?? 'heterogeneous second opinion'}) examined the ` +
-            'screen and found CONTRADICTING evidence (guard: refute-court): ' +
-            `${verdict.reason ?? 'no reason given'} (confidence ${verdict.confidence.toFixed(2)}).`,
-            'PAUSE: do NOT retry this click as-is. The target description did not survive adversarial review — ' +
-            'ask the USER to manually verify this target on screen (take_screenshot / zoom_inspect around the point) ' +
-            'and confirm what it actually is before any retry; if the user confirms the target, re-invoke with a ' +
-            'corrected target_description (the approval token is still valid — the court blocked before dispatch).',
-          );
+      const refuteStage = async (): Promise<{ refuteStamp: string | undefined; blocked: string | undefined }> => {
+        let refuteStamp: string | undefined;
+        if (dangerous && config.enableRefuteCourt === true && !config.dryRun && refuteCourtInSession()) {
+          // ΝΩ-32：呈堂证据优先消费帧票据（本阶段通常即铸票口 —— 证据帧定义上
+          // 新鲜）；票据缺席 ⇒ 原自截路径逐字节保持
+          const evidence = await captureRefuteEvidence((await ensureFrameTicket())?.buffer);
+          // 目标区域聚焦注记：与 notary 邻域窗口同源（regionVerifyRadius 夹取）
+          const rr = Math.min(0.25, Math.max(0.05, config.regionVerifyRadius > 0 ? config.regionVerifyRadius : 0.15));
+          const rLeft = Math.max(0, x - rr);
+          const rTop = Math.max(0, y - rr);
+          const verdict = await askRefutation({
+            imageBase64: evidence ? evidence.base64 : '',
+            mime: evidence?.mime,
+            description: target_description ?? expected_text ?? 'the point being clicked',
+            region: {
+              x: rLeft,
+              y: rTop,
+              width: Math.min(1 - rLeft, rr * 2),
+              height: Math.min(1 - rTop, rr * 2),
+            },
+          });
+          if (verdict.verdict === 'refuted') {
+            // 审计留痕：反驳拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
+            void journal.appendMarker({
+              kind: 'GUARD_BLOCKED',
+              guard: 'refute-court',
+              reason: `second-brain-refuted:${verdict.secondOpinionId ?? 'unknown'}`,
+            }).catch(() => { /* 存证旁路 */ });
+            return {
+              refuteStamp,
+              blocked: toolErr(
+                `Irreversible click on "${target_description ?? 'undescribed target'}" blocked by the refutation court.`,
+                `An independent second brain (${verdict.secondOpinionId ?? 'heterogeneous second opinion'}) examined the ` +
+                'screen and found CONTRADICTING evidence (guard: refute-court): ' +
+                `${verdict.reason ?? 'no reason given'} (confidence ${verdict.confidence.toFixed(2)}).`,
+                'PAUSE: do NOT retry this click as-is. The target description did not survive adversarial review — ' +
+                'ask the USER to manually verify this target on screen (take_screenshot / zoom_inspect around the point) ' +
+                'and confirm what it actually is before any retry; if the user confirms the target, re-invoke with a ' +
+                'corrected target_description (the approval token is still valid — the court blocked before dispatch).',
+              ),
+            };
+          }
+          if (verdict.verdict === 'upheld') refuteStamp = 'upheld';
+          // uncertain ⇒ 缺席审判零行为（不拦、不注记 —— 见上方法条）
         }
-        if (verdict.verdict === 'upheld') refuteStamp = 'upheld';
-        // uncertain ⇒ 缺席审判零行为（不拦、不注记 —— 见上方法条）
-      }
-        // W2-2（S3）：派发前接地新鲜度探针的判决（成功路径透明化用）
-        let freshnessStamp: FreshnessVerdict | undefined;
+        return { refuteStamp, blocked: undefined };
+      };
+      const refuteOutcome = await refuteStage();
+      if (refuteOutcome.blocked !== undefined) return refuteOutcome.blocked;
+      const refuteStamp = refuteOutcome.refuteStamp;
         // Δ 纪元（审计#2）：本回合是否已持有 beginAttempt 的派发预留（catch 路径
         // 需据此结算 —— 见下方异常分支）
         let attemptReserved = false;
       try {
-        const size = await system.getScreenSize();
-        const px = Math.round(x * size.width);
-        const py = Math.round(y * size.height);
+        // ΑΩ-R11 阶段函数·像素解析：屏幕尺寸换算点击落点（try 域首步 —— 取屏失败走 catch 结算）。
+        const resolvePixelsStage = async () => {
+          const size = await system.getScreenSize();
+          return { size, px: Math.round(x * size.width), py: Math.round(y * size.height) };
+        };
+        const { size, px, py } = await resolvePixelsStage();
 
+        // ΑΩ-R11 阶段函数·记忆预验：点击前本地核实 from_memory_id 目标还在原位（防 stale-click）。
         // ── 记忆预验（第六轮）：点击前本地核实目标还在原位 ──
         // recall_ui 给的是历史坐标；屏幕可能已变。取当前屏同位置区域指纹与
         // 记忆时的目标外观对比：不像 ⇒ 目标已移动/消失，点击中止（防 stale-click）
-        let preVerified: boolean | undefined;
-        if (typeof from_memory_id === 'number' && !config.dryRun) {
-          const lm = uiMemory.get(from_memory_id);
-          if (!lm) {
-            return toolErr(
-              `Landmark #${from_memory_id} click aborted.`,
-              'Landmark not found in memory.',
-              "Call 'recall_ui' to refresh landmark IDs, then retry with the correct from_memory_id.",
-            );
-          }
-          if (lm.regionHash) {
-            const curBuf = await system.captureScreen();
-            const curRegion = await regionDhash(curBuf, lm.normalized.x, lm.normalized.y, config.regionVerifyRadius);
-            const matchScore = similarity(curRegion, lm.regionHash);
-            if (matchScore < 0.85) {
-              return JSON.stringify({
-                status: 'FAILED',
-                state_anchor: {
-                  pre_verification: {
-                    landmark: from_memory_id,
-                    appearance_similarity_pct: Math.round(matchScore * 1000) / 10,
-                    verdict: 'target-changed',
-                  },
-                },
-                next_step: 'ABORTED BEFORE CLICK: the target region no longer looks like it did when remembered ' +
-                  '(the UI probably changed). Do NOT click stale coordinates — take a fresh screenshot and re-locate.',
-              }, null, 2);
+        const memoryPrecheckStage = async (): Promise<{ preVerified: boolean | undefined; blocked: string | undefined }> => {
+          let preVerified: boolean | undefined;
+          if (typeof from_memory_id === 'number' && !config.dryRun) {
+            const lm = uiMemory.get(from_memory_id);
+            if (!lm) {
+              return {
+                preVerified,
+                blocked: toolErr(
+                  `Landmark #${from_memory_id} click aborted.`,
+                  'Landmark not found in memory.',
+                  "Call 'recall_ui' to refresh landmark IDs, then retry with the correct from_memory_id.",
+                ),
+              };
             }
-            preVerified = true;
+            if (lm.regionHash) {
+              // ΝΩ-32：优先复用帧票据（与反驳证据/captureBefore 同一派发前帧 ——
+              // 票据缺席/过期/污染 ⇒ 原自截路径逐字节保持，预验语义零变化：
+              // 票据帧与 captureScreen 同为干净全屏 png/1600，regionDhash 同尺）
+              const ticket = await ensureFrameTicket();
+              const curBuf = ticket?.buffer ?? await system.captureScreen();
+              const curRegion = await regionDhash(curBuf, lm.normalized.x, lm.normalized.y, config.regionVerifyRadius);
+              const matchScore = similarity(curRegion, lm.regionHash);
+              if (matchScore < 0.85) {
+                return {
+                  preVerified,
+                  blocked: JSON.stringify({
+                    status: 'FAILED',
+                    state_anchor: {
+                      pre_verification: {
+                        landmark: from_memory_id,
+                        appearance_similarity_pct: Math.round(matchScore * 1000) / 10,
+                        verdict: 'target-changed',
+                      },
+                    },
+                    next_step: 'ABORTED BEFORE CLICK: the target region no longer looks like it did when remembered ' +
+                      '(the UI probably changed). Do NOT click stale coordinates — take a fresh screenshot and re-locate.',
+                  }, null, 2),
+                };
+              }
+              preVerified = true;
+            }
           }
-        }
+          return { preVerified, blocked: undefined };
+        };
+        const memoryOutcome = await memoryPrecheckStage();
+        if (memoryOutcome.blocked !== undefined) return memoryOutcome.blocked;
+        const preVerified = memoryOutcome.preVerified;
 
+        // ΑΩ-R11 阶段函数·交互性闸门：指针落下前问世界「这是控件还是正文」，
+        // 静态正文上的左键点击结构化否决（AA-1 拒绝即改道指引）。
         // ── Z-2 交互性闸门：指针落下之前，先问世界「这是控件还是正文」──
         // 对症失败模式：「模型将输出的正文当作点击的按钮」。Z-1 的判决只标注
         // 在 find_text 结果里（模型可以不看）；此处把同一三通道探针（UIA 结构层
@@ -643,51 +891,88 @@ export function createClickMouseTool(config: Config) {
         // 以 allow_text_click 自证（文档放置光标/选中文本）。
         // 顺序：闸门必须在 captureBefore 之前 —— 悬停实验可能触发 hover 高亮，
         // before 帧只能在探针之后取，否则高亮会污染「无变化」基线。
-        if (config.enableInteractivityProbe && !config.dryRun && button === 'left') {
-          const [probe] = await probePoints(config, [{ x, y }]);
-          const gate = gateTextClick(probe, { allowTextClick: allow_text_click === true });
-          if (gate.blocked) {
-            console.warn(`[Interactivity Gate] Blocked click on static text: ${gate.evidence}`);
-            // AA-1 跳转出口：被否决的正文里若含 URL，拒绝即改道指引 ——
-            // 「别点，跳」。UIA 的控件名是该点文字内容的官方回执（≤40 字符），
-            // 零成本复用；悬停通道无文本回执，保持原语义。
-            const textContent = probe?.evidence.hit_test?.name;
-            const urls = textContent ? extractUrls(textContent) : [];
-            const jumpHint = urls.length > 0
-              ? ` The static text contains a URL: ${urls[0]} — if your goal is to open it, call 'open_url' with it instead of clicking.`
-              : '';
-            return JSON.stringify({
-              status: 'ACTION_REQUIRED',
-              state_anchor: {
-                target: target_description ?? '(undescribed target)',
-                interactivity_gate: {
-                  verdict: 'text',
-                  reason: gate.reason,
-                  evidence: gate.evidence,
-                  note: probe?.note,
+        const interactivityStage = async (): Promise<string | undefined> => {
+          if (config.enableInteractivityProbe && !config.dryRun && button === 'left') {
+            const [probe] = await probePoints(config, [{ x, y }]);
+            // ΝΩ-32 票据污染标记：悬停实验可能触发 hover 高亮/光标移动 —— 本链
+            // 已触碰世界，票据不得再充当「无变化」基线（下方 captureBefore 回退
+            // 自截，与本阶段头注「before 帧只能在探针之后取」同一立法）
+            ticketPolluted = true;
+            const gate = gateTextClick(probe, { allowTextClick: allow_text_click === true });
+            if (gate.blocked) {
+              console.warn(`[Interactivity Gate] Blocked click on static text: ${gate.evidence}`);
+              // AA-1 跳转出口：被否决的正文里若含 URL，拒绝即改道指引 ——
+              // 「别点，跳」。UIA 的控件名是该点文字内容的官方回执（≤40 字符），
+              // 零成本复用；悬停通道无文本回执，保持原语义。
+              const textContent = probe?.evidence.hit_test?.name;
+              const urls = textContent ? extractUrls(textContent) : [];
+              const jumpHint = urls.length > 0
+                ? ` The static text contains a URL: ${urls[0]} — if your goal is to open it, call 'open_url' with it instead of clicking.`
+                : '';
+              return JSON.stringify({
+                status: 'ACTION_REQUIRED',
+                state_anchor: {
+                  target: target_description ?? '(undescribed target)',
+                  interactivity_gate: {
+                    verdict: 'text',
+                    reason: gate.reason,
+                    evidence: gate.evidence,
+                    note: probe?.note,
+                  },
                 },
-              },
-              next_step:
-                'This point is STATIC CONTENT (chat message / document text), not a clickable control — the text merely ' +
-                'MENTIONS the label you are looking for. Do NOT retry the same coordinates. ' +
-                "Re-locate the real control: call 'find_text' with the label keyword and click ONLY a match with " +
-                'interactivity=control; or take_screenshot and search visually; the entry may need scroll_page or a ' +
-                'menu to be opened first. ' +
-                'If you DELIBERATELY want to click static text (place a caret in a document, select a span), ' +
-                're-invoke click_mouse with allow_text_click: true.' + jumpHint,
-            }, null, 2);
+                next_step:
+                  'This point is STATIC CONTENT (chat message / document text), not a clickable control — the text merely ' +
+                  'MENTIONS the label you are looking for. Do NOT retry the same coordinates. ' +
+                  "Re-locate the real control: call 'find_text' with the label keyword and click ONLY a match with " +
+                  'interactivity=control; or take_screenshot and search visually; the entry may need scroll_page or a ' +
+                  'menu to be opened first. ' +
+                  'If you DELIBERATELY want to click static text (place a caret in a document, select a span), ' +
+                  're-invoke click_mouse with allow_text_click: true.' + jumpHint,
+              }, null, 2);
+            }
           }
-        }
+          return undefined;
+        };
+        const interactivityBlocked = await interactivityStage();
+        if (interactivityBlocked !== undefined) return interactivityBlocked;
 
+        // ΑΩ-R11 阶段函数·双尺度基线：动作前同时取全屏 + 点击点区域指纹
+        //（C-1 声明 expected_effect 时保留动作前帧供物理规则前后对比）。
         // ── 效果验证（双尺度 + C-1 意图感知）：动作前同时取全屏 + 点击点区域指纹 ──
         // 区域指纹放大局部反馈（光标/高亮/展开），弥补全屏 dHash 的局部盲区
         // C-1：声明了 expected_effect 时保留动作前帧 —— 物理规则需要前后两帧对比
-        const expectation = config.intentVerify ? parseExpectation(expected_effect) : null;
-        const verify = config.verifyActions && !config.dryRun;
-        const before = verify
-          ? await captureBefore({ x, y }, config.regionVerifyRadius, !!expectation)
-          : null;
+        const beforeCaptureStage = async () => {
+          const expectation = config.intentVerify ? parseExpectation(expected_effect) : null;
+          const verify = config.verifyActions && !config.dryRun;
+          if (!verify) return { expectation, before: null };
+          // ΝΩ-32 captureBefore 帧复用：票据在场且新鲜未污染 ⇒ 直接由票据铸
+          // BeforeState（铸票时服务端已算好 dhash/regionDhash —— 复用 = 零额外
+          // 服务端往返）。复用判据（缺一回退 captureBefore 自截，逐字节旧路径）：
+          //   · dhash 在场（指纹缺席的极端服务端降级不满足基线语义）；
+          //   · expectation 在场（物理规则消费 before 帧）⇒ 票据必须 keptFrame
+          //     且 frameId 非空（帧环引用锚不得缺席）。
+          const ticket = freshTicket();
+          if (ticket && ticket.dhash && (!expectation || (ticket.keptFrame && ticket.frameId != null))) {
+            // buffer 判据与 captureBefore 的 wantBuf 同源：expectation 且 sharp
+            // 可用才保留字节引用（legacy 物理规则前后帧对比路径）
+            const wantBuf = !!expectation && await sharpProbeAvailable();
+            const before: BeforeState = {
+              screen: normalizeHash(ticket.dhash),
+              phash: ticket.phash ?? null,
+              region: ticket.regionDhash ? normalizeHash(ticket.regionDhash) : null,
+              focus: { x, y },
+              buffer: wantBuf ? ticket.buffer : undefined,
+              frameId: ticket.frameId ?? null,
+            };
+            return { expectation, before };
+          }
+          return { expectation, before: await mouseVerify.captureBefore({ x, y }, config.regionVerifyRadius, !!expectation) };
+        };
+        const { expectation, before } = await beforeCaptureStage();
 
+        // ΑΩ-R11 阶段函数·接地新鲜度：dangerous 令牌动作派发前与接地指纹比对，
+        // 漂移/降级即阻断（W6R fail-closed；判决随成功路径透明化）。
+        // W2-2（S3）：派发前接地新鲜度探针的判决（成功路径透明化用）
         // ── W2-2（S3）：派发前接地新鲜度探针（approval.beginAttempt 之前）──
         // 危险类点击（dangerous 经闸门判定 —— riskGate 词表的只读调用产物）的
         // 坐标来自接地时刻的截图；审批人机往返分钟级，屏幕可能已相变。派发前
@@ -701,59 +986,73 @@ export function createClickMouseTool(config: Config) {
         // 原因与三条出路（重试 / 开探针 / 显式逃生门 allowUnverifiedDangerous）。
         // drifted（主动漂移证据）不受逃生门豁免 —— 那是阳性危险发现，不是证据
         // 缺席。非令牌动作不进入本块（叠加防御只挂危险令牌面，旧行为不变）。
-        if (dangerous && approval_token && !config.dryRun) {
-          const fresh = await probeGroundingFreshness();
-          freshnessStamp = fresh;
-          if (fresh.verdict === 'drifted') {
-            // 审计留痕：新鲜度拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
-            void journal.appendMarker({
-              kind: 'GUARD_BLOCKED',
-              guard: 'freshness-probe',
-              reason: `grounding-drift: similarity ${fresh.similarity_pct}% < threshold ${fresh.threshold_pct}%`,
-            }).catch(() => { /* 存证旁路 */ });
-            return JSON.stringify({
-              status: 'ACTION_REQUIRED',
-              state_anchor: {
-                target: target_description ?? expected_text ?? '(undescribed target)',
-                freshness_probe: fresh,
-                reason: 'grounding-stale',
-                note: 'The screen has changed materially since the screenshot these coordinates were ' +
-                  'grounded against — the click would land in a DIFFERENT world state.',
-              },
-              next_step: 'STALE GROUNDING — do NOT retry these coordinates. Call take_screenshot to ' +
-                're-capture the screen, RE-LOCATE the target from the fresh screenshot, then retry with ' +
-                'the new coordinates. The approval token is still valid (blocked before dispatch — no ' +
-                'attempt was spent).',
-            }, null, 2);
+        const freshnessStage = async (): Promise<{ stamp: FreshnessVerdict | undefined; blocked: string | undefined }> => {
+          if (dangerous && approval_token && !config.dryRun) {
+            const fresh = await probeGroundingFreshness();
+            if (fresh.verdict === 'drifted') {
+              // 审计留痕：新鲜度拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
+              void journal.appendMarker({
+                kind: 'GUARD_BLOCKED',
+                guard: 'freshness-probe',
+                reason: `grounding-drift: similarity ${fresh.similarity_pct}% < threshold ${fresh.threshold_pct}%`,
+              }).catch(() => { /* 存证旁路 */ });
+              return {
+                stamp: fresh,
+                blocked: JSON.stringify({
+                  status: 'ACTION_REQUIRED',
+                  state_anchor: {
+                    target: target_description ?? expected_text ?? '(undescribed target)',
+                    freshness_probe: fresh,
+                    reason: 'grounding-stale',
+                    note: 'The screen has changed materially since the screenshot these coordinates were ' +
+                      'grounded against — the click would land in a DIFFERENT world state.',
+                  },
+                  next_step: 'STALE GROUNDING — do NOT retry these coordinates. Call take_screenshot to ' +
+                    're-capture the screen, RE-LOCATE the target from the fresh screenshot, then retry with ' +
+                    'the new coordinates. The approval token is still valid (blocked before dispatch — no ' +
+                    'attempt was spent).',
+                }, null, 2),
+              };
+            }
+            if (fresh.verdict === 'degraded' && config.allowUnverifiedDangerous !== true) {
+              // W6R fail-closed：探针缺席/失败 ⇒ 拒绝派发（令牌未烧 —— 阻断在预留之前）
+              void journal.appendMarker({
+                kind: 'GUARD_BLOCKED',
+                guard: 'freshness-probe',
+                reason: `probe-unavailable: ${fresh.note ?? 'unknown'}`,
+              }).catch(() => { /* 存证旁路 */ });
+              return {
+                stamp: fresh,
+                blocked: JSON.stringify({
+                  status: 'ACTION_REQUIRED',
+                  state_anchor: {
+                    target: target_description ?? expected_text ?? '(undescribed target)',
+                    freshness_probe: fresh,
+                    reason: 'freshness-probe-unavailable',
+                    note: 'This irreversible (approval-token) action MUST be freshness-checked before ' +
+                      'dispatch, but the grounding-freshness probe is absent or failed ' +
+                      `(${fresh.note ?? 'unknown cause'}) — dispatch is refused (fail-closed), NOT silently degraded.`,
+                  },
+                  next_step: 'FRESHNESS PROBE UNAVAILABLE — the pre-dispatch grounding check could not run. ' +
+                    'Ways out: (1) RETRY after taking a fresh screenshot (take_screenshot establishes the ' +
+                    'grounding fingerprint the probe compares against); (2) ensure the physical service is ' +
+                    'alive and the probe port is wired (production wires it by default; offline/dry-run ' +
+                    'environments do not); (3) deployment-level explicit escape hatch: set ' +
+                    'allowUnverifiedDangerous=true (accepts unverified dangerous dispatch). ' +
+                    'The approval token is still valid (blocked before dispatch — no attempt was spent).',
+                }, null, 2),
+              };
+            }
+            return { stamp: fresh, blocked: undefined };
           }
-          if (fresh.verdict === 'degraded' && config.allowUnverifiedDangerous !== true) {
-            // W6R fail-closed：探针缺席/失败 ⇒ 拒绝派发（令牌未烧 —— 阻断在预留之前）
-            void journal.appendMarker({
-              kind: 'GUARD_BLOCKED',
-              guard: 'freshness-probe',
-              reason: `probe-unavailable: ${fresh.note ?? 'unknown'}`,
-            }).catch(() => { /* 存证旁路 */ });
-            return JSON.stringify({
-              status: 'ACTION_REQUIRED',
-              state_anchor: {
-                target: target_description ?? expected_text ?? '(undescribed target)',
-                freshness_probe: fresh,
-                reason: 'freshness-probe-unavailable',
-                note: 'This irreversible (approval-token) action MUST be freshness-checked before ' +
-                  'dispatch, but the grounding-freshness probe is absent or failed ' +
-                  `(${fresh.note ?? 'unknown cause'}) — dispatch is refused (fail-closed), NOT silently degraded.`,
-              },
-              next_step: 'FRESHNESS PROBE UNAVAILABLE — the pre-dispatch grounding check could not run. ' +
-                'Ways out: (1) RETRY after taking a fresh screenshot (take_screenshot establishes the ' +
-                'grounding fingerprint the probe compares against); (2) ensure the physical service is ' +
-                'alive and the probe port is wired (production wires it by default; offline/dry-run ' +
-                'environments do not); (3) deployment-level explicit escape hatch: set ' +
-                'allowUnverifiedDangerous=true (accepts unverified dangerous dispatch). ' +
-                'The approval token is still valid (blocked before dispatch — no attempt was spent).',
-            }, null, 2);
-          }
-        }
+          return { stamp: undefined, blocked: undefined };
+        };
+        const freshnessOutcome = await freshnessStage();
+        if (freshnessOutcome.blocked !== undefined) return freshnessOutcome.blocked;
+        const freshnessStamp: FreshnessVerdict | undefined = freshnessOutcome.stamp;
 
+        // ΑΩ-R11 阶段函数·验证旁路收口：W6R —— dangerous 令牌动作的效果验证
+        // 不可被 verifyActions 整体关闭（双重显式逃生门）。
         // ── W6R（验证总开关旁路收口）：dangerous 令牌动作的效果验证不可被
         //    verifyActions 整体关闭（双重显式逃生门） ──
         // 旧缺陷：verifyActions=false ⇒ dangerous+token 走 unverified-dispatch-
@@ -767,28 +1066,35 @@ export function createClickMouseTool(config: Config) {
         //   · verifyActions=true（缺省）⇒ 零变化。
         // 非 dangerous 分级维持 verifyActions 原语义（benign 动作的验证仍是可关
         // 的 Token 经济开关 —— 本块只挂在 dangerous && approval_token 面上）。
-        if (dangerous && approval_token && !config.dryRun
-          && config.verifyActions !== true && config.allowUnverifiedDangerous !== true) {
-          return JSON.stringify({
-            status: 'ACTION_REQUIRED',
-            state_anchor: {
-              target: target_description ?? expected_text ?? '(undescribed target)',
-              approval_gate: gateCoverage,
-              reason: 'effect-verification-required',
-              note: 'Effect verification is the acceptance basis for approval-token (irreversible) ' +
-                'actions: the token is only consumed on a VERIFIED world effect. verifyActions=false ' +
-                'alone can no longer bypass that (the legacy bypass silently consumed the token on ' +
-                'dispatch, defeating the whole acceptance system).',
-            },
-            next_step: 'EFFECT VERIFICATION REQUIRED for this approval-token action, but verifyActions=false. ' +
-              'Ways out: (1) re-enable verifyActions=true (recommended — dangerous actions then verify ' +
-              'before/after and the token is consumed only on a verified effect); (2) deployment-level ' +
-              'explicit escape hatch: ALSO set allowUnverifiedDangerous=true (two explicit keys — accepts ' +
-              'legacy unverified-dispatch-consumed dialect for dangerous actions). ' +
-              'No physical dispatch happened and the approval token is still valid.',
-          }, null, 2);
-        }
+        const verifyBypassStage = (): string | undefined => {
+          if (dangerous && approval_token && !config.dryRun
+            && config.verifyActions !== true && config.allowUnverifiedDangerous !== true) {
+            return JSON.stringify({
+              status: 'ACTION_REQUIRED',
+              state_anchor: {
+                target: target_description ?? expected_text ?? '(undescribed target)',
+                approval_gate: gateCoverage,
+                reason: 'effect-verification-required',
+                note: 'Effect verification is the acceptance basis for approval-token (irreversible) ' +
+                  'actions: the token is only consumed on a VERIFIED world effect. verifyActions=false ' +
+                  'alone can no longer bypass that (the legacy bypass silently consumed the token on ' +
+                  'dispatch, defeating the whole acceptance system).',
+              },
+              next_step: 'EFFECT VERIFICATION REQUIRED for this approval-token action, but verifyActions=false. ' +
+                'Ways out: (1) re-enable verifyActions=true (recommended — dangerous actions then verify ' +
+                'before/after and the token is consumed only on a verified effect); (2) deployment-level ' +
+                'explicit escape hatch: ALSO set allowUnverifiedDangerous=true (two explicit keys — accepts ' +
+                'legacy unverified-dispatch-consumed dialect for dangerous actions). ' +
+                'No physical dispatch happened and the approval token is still valid.',
+            }, null, 2);
+          }
+          return undefined;
+        };
+        const bypassBlocked = verifyBypassStage();
+        if (bypassBlocked !== undefined) return bypassBlocked;
 
+        // ΑΩ-R11 阶段函数·派发预留：beginAttempt 在物理派发前原子预留一次尝试
+        //（Δ 纪元双花窗口封堵 —— 预留到物理派发之间保持零 await）。
         // ── Δ 纪元（审计#2·双花窗口封堵）：派发预留 ──
         // validate（只查不烧）与验收式消费（consume/attemptFailed，见下方）之间
         // 隔着多个 await —— 并发两次同令牌调用都能过 validate、都派发物理点击。
@@ -798,93 +1104,140 @@ export function createClickMouseTool(config: Config) {
         // 计数时序：预留 +1 → 验收通过 consume（焚毁，计数随行）/ 验收失败
         // attemptFailed（释放预留，不再重复 ++）—— 单次点击全链路 attempts 恰 +1；
         // 预算耗尽在派发前焚毁（旧实现第 maxAttempts+1 次点击仍会落到物理世界）。
-        if (dangerous && approval_token) {
-          if (!approval.beginAttempt(approval_token)) {
-            approval.sweep();
-            return JSON.stringify({
-              status: 'ACTION_REQUIRED',
-              state_anchor: {
-                target: target_description ?? expected_text ?? '(undescribed target)',
-                approval_gate: 'attempt-reservation-denied',
-                reason: 'attempt-in-flight-or-budget-exhausted',
-                note: 'The token is valid, but another attempt under it is still in flight, or its retry budget is exhausted.',
-              },
-              next_step: 'Do NOT re-invoke click_mouse concurrently with the same token — wait for the in-flight ' +
-                'attempt to settle. If the retry budget is exhausted, call request_approval again and explain to ' +
-                'the user why the action keeps failing.',
-            }, null, 2);
+        const attemptReservationStage = (): { reserved: boolean; blocked: string | undefined } => {
+          if (dangerous && approval_token) {
+            if (!approval.beginAttempt(approval_token)) {
+              approval.sweep();
+              return {
+                reserved: false,
+                blocked: JSON.stringify({
+                  status: 'ACTION_REQUIRED',
+                  state_anchor: {
+                    target: target_description ?? expected_text ?? '(undescribed target)',
+                    approval_gate: 'attempt-reservation-denied',
+                    reason: 'attempt-in-flight-or-budget-exhausted',
+                    note: 'The token is valid, but another attempt under it is still in flight, or its retry budget is exhausted.',
+                  },
+                  next_step: 'Do NOT re-invoke click_mouse concurrently with the same token — wait for the in-flight ' +
+                    'attempt to settle. If the retry budget is exhausted, call request_approval again and explain to ' +
+                    'the user why the action keeps failing.',
+                }, null, 2),
+              };
+            }
+            return { reserved: true, blocked: undefined };
           }
-          attemptReserved = true;
-        }
+          return { reserved: false, blocked: undefined };
+        };
+        const reservation = attemptReservationStage();
+        if (reservation.blocked !== undefined) return reservation.blocked;
+        attemptReserved = reservation.reserved;
 
-        await system.clickMouse(px, py, button);
+        // ΑΩ-R11 阶段函数·物理派发：把点击落到物理世界（click_mouse 的世界写点）。
+        const dispatchStage = (): Promise<void> => system.clickMouse(px, py, button);
+        await dispatchStage();
 
+        // ΑΩ-R11 阶段函数·焦点登记：登记点击点为后续 type_text 的隐式上下文，
+        // 凭据语义命中 ⇒ 标记敏感（后续输入将被闸门拦截）。
         // 焦点登记：后续 type_text 的区域验证将以此为中心（隐式工具间上下文）。
         // 风险感知：目标描述命中凭据语义 ⇒ 焦点标记为敏感，后续输入将被闸门拦截
-        const sensitive = config.enableRiskGate
-          && !!target_description
-          && matchesRiskPatterns(target_description, config.riskPatterns);
-        focusTracker.set(x, y, sensitive);
+        const focusRegisterStage = (): boolean => {
+          const sensitive = config.enableRiskGate
+            && !!target_description
+            && matchesRiskPatterns(target_description, config.riskPatterns);
+          focusTracker.set(x, y, sensitive);
+          return sensitive;
+        };
+        const sensitive = focusRegisterStage();
 
-        let effect: CombinedEffect | null = null;
-        if (before) {
-          effect = await settleAndVerify(before, {
-            adaptive: config.adaptiveSettle,
-            settleMs: config.actionSettleMs,
-            threshold: config.noopSimilarityThreshold,
-            regionRadius: config.regionVerifyRadius,
-            physicsRules: config.physicsRules,
-          }, expectation);
-        }
-        // D-3 量子感知：验证证据喂给状态机（effect=null ⇒ undefined ⇒ 不计数）
-        quantum.recordEffect(effect?.detected);
+        // ΑΩ-R11 阶段函数·效果验证：双尺度 dHash + C-1 意图裁决（settleAndVerify），
+        // 证据喂量子感知状态机。
+        // ΝΩ-32 立法：settleAndVerify 的 after 帧必须新截 —— 派发后世界已变，
+        // 帧票据绝不跨越派发点复用（before 帧共享是「同一派发前世界」的增量，
+        // after 帧是「新世界」的测量；复用 = 用旧世界冒充新世界 = 效果验证失效，
+        // 进而误焚审批令牌）。故本阶段不接票据，settleAndVerify 内部照旧自截。
+        const verifyEffectStage = async (): Promise<CombinedEffect | null> => {
+          let effect: CombinedEffect | null = null;
+          if (before) {
+            effect = await mouseVerify.settleAndVerify(before, {
+              adaptive: config.adaptiveSettle,
+              settleMs: config.actionSettleMs,
+              threshold: config.noopSimilarityThreshold,
+              regionRadius: config.regionVerifyRadius,
+              physicsRules: config.physicsRules,
+            }, expectation);
+          }
+          // D-3 量子感知：验证证据喂给状态机（effect=null ⇒ undefined ⇒ 不计数）
+          quantum.recordEffect(effect?.detected);
+          return effect;
+        };
+        const effect = await verifyEffectStage();
 
+        // ΑΩ-R11 阶段函数·UI 记忆：验证生效 + 模型给了描述 ⇒ 写入场景记忆
+        //（含当时整屏指纹；regionHash 随行入库供 from_memory_id 预验比对）。
         // ── 自动记忆：验证生效 + 模型给了描述 ⇒ 写入场景记忆（含当时整屏指纹）──
         // regionHash（点击点邻域指纹）随行入库 —— from_memory_id 的 stale-click
         // 预验依赖它：无 regionHash 的 landmark 只能查存在性，无法比对外观
-        let memoryNote = '';
-        if (effect?.detected && config.autoRemember && target_description) {
-          const lm = uiMemory.remember(target_description, x, y, undefined, before?.screen, before?.region ?? undefined);
-          memoryNote = ` Landmark #${lm.id} saved.`;
-        }
+        const uiMemoryStage = (): string => {
+          let memoryNote = '';
+          if (effect?.detected && config.autoRemember && target_description) {
+            const lm = uiMemory.remember(target_description, x, y, undefined, before?.screen, before?.region ?? undefined);
+            memoryNote = ` Landmark #${lm.id} saved.`;
+          }
+          return memoryNote;
+        };
+        const memoryNote = uiMemoryStage();
 
+        // ΑΩ-R11 阶段函数·OCR 核对：语义核对预期文字是否出现在点击点邻域
+        //（像素验证答「有没有变化」，语义核对答「变化是不是预期的内容」）。
         // ── 语义核对（第四轮）：OCR 检查预期文字是否出现在点击点邻域 ──
         // 像素验证回答「有没有变化」，语义核对回答「变化是不是预期的内容」
-        let semantic: SemanticConfirm | 'ocr-unavailable' | null = null;
-        if (expected_text && config.enableOcr && effect?.detected) {
-          semantic = await semanticConfirm(
-            effect.afterBuffer, x, y,
-            Math.max(config.regionVerifyRadius * 1.5, 0.2),
-            expected_text, config.ocrLang,
-          ) ?? 'ocr-unavailable';
-        }
+        const semanticConfirmStage = async (): Promise<SemanticConfirm | 'ocr-unavailable' | null> => {
+          if (expected_text && config.enableOcr && effect?.detected) {
+            return await semanticConfirm(
+              effect.afterBuffer, x, y,
+              Math.max(config.regionVerifyRadius * 1.5, 0.2),
+              expected_text, config.ocrLang,
+            ) ?? 'ocr-unavailable';
+          }
+          return null;
+        };
+        const semantic = await semanticConfirmStage();
 
+        // ΑΩ-R11 阶段函数·下一步指引：双尺度判定 + C-1 意图裁决 + 预期核对
+        // 合成 next_step（intentBetrayed 随出口带给验收阶段复用）。
         // ── 自适应下一步指引：双尺度判定 + C-1 意图裁决 + 预期核对 ──
-        const noopSuspected = effect && !effect.detected;
-        const intentBetrayed = effect?.intent && !effect.intent.satisfied && effect.detected;
-        const lowConfidence = typeof confidence === 'number' && confidence < 0.6;
-        let nextStep = "MANDATORY: Call 'take_screenshot' to verify the UI state change.";
-        if (intentBetrayed) {
-          nextStep = `INTENT MISMATCH: the screen changed but NOT in the expected way (${effect!.intent!.evidence}). ` +
-            'The click probably landed on the wrong element — treat as partial failure and re-examine.';
-        } else if (noopSuspected) {
-          nextStep = 'WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. ' +
-            "Call 'zoom_inspect' around this point to refine coordinates, then retry.";
-        } else if (lowConfidence) {
-          nextStep = "Low confidence reported. Consider 'zoom_inspect' for finer grounding before the next action.";
-        }
-        if (!noopSuspected && expected_change) {
-          nextStep += ` Then CONFIRM your expectation: "${expected_change}" — if it did NOT happen, treat this as a partial failure.`;
-        }
-        if (semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed) {
-          nextStep = `SEMANTIC MISMATCH: expected text "${expected_text}" was NOT found near the click point. ` +
-            `Treat this click as FAILED even though pixels changed — re-examine with diff_view / take_screenshot.`;
-        }
-        if (sensitive) {
-          nextStep = 'SENSITIVE FIELD: this looks like a credentials/input-secret area. ' +
-            'Do NOT type secrets via type_text here — ask the USER to enter them personally, then continue with take_screenshot.';
-        }
+        const guidanceStage = (): { intentBetrayed: boolean | undefined; nextStep: string } => {
+          const noopSuspected = effect && !effect.detected;
+          const intentBetrayed = effect?.intent && !effect.intent.satisfied && effect.detected;
+          const lowConfidence = typeof confidence === 'number' && confidence < 0.6;
+          let nextStep = "MANDATORY: Call 'take_screenshot' to verify the UI state change.";
+          if (intentBetrayed) {
+            nextStep = `INTENT MISMATCH: the screen changed but NOT in the expected way (${effect!.intent!.evidence}). ` +
+              'The click probably landed on the wrong element — treat as partial failure and re-examine.';
+          } else if (noopSuspected) {
+            nextStep = 'WARNING: Neither the screen nor the clicked region changed — you may have MISSED the target. ' +
+              "Call 'zoom_inspect' around this point to refine coordinates, then retry.";
+          } else if (lowConfidence) {
+            nextStep = "Low confidence reported. Consider 'zoom_inspect' for finer grounding before the next action.";
+          }
+          if (!noopSuspected && expected_change) {
+            nextStep += ` Then CONFIRM your expectation: "${expected_change}" — if it did NOT happen, treat this as a partial failure.`;
+          }
+          if (semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed) {
+            nextStep = `SEMANTIC MISMATCH: expected text "${expected_text}" was NOT found near the click point. ` +
+              `Treat this click as FAILED even though pixels changed — re-examine with diff_view / take_screenshot.`;
+          }
+          if (sensitive) {
+            nextStep = 'SENSITIVE FIELD: this looks like a credentials/input-secret area. ' +
+              'Do NOT type secrets via type_text here — ask the USER to enter them personally, then continue with take_screenshot.';
+          }
+          return { intentBetrayed, nextStep };
+        };
+        const guidance = guidanceStage();
+        let nextStep = guidance.nextStep;
 
+        // ΑΩ-R11 阶段函数·验收式令牌消费：世界说「成了」才焚毁令牌
+        //（B-3 两阶段 + V 纪元验收式消费；验收失败保留令牌供同授权重试）。
         // ── 阶段二（B-3 + V 纪元·验收式消费）：令牌只在验收通过时焚毁 ──
         // 验收判定 —— 世界说「成了」才算成了：
         //   验证关闭/dry-run（effect=null）⇒ 无法验收，退回派发即消费（保守：
@@ -898,116 +1251,130 @@ export function createClickMouseTool(config: Config) {
         //     保留令牌让模型纠正后重试。
         // 一次用户确认覆盖整个任务：验收失败 ⇒ attemptFailed 登记（TTL 续期，
         // 次数递减），重试不再打扰用户；预算耗尽/超期 ⇒ 焚毁，重新审批。
-        let acceptance:
-          | { verdict: 'verified'; detail: string }
-          | { verdict: 'unverified-dispatch-consumed'; detail: string }
-          | { verdict: 'retry-allowed'; reason: string; remaining_attempts: number; detail: string }
-          | { verdict: 'budget-exhausted'; reason: string; detail: string }
-          | undefined;
-        if (dangerous && approval_token) {
-          const semanticMismatched = !!(semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed);
-          if (!effect) {
-            // 验证通道关闭（dry-run 或双重逃生门）：无从验收，维持旧方言（派发即消费，用后即焚）
-            approval.consume(approval_token);
-            acceptance = {
-              verdict: 'unverified-dispatch-consumed',
-              detail: 'Effect verification unavailable (dry-run, or verifyActions=false + ' +
-                'allowUnverifiedDangerous=true escape hatch); token consumed on dispatch.',
-            };
-          } else if (!effect.detected) {
-            const r = approval.attemptFailed(approval_token, 'no-effect');
-            acceptance = r.valid
-              ? {
-                verdict: 'retry-allowed', reason: 'no-effect', remaining_attempts: r.remainingAttempts,
-                detail: 'No verified world change — the click did NOT take effect (missed target / wrong window). ' +
-                  `Token STILL VALID (${r.remainingAttempts} attempts left): fix coordinates or focus and RETRY within the SAME approval. ` +
-                  'Do NOT ask the user again — their consent covers this task until a verified effect.',
-              }
-              : {
-                verdict: 'budget-exhausted', reason: 'no-effect',
-                detail: 'Retry budget exhausted with no verified effect. The token is void. ' +
-                  'Call request_approval again and explain to the user why the action keeps failing.',
+        const acceptanceStage = (): {
+          verdict: 'verified' | 'unverified-dispatch-consumed' | 'retry-allowed' | 'budget-exhausted';
+          reason?: string;
+          remaining_attempts?: number;
+          detail: string;
+        } | undefined => {
+          let acceptance:
+            | { verdict: 'verified'; detail: string }
+            | { verdict: 'unverified-dispatch-consumed'; detail: string }
+            | { verdict: 'retry-allowed'; reason: string; remaining_attempts: number; detail: string }
+            | { verdict: 'budget-exhausted'; reason: string; detail: string }
+            | undefined;
+          if (dangerous && approval_token) {
+            const semanticMismatched = !!(semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed);
+            if (!effect) {
+              // 验证通道关闭（dry-run 或双重逃生门）：无从验收，维持旧方言（派发即消费，用后即焚）
+              approval.consume(approval_token);
+              acceptance = {
+                verdict: 'unverified-dispatch-consumed',
+                detail: 'Effect verification unavailable (dry-run, or verifyActions=false + ' +
+                  'allowUnverifiedDangerous=true escape hatch); token consumed on dispatch.',
               };
-          } else if (intentBetrayed || semanticMismatched) {
-            const reason = semanticMismatched ? 'semantic-mismatch' : 'intent-betrayed';
-            const r = approval.attemptFailed(approval_token, reason);
-            acceptance = r.valid
-              ? {
-                verdict: 'retry-allowed', reason, remaining_attempts: r.remainingAttempts,
-                detail: 'The screen changed but NOT in the expected way — the click probably landed on the wrong element. ' +
-                  `Token STILL VALID (${r.remainingAttempts} attempts left): re-examine and RETRY within the SAME approval. ` +
-                  'Do NOT ask the user again.',
-              }
-              : {
-                verdict: 'budget-exhausted', reason,
-                detail: 'Retry budget exhausted with repeated wrong-element clicks. The token is void. ' +
-                  'Call request_approval again and explain to the user what keeps going wrong.',
+            } else if (!effect.detected) {
+              const r = approval.attemptFailed(approval_token, 'no-effect');
+              acceptance = r.valid
+                ? {
+                  verdict: 'retry-allowed', reason: 'no-effect', remaining_attempts: r.remainingAttempts,
+                  detail: 'No verified world change — the click did NOT take effect (missed target / wrong window). ' +
+                    `Token STILL VALID (${r.remainingAttempts} attempts left): fix coordinates or focus and RETRY within the SAME approval. ` +
+                    'Do NOT ask the user again — their consent covers this task until a verified effect.',
+                }
+                : {
+                  verdict: 'budget-exhausted', reason: 'no-effect',
+                  detail: 'Retry budget exhausted with no verified effect. The token is void. ' +
+                    'Call request_approval again and explain to the user why the action keeps failing.',
+                };
+            } else if (guidance.intentBetrayed || semanticMismatched) {
+              const reason = semanticMismatched ? 'semantic-mismatch' : 'intent-betrayed';
+              const r = approval.attemptFailed(approval_token, reason);
+              acceptance = r.valid
+                ? {
+                  verdict: 'retry-allowed', reason, remaining_attempts: r.remainingAttempts,
+                  detail: 'The screen changed but NOT in the expected way — the click probably landed on the wrong element. ' +
+                    `Token STILL VALID (${r.remainingAttempts} attempts left): re-examine and RETRY within the SAME approval. ` +
+                    'Do NOT ask the user again.',
+                }
+                : {
+                  verdict: 'budget-exhausted', reason,
+                  detail: 'Retry budget exhausted with repeated wrong-element clicks. The token is void. ' +
+                    'Call request_approval again and explain to the user what keeps going wrong.',
+                };
+            } else {
+              // 验收通过：世界出现了变化且与预期一致（或无更严苛的期望可核对）
+              approval.consume(approval_token);
+              acceptance = {
+                verdict: 'verified',
+                detail: 'Verified world change consistent with the expectation — user consent consumed by this irreversible effect. ' +
+                    'Report the acceptance result to the user.',
               };
-          } else {
-            // 验收通过：世界出现了变化且与预期一致（或无更严苛的期望可核对）
-            approval.consume(approval_token);
-            acceptance = {
-              verdict: 'verified',
-              detail: 'Verified world change consistent with the expectation — user consent consumed by this irreversible effect. ' +
-                  'Report the acceptance result to the user.',
-            };
+            }
           }
-        }
+          return acceptance;
+        };
+        const acceptance = acceptanceStage();
 
-        // 重试指引前置：验收失败且令牌仍有效时，下一步就是纠偏重试（免二次确认）
-        if (acceptance && acceptance.verdict === 'retry-allowed') {
-          nextStep = acceptance.detail + ' ' + nextStep;
-        }
+        // ΑΩ-R11 阶段函数·成功回执装配：重试指引前置 + SUCCESS 回执
+        //（状态锚点携带全部安全链注记；输出形状逐字节保持，不迁 toolOk —— 见 execute 头注）。
+        const successReceiptStage = (): string => {
+          // 重试指引前置：验收失败且令牌仍有效时，下一步就是纠偏重试（免二次确认）
+          if (acceptance && acceptance.verdict === 'retry-allowed') {
+            nextStep = acceptance.detail + ' ' + nextStep;
+          }
 
-        return JSON.stringify({
-          status: 'SUCCESS',
-          action: `Mouse ${button} clicked.`,
-          state_anchor: {
-            normalized: { x, y },
-            absolute_pixels: { x: px, y: py },
-            screen_resolution: `${size.width}x${size.height}`,
-            effect: effect ? {
-              detected: effect.detected,
-              scale: effect.scale, // page-level / element-level / none
-              screen_similarity_pct: effect.screen.similarity_pct,
-              region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
-              // C-1 意图裁决：期望 kind + 物理证据（与 detected 分歧 = 高级幻觉警报）
-              intent: effect.intent ?? undefined,
-            } : 'verification-off',
-            expected_change: expected_change || undefined, // 预期锚定：模型行动前声明的预期
-            sensitive_focus: sensitive || undefined,       // 风险闸门：焦点已标记为凭据区
-            // J 纪元：审批网覆盖情况透明化（described / blind-spot / gate-disabled）
-            approval_gate: gateCoverage,
-            // Ρ 纪元：双钥公证参与情况透明化（engaged/degraded + 各通道在场情况；
-            // 总开关关 ⇒ 键不入场 —— 完全旧路径）
-            notarization: notarization || undefined,
-            // Β 纪元：反驳法院参与情况透明化 —— 'upheld' = 异构第二脑认真反驳后
-            // 维持「目标=描述」；uncertain/缺席 ⇒ 键不入场（缺席审判零行为，
-            // 输出与法院关闭时同路）
-            refute: refuteStamp || undefined,
-            // W2-2（S3）：接地新鲜度探针判决（dangerous 令牌路径在场）。W6R 后
-            // degraded 只在逃生门（allowUnverifiedDangerous=true）下才能到达成功
-            // 路径 —— 缺席即拒绝（fail-closed），这里的 degraded 是逃生门下的
-            // 诚实观测面（模型/遥测仍看得见防御缺席）
-            freshness: freshnessStamp || undefined,
-            // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
-            reversibility_lane: laneAnchorOf(laneGate),
-            // W2-2（W1-2）：批注修正透明化 —— 用户批注把计划修正成了什么
-            amendment: amendment.stamp || undefined,
-            // V 纪元：验收裁决 —— verified（通过，令牌已焚毁）/ retry-allowed
-            // （未生效，令牌保留，重试免确认）/ budget-exhausted（预算耗尽，需重新审批）
-            acceptance: acceptance || undefined,
-            semantic: semantic
-              ? (semantic === 'ocr-unavailable'
-                ? 'ocr-unavailable'
-                : { expected_text: expected_text, confirmed: semantic.confirmed, region_text_snippet: semantic.snippet })
-              : undefined,
-          },
-            memory: memoryNote || undefined,
-            next_step: nextStep,
-            // 预验结果透明化：本次点击是否经过 from_memory_id 外观比对
-            pre_verified: preVerified === undefined ? undefined : { landmark: from_memory_id, appearance_match: true },
-          }, null, 2);
+          return JSON.stringify({
+            status: 'SUCCESS',
+            action: `Mouse ${button} clicked.`,
+            state_anchor: {
+              normalized: { x, y },
+              absolute_pixels: { x: px, y: py },
+              screen_resolution: `${size.width}x${size.height}`,
+              effect: effect ? {
+                detected: effect.detected,
+                scale: effect.scale, // page-level / element-level / none
+                screen_similarity_pct: effect.screen.similarity_pct,
+                region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
+                // C-1 意图裁决：期望 kind + 物理证据（与 detected 分歧 = 高级幻觉警报）
+                intent: effect.intent ?? undefined,
+              } : 'verification-off',
+              expected_change: expected_change || undefined, // 预期锚定：模型行动前声明的预期
+              sensitive_focus: sensitive || undefined,       // 风险闸门：焦点已标记为凭据区
+              // J 纪元：审批网覆盖情况透明化（described / blind-spot / gate-disabled）
+              approval_gate: gateCoverage,
+              // Ρ 纪元：双钥公证参与情况透明化（engaged/degraded + 各通道在场情况；
+              // 总开关关 ⇒ 键不入场 —— 完全旧路径）
+              notarization: notarization || undefined,
+              // Β 纪元：反驳法院参与情况透明化 —— 'upheld' = 异构第二脑认真反驳后
+              // 维持「目标=描述」；uncertain/缺席 ⇒ 键不入场（缺席审判零行为，
+              // 输出与法院关闭时同路）
+              refute: refuteStamp || undefined,
+              // W2-2（S3）：接地新鲜度探针判决（dangerous 令牌路径在场）。W6R 后
+              // degraded 只在逃生门（allowUnverifiedDangerous=true）下才能到达成功
+              // 路径 —— 缺席即拒绝（fail-closed），这里的 degraded 是逃生门下的
+              // 诚实观测面（模型/遥测仍看得见防御缺席）
+              freshness: freshnessStamp || undefined,
+              // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
+              reversibility_lane: laneAnchorOf(laneGate),
+              // W2-2（W1-2）：批注修正透明化 —— 用户批注把计划修正成了什么
+              amendment: amendment.stamp || undefined,
+              // V 纪元：验收裁决 —— verified（通过，令牌已焚毁）/ retry-allowed
+              // （未生效，令牌保留，重试免确认）/ budget-exhausted（预算耗尽，需重新审批）
+              acceptance: acceptance || undefined,
+              semantic: semantic
+                ? (semantic === 'ocr-unavailable'
+                  ? 'ocr-unavailable'
+                  : { expected_text: expected_text, confirmed: semantic.confirmed, region_text_snippet: semantic.snippet })
+                : undefined,
+            },
+              memory: memoryNote || undefined,
+              next_step: nextStep,
+              // 预验结果透明化：本次点击是否经过 from_memory_id 外观比对
+              pre_verified: preVerified === undefined ? undefined : { landmark: from_memory_id, appearance_match: true },
+            }, null, 2);
+        };
+        return successReceiptStage();
 
       } catch (error: any) {
         // B-3 注：异常路径不烧审批令牌（validate 只查不烧；consume 仅在成功 return 前调用）

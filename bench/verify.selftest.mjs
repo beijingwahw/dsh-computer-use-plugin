@@ -8,6 +8,8 @@
 //   C. E3 SPRT 三态判定 + 预算上限 + 边界公式(与 popupDetector 同式)
 //   D. Wilson CI / 两比例 z 检验 / McNemar 精确检验的已知数值
 //   E. suite-*.json 的 verify 块结构合法 + doctor 规则候选草稿字段
+//   F. ΝΩ-39 统计功效:MDER/normalInv/Beta 共轭后验已知数值、flaky 后验一行、
+//      suite sprt:{p0,p1} 覆写装载、n<20 拒判、bench_gate glob 白名单与计数硬门接线
 // 期望 exit 0;任一断言失败 exit 1 并列出全部失败项。
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +23,7 @@ import {
 } from './verifyCore.mjs';
 import {
   createRegressionGate, BernoulliSprt, wilsonCI, twoProportionTest, mcNemarExact, normalCdf,
+  mder, normalInv, logBetaFn, betaInc, betaTailProb, MDER_MIN_N,
   SPRT_ALPHA, SPRT_BETA, SPRT_P0, SPRT_P1, MAX_RERUNS,
 } from './sprtCore.mjs';
 
@@ -194,6 +197,7 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   eq(st.verdict.verdict, 'deterministic-fail', 'C2 deterministic-fail');
   eq(st.verdict.runs, 3, 'C2 预算节俭:3 次运行即停(期望样本量最优性)');
   ok(st.verdict.ci.low <= st.verdict.pHat && st.verdict.pHat <= st.verdict.ci.high, 'C2 CI 包含 p̂');
+  eq(st.verdict.posterior, undefined, 'C2 deterministic-fail 不附 Beta 后验');
 
   // 首发即过(现实中不触发门,但语义上):零失败 ⇒ deterministic-pass
   const g2 = createRegressionGate();
@@ -201,6 +205,7 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   eq(st.action, 'settled', 'C2 零失败即收口');
   eq(st.verdict.verdict, 'deterministic-pass', 'C2 deterministic-pass ⇔ 零失败观测');
   eq(st.verdict.flavor, 'zero-failure', 'C2 flavor=zero-failure');
+  eq(st.verdict.posterior, undefined, 'C2 deterministic-pass 不附 Beta 后验(零失败无比例可言)');
 
   // 1 败 + 连过 ⇒ SPRT 接受 H1 但有失败 ⇒ flaky(high-rate),不冒充 deterministic-pass
   const g3 = createRegressionGate();
@@ -211,6 +216,9 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   eq(st.verdict.flavor, 'high-rate', 'C2 flavor=high-rate');
   near(st.verdict.pHat, (n3 - 1) / n3, 1e-4, `C2 p̂=${n3 - 1}/${n3}`);
   eq(st.verdict.sprt.decision, 'H1', 'C2 SPRT 判 H1');
+  // ΝΩ-39:flaky 态附 Beta 共轭后验一行 P(p>0.8|data)(均匀先验 ⇒ Beta(6,2),手算 0.4233)
+  ok(st.verdict.posterior && st.verdict.posterior.threshold === SPRT_P1, 'C2 flaky 附后验(threshold=H1 p1)');
+  near(st.verdict.posterior.pAbove, 0.4233, 0.001, 'C2 P(p>0.8|data)=Beta(6,2) 上尾手算 0.4233(1败5过)');
 
   // 交替胜负至预算耗尽 ⇒ flaky(indifference-zone)
   const g4 = createRegressionGate();
@@ -222,6 +230,36 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   eq(st.verdict.runs, 1 + MAX_RERUNS, `C2 预算上限强制(总运行=${1 + MAX_RERUNS})`);
   near(st.verdict.pHat, 3 / 6, 1e-4, 'C2 p̂=3/6');
   ok(st.verdict.ci.high - st.verdict.ci.low > 0.3, 'C2 小样本 CI 宽(Wilson 不假装精度)');
+  ok(st.verdict.posterior && st.verdict.posterior.pAbove >= 0 && st.verdict.posterior.pAbove <= 1,
+    `C2 indifference-zone 亦附后验一行(得 ${st.verdict.posterior?.pAbove},Beta(4,4) 上尾)`);
+}
+
+// ─── C3. ΝΩ-39:suite 参数域 —— sprt:{p0,p1} 覆写装载(loadSuite 纯函数) ───
+{
+  const { loadSuite } = await import('./battery.mjs'); // import 守卫:不触发 main
+  const arr = loadSuite([{ id: 'x' }, { id: 'y' }]);
+  eq(arr.sprt, null, 'C3 数组旧格式:sprt=null(缺省保持 0.30/0.80)');
+  eq(arr.tasks.length, 2, 'C3 数组旧格式任务透传');
+  const ov = loadSuite({ sprt: { p0: 0.6, p1: 0.9 }, tasks: [{ id: 'x' }] });
+  eq(ov.sprt.p0, 0.6, 'C3 新格式 sprt.p0 覆写');
+  eq(ov.sprt.p1, 0.9, 'C3 新格式 sprt.p1 覆写(README 建议值 0.60/0.90)');
+  eq(ov.tasks.length, 1, 'C3 新格式任务透传');
+  const half = loadSuite({ sprt: { p1: 0.9 }, tasks: [] });
+  eq(half.sprt.p0, undefined, 'C3 半覆写:缺省键不代填(装载器不猜,生效值由 battery 合成)');
+  eq(half.sprt.p1, 0.9, 'C3 半覆写:显式键透传');
+  const noSprt = loadSuite({ tasks: [{ id: 'x' }] });
+  eq(noSprt.sprt, null, 'C3 新格式缺 sprt 块 = 缺省域');
+  const throws = (v) => { try { loadSuite(v); return false; } catch { return true; } };
+  ok(throws({ sprt: { p0: 0.9, p1: 0.6 }, tasks: [] }), 'C3 p0≥p1 拒绝(与 BernoulliSprt 同律 fail-fast)');
+  ok(throws({ sprt: { p0: 0.3, alpha: 0.01 }, tasks: [] }), 'C3 未登记键拒绝(resultContract 同律)');
+  ok(throws({ sprt: [], tasks: [] }), 'C3 sprt 非对象拒绝');
+  ok(throws({ sprt: { p0: 'x', p1: 0.9 }, tasks: [] }), 'C3 非数值拒绝');
+  ok(throws({ nope: 1 }), 'C3 既非数组又无 tasks 拒绝');
+  // 覆写域真正进门:α/β 不变 ⇒ 边界不变;p0/p1 变 ⇒ 每步 LLR 增量变
+  const g = createRegressionGate({ p0: 0.6, p1: 0.9 });
+  near(g.sprtState().bounds.accept, 2.9444, 1e-12, 'C3 覆写只动假设域,α/β 边界不变(A=ln19=2.9444)');
+  g.push(true);
+  near(g.sprtState().logLikelihoodRatio, Math.log(0.9 / 0.6), 1e-4, 'C3 单过 LLR=ln(p1/p0)=ln(0.9/0.6)≈0.405');
 }
 
 // ─── D. 统计函数已知数值 ───
@@ -246,15 +284,61 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   ok(wilsonCI(0, 5).low === 0 && wilsonCI(0, 5).high > 0, 'D3 0 失败的 CI 不塌缩到 [0,0]');
 }
 
-// ─── E1. suite-*.json 的 verify 块结构合法(fail-fast 通道的自证) ───
+// ─── D4. ΝΩ-39:正态分位与 MDER 已知数值(手算锚点) ───
 {
+  near(normalInv(0.8), 0.8416212, 1e-6, 'D4 Φ⁻¹(0.8)=0.8416212(power=0.80 的 z)');
+  near(normalInv(0.975), 1.9599640, 1e-6, 'D4 Φ⁻¹(0.975)=1.9599640(双侧 α=0.05 的 z,与 WILSON_Z 同值)');
+  near(normalInv(0.6), 0.2533475, 1e-6, 'D4 Φ⁻¹(0.6)=0.2533475');
+  near(normalCdf(normalInv(0.37)), 0.37, 1e-6, 'D4 CDF∘Φ⁻¹ 往返恒等(两级近似的合成误差 ≤1e-6)');
+  // MDER 手算:z 和 = 1.9599640+0.8416212 = 2.8015852;se=sqrt(0.25(1/n1+1/n2))
+  //   26 vs 4:se=sqrt(0.25×(1/26+1/4))=sqrt(0.0721154)=0.2685433 ⇒ 0.7523470
+  near(mder(26, 4), 0.7523, 1e-9, 'D4 MDER(26,4)=0.7523 手算(suite-4 的 26 任务 vs suite-4c 的 4 任务:只看得见 75pt 级差异)');
+  //   26 vs 26:se=sqrt(0.25×2/26)=0.1386750 ⇒ 0.3885100
+  near(mder(26, 26), 0.3885, 1e-9, 'D4 MDER(26,26)=0.3885 手算(同尺寸对照)');
+  near(mder(100, 100), 0.1981, 1e-9, 'D4 MDER(100,100)=0.1981 手算(se=0.0707107)');
+  eq(mder(1, 1), 1, 'D4 n=1:1 原始值 1.9808 ⇒ 夹 [0,1] 上限');
+  eq(mder(3, 2), 1, 'D4 小 suite 夹上限(MDER=1:只有全过/全表的差异可见)');
+  ok(mder(52, 52) < mder(26, 26), 'D4 MDER 随 n 单调收窄(功效随样本增大)');
+  near(mder(20, 20, 0.05, 0.9), 0.5125, 1e-3, 'D4 α/power 可参数化(power=0.90:z 和 3.2415 × se 0.1581 = 0.5125)');
+  eq(MDER_MIN_N, 20, 'D4 拒判阈值常量 MDER_MIN_N=20');
+  const throws = (fn) => { try { fn(); return false; } catch { return true; } };
+  ok(throws(() => mder(0, 5)), 'D4 n=0 拒绝');
+  ok(throws(() => mder(10, 10, 0.05, 0.3)), 'D4 power≤0.5 拒绝(无意义检验)');
+  ok(throws(() => mder(10, 10, 1.5, 0.8)), 'D4 α∉(0,1) 拒绝');
+  ok(throws(() => mder(10.5, 10)), 'D4 非整数 n 拒绝');
+}
+
+// ─── D5. ΝΩ-39:Beta 共轭后验已知数值(logGamma 手写 + 正则化不完全 Beta 连分式) ───
+{
+  near(logBetaFn(1, 1), 0, 1e-12, 'D5 logB(1,1)=0(均匀先验的归一化)');
+  near(logBetaFn(2, 2), Math.log(1 / 6), 1e-12, 'D5 logB(2,2)=ln(1/6)');
+  near(betaInc(0.5, 1, 1), 0.5, 1e-9, 'D5 I_0.5(1,1)=0.5(均匀分布中位)');
+  near(betaInc(0.8, 3, 3), 0.9421, 0.0001, 'D5 I_0.8(3,3)=30∫₀^0.8 p²(1−p)²dp=0.94208(手算)');
+  // 手算闭式:均匀先验 Beta(1,1) ⇒ 后验 Beta(k+1,n−k+1),上尾可积
+  near(betaTailProb(0.8, 0, 1), 0.04, 1e-9, 'D5 0/1 过 ⇒ Beta(1,2) 上尾 =(1−0.8)²=0.04');
+  near(betaTailProb(0.8, 1, 1), 0.36, 1e-9, 'D5 1/1 过 ⇒ Beta(2,1) 上尾 =1−0.8²=0.36');
+  near(betaTailProb(0.8, 9, 10), 0.6779, 0.0001, 'D5 9/10 ⇒ Beta(10,2) 上尾 =110[(1−.8¹⁰)/10−(1−.8¹¹)/11]=0.6779');
+  near(betaTailProb(0.8, 2, 4), 0.0579, 0.0001, 'D5 2/4 ⇒ Beta(3,3) 上尾 =1−30[.8³/3−.8⁴/2+.8⁵/5]=0.0579');
+  near(betaTailProb(0.8, 5, 6), 0.4233, 0.0001, 'D5 5/6 ⇒ Beta(6,2) 上尾 手算 0.4233(与 C2 门输出同值)');
+  ok(betaTailProb(0.8, 8, 10) < betaTailProb(0.8, 9, 10), 'D5 后验随通过数单调升');
+  ok(betaTailProb(0.8, 0, 10) < 0.001, 'D5 全败 ⇒ P(p>0.8|data)≈0');
+  near(betaTailProb(0.8, 10, 10), 0.9141, 0.0001, 'D5 全过 ⇒ Beta(11,1) 上尾 =1−0.8¹¹=0.9141(高但确不为 1 —— 统计诚实)');
+  const throws2 = (fn) => { try { fn(); return false; } catch { return true; } };
+  ok(throws2(() => betaTailProb(0.8, 11, 10)), 'D5 k>n 拒绝');
+  ok(throws2(() => betaTailProb(1.2, 1, 2)), 'D5 threshold∉(0,1) 拒绝');
+  ok(throws2(() => betaTailProb(0.8, 1, 0)), 'D5 n=0 拒绝');
+}
+
+// ─── E1. suite-*.json 的 verify 块结构合法(fail-fast 通道的自证;ΝΩ-39 起经 loadSuite 归一化) ───
+{
+  const { loadSuite } = await import('./battery.mjs');
   const benchDir = fileURLToPath(new URL('./', import.meta.url));
   const files = readdirSync(benchDir).filter((f) => /^suite-.*\.json$/.test(f));
   ok(files.length > 0, `E1 发现 suite 文件(${files.length} 个)`);
   let verifyBlocks = 0;
   for (const f of files) {
-    const suite = JSON.parse(readFileSync(path.join(benchDir, f), 'utf8'));
-    for (const t of suite) {
+    const { tasks } = loadSuite(JSON.parse(readFileSync(path.join(benchDir, f), 'utf8')));
+    for (const t of tasks) {
       if (!t.verify) continue;
       verifyBlocks += 1;
       const v = validateVerifyBlock(t.verify);
@@ -352,6 +436,60 @@ function exvidenceExists(files) { return Array.isArray(files) && files.length >=
   // 手算:2/3 vs 1/2 ⇒ pooled=3/5,z=(0.6667−0.5)/sqrt(0.6·0.4·(1/3+1/2))=0.1667/0.4472≈0.3727,p≈0.7094
   near(cmp.twoProportionZ.z, 0.3727, 0.001, 'E4 z 手算值');
   near(cmp.twoProportionZ.p, 0.7094, 0.001, 'E4 p 手算值');
+  // ΝΩ-39:n<20 ⇒ 拒判 verdictHint(诚实降级「样本不足,仅记录」),MDER/Wilson 仍在场
+  ok(cmp.verdictHint.includes('样本不足') && cmp.verdictHint.includes('仅记录'), 'E4 n<20 ⇒ verdictHint 诚实降级(拒下显著性结论)');
+  eq(cmp.mder.sufficientN, false, 'E4 小 suite 标记功效不足');
+  eq(cmp.mder.value, 1, 'E4 n=3 vs 2 ⇒ MDER 夹上限 1(只有全过/全表可见)');
+  ok(cmp.wilson && typeof cmp.wilson.current.low === 'number' && typeof cmp.wilson.baseline.low === 'number',
+    'E4 对比输出附两侧通过率 Wilson 95% CI');
+  // n≥20(26 vs 26):恢复判定通道,MDER=0.3885 在场
+  const big = Array.from({ length: 26 }, (_, i) => ({ id: 't' + i, pass: i < 20 }));
+  const bigPath = path.join(tmp, 'prev-big.json');
+  writeFileSync(bigPath, JSON.stringify({ results: big }));
+  const curBig = big.map((t) => ({ id: t.id, gate: { verdict: t.pass ? 'deterministic-pass' : 'flaky' } }));
+  const cmp2 = compareWithBaseline(curBig, bigPath);
+  eq(cmp2.mder.sufficientN, true, 'E4 26 vs 26 ⇒ 样本充足,不拒判');
+  near(cmp2.mder.value, 0.3885, 1e-9, 'E4 MDER(26,26) 在对比报告在场');
+  ok(!cmp2.verdictHint.includes('样本不足'), 'E4 样本充足时无降级话术');
+  ok(cmp2.verdictHint.includes('MDER=0.3885'), 'E4 充足时 verdictHint 亦附 MDER(差异<MDER 时「不显著」与「功效不足」不可区分)');
+}
+
+// ─── F. ΝΩ-39:bench_gate glob 白名单扩容与计数类硬门接线(纯函数区,离线) ───
+{
+  const gate = await import(new URL('../scripts/bench_gate.mjs', import.meta.url).href);
+  const wl = gate.BENCH_WHITELIST;
+  ok(Array.isArray(wl) && wl.includes('test/w5*.bench.ts'), 'F 白名单保留原 w5 glob(零回归)');
+  for (const f of [
+    'test/jointCalibration.bench.ts', 'test/ablation.bench.ts', 'test/paramAblation.bench.ts',
+    'test/calibration.bench.ts', 'test/organAblation.bench.ts', 'test/fovea.ab.bench.ts',
+  ]) {
+    ok(wl.includes(f), `F 白名单含确定性 bench ${f}`);
+  }
+  ok(wl.every((f) => !/realMachine|largeScale/.test(f)), 'F 真机类(realMachine*/largeScale*)排除并注释');
+  ok(wl.every((f) => !f.includes('autonomy.closedloop')), 'F 当前红的 closedloop 不入册(基线必须全绿才可信)');
+  ok(gate.BENCH_ARGS.includes('--test-skip-pattern') && gate.BENCH_ARGS.includes('真机复测'),
+    'F jointCalibration 真机子测经 skip-pattern 整体剔除(SKIP 按未通过计,会卡死 --update)');
+  ok(gate.BENCH_ARGS.includes('--test-reporter') && gate.BENCH_ARGS.includes('tap'),
+    'F TAP 报告器显式钉死(node 23+ 管道默认 spec 记号,parseTap 会解析得 0 个测试)');
+  ok(JSON.stringify(gate.BENCH_ARGS.slice(-wl.length)) === JSON.stringify(wl), 'F BENCH_ARGS = 公共旗标 + 剔除模式 + 白名单(白名单居尾)');
+  // 计数类硬门:纯函数缺省保持旧口径(test/w7gate.test.ts 门h 锁定),开即升硬
+  const mk = (v, dur = 1) => ({ name: 'A', ok: true, durationMs: dur, metrics: { m: { value: v, unit: 'plain' } } });
+  const base = { tests: [mk(100)] };
+  const soft = gate.compareBenchmarks(base, { tests: [mk(115.1)] });
+  eq(soft.hardRed, false, 'F 纯函数缺省:计数漂移仅告警(w7gate 门h 锁定的历史口径,零回归)');
+  eq(soft.warnFindings.length, 1, 'F 缺省落 warnFindings(kind=metric-drift)');
+  const hard = gate.compareBenchmarks(base, { tests: [mk(115.1)] }, { countDriftHard: true });
+  eq(hard.hardRed, true, 'F countDriftHard=true ⇒ ±15% 确定性计数漂移升硬门(ΝΩ-39 缺省,经 CLI 接线)');
+  ok(hard.hardFindings.some((f) => f.kind === 'metric-drift'), 'F 升硬后 kind 保持 metric-drift(取证口径不变)');
+  eq(hard.warnFindings.length, 0, 'F 升硬后不再重复落告警');
+  eq(gate.compareBenchmarks(base, { tests: [mk(100)] }, { countDriftHard: true }).hardRed, false, 'F 无漂移时硬门绿(不误红)');
+  const durDrift = gate.compareBenchmarks(
+    { tests: [mk(100, 100)] },
+    { tests: [mk(100, 200)] },
+    { countDriftHard: true },
+  );
+  eq(durDrift.hardRed, false, 'F 时间类 duration 漂移永不升硬(volatile 恒仅告警)');
+  eq(durDrift.warnFindings.length, 1, 'F 时间类漂移仍落告警');
 }
 
 // ─── 收尾 ───

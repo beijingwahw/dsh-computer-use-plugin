@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getSharp, type SharpLike } from '../src/_legacyDeps.ts';
+import { kernelRegistry } from '../src/kernel/registry.ts';
 import type { GlmClient, GlmVisionRequest } from '../src/vlm/glmClient.ts';
 import type { Bbox } from '../src/vlm/codec.ts';
 
@@ -24,7 +25,7 @@ const {
   mapEncodedToOriginal, mapBboxEncodedToOriginal,
   _overrideSharpResolver_forTest,
 } = await import('../src/vlm/codec.ts');
-const { groundElements } = await import('../src/vlm/grounding.ts');
+const { groundElements, _resetGroundingCache_forTest } = await import('../src/vlm/grounding.ts');
 const { readTextViaVlm, findTextViaVlm } = await import('../src/vlm/vlmOcr.ts');
 
 // ─── 测试脚手架 ───
@@ -469,5 +470,85 @@ test('Γ-3c: vlmOcr 无 region 恒等反算 + 失败路径 coordinateSpace 诚�
     const f2 = await findTextViaVlm(png, 'x', { client: bad.client });
     assert.equal(f2.ok, false);
     assert.equal(f2.coordinateSpace, undefined);
+  });
+});
+
+// ─── ΝΩ-48（注视经济进 grounding）：inset 模式 + foveaCenter 的坐标反算闭环 ───
+
+test('ΝΩ-48: groundElements + foveaCenter + inset —— 偏置注视窗下合成 bbox roundtrip 回源图系', async (t) => {
+  await withSharp(t, async (s) => {
+    // 注册表路线开 inset（codec.foveaMode；foveated 由 grounding 的 foveaCenter
+    // 在场显式铸入）；结束复位（生产缺省 = 未注册 = blur —— epochGamma2 同律）
+    kernelRegistry.register({
+      key: 'codec.foveaMode', organ: 'perception', defaultValue: 1, min: 0, max: 1,
+      note: 'ΝΩ-48 测试铸入（生产缺省未注册 = blur）',
+    });
+    try {
+      _resetGroundingCache_forTest();
+      const png = await solidPng(s, 1600, 800); // → 原生编码图 1568x784 → inset 缩图 784x392
+      const gaze = { x: 0.7, y: 0.4 };
+      // 参考编码：grounding 内部走同一确定性管线 —— inset 元信息供正向映射
+      const ref = await encodeForVlmMeta(png, { foveated: true, foveaMode: 'inset', foveaCenter: gaze });
+      assert.equal(ref.ok, true);
+      const m = ref.value!;
+      assert.equal(m.foveated, true);
+      assert.equal(m.foveaMode, 'inset');
+      assert.deepEqual(m.foveaCenter, gaze, '生效注视中心随行');
+      // 注视偏置实证：提取原点 ≠ 居中提取律（几何中心缺省的推导值）
+      const centerFx = Math.floor((m.insetNative!.width - m.insetRect!.w) / 2);
+      assert.notEqual(m.insetExtract!.x, centerFx, '注视窗在原生画布上被真实偏置');
+
+      // 正向映射（applyInsetFoveation 构造律的解析逆）：源图 → 原生编码图 E
+      // （等比）→ 缩图 T（凹窗内 1:1 / 窗外按缩图实际比值）
+      const toThumb = (sx: number, sy: number): { x: number; y: number } => {
+        const ex = (sx * m.insetNative!.width) / m.sourceWidth;
+        const ey = (sy * m.insetNative!.height) / m.sourceHeight;
+        const R = m.insetRect!, F = m.insetExtract!;
+        if (ex >= F.x && ex < F.x + R.w && ey >= F.y && ey < F.y + R.h) {
+          return { x: R.x + (ex - F.x), y: R.y + (ey - F.y) }; // 窗内 1:1 原生
+        }
+        return { x: (ex * m.width) / m.insetNative!.width, y: (ey * m.height) / m.insetNative!.height };
+      };
+      // 两个源图 bbox：注视窗内（1:1 原生密度）+ 窗外（外围缩图比值）
+      const inWindow = { x0: 1080, y0: 300, x1: 1160, y1: 340 };  // 注视点 (1120,320) 邻域
+      const outWindow = { x0: 100, y0: 600, x1: 180, y1: 640 };   // 左下外围
+      const p0 = toThumb(inWindow.x0, inWindow.y0), p1 = toThumb(inWindow.x1, inWindow.y1);
+      const q0 = toThumb(outWindow.x0, outWindow.y0), q1 = toThumb(outWindow.x1, outWindow.y1);
+      // 模型按所见图（缩图系）作答 —— 与生产语义一致
+      const { client } = fakeGroundClient(() => ({
+        ok: true,
+        value: {
+          elements: [
+            { id: 'a', label: '窗内钮', role: 'button', bbox: [p0.x, p0.y, p1.x, p1.y], confidence: 0.9 },
+            { id: 'b', label: '窗外钮', role: 'button', bbox: [q0.x, q0.y, q1.x, q1.y], confidence: 0.9 },
+          ],
+        },
+        raw: '...',
+      }));
+      const r = await groundElements(png, { client, foveaCenter: gaze, verifyGate: false });
+      assert.equal(r.ok, true);
+      assert.ok(r.strategy.endsWith('+inset'), `strategy=${r.strategy}`);
+      assert.equal(r.coordinateSpace, 'original', '分段反算成立 ⇒ 源图系标注');
+      assert.equal(r.elements.length, 2);
+      const byLabel = new Map(r.elements.map(e => [e.label, e]));
+      const near = (got: Bbox, want: typeof inWindow, tol: number, tag: string) => {
+        for (const k of ['x0', 'y0', 'x1', 'y1'] as const) {
+          assert.ok(
+            Math.abs(got[k] - want[k]) <= tol,
+            `${tag}.${k}: 得 ${got[k]} 期望 ${want[k]}（容差 ${tol}px）`,
+          );
+        }
+      };
+      // 窗内 1:1 原生：正反算互为解析逆，只剩 clamp 取整残差（≤2px）
+      near(byLabel.get('窗内钮')!.bbox, inWindow, 2, '窗内钮');
+      // 窗外缩图比值：缩图 1px 取整 ⇒ 源图 ≤scale(=2)px 残差（诚实边界）+ clamp ≤1
+      near(byLabel.get('窗外钮')!.bbox, outWindow, 3, '窗外钮');
+      // 中心点与 bbox 同系换算
+      const inEl = byLabel.get('窗内钮')!;
+      assert.ok(Math.abs(inEl.center.x - (inEl.bbox.x0 + inEl.bbox.x1) / 2) < 1e-9);
+    } finally {
+      kernelRegistry.reset(); // 测试隔离：注册表复位（生产缺省 = 未注册 = blur）
+      _resetGroundingCache_forTest();
+    }
   });
 });

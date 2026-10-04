@@ -29,8 +29,8 @@ interface FakeProvider extends VisionProvider {
   readonly lastJsonMode: boolean | undefined;
 }
 
-/** 铸假脑：steps 按次消耗，耗尽重复末步；configured 可伪造；chat 违约可上抛 */
-function fake(id: string, steps: Step[], o: { configured?: boolean } = {}): FakeProvider {
+/** 铸假脑：steps 按次消耗，耗尽重复末步；configured/baseUrl 可伪造；chat 违约可上抛 */
+function fake(id: string, steps: Step[], o: { configured?: boolean; baseUrl?: string } = {}): FakeProvider {
   let calls = 0;
   let lastJsonMode: boolean | undefined;
   const model = `m-${id}`;
@@ -38,6 +38,7 @@ function fake(id: string, steps: Step[], o: { configured?: boolean } = {}): Fake
     id,
     protocol: 'openai',
     model,
+    ...(o.baseUrl !== undefined ? { baseUrl: o.baseUrl } : {}),
     configured: o.configured ?? true,
     get calls() { return calls; },
     get lastJsonMode() { return lastJsonMode; },
@@ -239,6 +240,73 @@ test('Ψ-6i: chatJson —— 强制 jsonMode + 剥壳提取；无 JSON / 全败�
   assert.equal(j3.raw, '');
 });
 
+// ─── ΝΩ-18（熔断剥壳半权）：chatJson 剥壳失败 ≠ 拨号失败 —— 半权记账 ───
+
+test('ΝΩ-18: chatJson 剥壳失败半权 —— 阈值 2 需 4 次坏 JSON 才 open（2N 半权律）；好 JSON 清零', async () => {
+  let t = 100_000; // 可拨时钟 —— 熔断全程离线复算
+  const badJson = fake('bad-json', [{ ok: true, text: '纯文本无 JSON' }]); // 恒拨号成功、恒剥壳失败
+  const pool = new ProviderPool([badJson], {
+    breakers: { failureThreshold: 2, cooldownMs: 60_000 },
+    now: () => t,
+  });
+  await pool.chatJson(req());
+  await pool.chatJson(req());
+  await pool.chatJson(req()); // 3 次剥壳失败 = 1.5 权 < 2
+  assert.equal(pool.health()[0].state, 'closed', '3 次坏 JSON（1.5 权）< 阈值 2 ⇒ 不熔断（误熔断好脑防线）');
+  assert.equal(badJson.calls, 3, '闭合期照常拨号');
+  await pool.chatJson(req()); // 第 4 次 = 2.0 ≥ 2 ⇒ open（半权：阈值 N 需 2N 次）
+  assert.equal(pool.health()[0].state, 'open', '第 4 次（2N）恰熔断');
+  assert.equal(badJson.calls, 4);
+  // open ⇒ 整行跳过：chatJson 回合成 degraded（未拨号），主力零新调用
+  const j = await pool.chatJson(req());
+  assert.equal(j.ok, false);
+  assert.equal(j.error, 'no provider available');
+  assert.equal(badJson.calls, 4, 'open 后零拨号');
+
+  // 好 JSON 一次即治愈（onSuccess 清零分数账）—— 交替型坏路线永不误熔断
+  const flaky = fake('flaky', [
+    { ok: true, text: 'not json' },   // 剥壳失败 ×3（1.5 权）
+    { ok: true, text: 'not json' },
+    { ok: true, text: 'not json' },
+    { ok: true, text: '{"good":1}' }, // 好 JSON ⇒ onSuccess 清零
+    { ok: true, text: 'not json' },   // 0.5 权
+  ]);
+  const pool2 = new ProviderPool([flaky], {
+    breakers: { failureThreshold: 2, cooldownMs: 60_000 },
+    now: () => t,
+  });
+  await pool2.chatJson(req());
+  await pool2.chatJson(req());
+  await pool2.chatJson(req());
+  assert.equal(pool2.health()[0].state, 'closed', '1.5 权未熔');
+  const okCall = await pool2.chatJson<{ good: number }>(req());
+  assert.equal(okCall.ok, true, '好 JSON 承接');
+  assert.equal(pool2.health()[0].state, 'closed', 'onSuccess 治愈（清零分数账）');
+  await pool2.chatJson(req());
+  assert.equal(pool2.health()[0].state, 'closed', '清零后重计 0.5 权 ⇒ 仍闭合');
+});
+
+test('ΝΩ-18: 真拨号失败全权照旧 + chat() 的 onSuccess 记账位置迁移零回归', async () => {
+  let t = 200_000;
+  // 全权律保持：2 次真实拨号失败即 open（既有 Ψ-6d 语义不因半权改动漂移）
+  const a = fake('a', [{ ok: false, error: '挂了' }]);
+  const b = fake('b', [{ ok: true, text: 'b 脑' }]);
+  const pool = new ProviderPool([a, b], {
+    breakers: { failureThreshold: 2, cooldownMs: 60_000 },
+    now: () => t,
+  });
+  assert.equal((await pool.chat(req())).providerId, 'b');
+  const j2 = await pool.chatJson(req()); // a 第二次真失败（全权 2）⇒ open；b 拨号成功但 'b 脑' 剥壳失败
+  assert.equal(j2.ok, false);
+  assert.match(j2.error!, /extraction failed/, 'chatJson 剥壳失败如实归因（b 的半权不掺进 a 的全权账）');
+  assert.equal(pool.health()[0].state, 'open', '2 次真失败（全权）⇒ 即熔');
+  assert.equal(pool.health()[1].state, 'closed', 'b：1 次拨号成功 + 1 次剥壳半权 ⇒ 0.5 权闭合');
+  // chat() 胜者 onSuccess 经 runChainEntry 迁移后照记：胜脑连胜不熔，熔断脑冷却后回闭可再胜
+  t += 60_000; // 越过冷却期
+  assert.equal((await pool.chat(req())).providerId, 'b', 'a 冷却回闭再试再败 ⇒ b 照常补位');
+  assert.equal(pool.health()[1].state, 'closed', '胜脑屡胜不熔（onSuccess 记账在场）');
+});
+
 // ─── Ψ-6j createProviderPool 铸造（env 控制法 + 注入 fetchImpl） ───
 
 /** env 控制法三件套：涉及的环境变量全量备份 → 清场 → 测后还原 */
@@ -329,6 +397,47 @@ test('Ψ-6j: createProviderPool 铸造 —— env 控制法下的进池/跳过/�
   } finally {
     restoreEnv();
   }
+});
+
+// ─── ΑΩ-R35 同源降位：与主力同平台同 baseUrl 的候选降一位（不删除） ───
+
+test('ΑΩ-R35: 同源降位 —— 同平台同端点候选降一位、异构脑先上、同源脑殿后仍可救场', async () => {
+  const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/';
+  const head = fake('glm-main', [{ ok: false, error: 'network unreachable' }], { baseUrl: GLM_URL });
+  const twin = fake('glm-mirror', [{ ok: true, text: '同源脑殿后救场' }], { baseUrl: GLM_URL.replace(/\/+$/, '') }); // 尾斜杠归一同源
+  const hetero = fake('openai', [{ ok: true, text: '异构脑先上' }], { baseUrl: 'https://api.openai.com/v1' });
+  const tail = fake('qwen', [{ ok: true }], { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' });
+  const pool = new ProviderPool([head, twin, hetero, tail]);
+  // 降位后池序：同源 twin 从次席降到第 3 位（降序不删除）
+  assert.deepEqual(pool.ids, ['glm-main', 'openai', 'glm-mirror', 'qwen'], '同源候选降一位，异构脑顶上次席');
+  assert.ok(pool.notes.some(n => n.includes('同源降位') && n.includes('glm-mirror')), 'note 记录降位决策');
+
+  // 主力网络错 ⇒ 异构脑先补位（不再对同源端点白烧一次）
+  const r = await pool.chat(req());
+  assert.equal(r.ok, true);
+  assert.equal(r.providerId, 'openai', '异构脑先上');
+  assert.equal(twin.calls, 0, '同源脑未被白白试错');
+  assert.equal(tail.calls, 0, '第 4 席未动');
+
+  // 降序不删除：异构脑也倒下时，同源脑仍作最后手段
+  const head2 = fake('glm-main', [{ ok: false, error: 'net down' }], { baseUrl: GLM_URL });
+  const twin2 = fake('glm-mirror', [{ ok: true, text: '最后手段' }], { baseUrl: GLM_URL });
+  const hetero2 = fake('openai', [{ ok: false, error: '也挂了' }], { baseUrl: 'https://api.openai.com/v1' });
+  const pool2 = new ProviderPool([head2, twin2, hetero2]);
+  assert.deepEqual(pool2.ids, ['glm-main', 'openai', 'glm-mirror']);
+  const r2 = await pool2.chat(req());
+  assert.equal(r2.ok, true);
+  assert.equal(r2.providerId, 'glm-mirror', '同源脑仍在池内 —— 全线告急时照常救场');
+  assert.equal(twin2.calls, 1);
+
+  // 非同源（同 protocol 异端点 / baseUrl 缺席）⇒ 原池序纹丝不动
+  const noDemote = new ProviderPool([
+    fake('a', [{ ok: true }], { baseUrl: 'https://a.example/v1' }),
+    fake('b', [{ ok: true }], { baseUrl: 'https://b.example/v1' }), // 同 protocol 异端点
+    fake('c', [{ ok: true }]), // baseUrl 缺席 ⇒ 不虚构比对材料
+  ]);
+  assert.deepEqual(noDemote.ids, ['a', 'b', 'c'], '非同源零扰动');
+  assert.equal(noDemote.notes.length, 0, '零降位零噪音');
 });
 
 // ─── Ψ-6k registry 桩契约 —— resolveProviderConfig / getPreset ───

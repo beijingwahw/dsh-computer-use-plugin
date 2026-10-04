@@ -144,10 +144,10 @@ test('W7-①b: 接线行为级往返 —— 冷启动空账 → 武装 → 节�
   assert.equal(federationTrustPersistenceStatus().armed, false, '卸载后武装解除（下次 apply 重武装）');
   assert.deepEqual(federationTrustReport(), [], '内存账随会话归零（W-1 单例隔离律）');
 
-  // 下次启动：从档恢复（信任度由 regressed 重算）
+  // 下次启动：从档恢复（信任度由 regressed + 试用期计数重算）
   const rep = loadFederationTrust(store);
   assert.equal(rep.restored, 1);
-  assert.equal(federationTrustOf('src-a'), 0.5, '恢复后折减信任在岗（掺入闸语义零变化）');
+  assert.ok(Math.abs(federationTrustOf('src-a') - 0.35) < 1e-12, '恢复后信任在岗（raw 0.5 与试用期封顶 0.35 取小 —— ΑΩ-R6）');
 });
 
 test('W7-①c: 缺省臂 —— checkpointPath 空 ⇒ 不武装纯内存；未武装 flush 幂等零磁盘', () => {
@@ -155,8 +155,11 @@ test('W7-①c: 缺省臂 —— checkpointPath 空 ⇒ 不武装纯内存；未�
   // 记账/冲刷零磁盘、status 如实申报
   assert.equal(federationTrustPersistenceStatus().armed, false, '缺省未武装');
   recordFederationTrust('mem-only', { applied: 3 });
-  assert.deepEqual(federationTrustReport(), [{ sourceId: 'mem-only', applied: 3, regressed: 0, trust: 1 }],
-    '纯内存记账照常执法');
+  assert.deepEqual(
+    federationTrustReport(),
+    [{ sourceId: 'mem-only', applied: 3, regressed: 0, merges: 1, cleanMerges: 1, probation: true, trust: 0.35 }],
+    '纯内存记账照常执法（ΑΩ-R6 初见试用期封顶在岗）',
+  );
   assert.deepEqual(flushFederationTrust(), { ok: true, written: 0 }, '未武装 flush = 幂等 no-op（纯内存是合法配置态）');
 });
 

@@ -6,7 +6,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { uiMemory } from '../uiMemory';
 import { contextManager } from '../contextManager';
-import { toolOk } from '../toolResult';
+import { toolOk, toolErr } from '../toolResult';
 
 export function createRememberUiTool() {
   return defineTool({
@@ -28,7 +28,19 @@ export function createRememberUiTool() {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     async execute(args) {
-      const lm = uiMemory.remember(args.description, args.x, args.y, args.app_hint);
+      // ΝΩ-31（坐标校验）：NaN 与任何比较皆 false，旧面无校验 —— 越界/非有限坐标
+      // 直接铸进长期记忆（recall 后成为 click_mouse 的有毒先验）。与 zoomInspect
+      // 的 NaN 卫兵同律：Number.isFinite + 值域 [0,1] 双闸。
+      const { x, y } = args;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
+        return toolErr(
+          'Landmark validation failed.',
+          `Invalid coordinates x=${JSON.stringify(x)}, y=${JSON.stringify(y)} — must be finite numbers within 0.0-1.0 (full-screen normalized).`,
+          'Only save VERIFIED positions: take the coordinates from a recent take_screenshot / find_text / ' +
+            'click verification anchor, not from memory or estimation.',
+        );
+      }
+      const lm = uiMemory.remember(args.description, x, y, args.app_hint);
       return toolOk(
         `Landmark #${lm.id} "${lm.description}" saved.`,
         {

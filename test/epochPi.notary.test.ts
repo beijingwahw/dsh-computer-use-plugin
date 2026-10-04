@@ -7,6 +7,13 @@
 //        fetch 拒绝/超时 ⇒ source='local' 回退 + 注记；endpoint='' ⇒ fetch 零调用
 //   Π-4 MMR 章：诚实 journal ⇒ mmr-membership 绿；replay-consistency='n/a' 且理由在场
 //   Π-5 notarize 工具动作：quality_checkup 分发走通、四章报告返回；autoAnchor 开关面在册
+//   Π-6 auxChains 双账覆盖（ΑΩ-R42）：在场收集/缺席字段缺席/锚后篡改 drift 注记不翻章/
+//        驱逐与旧锚 n/a/哈希域覆盖
+//   Π-7 journalDisk 旁链（ΝΩ-21 驱逐盲区清偿）：磁盘 JSONL 整体指纹登记进锚哈希域与
+//        TSA 摘要域；磁盘篡改/截断 ⇒ disk-chain-drift 注记（保守不翻章）；容量驱逐
+//        （③-b n/a）时 drift 证词仍在场 —— 盲区就此有证可举；诚实增长前缀复现
+//   Π-8 自适应锚频（ΝΩ-21/NO-3）：shouldAnchor 纯函数 / anchorCadence 注记 / 章③
+//        补锚提示 / notaryAutoAnchorIfDue 卸载接线面（不引入后台定时器）
 // 全离线：journal 单例 reset 直喂、假 fetch、注入时钟与 CSPRNG（确定性）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,8 +21,13 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Config } from '../src/config';
-import { notary, notaryAutoAnchorIfConfigured } from '../src/notary/index.ts';
+import {
+  notary, notaryAutoAnchorIfConfigured, notaryAutoAnchorIfDue, shouldAnchor,
+  ADAPTIVE_ANCHOR_THRESHOLD, anchorHash, canonical, sha256Hex,
+  type AnchorRecord, type NotarizableLedger,
+} from '../src/notary/index.ts';
 import { journal } from '../src/journal.ts';
+import { sandboxLog } from '../src/sandbox/log.ts';
 import { derRead, derChildren, derEncode } from '../src/notary/rfc3161.ts';
 import { createQualityCheckupTool } from '../src/tools/qualityCheckup.ts';
 import { doctor } from '../src/qualityDoctor.ts';
@@ -373,4 +385,254 @@ test('Π-5: quality_checkup notarize 分发走通（四章报告 + 锚计数 + �
     notary.reset();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─── Π-6 ΑΩ-R42：旁链双账覆盖 ───
+
+test('Π-6: auxChains 双账覆盖 —— 在场收集/沙箱缺席字段缺席/锚后篡改注记 drift 不翻章/驱逐与旧锚 n/a/哈希域覆盖', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-notary-6-'));
+  const trace = join(dir, 'anchors.jsonl');
+  try {
+    // (a) 沙箱缺席 ⇒ 字段缺席（诚实，不伪造空链）
+    sandboxLog.reset();
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: '' });
+    await seedJournal(2);
+    const bare = await notary.anchorOnce({ now: fixedClock, random: makeRandom(0x61) });
+    assert.ok(bare);
+    assert.equal(bare.auxChains, undefined, '沙箱未启用 ⇒ 字段缺席');
+    assert.equal('auxChains' in bare, false, '键不落（canonical 缺席语义 —— 与旧锚逐字节同形态）');
+    let r = notary.verifyNotary();
+    assert.match(r.badges['timestamp-anchor'].detail, /no aux-chain snapshot on record/, '注记级 n/a 在场');
+    assert.equal(r.lastAnchor?.auxChains, null, '报告投影 null 诚实标注');
+
+    // (b) 沙箱在场 ⇒ 三元组忠实映射账本公开面（条数 + 尾哈希）；复算一致 ⇒ 注记在场
+    for (let i = 0; i < 3; i++) await sandboxLog.append('observation', { i });
+    const aux1 = await notary.anchorOnce({ now: fixedClock, random: makeRandom(0x62) });
+    assert.ok(aux1);
+    assert.deepEqual(aux1.auxChains, [{ chainName: 'sandboxLog', seq: 3, chainTip: sandboxLog.tip }],
+      '三元组 = (chainName, 条数, 尾哈希)');
+    r = notary.verifyNotary();
+    assert.equal(r.badges['timestamp-anchor'].status, 'green', '复算一致 ⇒ 绿');
+    assert.match(r.badges['timestamp-anchor'].detail, /re-walk over 3 entries reproduces its chainTip/);
+    assert.equal(r.badges['replay-consistency'].status, 'n/a', 'observation 非排练段 —— 重放章不受旁链快照牵连');
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.lastAnchor?.auxChains, [{ chainName: 'sandboxLog', seq: 3, chainTip: sandboxLog.tip }],
+      '报告投影如实（下游独立复核入口）');
+
+    // (c) 哈希域覆盖：改 auxChains 一字节（seq 3→4）⇒ 锚 hash 失配
+    const domain = { ...aux1 } as Partial<AnchorRecord>;
+    delete domain.hash;
+    assert.equal(anchorHash(domain as Omit<AnchorRecord, 'hash'>), aux1.hash, '原记录重算一致');
+    const tampered = { ...aux1, auxChains: [{ chainName: 'sandboxLog', seq: 4, chainTip: aux1.auxChains![0].chainTip }] };
+    const tDomain = { ...tampered } as Partial<AnchorRecord>;
+    delete tDomain.hash;
+    assert.notEqual(anchorHash(tDomain as Omit<AnchorRecord, 'hash'>), tampered.hash, '改一字节 ⇒ 锚 hash 变');
+
+    // (d) 锚后篡改 sandboxLog 一条 ⇒ 复核注记 aux-chain-drift 可见、章不翻红
+    (sandboxLog.list()[1] as { data: Record<string, unknown> }).data.i = 999;
+    r = notary.verifyNotary();
+    assert.equal(r.badges['timestamp-anchor'].status, 'green', '注记级核验不翻章（锚定 ≠ 内容为真）');
+    assert.match(r.badges['timestamp-anchor'].detail, /aux-chain-drift/, 'drift 证词在场');
+    assert.match(r.badges['timestamp-anchor'].detail, /learning history drifted/);
+    assert.equal(r.ok, true, '旁链漂移不算整体失败 —— 判据面隔离');
+
+    // (e) 旁链容量驱逐（链基前滚）⇒ 重算不可得 ⇒ 诚实 n/a（不虚算不误报）
+    sandboxLog.configure('', 2);
+    sandboxLog.reset();
+    for (let i = 0; i < 3; i++) await sandboxLog.append('observation', { i });
+    const aux2 = await notary.anchorOnce({ now: fixedClock, random: makeRandom(0x63) });
+    assert.ok(aux2 && aux2.auxChains && aux2.auxChains[0].seq === 2, '存活窗口计数（驱逐后 2/3）');
+    r = notary.verifyNotary();
+    assert.equal(r.badges['timestamp-anchor'].status, 'green');
+    assert.match(r.badges['timestamp-anchor'].detail, /not recomputable/, '驱逐 ⇒ 诚实 n/a 注记');
+
+    // (f) 旧锚兼容：手铸 pre-ΑΩ-R42 形态锚行（无 auxChains 键）⇒ 水合重读不炸、章③绿 + n/a 注记
+    const legacySeed = {
+      seq: 2, chainTip: journal.tip, mmrRoot: journal.mmrRoot(),
+      timestamp: { source: 'local' as const, anchoredAt: 1735689600000, nonce: 'bg==' },
+      prevAnchorHash: null,
+    };
+    writeFileSync(trace, JSON.stringify({ ...legacySeed, hash: anchorHash(legacySeed) }) + '\n', 'utf8');
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: trace });
+    assert.equal(notary.anchorCount, 1, '旧锚行铸回（水合路径防御式）');
+    r = notary.verifyNotary();
+    assert.equal(r.badges['timestamp-anchor'].status, 'green', '旧锚（无 auxChains）核验照常');
+    assert.match(r.badges['timestamp-anchor'].detail, /no aux-chain snapshot on record/);
+    assert.equal(r.lastAnchor?.auxChains, null, '旧锚投影 null（不追溯、不误判）');
+  } finally {
+    sandboxLog.reset();
+    sandboxLog.configure('', 2000);
+    notary.reset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── Π-7 ΝΩ-21：journalDisk 旁链（容量驱逐盲区的磁盘取证面） ───
+
+test('Π-7: journalDisk 旁链 —— 磁盘指纹登记/哈希域与 TSA 摘要域覆盖/篡改与截断 drift 注记不翻章/驱逐盲区有证可举/诚实增长前缀复现', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-notary-7-'));
+  const disk = join(dir, 'journal.jsonl');
+  try {
+    // (a) 路径未配 ⇒ journalDisk 不登记（诚实缺席 —— 与沙箱缺席同律）
+    sandboxLog.reset();
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: '' });
+    await seedJournal(2);
+    const bare = await notary.anchorOnce({ now: fixedClock, random: makeRandom(0x71) });
+    assert.ok(bare);
+    assert.equal(bare.auxChains, undefined, '沙箱与磁盘路径皆缺席 ⇒ 旁链字段缺席');
+
+    // (b) 配路径 + 3 行账本文件 ⇒ 登记 (journalDisk, 3, sha256(3 行字节))
+    const threeLines = '{"tool":"click_mouse","i":1}\n{"tool":"click_mouse","i":2}\n{"tool":"scroll_page","i":3}\n';
+    writeFileSync(disk, threeLines, 'utf8');
+    const expectedTip = sha256Hex(threeLines);
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: '', journalDiskPath: disk });
+    const a = await notary.anchorOnce({ now: fixedClock, random: makeRandom(0x72) });
+    assert.ok(a);
+    assert.deepEqual(a.auxChains, [{ chainName: 'journalDisk', seq: 3, chainTip: expectedTip }],
+      '三元组 = (journalDisk, 完整行数, 前 N 行字节整体 sha256)');
+    let r = notary.verifyNotary();
+    assert.equal(r.badges['timestamp-anchor'].status, 'green', '复算一致 ⇒ 绿');
+    assert.match(r.badges['timestamp-anchor'].detail,
+      /journalDisk re-hash over the sworn 3-line prefix reproduces its fingerprint/, '复算注记在场');
+    assert.equal(r.ok, true);
+
+    // (c) 哈希域覆盖：改 journalDisk 三元组一字节（seq 3→4）⇒ 锚 hash 失配
+    const domain = { ...a } as Partial<AnchorRecord>;
+    delete domain.hash;
+    assert.equal(anchorHash(domain as Omit<AnchorRecord, 'hash'>), a.hash, '原记录重算一致');
+    const tampered = { ...a, auxChains: [{ chainName: 'journalDisk', seq: 4, chainTip: expectedTip }] };
+    const tDomain = { ...tampered } as Partial<AnchorRecord>;
+    delete tDomain.hash;
+    assert.notEqual(anchorHash(tDomain as Omit<AnchorRecord, 'hash'>), tampered.hash, '改一字节 ⇒ 锚 hash 变');
+
+    // (d) TSA 摘要域覆盖：假 TSA 捕获请求 —— imprint = sha256(canonical(载荷含 journalDisk))
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: '', journalDiskPath: disk });
+    await seedJournal(2);
+    let capturedBody: Uint8Array | null = null;
+    const spyTsa = (async (_url: unknown, init: { headers: Record<string, string>; body: Uint8Array }) => {
+      capturedBody = init.body;
+      const reply = buildTimestampReply(init.body);
+      return {
+        ok: true, status: 200,
+        arrayBuffer: async () => reply.buffer.slice(reply.byteOffset, reply.byteOffset + reply.byteLength) as ArrayBuffer,
+      };
+    }) as unknown as typeof fetch;
+    const d = await notary.anchorOnce({
+      endpoint: 'https://tsa.example/tsr', fetchImpl: spyTsa,
+      now: fixedClock, random: makeRandom(0x73),
+    });
+    assert.ok(d && capturedBody);
+    const req = capturedBody as Uint8Array;
+    const kids = derChildren(derRead(req)!, req);
+    const imprintKids = derChildren(kids[1], req);
+    const digestBytes = req.subarray(imprintKids[1].contentStart, imprintKids[1].contentEnd);
+    const expected = sha256Hex(canonical({
+      seq: journal.list(false).length,
+      chainTip: journal.tip,
+      mmrRoot: journal.mmrRoot(),
+      prevAnchorHash: null, // 本测 reset 后首锚
+      auxChains: [{ chainName: 'journalDisk', seq: 3, chainTip: expectedTip }],
+    }));
+    assert.equal(Buffer.from(digestBytes.buffer, digestBytes.byteOffset, digestBytes.byteLength).toString('hex'), expected,
+      'RFC 3161 摘要域覆盖磁盘指纹（第三方回执绑定磁盘史）');
+
+    // (e) 磁盘篡改（重写第 2 行、行数不变）⇒ disk-chain-drift 注记在场、章不翻红
+    writeFileSync(disk, '{"tool":"click_mouse","i":1}\n{"tool":"click_mouse","i":"TAMPERED"}\n{"tool":"scroll_page","i":3}\n', 'utf8');
+    r = notary.verifyNotary();
+    assert.equal(r.badges['timestamp-anchor'].status, 'green', '注记级核验不翻章（锚定 ≠ 内容为真 —— R42 同律）');
+    assert.match(r.badges['timestamp-anchor'].detail, /disk-chain-drift/, 'drift 证词在场');
+    assert.match(r.badges['timestamp-anchor'].detail, /disk journal rewritten after anchoring/);
+    assert.equal(r.ok, true, '磁盘漂移不算整体失败 —— 判据面隔离');
+
+    // (f) 驱逐盲区端到端：容量驱逐后 ③-b 诚实 n/a —— 但 drift 证词仍随章③ detail 在场
+    //     （③-d 先于驱逐早退执行 —— 盲区就此有证可举；磁盘史改回篡改前的主张由 (e) 覆盖，
+    //      此处直接以「篡改文件 + 驱逐链基」的复合形态执法）
+    const evictedLedger: NotarizableLedger = {
+      entries: () => journal.list(false),
+      tip: () => journal.tip,
+      base: () => 'evicted-hash-not-genesis', // 链基前滚 ⇒ ③-b 前缀重走不可得
+      verify: () => journal.verify(),
+      mmrRoot: () => journal.mmrRoot(),
+      mmrProof: (i) => journal.mmrProof(i),
+    };
+    r = notary.verifyNotary({ ledger: evictedLedger });
+    assert.equal(r.badges['timestamp-anchor'].status, 'n/a', '驱逐 ⇒ 章③诚实 n/a（既有语义不动）');
+    assert.match(r.badges['timestamp-anchor'].detail, /capacity eviction advanced the chain base/, '驱逐事实申报');
+    assert.match(r.badges['timestamp-anchor'].detail, /disk-chain-drift/, '盲区窗口内磁盘史被动过 —— 证词仍随章在场');
+
+    // (g) 诚实增长（追加第 4 行 —— append-only）⇒ 前 3 行前缀重算复现
+    writeFileSync(disk, threeLines + '{"tool":"type_text","i":4}\n', 'utf8');
+    r = notary.verifyNotary();
+    assert.match(r.badges['timestamp-anchor'].detail,
+      /journalDisk re-hash over the sworn 3-line prefix reproduces its fingerprint \(file grew to 4 lines since — append-only, prefix intact\)/,
+      '增长世界前缀复现（append-only 语义如实标注）');
+
+    // (h) 截断（仅剩 1 行 < 誓言 3 行）⇒ fewer-lines drift 注记
+    writeFileSync(disk, '{"tool":"click_mouse","i":1}\n', 'utf8');
+    r = notary.verifyNotary();
+    assert.match(r.badges['timestamp-anchor'].detail, /disk-chain-drift/);
+    assert.match(r.badges['timestamp-anchor'].detail, /now holds 1 complete lines/, '截断形态如实申报');
+
+    // (i) 核验端无路径：journalDisk 在册但未配 journalDiskPath ⇒ 诚实 n/a 注记
+    notary.configure({ endpoint: '', tracePath: '', journalDiskPath: '' });
+    r = notary.verifyNotary();
+    assert.match(r.badges['timestamp-anchor'].detail,
+      /journalDisk chain on record but no journal disk path configured/, '无路径 ⇒ 不可重算的诚实申报');
+  } finally {
+    sandboxLog.reset();
+    notary.reset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── Π-8 ΝΩ-21（NO-3）：自适应锚频 ───
+
+test('Π-8: shouldAnchor 纯函数 / anchorCadence 注记与章③补锚提示 / notaryAutoAnchorIfDue 卸载接线面', async () => {
+  notary.reset();
+  notary.configure({ endpoint: '', tracePath: '' });
+  await seedJournal(2);
+  // (a) 纯函数：严格大于阈值才补（50 ⇒ false，51 ⇒ true）；NaN/负数防御；阈值可注入
+  assert.equal(shouldAnchor(0), false);
+  assert.equal(shouldAnchor(ADAPTIVE_ANCHOR_THRESHOLD), false, '等于阈值不补（严格大于）');
+  assert.equal(shouldAnchor(ADAPTIVE_ANCHOR_THRESHOLD + 1), true);
+  assert.equal(shouldAnchor(Number.NaN), false, 'NaN ⇒ false（绝不抛）');
+  assert.equal(shouldAnchor(6, 5), true, '阈值注入面');
+  assert.equal(typeof notaryAutoAnchorIfDue, 'function', '卸载接线面导出在册');
+
+  // (b) 锚后增量 ≤ 阈 ⇒ anchorCadence 如实、无提示
+  const a = await notary.anchorOnce({ now: fixedClock, random: makeRandom(0x81) });
+  assert.ok(a);
+  let r = notary.verifyNotary();
+  assert.deepEqual(r.anchorCadence, { entriesSinceLastAnchor: 0, threshold: 50, due: false }, '注记字段如实');
+  assert.equal(r.badges['timestamp-anchor'].detail.includes('adaptive-anchor hint'), false, '未超阈 ⇒ 无提示');
+
+  // (c) 增量超阈（2 → 53）⇒ due=true + 章③ detail 补锚提示（quality_checkup notarize
+  //     输出的 badges 投影即可见 —— 「在 notarize 旁提示」的最小接线）
+  for (let i = 0; i < 51; i++) {
+    await journal.append({ ts: 1700000100 + i, tool: 'scroll_page', args: { direction: 'down' }, status: 'SUCCESS' });
+  }
+  r = notary.verifyNotary();
+  assert.deepEqual(r.anchorCadence, { entriesSinceLastAnchor: 51, threshold: 50, due: true }, '增量 51 超阈');
+  assert.match(r.badges['timestamp-anchor'].detail, /adaptive-anchor hint \(NO-3\): journal grew 51 entries since the last anchor/,
+    '补锚提示随章③ detail 在场');
+  assert.equal(r.badges['timestamp-anchor'].status, 'green', '提示不翻章（注记级）');
+
+  // (d) 卸载接线面：开关假 ⇒ 零行为；真且超阈 ⇒ 补铸一枚（fire-and-forget）
+  notaryAutoAnchorIfDue({ notaryAutoAnchor: false, notaryEndpoint: '', notaryTracePath: '' });
+  assert.equal(notary.anchorCount, 1, '开关假 ⇒ 不铸锚');
+  notaryAutoAnchorIfDue({ notaryAutoAnchor: true, notaryEndpoint: '', notaryTracePath: '' });
+  await new Promise(resolve_ => setTimeout(resolve_, 20)); // fire-and-forget 落账宽限
+  assert.equal(notary.anchorCount, 2, '超阈 ⇒ 卸载路径补铸一枚');
+  const after = notary.lastAnchor();
+  assert.equal(after?.seq, journal.list(false).length, '补锚覆盖当前 journal 条数（增量归零）');
+  // 补锚后增量归零 ⇒ 再触发零行为（幂等不重复铸）
+  notaryAutoAnchorIfDue({ notaryAutoAnchor: true, notaryEndpoint: '', notaryTracePath: '' });
+  await new Promise(resolve_ => setTimeout(resolve_, 20));
+  assert.equal(notary.anchorCount, 2, '增量已归零 ⇒ 不再补铸');
+  notaryAutoAnchorIfDue(null); // 防御：null 配置不炸
 });

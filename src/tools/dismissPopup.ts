@@ -2,6 +2,12 @@
 // 零副作用元工具：什么都不做恰恰是设计 —— 不猜关闭按钮位置（会点错），
 // 只返回强制重分析指令，把「我发现自己被挡住了」外化为可调用的 ReAct 暂停键。
 // 引入第三种状态 ACTION_REQUIRED：不是成功也不是失败，而是「需要你重新介入」。
+//
+// ΑΩ-R29 老工具方言整治审计：**不收编** —— 回执是与 popupGuard 共享的
+// TACTICAL_PAUSE 逐字节常量（拦截路径与自救路径必须收到逐字一致的指令 ——
+// 设计约束，tools.dismissPopup.test.ts 钉死），且无顶层 action/reason 键
+//（toolActionRequired 会注入两者并重排 state_anchor）；改走工厂即破坏与守卫
+// 路径的字节一致性。维持共享常量现状。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { TACTICAL_PAUSE } from '../guards/popupGuard';
 

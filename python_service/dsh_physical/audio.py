@@ -10,9 +10,12 @@
   - 运行层绝不抛（对齐 errors.py 异常诚实第二条）：采集失败 ⇒ 诚实
     ``available=False`` + reason，``read()`` 返回空，绝不假装采到了样本。
 
-采集（W4-8）：
-  - Windows：WASAPI loopback（comtypes 驱动 IAudioClient 回环标志）；
-    非 win32 / comtypes 缺席 / COM 或设备失败 ⇒ **诚实 unsupported**。
+采集（W4-8；ΑΩ-R1 双引擎分治）：
+  - Windows：WASAPI loopback 按 ``sys.version_info`` 分流 —— Python ≥3.14 走
+    **原始 vtable** 引擎（纯 ctypes 手写 vtable 调用；py3.14 的 ctypes 出参
+    约定回归使 comtypes 接口出参不可用，实证在案 real_probe D-A4），低版本
+    保留 comtypes 路径（行为零回归）；两路共用同一 PCM 解码与上层分类器。
+    非 win32 / 引擎缺席 / COM 或设备失败 ⇒ **诚实 unsupported**。
   - 全部采集经可注入 ``runner``（``read() -> list[float]``）—— 无真音频
     设备的环境注入 MockRunner 交付（mock 交付是合法形态，不是降级测试）。
 
@@ -37,6 +40,21 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Iterable, Protocol, runtime_checkable
+
+# ΝΩ-36(c):特征扫描 numpy 分块向量化(numpy 可用性核对后启用;缺席 ⇒
+# 纯 Python 逐样本路径原样保留 —— 行为零回归,selftest 无 numpy 也可跑)。
+try:
+    import numpy as _np  # noqa: N813
+except Exception:  # noqa: BLE001 —— numpy 缺席 = 性能降级,不是能力缺席
+    _np = None
+
+# ─── ΑΩ-R1（D-E2）：WASAPI 引擎分治 ───
+# py3.14 的 _ctypes 对 comtypes 接口类型的出参触发约定回归
+# （「'out' parameter must be passed as default value」—— real_probe D-A4 报文
+# 在案），故 ≥3.14 首选**原始 vtable** 引擎（纯 ctypes，零 paramflags 依赖，
+# 版本无关地可用）；低版本保留 comtypes（零回归）。原始 vtable 链路已经
+# D-A4 真机闭环验证（真播放 → 回环 → 分类 = notification_ding）。
+_USE_RAW_VTABLE = sys.version_info >= (3, 14)
 
 # ─── 事件类型（W4-8：五类非语义物理事件 —— 与 TS 端 AudioEventKind 字面镜像）───
 
@@ -65,6 +83,14 @@ DING_DECAY = 0.35           # 叮声判定：最长 burst 后半/前半能量比
 DING_MAX_MS = 450.0         # 叮声最长持续（更长 ⇒ 多音家族 ⇒ 成功提示）
 MIN_CONFIDENCE = 0.0
 MAX_CONFIDENCE = 1.0
+
+# ─── ΝΩ-36：VAD 预门 + 声学指纹（性能与刷屏治理）───
+# (a) 能量 VAD 预门：峰值帧 RMS < SILENCE_RMS 的窗口（真实占空比最高）直接
+#     silence 快径，跳过 IIR×2 + 过零全特征扫描；
+# (b) 激活段 8 带能量比 → 量化声学指纹；同指纹激活窗口聚合计数 —— 同一
+#     提示音重复播放不每沿一报（FINGERPRINT_WINDOW_S 内同指纹 = 同一系列）。
+FINGERPRINT_BANDS = 8         # 指纹频带数（几何分带）
+FINGERPRINT_WINDOW_S = 30.0   # 同指纹聚合窗（秒）
 
 
 def _clamp01(v: float) -> float:
@@ -99,26 +125,98 @@ class WindowFeatures:
     decay: float             # 最长 burst 后半/前半能量比（指数衰减 ⇒ ≪1；平包络 ≈1）
 
 
-def extract_features(
-    samples: Iterable[float],
-    sample_rate: int = SAMPLE_RATE,
-    hop_ms: int = ANALYSIS_HOP_MS,
-) -> WindowFeatures:
-    """短时能量包络 + 过零率 + 频带比 —— 一次线性扫描完成（无 FFT，轻量）。
+def _peak_frame_rms(samples: list[float], hop: int) -> tuple[float, int]:
+    """ΝΩ-36(a) VAD 预门数据：峰值帧 RMS + 帧数（纯能量，无 IIR/过零）。
 
-    频带比用一阶 IIR：``y += a * (x - y)``，``a = 1 - exp(-2π·fc/sr)``；
-    高带 = 原信号 − 2kHz 低通。防御式：空窗/非法采样率 ⇒ 全零特征
-    （下游分类为 silence —— 空窗没有证据，只有缺席）。
+    分帧与全特征扫描**逐帧一致**（整数 hop 分块 + 尾帧）；帧 RMS 分母一律
+    ``hop``（尾帧亦然 —— 与全扫描 ``sqrt(s/hop)`` 的方言逐字段对齐）⇒ 所得
+    峰值与全扫描的 ``peak_rms`` 相等（浮点求和顺序差异 ≤ 1e-15 相对量级）。
+    numpy 在场 ⇒ 向量化（reshape 均值）；缺席 ⇒ 纯 Python 块循环（仍省去
+    全扫描的 IIR×2 + 过零 —— 预门自身的开销有界且远轻）。
     """
-    samples = list(samples)
-    if not samples or sample_rate <= 0:
-        return WindowFeatures(0.0, 0, 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
+    n = len(samples)
+    n_frames = (n + hop - 1) // hop
+    if _np is not None:
+        arr = _np.asarray(samples, dtype=_np.float64)
+        sq = arr * arr
+        n_full = n // hop
+        best_ms = 0.0
+        if n_full:
+            best_ms = float(sq[: n_full * hop].reshape(n_full, hop).mean(axis=1).max())
+        tail = sq[n_full * hop:]
+        if tail.size:
+            best_ms = max(best_ms, float(tail.sum()) / hop)  # 尾帧分母同为 hop
+        return math.sqrt(max(0.0, best_ms)), n_frames
+    best_ms = 0.0  # 帧均方值（分母一律 hop；开方推迟到 return）
+    sq = 0.0
+    n_in = 0
+    for x in samples:
+        sq += x * x
+        n_in += 1
+        if n_in >= hop:
+            ms = sq / hop
+            if ms > best_ms:
+                best_ms = ms
+            sq = 0.0
+            n_in = 0
+    if n_in and sq / hop > best_ms:  # 尾帧：分母仍为 hop（全扫描方言）
+        best_ms = sq / hop
+    return math.sqrt(max(0.0, best_ms)), n_frames
 
-    a_low = 1.0 - math.exp(-2.0 * math.pi * LOW_BAND_HZ / sample_rate)
-    a_high = 1.0 - math.exp(-2.0 * math.pi * HIGH_BAND_HZ / sample_rate)
-    hop = max(1, int(sample_rate * hop_ms / 1000.0))
 
-    # 帧统计：raw/low/high 能量和、过零数 —— 单遍扫描内联计算
+def _np_one_pole(x: "_np.ndarray", a: float) -> "_np.ndarray":
+    """一阶 IIR 低通 ``y[n] = (1-a)·y[n-1] + a·x[n]``（y[-1]=0）的 numpy 等价实现。
+
+    闭式解 = 与指数核 ``a·(1-a)^k`` 的全卷积 —— FFT 卷积 O(n log n) 完成顺序
+    递推（ΝΩ-36(c)）。核在尾权 < 1e-9 处截断（L ≈ 317 @500Hz/80 @2kHz ——
+    实测 2.4× 快于全核；截断偏差 ~1e-9 相对，阈值级联与双路径等价断言均无感）。
+    """
+    n = x.size
+    if n == 0:
+        return x
+    decay = 1.0 - a
+    ell = min(n, max(1, math.ceil(math.log(1e-9) / math.log(decay))))
+    kernel = a * decay ** _np.arange(ell, dtype=_np.float64)
+    nfft = 1 << (n + ell - 2).bit_length()  # ≥ n+L-1 的最小 2 幂(线性卷积无环绕)
+    y = _np.fft.irfft(_np.fft.rfft(x, nfft) * _np.fft.rfft(kernel, nfft), nfft)
+    return y[:n]
+
+
+def _frame_stats_np(
+    samples: list[float], a_low: float, a_high: float, hop: int,
+) -> tuple[list[float], list[float], list[float], list[int]]:
+    """ΝΩ-36(c)：numpy 分块向量化的帧统计（raw/low/high 能量和 + 过零数）。
+
+    与纯 Python 路径逐字段等价（IIR 闭式卷积 + reduceat 分帧求和 + 帧内
+    符号翻转计数 —— 帧首样本不计，与 ``_frame_stats_python`` 的
+    ``n_in_frame > 0`` 守卫逐位一致）。
+    """
+    arr = _np.asarray(samples, dtype=_np.float64)
+    n = arr.size
+    y_low = _np_one_pole(arr, a_low)
+    hi = arr - _np_one_pole(arr, a_high)  # 高带 = 原信号 − 2kHz 低通
+    sq = arr * arr
+    sq_low = y_low * y_low
+    sq_high = hi * hi
+    ge = arr >= 0.0
+    zc_flags = _np.zeros(n, dtype=_np.int64)
+    if n > 1:
+        zc_flags[1:] = (ge[1:] != ge[:-1]).astype(_np.int64)
+    n_full = n // hop
+    offsets = _np.arange(n_full + (1 if n % hop else 0)) * hop
+    zc_flags[offsets] = 0  # 帧首样本的跨帧翻转不计（对齐纯 Python 守卫）
+    return (
+        _np.add.reduceat(sq, offsets).tolist(),
+        _np.add.reduceat(sq_low, offsets).tolist(),
+        _np.add.reduceat(sq_high, offsets).tolist(),
+        _np.add.reduceat(zc_flags, offsets).tolist(),
+    )
+
+
+def _frame_stats_python(
+    samples: list[float], a_low: float, a_high: float, hop: int,
+) -> tuple[list[float], list[float], list[float], list[int]]:
+    """纯 Python 逐样本路径（numpy 缺席的降级 —— 与 W4-8 原实现逐字段一致）。"""
     frame_sq: list[float] = []      # 每帧原始能量和
     frame_sq_low: list[float] = []
     frame_sq_high: list[float] = []
@@ -154,6 +252,51 @@ def extract_features(
         frame_sq_low.append(sq_low)
         frame_sq_high.append(sq_high)
         frame_zc.append(zc)
+    return frame_sq, frame_sq_low, frame_sq_high, frame_zc
+
+
+def extract_features(
+    samples: Iterable[float],
+    sample_rate: int = SAMPLE_RATE,
+    hop_ms: int = ANALYSIS_HOP_MS,
+) -> WindowFeatures:
+    """短时能量包络 + 过零率 + 频带比 —— 一次线性扫描完成（无 FFT 特征语义，
+    轻量）。频带比用一阶 IIR：``y += a * (x - y)``，``a = 1 - exp(-2π·fc/sr)``；
+    高带 = 原信号 − 2kHz 低通。防御式：空窗/非法采样率 ⇒ 全零特征
+    （下游分类为 silence —— 空窗没有证据，只有缺席）。
+
+    ΝΩ-36 改造（行为零回归）：
+      (a) 能量 VAD 预门：峰值帧 RMS < SILENCE_RMS ⇒ 全帧必低于 ACTIVE_RMS
+          （SILENCE_RMS < ACTIVE_RMS）⇒ 判决必为 silence —— 直接返回与全
+          扫描**逐字段相等**的零激活特征，跳过 IIR×2 + 过零全扫描（静默窗
+          是真实占空比最高的窗口形态）；
+      (c) 非静默窗的帧统计走 numpy 分块向量化（IIR 闭式 FFT 卷积 + reduceat
+          分帧；numpy 缺席 ⇒ 纯 Python 原路径原样保留）。
+    """
+    samples = list(samples)
+    if not samples or sample_rate <= 0:
+        return WindowFeatures(0.0, 0, 0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
+
+    a_low = 1.0 - math.exp(-2.0 * math.pi * LOW_BAND_HZ / sample_rate)
+    a_high = 1.0 - math.exp(-2.0 * math.pi * HIGH_BAND_HZ / sample_rate)
+    hop = max(1, int(sample_rate * hop_ms / 1000.0))
+
+    # ── ΝΩ-36(a) 能量 VAD 预门（分帧与全扫描逐帧一致 ⇒ 快径输出 == 全扫描输出）──
+    peak_rms, n_frames = _peak_frame_rms(samples, hop)
+    if peak_rms < SILENCE_RMS:
+        return WindowFeatures(
+            peak_rms=peak_rms, active_frames=0, total_frames=n_frames,
+            longest_burst_ms=0.0, burst_count=0, mean_zcr=0.0,
+            low_ratio=0.0, high_ratio=0.0, decay=1.0,
+        )
+
+    # ── 帧统计：raw/low/high 能量和、过零数（ΝΩ-36(c) 双路径）──
+    if _np is not None:
+        frame_sq, frame_sq_low, frame_sq_high, frame_zc = _frame_stats_np(
+            samples, a_low, a_high, hop)
+    else:
+        frame_sq, frame_sq_low, frame_sq_high, frame_zc = _frame_stats_python(
+            samples, a_low, a_high, hop)
 
     hop_seconds = hop / sample_rate
     active: list[bool] = []
@@ -260,6 +403,87 @@ def classify_window(samples: Iterable[float], sample_rate: int = SAMPLE_RATE) ->
     return classify_features(extract_features(samples, sample_rate))
 
 
+# ─── ΝΩ-36(b)：激活段 8 带能量比 → 声学指纹（去重的判别面）───
+
+# 几何分带边界（Hz）：8 带 = [<125, 125-250, 250-500, 500-1k, 1k-2k, 2k-4k, 4k-8k, >8k]
+_FINGERPRINT_EDGES_HZ = (125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0)
+
+
+def _quantize_ratios(energies: list[float]) -> str:
+    """带能量 → 归一化占比 → 每带 4bit 量化 → 8 nibble 十六进制串（纯函数）。"""
+    total = sum(energies)
+    if total <= 0.0:
+        return "0" * FINGERPRINT_BANDS
+    return "".join(
+        f"{min(15, int(max(0.0, e / total) * 16)):x}" for e in energies
+    )
+
+
+def acoustic_fingerprint(
+    samples: Iterable[float], sample_rate: int = SAMPLE_RATE,
+) -> str | None:
+    """ΝΩ-36(b)：激活段 8 带能量比 → 量化声学指纹（纯函数；静默/空窗 ⇒ None）。
+
+    激活段 = 帧 RMS ≥ ``ACTIVE_RMS`` 的帧覆盖的样本（帧粒度掩码，静默段
+    的频谱不稀释指纹）。8 几何带能量：
+      - numpy 在场：掩码信号单次 rfft 的谱能量分箱（O(n log n)）；
+      - 缺席：隔 4 抽样的 7 点一阶低通滤波器组差分能量（确定性降级 ——
+        同波形 ⇒ 同指纹、异波形 ⇒ 异指纹的判别性两路一致）。
+    """
+    samples = list(samples)
+    if not samples or sample_rate <= 0:
+        return None
+    hop = max(1, int(sample_rate * ANALYSIS_HOP_MS / 1000.0))
+    peak_rms, _ = _peak_frame_rms(samples, hop)
+    if peak_rms < SILENCE_RMS:
+        return None  # 静默窗无激活段 —— 指纹诚实缺席
+
+    if _np is not None:
+        arr = _np.asarray(samples, dtype=_np.float64)
+        n = arr.size
+        # 帧粒度激活掩码 → 样本掩码（帧均方 ≥ ACTIVE_RMS² ⟺ 帧 RMS ≥ ACTIVE_RMS，
+        # 开方保序 —— 免开方的等价判据）
+        sq = arr * arr
+        n_full = n // hop
+        frame_ms = (
+            sq[: n_full * hop].reshape(n_full, hop).mean(axis=1)
+            if n_full else _np.zeros(0)
+        )
+        if n % hop and n_full * hop < n:
+            frame_ms = _np.concatenate([frame_ms, [sq[n_full * hop:].sum() / hop]])
+        active_frames = frame_ms >= ACTIVE_RMS ** 2
+        mask = _np.repeat(active_frames, hop)[:n]
+        masked = arr * mask
+        spec = _np.abs(_np.fft.rfft(masked)) ** 2
+        freqs = _np.fft.rfftfreq(n, d=1.0 / sample_rate)
+        lo = 0.0
+        energies: list[float] = []
+        for edge in (*_FINGERPRINT_EDGES_HZ, float("inf")):
+            energies.append(float(spec[(freqs >= lo) & (freqs < edge)].sum()))
+            lo = edge
+        return _quantize_ratios(energies)
+
+    # 纯 Python 降级：stride-4 抽样 + 7 点一阶低通滤波器组（差分能量；
+    # 免激活掩码 —— 静默样本能量 ≈ 0，占比天然由激活段主导）
+    stride = 4
+    coefs = [
+        1.0 - math.exp(-2.0 * math.pi * fc / sample_rate) for fc in _FINGERPRINT_EDGES_HZ
+    ]
+    ys = [0.0] * len(coefs)
+    band_sq = [0.0] * (len(coefs) + 1)
+    for i, x in enumerate(samples):
+        if i % stride:
+            continue
+        prev_lp = 0.0
+        for k, a in enumerate(coefs):
+            ys[k] += a * (x - ys[k])
+            diff = ys[k] - prev_lp
+            band_sq[k] += diff * diff
+            prev_lp = ys[k]
+        band_sq[len(coefs)] += (x - prev_lp) * (x - prev_lp)
+    return _quantize_ratios(band_sq)
+
+
 # ─── 环形缓冲（~2s 窗口）───
 
 
@@ -325,8 +549,260 @@ class MockRunner:
         return self._sample_rate
 
 
+def _decode_to_mono(addr: int, frames: int, channels: int, tag: int, bits: int) -> list[float]:
+    """PCM 帧指针 → 单声道 float 列表（ΑΩ-R1：comtypes / 原始 vtable 两引擎
+    共用的唯一解码实现 —— 语义与原 ``WasapiLoopbackRunner._decode`` 逐分支一致：
+    未知编码宁可缺席不可造假，多声道平均成单声道）。"""
+    import ctypes
+
+    total = frames * channels
+    if tag == 3 and bits == 32:  # IEEE float32（共享模式 mix format 最常见）
+        arr = (ctypes.c_float * total).from_address(addr)
+        raw = list(arr)
+    elif tag == 1 and bits == 32:  # PCM int32
+        arr = (ctypes.c_int32 * total).from_address(addr)
+        raw = [v / 2147483648.0 for v in arr]
+    elif tag == 1 and bits == 16:  # PCM int16
+        arr = (ctypes.c_int16 * total).from_address(addr)
+        raw = [v / 32768.0 for v in arr]
+    else:  # 未知编码：宁可缺席不可造假
+        return [0.0] * frames
+    if channels == 1:
+        return raw
+    return [sum(raw[i * channels:(i + 1) * channels]) / channels for i in range(frames)]
+
+
+class _RawVtableWasapiLink:
+    """ΑΩ-R1（D-E2）：原始 vtable WASAPI 客户端 —— py≥3.14 首选引擎。
+
+    背景：py3.14 的 _ctypes 出参约定回归使 comtypes 接口出参
+    （``POINTER(IMMDevice)`` 等）不可用；本类以纯 ctypes 手写 vtable 调用重建
+    同一条链（IMMDeviceEnumerator → 默认 render 端点 → IAudioClient(LOOPBACK)
+    → IAudioCaptureClient），移植自 real_probe.py D-A4 探针的**已验证**实现
+    （真播放 → 回环 → 分类闭环）。与 runner 的契约：建链/读失败**抛出**，
+    由 ``WasapiLoopbackRunner`` 统一记因降级（available=False + reason）——
+    本类绝不吞错、绝不造假样本。
+    """
+
+    # vtable 槽位（0=QI，1=AddRef，2=Release 之后按接口方法序）
+    SLOT_ENUM_GETDEFAULT = 4   # IMMDeviceEnumerator::GetDefaultAudioEndpoint
+    SLOT_DEV_ACTIVATE = 3      # IMMDevice::Activate
+    SLOT_DEV_GETID = 5         # IMMDevice::GetId
+    SLOT_CLI_INITIALIZE = 3    # IAudioClient::Initialize
+    SLOT_CLI_GETMIXFMT = 8     # IAudioClient::GetMixFormat
+    SLOT_CLI_START = 10        # IAudioClient::Start
+    SLOT_CLI_STOP = 11         # IAudioClient::Stop
+    SLOT_CLI_GETSERVICE = 14   # IAudioClient::GetService
+    SLOT_CAP_GETBUFFER = 3     # IAudioCaptureClient::GetBuffer
+    SLOT_CAP_RELEASEBUF = 4    # IAudioCaptureClient::ReleaseBuffer
+    SLOT_CAP_NEXTPACKET = 5    # IAudioCaptureClient::GetNextPacketSize
+
+    CLSID_MMDeviceEnumerator = "{bcde0395-e52f-467c-8e3d-c4579291692e}"
+    IID_IMMDeviceEnumerator = "{a95664d2-9614-4f35-a746-de8db63617e6}"
+    IID_IAudioClient = "{1cb9ad4c-dbfa-4c32-b178-c2f568a703b2}"
+    IID_IAudioCaptureClient = "{c8adbd64-e71e-48a0-a4de-185c395cd317}"
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self.ct = ctypes
+        self.ole32 = ctypes.WinDLL("ole32")  # 仅 win32 构造（runner 已平台分治）
+        self.ptrs: list[int] = []            # 保活 + 逆序 Release 名册
+        self._tls = threading.local()        # ΑΩ-R1：按读线程各补一次 COM 初始化
+
+    def _fn(self, obj: int, slot: int, restype, *argtypes):
+        """取 vtable 第 slot 槽函数指针并包装为可调用（ΑΩ-R1）。"""
+        ct = self.ct
+        vtbl = ct.cast(obj, ct.POINTER(ct.c_void_p)).contents.value
+        fn_addr = ct.cast(vtbl + slot * ct.sizeof(ct.c_void_p),
+                          ct.POINTER(ct.c_void_p)).contents.value
+        return ct.WINFUNCTYPE(restype, ct.c_void_p, *argtypes)(fn_addr)
+
+    def _keep(self, p) -> int:
+        v = self.ct.cast(p, self.ct.c_void_p).value or 0
+        if v:
+            self.ptrs.append(v)
+        return v
+
+    def _release_all(self) -> None:
+        for v in reversed(self.ptrs):
+            try:
+                self._fn(v, 2, self.ct.c_ulong)(self.ct.c_void_p(v))  # Release
+            except Exception:  # noqa: BLE001 —— 尽力回收，失败不阻断
+                pass
+        self.ptrs = []
+
+    def _com_mta_init(self) -> None:
+        """当前线程尽力初始化 COM（MTA）；已初始化/异模式冲突 ⇒ 沿用现状不阻断
+        （ΑΩ-R1：建链线程与后台采集线程可能不同，逐线程各补一次）。"""
+        if getattr(self._tls, "mta_init", False):
+            return
+        try:
+            self.ole32.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+        except Exception:  # noqa: BLE001
+            pass
+        self._tls.mta_init = True
+
+    def _mix_format(self, client: int) -> dict:
+        """GetMixFormat → 解析 WAVEFORMATEX(/EXTENSIBLE) 真格式标签（ΑΩ-R1）。"""
+        ct = self.ct
+
+        class WFX(ct.Structure):  # WAVEFORMATEX（ΑΩ-R1：与 real_probe D-A4 探针一致）
+            _fields_ = [
+                ("tag", ct.c_ushort), ("channels", ct.c_ushort), ("sr", ct.c_uint),
+                ("byterate", ct.c_uint), ("align", ct.c_ushort), ("bits", ct.c_ushort),
+                ("cbSize", ct.c_ushort),
+            ]
+
+        pwfx = ct.c_void_p()
+        hr = self._fn(client, self.SLOT_CLI_GETMIXFMT, ct.c_long, ct.POINTER(ct.c_void_p))(
+            ct.c_void_p(client), ct.byref(pwfx))
+        if hr != 0 or not pwfx.value:
+            raise OSError(f"GetMixFormat hr=0x{hr & 0xFFFFFFFF:08x}")
+        fmt = ct.cast(pwfx, ct.POINTER(WFX)).contents
+        tag = int(fmt.tag)
+        if tag == 0xFFFE and int(fmt.cbSize) >= 22:  # EXTENSIBLE：SubFormat 首 2 字节 = 真标签
+            raw = ct.cast(pwfx, ct.POINTER(ct.c_ubyte * (ct.sizeof(WFX) + int(fmt.cbSize)))).contents
+            tag = raw[ct.sizeof(WFX)] | (raw[ct.sizeof(WFX) + 1] << 8)
+        return {"tag": tag, "channels": max(1, int(fmt.channels)), "bits": int(fmt.bits),
+                "sr": int(fmt.sr), "wfx_ptr": pwfx.value}
+
+    def open_session(self) -> dict:
+        """建链：enumerator → 默认 render 端点 → IAudioClient(LOOPBACK) → capture。
+        失败 ⇒ 抛 OSError（hr 载明）由调用方记因降级（ΑΩ-R1）。"""
+        ct = self.ct
+        self._com_mta_init()
+        from uuid import UUID
+
+        clsid = ct.create_string_buffer(UUID(self.CLSID_MMDeviceEnumerator).bytes_le)
+        iid_enum = ct.create_string_buffer(UUID(self.IID_IMMDeviceEnumerator).bytes_le)
+        pv = ct.c_void_p()
+        hr = self.ole32.CoCreateInstance(
+            ct.byref(clsid), None, 0x17, ct.byref(iid_enum), ct.byref(pv))  # CLSCTX_ALL
+        if hr != 0:
+            raise OSError(f"CoCreateInstance(MMDeviceEnumerator) hr=0x{hr & 0xFFFFFFFF:08x}")
+        enum = self._keep(pv)
+
+        dev = ct.c_void_p()
+        hr = self._fn(enum, self.SLOT_ENUM_GETDEFAULT, ct.c_long, ct.c_uint32, ct.c_uint32,
+                      ct.POINTER(ct.c_void_p))(ct.c_void_p(enum), 0, 0, ct.byref(dev))
+        if hr != 0:  # eRender/eConsole —— 无默认 render 端点（无音频设备）
+            self._release_all()
+            raise OSError(f"GetDefaultAudioEndpoint(eRender,eConsole) hr=0x{hr & 0xFFFFFFFF:08x}")
+        devp = self._keep(dev)
+
+        # 端点 ID 证据（CoTaskMemAlloc 内存读后真释放 —— 修探针版漏释放，ΑΩ-R1）
+        endpoint_id = None
+        wid = ct.c_void_p()
+        hr = self._fn(devp, self.SLOT_DEV_GETID, ct.c_long, ct.POINTER(ct.c_void_p))(
+            ct.c_void_p(devp), ct.byref(wid))
+        if hr == 0 and wid.value:
+            try:
+                endpoint_id = ct.wstring_at(wid.value)
+            finally:
+                self.ole32.CoTaskMemFree(wid)
+
+        iid_cli = ct.create_string_buffer(UUID(self.IID_IAudioClient).bytes_le)
+        client = ct.c_void_p()
+        hr = self._fn(devp, self.SLOT_DEV_ACTIVATE, ct.c_long,
+                      ct.POINTER(ct.c_ubyte * 16), ct.c_uint32, ct.c_void_p,
+                      ct.POINTER(ct.c_void_p))(
+            ct.c_void_p(devp), ct.cast(iid_cli, ct.POINTER(ct.c_ubyte * 16)), 0x17, None,
+            ct.byref(client))
+        if hr != 0:
+            self._release_all()
+            raise OSError(f"IMMDevice.Activate(IAudioClient) hr=0x{hr & 0xFFFFFFFF:08x}")
+        clip = self._keep(client)
+
+        fmt = self._mix_format(clip)
+        hr = self._fn(clip, self.SLOT_CLI_INITIALIZE, ct.c_long, ct.c_uint32, ct.c_uint32,
+                      ct.c_longlong, ct.c_longlong, ct.c_void_p, ct.c_void_p)(
+            ct.c_void_p(clip), 0, 0x00020000, 20_000_000, 0,  # SHARED | LOOPBACK，2s 缓冲
+            ct.c_void_p(fmt["wfx_ptr"]), None)                 # 回环必须用 mix format 原样
+        if hr != 0:
+            self._release_all()
+            raise OSError(f"IAudioClient.Initialize(SHARED,LOOPBACK) hr=0x{hr & 0xFFFFFFFF:08x}")
+
+        iid_cap = ct.create_string_buffer(UUID(self.IID_IAudioCaptureClient).bytes_le)
+        cap = ct.c_void_p()
+        hr = self._fn(clip, self.SLOT_CLI_GETSERVICE, ct.c_long,
+                      ct.POINTER(ct.c_ubyte * 16), ct.POINTER(ct.c_void_p))(
+            ct.c_void_p(clip), ct.cast(iid_cap, ct.POINTER(ct.c_ubyte * 16)), ct.byref(cap))
+        if hr != 0 or not cap.value:
+            self._release_all()
+            raise OSError(f"IAudioClient.GetService(IAudioCaptureClient) hr=0x{hr & 0xFFFFFFFF:08x}")
+        capp = self._keep(cap)
+
+        hr = self._fn(clip, self.SLOT_CLI_START, ct.c_long)(ct.c_void_p(clip))
+        if hr != 0:
+            self._release_all()
+            raise OSError(f"IAudioClient.Start hr=0x{hr & 0xFFFFFFFF:08x}")
+
+        return {
+            "engine": "raw-vtable",
+            "link": self,
+            "client": clip,
+            "capture": capp,
+            "channels": fmt["channels"],
+            "bits": fmt["bits"],
+            "format_tag": fmt["tag"],
+            "sr": fmt["sr"],
+            "silent_flag": 0x2,  # AUDCLNT_BUFFERFLAGS_SILENT
+            "endpoint_id": endpoint_id,
+            "wfx_ptr": fmt["wfx_ptr"],  # 保活：mix format 内存归 IAudioClient 生命周期管
+        }
+
+    def read_block(self, session: dict) -> list[float]:
+        """读一块待决包（语义与 comtypes 路径 ``read()`` 对齐）；无包 ⇒ []。
+        意外异常向上抛 —— 由 runner 记因标死（诚实缺席，ΑΩ-R1）。"""
+        ct = self.ct
+        self._com_mta_init()
+        cap = session["capture"]
+        channels = session["channels"]
+        n = ct.c_uint32()
+        hr = self._fn(cap, self.SLOT_CAP_NEXTPACKET, ct.c_long, ct.POINTER(ct.c_uint32))(
+            ct.c_void_p(cap), ct.byref(n))
+        if hr != 0 or n.value == 0:
+            return []
+        out: list[float] = []
+        while n.value > 0:
+            data = ct.c_void_p()
+            frames = ct.c_uint32()
+            flags = ct.c_uint32()
+            hr = self._fn(cap, self.SLOT_CAP_GETBUFFER, ct.c_long,
+                          ct.POINTER(ct.c_void_p), ct.POINTER(ct.c_uint32),
+                          ct.POINTER(ct.c_uint32), ct.c_void_p, ct.c_void_p)(
+                ct.c_void_p(cap), ct.byref(data), ct.byref(frames), ct.byref(flags), None, None)
+            if hr != 0:
+                break
+            fcount = frames.value
+            if flags.value & session["silent_flag"] or not data.value:
+                out.extend([0.0] * fcount)
+            else:
+                out.extend(_decode_to_mono(data.value, fcount, channels,
+                                           session["format_tag"], session["bits"]))
+            self._fn(cap, self.SLOT_CAP_RELEASEBUF, ct.c_long, ct.c_uint32)(
+                ct.c_void_p(cap), fcount)
+            nn = ct.c_uint32()
+            hr2 = self._fn(cap, self.SLOT_CAP_NEXTPACKET, ct.c_long, ct.POINTER(ct.c_uint32))(
+                ct.c_void_p(cap), ct.byref(nn))
+            if hr2 != 0:
+                break
+            n = nn
+        return out
+
+    def stop(self, session: dict) -> None:
+        """尽力收尾：Stop + 逆序 Release（ΑΩ-R1；通道标死时回收用）。"""
+        try:
+            self._fn(session["client"], self.SLOT_CLI_STOP, self.ct.c_long)(
+                self.ct.c_void_p(session["client"]))
+        finally:
+            self._release_all()
+
+
 class WasapiLoopbackRunner:
-    """WASAPI 系统回环 runner（Windows；comtypes 驱动，缺席 ⇒ 诚实 unsupported）。
+    """WASAPI 系统回环 runner（Windows；ΑΩ-R1/D-E2 双引擎分治：
+    py≥3.14 首选原始 vtable，低版本保留 comtypes；缺席/失败 ⇒ 诚实 unsupported）。
 
     生命周期防御式（运行层绝不抛）：
       - 构造零副作用（COM 延迟到 ``_ensure_session``）；
@@ -335,7 +811,9 @@ class WasapiLoopbackRunner:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # ΝΩ-9：Lock → RLock —— read() 现全程持锁（见其 docstring），锁内再经
+        # _ensure_session/describe 重入同一锁（非重入 Lock 会自锁死）。
+        self._lock = threading.RLock()
         self._session: dict | None = None  # {client, capture, channels, fmt, sr}
         self._reason: str | None = None
         self._dead = False
@@ -473,6 +951,20 @@ class WasapiLoopbackRunner:
         if sys.platform != "win32":
             self._reason = "unsupported platform: WASAPI loopback is Windows-only"
             return None
+        if _USE_RAW_VTABLE:  # ΑΩ-R1（D-E2）：py≥3.14 首选原始 vtable 引擎
+            return self._open_session_raw()
+        return self._open_session_comtypes()
+
+    def _open_session_raw(self) -> dict | None:
+        """ΑΩ-R1（D-E2）：原始 vtable 建链 —— real_probe D-A4 已真机验证的路径。"""
+        try:
+            return _RawVtableWasapiLink().open_session()
+        except Exception as e:  # noqa: BLE001 —— 运行层铁律：绝不抛，记因降级
+            self._reason = f"wasapi loopback (raw-vtable) unavailable: {type(e).__name__}: {e}"
+            return None
+
+    def _open_session_comtypes(self) -> dict | None:
+        """comtypes 建链（py<3.14 保留路径 —— ΑΩ-R1；3.14 出参约定回归下不可用）。"""
         built = self._build_comtypes()
         if built is None:
             self._reason = "comtypes unavailable (pip install comtypes) — honest unsupported"
@@ -531,6 +1023,7 @@ class WasapiLoopbackRunner:
             capture = ctypes.cast(pv_capture, ctypes.POINTER(CaptureClient)).contents
 
             return {
+                "engine": "comtypes",  # ΑΩ-R1：引擎标记（read/describe 分流用）
                 "client": client,
                 "capture": capture,
                 "channels": channels,
@@ -545,66 +1038,74 @@ class WasapiLoopbackRunner:
             return None
 
     def read(self) -> list[float]:
-        """读一块（≤200ms）单声道采样；失败/缺席 ⇒ []（绝不抛）。"""
-        session = self._ensure_session()
-        if session is None:
-            return []
-        try:
-            import ctypes
-            capture = session["capture"]
-            channels = session["channels"]
-            packet = ctypes.c_uint32(0)
-            if capture.GetNextPacketSize(ctypes.byref(packet)) != 0 or packet.value == 0:
+        """读一块（≤200ms）单声道采样；失败/缺席 ⇒ []（绝不抛）。
+
+        ΝΩ-9：全程持 ``_lock``。IAudioCaptureClient 的 GetBuffer/ReleaseBuffer
+        单线程所有，两方并发读同一 capture 句柄会互相窜包（AUDCLNT_E_* hr），
+        异常即把通道标死（``_dead`` 无复活）—— 首调竞态有三方：ensure_started
+        暖机循环 vs 刚起步的 _drain_loop；多个 /v1/audio_events 的 executor
+        并发首调；外部直调 drain_once。选「read 全程加锁」而非「删暖机循环改
+        轮询 len(self._ring)」：前者一次封死全部三方，后者只堵其一。持锁时长
+        有界 —— read 只清已就绪包（≤2s 环缓冲 ≈ 数十 ms），竞争方至多顺延一拍。
+        """
+        with self._lock:
+            session = self._ensure_session()
+            if session is None:
                 return []
-            out: list[float] = []
-            while packet.value > 0:
-                data = ctypes.c_void_p()
-                frames = ctypes.c_uint32(0)
-                flags = ctypes.c_uint32(0)
-                hr = capture.GetBuffer(
-                    ctypes.byref(data), ctypes.byref(frames), ctypes.byref(flags),
-                    None, None,
-                )
-                if hr != 0:
-                    break
-                n = frames.value
-                if flags.value & session["silent_flag"] or not data.value:
-                    out.extend([0.0] * n)
-                else:
-                    out.extend(self._decode(data.value, n, channels, session))
-                capture.ReleaseBuffer(n)
-                if capture.GetNextPacketSize(ctypes.byref(packet)) != 0:
-                    break
-            return out
-        except Exception as e:  # noqa: BLE001 —— 读失败 = 通道死亡（诚实缺席）
-            with self._lock:
-                self._dead = True
+            if session.get("engine") == "raw-vtable":  # ΑΩ-R1（D-E2）：py≥3.14 首选路径
+                try:
+                    return session["link"].read_block(session)
+                except Exception as e:  # noqa: BLE001 —— 读失败 = 通道死亡（诚实缺席）
+                    self._dead = True  # 已持锁（read 全程持锁，ΝΩ-9）
+                    self._reason = f"wasapi read failed: {type(e).__name__}: {e}"
+                    self._best_effort_release(session)
+                    return []
+            try:
+                import ctypes
+                capture = session["capture"]
+                channels = session["channels"]
+                packet = ctypes.c_uint32(0)
+                if capture.GetNextPacketSize(ctypes.byref(packet)) != 0 or packet.value == 0:
+                    return []
+                out: list[float] = []
+                while packet.value > 0:
+                    data = ctypes.c_void_p()
+                    frames = ctypes.c_uint32(0)
+                    flags = ctypes.c_uint32(0)
+                    hr = capture.GetBuffer(
+                        ctypes.byref(data), ctypes.byref(frames), ctypes.byref(flags),
+                        None, None,
+                    )
+                    if hr != 0:
+                        break
+                    n = frames.value
+                    if flags.value & session["silent_flag"] or not data.value:
+                        out.extend([0.0] * n)
+                    else:
+                        out.extend(self._decode(data.value, n, channels, session))
+                    capture.ReleaseBuffer(n)
+                    if capture.GetNextPacketSize(ctypes.byref(packet)) != 0:
+                        break
+                return out
+            except Exception as e:  # noqa: BLE001 —— 读失败 = 通道死亡（诚实缺席）
+                self._dead = True  # 已持锁（read 全程持锁，ΝΩ-9）
                 self._reason = f"wasapi read failed: {type(e).__name__}: {e}"
-            return []
+                return []
 
     @staticmethod
     def _decode(addr: int, frames: int, channels: int, session: dict) -> list[float]:
-        import ctypes
-        total = frames * channels
-        tag = session["format_tag"]
-        bits = session["bits"]
-        if tag == 3 and bits == 32:  # IEEE float32（共享模式 mix format 最常见）
-            arr = (ctypes.c_float * total).from_address(addr)
-            raw = list(arr)
-        elif tag == 1 and bits == 32:  # PCM int32
-            arr = (ctypes.c_int32 * total).from_address(addr)
-            raw = [v / 2147483648.0 for v in arr]
-        elif tag == 1 and bits == 16:  # PCM int16
-            arr = (ctypes.c_int16 * total).from_address(addr)
-            raw = [v / 32768.0 for v in arr]
-        else:  # 未知编码：宁可缺席不可造假
-            return [0.0] * frames
-        if channels == 1:
-            return raw
-        return [
-            sum(raw[i * channels:(i + 1) * channels]) / channels
-            for i in range(frames)
-        ]
+        # ΑΩ-R1：解码体已提为两引擎共用的模块级 _decode_to_mono（本静态方法保留薄委托）
+        return _decode_to_mono(addr, frames, channels, session["format_tag"], session["bits"])
+
+    def _best_effort_release(self, session: dict) -> None:
+        """ΑΩ-R1：raw-vtable 会话标死时尽力回收 COM 引用（Stop + 逆序 Release）。"""
+        link = session.get("link")
+        if link is None:
+            return
+        try:
+            link.stop(session)
+        except Exception:  # noqa: BLE001 —— 回收失败不阻断降级路径
+            pass
 
     def describe(self) -> dict:
         with self._lock:
@@ -612,6 +1113,7 @@ class WasapiLoopbackRunner:
             if self._reason is not None:
                 info["reason"] = self._reason
             if self._session is not None:
+                info["engine"] = str(self._session.get("engine", "comtypes"))  # ΑΩ-R1
                 info["sample_rate"] = self._session["sr"]
                 info["channels"] = self._session["channels"]
             return info
@@ -631,7 +1133,8 @@ class AudioMonitor:
       （防同类刷屏），否则 None。
     """
 
-    def __init__(self, runner: CaptureRunner, sample_rate: int | None = None):
+    def __init__(self, runner: CaptureRunner, sample_rate: int | None = None,
+                 fingerprint_window_s: float = FINGERPRINT_WINDOW_S):
         self._runner = runner
         sr = sample_rate if sample_rate is not None else getattr(runner, "sample_rate", SAMPLE_RATE)
         self._sample_rate = int(sr)
@@ -640,6 +1143,11 @@ class AudioMonitor:
         self._thread: threading.Thread | None = None
         self._stop_flag = threading.Event()
         self._last_emitted: str | None = None
+        # ΝΩ-36(b) 同指纹聚合状态:同一提示音重复播放(聚合窗内同指纹)只
+        # 计数不报 —— 不每沿一报;聚合计数在 describe()/下次真报可见。
+        self._fingerprint_window_s = max(1.0, float(fingerprint_window_s))
+        self._fp_state: dict = {"fingerprint": None, "count": 0, "last_seen": 0.0}
+        self._suppressed_total = 0
 
     # ── 采集 ──
 
@@ -688,7 +1196,11 @@ class AudioMonitor:
     def ensure_started(self) -> dict:
         """端点友好的启动：mock ⇒ 同步耗尽脚本；真机 ⇒ 惰性建链 + 起线程
         稍候首填。返回 runner **终态**能力声明（建链尝试之后的诚实信封 ——
-        构造期零副作用 ⇒ 未建链前 describe 恒乐观，必须重读）。"""
+        构造期零副作用 ⇒ 未建链前 describe 恒乐观，必须重读）。
+
+        ΝΩ-9：start() 之后的暖机循环与 _drain_loop 线程并发调 read —— 竞态
+        已由 WasapiLoopbackRunner.read() 全程持锁封死（见其 docstring 论证），
+        此处保留暖机语义（等首填 ~100ms，让首响应即有判决）。"""
         if isinstance(self._runner, MockRunner):
             while self.drain_once() > 0:
                 pass
@@ -707,22 +1219,53 @@ class AudioMonitor:
     # ── 判决 ──
 
     def detect(self) -> dict | None:
-        """当前窗口五类判决 ``{event, confidence, ts}``；通道不可用 ⇒ None。"""
+        """当前窗口五类判决 ``{event, confidence, ts}``；通道不可用 ⇒ None。
+
+        ΝΩ-36(b)：激活事件附 ``fingerprint``（8 带量化指纹，附加字段 ——
+        五类判决字段不动）。指纹计算失败不击穿判决（诊断性字段，诚实缺席）。
+        """
         if not self._runner.describe().get("available", False):
             return None
         with self._lock:
             snapshot = self._ring.snapshot()
         verdict = classify_window(snapshot, self._sample_rate)
-        return {"event": verdict["event"], "confidence": verdict["confidence"],
-                "ts": int(time.time() * 1000)}
+        out = {"event": verdict["event"], "confidence": verdict["confidence"],
+               "ts": int(time.time() * 1000)}
+        if verdict["event"] != "silence":
+            try:
+                out["fingerprint"] = acoustic_fingerprint(snapshot, self._sample_rate)
+            except Exception:  # noqa: BLE001 —— 指纹是诊断增强，不是判决依据
+                out["fingerprint"] = None
+        return out
 
     def poll(self) -> dict | None:
-        """边沿触发事件流：类别变化才发（含进入/离开静默的边沿）。"""
+        """边沿触发事件流（类别变化才发，含进入/离开静默的边沿）。
+
+        ΝΩ-36(b) 同指纹聚合：激活事件的指纹与上次已报指纹相同（聚合窗内）
+        ⇒ 只聚合计数不报 —— **同一提示音重复播放不每沿一报**。被聚合的
+        事件计数在 ``describe()`` 与下一次真报（指纹变化/超窗）时申报
+        （真报携带 ``repeats`` = 本系列窗口数，含自身）。
+        """
         ev = self.detect()
         if ev is None:
             return None
         if ev["event"] == self._last_emitted:
             return None
+        if ev["event"] != "silence":
+            fp = ev.get("fingerprint")
+            now_s = ev["ts"] / 1000.0
+            st = self._fp_state
+            if now_s - st["last_seen"] > self._fingerprint_window_s:
+                st["fingerprint"] = None  # 聚合窗过期：系列自然收尾
+                st["count"] = 0
+            if fp is not None and fp == st["fingerprint"]:
+                st["count"] += 1
+                st["last_seen"] = now_s
+                self._suppressed_total += 1
+                self._last_emitted = ev["event"]  # 边沿状态推进（同类持续不重判）
+                return None                       # 聚合：不报
+            ev["repeats"] = 1  # 新系列首报（suppressed 计数见 describe）
+            st.update({"fingerprint": fp, "count": 0, "last_seen": now_s})
         self._last_emitted = ev["event"]
         return ev
 
@@ -733,6 +1276,13 @@ class AudioMonitor:
             desc = {"available": False, "backend": "unknown", "reason": "describe() raised"}
         desc["window_ms"] = int(WINDOW_SECONDS * 1000)
         desc["buffered_samples"] = len(self._ring)
+        # ΝΩ-36(b)：同指纹聚合的可观测面
+        desc["fingerprint_dedup"] = {
+            "window_s": self._fingerprint_window_s,
+            "active_fingerprint": self._fp_state["fingerprint"],
+            "suppressed_in_series": self._fp_state["count"],
+            "suppressed_total": self._suppressed_total,
+        }
         return desc
 
 
@@ -895,8 +1445,9 @@ def run_selftest() -> int:
     finally:
         set_shared_monitor(saved)
 
-    # 诚实 unsupported：comtypes 缺席 / 非 win32 / 无设备 ⇒ available=False
-    # ⇒ 端点信封必须 event=None（「没采到」绝不伪装成「静默」）。
+    # 诚实 unsupported：非 win32 / 引擎失败或缺席（raw-vtable 建链失败、无音频
+    # 设备、低版本 comtypes 缺席）⇒ available=False ⇒ 端点信封必须 event=None
+    # （「没采到」绝不伪装成「静默」—— ΑΩ-R1：双引擎同受此律约束）。
     # 先 read() 一次触发惰性建链（构造零副作用 ⇒ describe 在建链前恒乐观）
     probe = WasapiLoopbackRunner()
     probe.read()
@@ -908,6 +1459,107 @@ def run_selftest() -> int:
             print(f"[FAIL] unsupported honesty: {payload_unsupported}")
         else:
             print(f"[OK ] honest unsupported: {payload_unsupported['reason']}")
+
+    # ── ΝΩ-36(a) VAD 预门零回归：快径输出 == 全扫描输出 ──
+    # 把 SILENCE_RMS 钉到 0（门永不触发 ⇒ 走全扫描），与正常门（快径）对比。
+    _saved_gate = SILENCE_RMS
+    try:
+        wave_sil = synth_silence()
+        gated = extract_features(wave_sil)  # 快径（峰值 < 静默门）
+        globals()["SILENCE_RMS"] = 0.0
+        full = extract_features(wave_sil)   # 门永不触发 ⇒ 全扫描
+        ok_gate = (
+            gated.active_frames == full.active_frames == 0
+            and gated.total_frames == full.total_frames
+            and abs(gated.peak_rms - full.peak_rms) < 1e-12
+            and (gated.decay, gated.burst_count, gated.mean_zcr,
+                 gated.low_ratio, gated.high_ratio)
+            == (full.decay, full.burst_count, full.mean_zcr,
+                full.low_ratio, full.high_ratio)
+        )
+        if ok_gate:
+            print("[OK ] vad gate fast-path == full scan (silence window)")
+        else:
+            failures.append(f"vad gate drift: gated={gated} full={full}")
+            print(f"[FAIL] vad gate drift: {gated} vs {full}")
+    finally:
+        globals()["SILENCE_RMS"] = _saved_gate
+
+    # ── ΝΩ-36(c) numpy/纯 Python 双路径等价（五类合成波形逐字段对比）──
+    global _np  # noqa: PLW0603 —— 测试期路径切换（finally 还原）
+    _saved_np = _np
+    try:
+        for expected, wave in cases:
+            f_np = extract_features(wave)
+            _np = None  # 强制纯 Python 降级路径
+            f_py = extract_features(wave)
+            _np = _saved_np
+            fields = ("peak_rms", "active_frames", "total_frames",
+                      "longest_burst_ms", "burst_count", "mean_zcr",
+                      "low_ratio", "high_ratio", "decay")
+            ok_path = all(
+                math.isclose(getattr(f_np, k), getattr(f_py, k),
+                             rel_tol=1e-6, abs_tol=1e-9)
+                for k in fields
+            )
+            if ok_path:
+                print(f"[OK ] numpy == pure-python features ({expected})")
+            else:
+                failures.append(f"path drift on {expected}: {f_np} vs {f_py}")
+                print(f"[FAIL] path drift on {expected}: {f_np} vs {f_py}")
+    finally:
+        _np = _saved_np
+
+    # ── ΝΩ-36(b) 声学指纹：确定性 / 判别性 / 静默缺席 ──
+    fp_ding_1 = acoustic_fingerprint(synth_notification_ding())
+    fp_ding_2 = acoustic_fingerprint(synth_notification_ding())
+    fp_error = acoustic_fingerprint(synth_error_beep())
+    fp_ok_fp = (
+        isinstance(fp_ding_1, str) and len(fp_ding_1) == FINGERPRINT_BANDS
+        and fp_ding_1 == fp_ding_2
+        and fp_ding_1 != fp_error
+        and acoustic_fingerprint(synth_silence()) is None
+    )
+    if fp_ok_fp:
+        print(f"[OK ] fingerprint deterministic+discriminative: ding={fp_ding_1} error={fp_error}")
+    else:
+        failures.append(f"fingerprint: {fp_ding_1} {fp_error}")
+        print(f"[FAIL] fingerprint: {fp_ding_1} {fp_error}")
+
+    # ── ΝΩ-36(b) poll 同指纹聚合：同一提示音重复播放不每沿一报 ──
+    # 分相喂数(ding → 静默 → 同 ding → 静默 → 同 ding)：首次报、后续同指纹
+    # 聚合抑制;聚合计数在 describe() 可观测。
+    ding_wave = synth_notification_ding()
+    zeros_wave = [0.0] * SAMPLE_RATE * 2
+    chunk = SAMPLE_RATE // 10  # 100ms 块
+
+    def _chunks(w):
+        return [w[i:i + chunk] for i in range(0, len(w), chunk)]
+
+    phases = [_chunks(ding_wave), _chunks(zeros_wave),
+              _chunks(ding_wave), _chunks(zeros_wave), _chunks(ding_wave)]
+    script = [c for ph in phases for c in ph]
+    mon2 = AudioMonitor(MockRunner(script))
+    emissions: list[dict | None] = []
+    for ph in phases:
+        for _c in ph:
+            mon2.drain_once()
+        emissions.append(mon2.poll())
+    ok_dedup = (
+        emissions[0] is not None and emissions[0]["event"] == "notification_ding"
+        and "fingerprint" in emissions[0]
+        and emissions[1] is not None and emissions[1]["event"] == "silence"
+        and emissions[2] is None  # 同指纹 ding：聚合抑制（不每沿一报）
+        and emissions[3] is not None and emissions[3]["event"] == "silence"
+        and emissions[4] is None  # 再次同指纹：仍聚合
+        and mon2.describe()["fingerprint_dedup"]["suppressed_total"] == 2
+    )
+    if ok_dedup:
+        dd = mon2.describe()["fingerprint_dedup"]
+        print(f"[OK ] poll same-fingerprint aggregation (suppressed_total={dd['suppressed_total']})")
+    else:
+        failures.append(f"poll dedup: {emissions}")
+        print(f"[FAIL] poll dedup: {emissions}")
 
     if failures:
         print(f"audio selftest FAILED ({len(failures)}):")

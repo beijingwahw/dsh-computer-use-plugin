@@ -54,3 +54,7 @@ for (const file of walk(DIST)) {
   }
 }
 console.log(`[fix-imports] rewrote ${files} file(s) in dist/`);
+
+// ΝΩ-43：后处理落定后同批生成 dist 完整性清单（产物+清单同出厂）。
+// await 动态 import 等待其跑完——「fix-imports 结束」⇒「清单已就位」的 build 链语义。
+await import('./build_manifest.mjs');

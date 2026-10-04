@@ -5,6 +5,9 @@
 // 纯数字 / 纪元 Δ WeakMap 缓存契约）；弹窗确认词面扩表（确定/同意/是/yes + 反例
 // 取消/否/稍后仍走 Esc）；不确定判定（低置信 / 候选并列）与云脑咨询命中 / 越界回退 /
 // 失败回退 / 异常回退；rationale / expectedEffect 非空与 utility 值域不变式。
+// ΝΩ-10（决策面五合一）追加：② 候选透出（candidates 产出与缺席回退）、②′
+// type/drag 产生通道（引号/后缀载荷正反例、drag 双落点锚定）、④ 三级退避
+// （scroll→inspect→hotkey Tab 环回、Esc 不进轮换家族）、并列破平新鲜度端到端。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -118,9 +121,29 @@ function ctx(o: {
   };
 }
 
-/** 行动史条目用的极简动作字面量 */
-function act(kind: AutonomyActionKind): PolicyAction {
-  return { kind, rationale: '测试史', expectedEffect: '测试', utility: 0.5, riskTier: 'benign' };
+/** 行动史条目用的极简动作字面量（ΝΩ-10：可选 payload —— 轮换史里 Tab 热键需要） */
+function act(kind: AutonomyActionKind, payload?: Record<string, unknown>): PolicyAction {
+  return {
+    kind,
+    ...(payload !== undefined ? { payload } : {}),
+    rationale: '测试史',
+    expectedEffect: '测试',
+    utility: 0.5,
+    riskTier: 'benign',
+  };
+}
+
+/** ΝΩ-10：带落点标签的点击史条目（actionSignature 按 kind+label 归一 —— 新鲜度测试用） */
+function clickAct(label: string): PolicyAction {
+  const bbox = { x0: 10, y0: 20, x1: 110, y1: 60 };
+  return {
+    kind: 'click',
+    target: { bbox, center: { x: (bbox.x0 + bbox.x1) / 2, y: (bbox.y0 + bbox.y1) / 2 }, label },
+    rationale: '测试史',
+    expectedEffect: '测试',
+    utility: 0.5,
+    riskTier: 'benign',
+  };
 }
 
 // ─── Φ-3a 关键词提取 ───
@@ -622,4 +645,248 @@ test('Φ-3j: 输出不变式 —— 各级决策的 rationale/expectedEffect 恒
     assert.equal(typeof dec.uncertain, 'boolean');
     assert.equal(typeof dec.degraded, 'boolean');
   }
+});
+
+// ─── ΝΩ-10（决策面五合一）：候选透出 / ②′ type·drag 产生通道 / ④ 三级退避 / 新鲜度破平 ───
+
+test('ΝΩ-10: ② 候选透出 —— candidates 携带 breakTieBand 后排名（首位=确定性最佳、动作同构、截 8 名），其余各级缺席', async () => {
+  const { client } = idleClient();
+  const engine = new PolicyEngine({ client });
+  const dec = await engine.decide(
+    ctx({
+      snapshot: snap({
+        elements: [
+          elem('登录', { confidence: 0.9 }),
+          elem('登录帮助', { confidence: 0.8 }),
+          elem('注册登录', { confidence: 0.7 }),
+        ],
+      }),
+    }),
+  );
+  assert.equal(dec.action.kind, 'click');
+  assert.ok(Array.isArray(dec.candidates), '② 级候选存在 ⇒ candidates 字段产出');
+  const cands = dec.candidates ?? [];
+  assert.equal(cands.length, 3);
+  assert.equal(cands[0].target?.label, '登录', '首位 = 确定性最佳（覆盖率 1.0）');
+  assert.equal(cands[1].target?.label, '登录帮助', '次位按 得分→置信→原序 稳定排序');
+  for (const c of cands) {
+    assert.equal(c.kind, 'click');
+    assert.ok(c.rationale.length >= 4 && c.expectedEffect.length >= 4, '候选动作与真实动作同构（rationale/expectedEffect 非空）');
+    assert.ok(c.utility >= 0 && c.utility <= 1);
+    assert.ok(['benign', 'sensitive', 'destructive'].includes(c.riskTier));
+  }
+
+  // 9 个等分候选 ⇒ 截前 8（与云脑咨询候选上限同一带宽礼仪）
+  const nine = await engine.decide(
+    ctx({
+      snapshot: snap({
+        elements: Array.from({ length: 9 }, (_, i) => elem(`登录${'一二三四五六七八九'[i]}`, { confidence: 0.6 })),
+      }),
+    }),
+  );
+  assert.equal(nine.candidates?.length, 8, '9 候选截 8');
+
+  // 缺席回退：① 弹窗 / ③ 宣称 / ④ 僵局 / ⑦ 兜底 均不带 candidates 字段
+  const popup = await engine.decide(
+    ctx({ snapshot: snap({ popups: ['提示'], elements: [elem('允许')] }) }),
+  );
+  assert.equal(popup.candidates, undefined, '① 弹窗级无候选透出');
+  const decl = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['页面显示欢迎语'] }),
+      snapshot: snap({ elements: [elem('天气')], textDigest: '页面显示欢迎语' }),
+    }),
+  );
+  assert.equal(decl.action.kind, 'declare');
+  assert.equal(decl.candidates, undefined, '③ 宣称级无候选透出');
+  const stuck = await engine.decide(
+    ctx({
+      snapshot: snap({ elements: [elem('天气')] }),
+      history: [
+        { action: act('click'), outcome: 'no_effect' },
+        { action: act('click'), outcome: 'no_effect' },
+      ],
+    }),
+  );
+  assert.equal(stuck.action.kind, 'scroll');
+  assert.equal(stuck.candidates, undefined, '④ 僵局级无候选透出');
+  const vlm = await engine.decide(ctx({ snapshot: snap({ elements: [elem('天气')] }) }));
+  assert.equal(vlm.action.kind, 'ask_vlm');
+  assert.equal(vlm.candidates, undefined, '⑦ 兜底级无候选透出');
+});
+
+test('ΝΩ-10: ②′ type 正例 —— 引号载荷优先（intentGrammar 无损提取）、密码判据记 sensitive；后缀兜底提取', async () => {
+  const { client, calls } = idleClient();
+  const engine = new PolicyEngine({ client });
+  const dec = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['在密码框输入"hunter2"'] }),
+      snapshot: snap({ elements: [elem('密码框', { role: 'input', confidence: 0.75 })] }),
+    }),
+  );
+  assert.equal(dec.action.kind, 'type');
+  assert.equal(dec.action.target?.label, '密码框');
+  assert.deepEqual((dec.action.payload as { text?: string } | undefined)?.text, 'hunter2');
+  assert.deepEqual(dec.action.target?.center, { x: 60, y: 40 });
+  assert.equal(dec.action.utility, 0.75, 'type 效用 = 元素置信（与 ② 点击同律）');
+  assert.equal(dec.action.riskTier, 'sensitive', '键入凭据判据（含「密码」）预分类 sensitive');
+  assert.equal(dec.uncertain, false);
+  assert.equal(dec.degraded, false);
+  assert.equal(calls.length, 0, '②′ 是确定性通道，不触云脑');
+
+  // 后缀兜底：无引号时取语义锚词后的合格残段
+  const suffix = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['姓名栏输入张三'] }),
+      snapshot: snap({ elements: [elem('姓名栏', { role: 'input', confidence: 0.8 })] }),
+    }),
+  );
+  assert.equal(suffix.action.kind, 'type');
+  assert.equal((suffix.action.payload as { text?: string } | undefined)?.text, '张三');
+  assert.equal(suffix.action.riskTier, 'benign');
+});
+
+test('ΝΩ-10: ②′ type 反例 —— 纯标签判据无载荷 / 候选非 input 角色 / 点击动词守卫 ⇒ 不产 type，回退 ② 点击', async () => {
+  const { client } = idleClient();
+  const engine = new PolicyEngine({ client });
+  // 「输入密码」：后缀 =「密码」是语义锚词 ⇒ 拿不准不产
+  const noPayload = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['输入密码'] }),
+      snapshot: snap({ elements: [elem('密码框', { role: 'input' })] }),
+    }),
+  );
+  assert.equal(noPayload.action.kind, 'click', '无载荷可提取 ⇒ 走 ② 点击（聚焦交给执行层）');
+  assert.equal(noPayload.action.target?.label, '密码框');
+
+  // 匹配候选是 button 角色 ⇒ 不是键入落点
+  const notInput = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['在输入框输入"hi"'] }),
+      snapshot: snap({ elements: [elem('输入框', { role: 'button' })] }),
+    }),
+  );
+  assert.equal(notInput.action.kind, 'click', 'role≠input ⇒ ②′ 不点火');
+
+  // 判据明说「点击」⇒ 尊重点击意图
+  const clickIntent = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['点击输入框并输入"hi"'] }),
+      snapshot: snap({ elements: [elem('输入框', { role: 'input' })] }),
+    }),
+  );
+  assert.equal(clickIntent.action.kind, 'click', '点击动词守卫 ⇒ 不产 type');
+});
+
+test('ΝΩ-10: ②′ drag 正反例 —— 两个引号落点锚定快照 ⇒ 产 drag（payload.end=目的地中心）；落点不足不产', async () => {
+  const { client } = idleClient();
+  const engine = new PolicyEngine({ client });
+  const dec = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['把「图标A」拖到「文件夹B」'] }),
+      snapshot: snap({
+        elements: [
+          elem('图标A'),
+          elem('文件夹B', { bbox: { x0: 200, y0: 200, x1: 400, y1: 300 }, confidence: 0.7 }),
+        ],
+      }),
+    }),
+  );
+  assert.equal(dec.action.kind, 'drag');
+  assert.equal(dec.action.target?.label, '图标A', 'target = 被拖的源元素');
+  const payload = dec.action.payload as { end?: { x: number; y: number }; toLabel?: string } | undefined;
+  assert.deepEqual(payload?.end, { x: 300, y: 250 }, 'payload.end = 目的地元素中心（执行层契约）');
+  assert.equal(payload?.toLabel, '文件夹B');
+  assert.equal(dec.action.utility, Math.min(0.8, 0.7), 'drag 效用 = 源/目的置信取小（保守）');
+  assert.equal(dec.action.riskTier, 'benign');
+
+  // 反例：只有一个引号落点 ⇒ 拿不准不产，回退 ② 点击
+  const lone = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['把「图标A」拖动'] }),
+      snapshot: snap({ elements: [elem('图标A')] }),
+    }),
+  );
+  assert.equal(lone.action.kind, 'click', '落点不足 ⇒ drag 不点火');
+
+  // 风险预分类扫源+目的双标签：拖到「删除区」⇒ destructive
+  const danger = await engine.decide(
+    ctx({
+      spec: spec({ successCriteria: ['把「图标A」拖到「删除区」'] }),
+      snapshot: snap({ elements: [elem('图标A'), elem('删除区')] }),
+    }),
+  );
+  assert.equal(danger.action.kind, 'drag');
+  assert.equal(danger.action.riskTier, 'destructive');
+});
+
+test('ΝΩ-10: ④ 僵局三级退避 —— scroll → inspect → hotkey Tab → scroll 环回；Esc 热键不进轮换家族', async () => {
+  const { client } = idleClient();
+  const engine = new PolicyEngine({ client });
+  const stagnant = [
+    { action: act('click'), outcome: 'no_effect' as const },
+    { action: act('click'), outcome: 'no_effect' as const },
+  ];
+  // 第 1 棒：无切换史 ⇒ scroll（旧缺省不变）
+  const s1 = await engine.decide(ctx({ snapshot: snap({ elements: [elem('天气')] }), history: stagnant }));
+  assert.equal(s1.action.kind, 'scroll');
+  // 第 2 棒：上次 scroll ⇒ inspect（旧二元轮换不变）
+  const s2 = await engine.decide(
+    ctx({
+      snapshot: snap({ elements: [elem('天气')] }),
+      history: [...stagnant, { action: act('scroll', { direction: 'down' }), outcome: 'no_effect' }],
+    }),
+  );
+  assert.equal(s2.action.kind, 'inspect');
+  // 第 3 棒：上次 inspect ⇒ hotkey Tab 焦点周游（第三级，与探索层 hotkey#tab 同先例）
+  const s3 = await engine.decide(
+    ctx({
+      snapshot: snap({ elements: [elem('天气')] }),
+      history: [...stagnant, { action: act('inspect'), outcome: 'no_effect' }],
+    }),
+  );
+  assert.equal(s3.action.kind, 'hotkey');
+  assert.deepEqual(s3.action.payload, { keys: ['tab'] });
+  assert.equal(s3.action.utility, 0.5, '第三级效用与 scroll/inspect 同基线');
+  assert.match(s3.action.rationale, /连续 2 次无效果/);
+  assert.match(s3.action.rationale, /Tab/);
+  // 环回：上次 Tab 热键 ⇒ scroll
+  const s4 = await engine.decide(
+    ctx({
+      snapshot: snap({ elements: [elem('天气')] }),
+      history: [...stagnant, { action: act('hotkey', { keys: ['tab'] }), outcome: 'no_effect' }],
+    }),
+  );
+  assert.equal(s4.action.kind, 'scroll');
+  // Esc 热键不是切换家族成员：只见过 Esc ⇒ 轮换状态视为无史 ⇒ scroll
+  const esc = await engine.decide(
+    ctx({
+      snapshot: snap({ elements: [elem('天气')] }),
+      history: [...stagnant, { action: act('hotkey', { keys: ['esc'] }), outcome: 'no_effect' }],
+    }),
+  );
+  assert.equal(esc.action.kind, 'scroll', '弹窗 Esc 不算切换动作');
+});
+
+test('ΝΩ-10: 并列破平吃新鲜度 —— 点过且 no_effect 的带内候选让位给点过且有进展者（端到端）', async () => {
+  // 两候选同分并列（均 1.0 覆盖率、同置信）⇒ 带内交 Φ-9 沙盘：
+  //   甲按钮（点过且 no_effect）：info = 0.3 − 0.1 = 0.2
+  //   乙按钮（点过但有进展）　：info = 0.3（基线不修正，progress ×0.6 另记账）
+  // 旧律（无 no_effect 透传）两人 info 恒 0.1 ⇒ 效用全并列取输入序（甲胜）；
+  // 新律乙胜 —— 带内从「标签陌生度」单维扩出「新鲜度」维。
+  const engine = new PolicyEngine({ useVlmWhenUncertain: false });
+  const history: PolicyContext['history'] = [
+    { action: clickAct('甲按钮'), outcome: 'no_effect' },
+    { action: clickAct('乙按钮'), outcome: 'progress' },
+  ];
+  const dec = await engine.decide(
+    ctx({
+      spec: spec({ goal: '完成选择', successCriteria: ['点击甲按钮或乙按钮'] }),
+      snapshot: snap({ elements: [elem('甲按钮'), elem('乙按钮')] }),
+      history,
+    }),
+  );
+  assert.equal(dec.action.kind, 'click');
+  assert.equal(dec.action.target?.label, '乙按钮', '点过且 no_effect 的甲让位给有点进展的乙');
+  assert.equal(dec.candidates?.[0].target?.label, '乙按钮', '排名候选同样体现新鲜度破平');
 });

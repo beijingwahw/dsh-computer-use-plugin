@@ -155,6 +155,110 @@ export function w4ForwardingSteerSession(
   };
 }
 
+// ─── ΑΩ-R28（注册处单源 + 完备性执法）：变更类工具登记处 ───
+// 本桶是工具装配的唯一事实源 —— 先行审计（W2-2 fail-closed WAL）的变更类
+// 名单也以此为准：单源导出，auditGuard 只读引入（guards→tools 单向依赖，
+// 无环）。历史病灶：名单在 guard 侧硬编码 ⇒ fail-open 于名单维护 —— 新增
+// 变更类工具忘登记则静默漏审计（W6R-A9 曾因此补齐 12 件）。
+// **立法：新增变更类工具必须在此登记**；观察/控制面工具登记进
+// KNOWN_READ_ONLY_TOOL_NAMES；两者都不落 ⇒ 装配期断言如实炸出
+// （assertToolAuditClassification —— fail-open 变 fail-fast）。
+// 判定标准（W6R-A9 同律）：该工具派发后，用户机器的桌面状态 / 文件系统 /
+// 后续物理动作面将被改变。纯观察类（截图/读取/探针/问答）不入列。
+export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // ── 直接物理动作面（原 6 件，W2-2 铁律）──
+  'click_mouse', 'click_element', 'drag_mouse',
+  'scroll_page', 'type_text', 'press_hotkey',
+  // ── W6R-A9 补齐：直接物理动作面（漏网的键鼠/窗口/跳转族）──
+  // switch_tab：真实键击 ctrl(+shift)+tab（switchTab.ts 调 system.pressHotkey）
+  //   —— 浏览器前台标签被切换，世界状态改变
+  'switch_tab',
+  // switch_window：按标题把窗口调到前台（switchWindow.ts 调
+  //   system.switchWindowByTitle）—— 焦点窗口被改变
+  'switch_window',
+  // open_url：经 OS 壳层打开默认浏览器（openUrl.ts 调 system.openUrl）——
+  //   世界跳转；ACTION_TOOLS 已在册（journal.ts）
+  'open_url',
+  // replay_actions：宏重放 = 把日志里的 click/type/drag 序列原样打到真实
+  //   桌面（replayActions.ts 自述 real-world side-effect operation）
+  'replay_actions',
+  // run_skill：技能执行 = 经 replayOne 逐步重放物理步骤（skillTools.ts）
+  'run_skill',
+  // shape_environment：raise/maximize/move_window、set_zoom/set_contrast ——
+  //   直接重塑物理工作台。D-D12 子动作分流在 auditGuard 侧执法：
+  //   capabilities/undo_log 两个只读子动作免派发（闭集），apply/restore 及
+  //   未知 action 仍按本名单执法（fail-closed 闭集）
+  'shape_environment',
+  // ── W6R-A9 补齐：绕过宿主管线的物理动作批次（入口审计是唯一机会）──
+  // autonomous_run：自主环内 PolicyAction 经 runtime.createExecute 直接驱
+  //   system 键鼠（autonomy/runtime.ts）—— 不经过宿主工具管线，环内逐步
+  //   动作永远不路过守卫；入口处的先行审计是整批动作唯一的 WAL 机会
+  'autonomous_run',
+  // autonomy_resume：同一引擎续跑（autonomyResume.ts 复用 runPilotLoop）
+  'autonomy_resume',
+  // ── W6R-A9 补齐：文件系统写入族（变更用户机器上的持久状态）──
+  // save_skill：技能库落盘（skillLibrary.ts writeFileSync 原子写）
+  'save_skill',
+  // save_checkpoint：认知态快照写盘（checkpoint.ts，config.checkpointPath）
+  'save_checkpoint',
+  // switch_vision_model：连接档案持久化到 ~/.dsh/vlm-connection.json
+  //   （vlm/connection.ts writeFileSync）并热替换全局 VLM 单例
+  'switch_vision_model',
+  // vlm_wizard：起回环服务 + system.openUrl 打开浏览器窗口（vlmWizard.ts）
+  //   —— 浏览器被打开是世界可见动作
+  'vlm_wizard',
+  // replay_on_host（ΝΩ-1）：沙箱肌肉记忆宿主重放 = 四/五门全过后逐步真派发
+  //   键鼠（sandbox/index.ts 经 system 层）—— 与 replay_actions 同族的物理动作面
+  'replay_on_host',
+]);
+
+/** ΑΩ-R28：已知只读/控制面白名单 —— 显式不入先行审计面的注册工具（二分类
+ *  的另一翼）。不入列 ≠ 漏网：每项都是有理由的缺席（W6R-A9 盘点同律）：
+ *   · take_screenshot / zoom_inspect / diff_view / extract_ui_vision /
+ *     read_text / find_text / ask_screen / vlm_platforms / probe_interactivity /
+ *     metrics_dashboard / verify_journal / get_metrics / self_diagnose /
+ *     quality_checkup / recall_ui / match_skill / what_if —— 观察探针/问答/
+ *     体检（纯读取，世界不被打改）；
+ *   · dismiss_popup —— 零副作用元工具（只返回 TACTICAL_PAUSE 字符串）；
+ *   · swarm_dispatch / swarm_report —— 控制面记账（物理 IO 走常规动作工具，
+ *     逐次被守卫审计）；
+ *   · request_approval / grant_approval / adjudicate_approval_queue —— 审批
+ *     控制面（令牌簿自有留痕；物理动作在消费令牌的动作工具处被审计）；
+ *   · remember_ui —— 会话内存笔记本（UIMemory 无磁盘持久化）；
+ *   · steer_choice / steer_answer —— 瞬态控制面（在役会话的问答回流）；
+ *   · federation_sync —— 联邦记账面（离线摘要铸造/合并；世界动作零派发）。 */
+const KNOWN_READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'take_screenshot', 'zoom_inspect', 'diff_view', 'extract_ui_vision',
+  'read_text', 'find_text', 'ask_screen', 'vlm_platforms', 'probe_interactivity',
+  'metrics_dashboard', 'verify_journal', 'get_metrics', 'self_diagnose',
+  'quality_checkup', 'recall_ui', 'remember_ui', 'match_skill', 'what_if',
+  'swarm_report', 'swarm_dispatch', 'dismiss_popup',
+  'request_approval', 'grant_approval', 'adjudicate_approval_queue',
+  'steer_choice', 'steer_answer', 'federation_sync',
+]);
+
+/** ΑΩ-R28（完备性执法）：装配期断言 —— 每个注册进工具表的名字必须被二分类
+ *  （MUTATING_TOOL_NAMES 或 KNOWN_READ_ONLY_TOOL_NAMES 之一）；出现未分类
+ *  名字 ⇒ 如实 throw。这是配置期而非运行期（加载层可 throw 的纪律）：新
+ *  工具加入装配时漏分类立即炸出，名单维护遗漏从静默漏审计（fail-open）变
+ *  装配即炸（fail-fast）。独立导出以便测试注入假工具名直驱断言路径。 */
+export function assertToolAuditClassification(
+  tools: ReadonlyArray<Pick<ToolDefinition, 'name'>>,
+): void {
+  const unclassified = tools
+    .map(t => t.name)
+    .filter(n => !MUTATING_TOOL_NAMES.has(n) && !KNOWN_READ_ONLY_TOOL_NAMES.has(n));
+  if (unclassified.length > 0) {
+    throw new Error(
+      'ΑΩ-R28 audit classification incomplete: unclassified tool name(s) [' + unclassified.join(', ') + '] ' +
+      '— every tool registered by buildAllTools must be classified in src/tools/index.ts: ' +
+      'world-changing tools in MUTATING_TOOL_NAMES (pre-dispatch audit WAL), ' +
+      'observation/control-plane tools in KNOWN_READ_ONLY_TOOL_NAMES. ' +
+      'An unclassified name would dispatch without a pre-dispatch audit trail (fail-open) — refused at assembly time.',
+    );
+  }
+}
+
 export function buildAllTools(config: Config): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     createTakeScreenshotTool(config),
@@ -298,6 +402,11 @@ export function buildAllTools(config: Config): ToolDefinition[] {
     const w4SteerSession = w4ForwardingSteerSession();
     tools.push(createSteerChoiceTool(w4SteerSession), createSteerAnswerTool(w4SteerSession));
   }
+
+  // ΑΩ-R28（完备性执法）：装配收尾断言 —— 注册面全员二分类（变更类名单 /
+  // 显式只读白名单，二选一）。新工具漏分类 ⇒ 此处如实炸（配置期 fail-fast，
+  // 非运行期），杜绝「新增变更类工具忘登记 ⇒ 静默漏审计」的 fail-open 病灶。
+  assertToolAuditClassification(tools);
 
   return tools;
 }

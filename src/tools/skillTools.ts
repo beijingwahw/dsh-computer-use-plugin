@@ -13,7 +13,7 @@ import { resolveMacroChain, type MacroResolveResult } from '../macroExecutor';
 import { sharedMacroRehearsalGate, MACRO_REHEARSAL_GATE } from '../sandbox/macroRehearsal';
 import { failureMemory } from '../failureMemory';
 import { journal } from '../journal';
-import { replayOne, replayStepExecuted } from './replayActions';
+import { replayOneTraced, settleReservedApproval, replayStepExecuted } from './replayActions';
 // D-G5（W8-C1 收口 · run_skill 公证）：技能重放的轨迹见证铸证面（replay_actions
 // 同款接线 —— 步指纹 + 三态结局 + 整体成败入 notary 锚；公证缺席诚实降级）。
 import {
@@ -326,12 +326,23 @@ export function createRunSkillTool(config: Config) {
       'The outcome updates the skill reliability automatically. Requires confirm=true. ' +
       'W4-1: template_id executes a parameterized template (holes bound at runtime; bind failure falls back ' +
       'to the parent literal skill); low-reliability skills and template products must first pass a sandbox ' +
-      'virtual rehearsal gate before host dispatch.',
+      'virtual rehearsal gate before host dispatch. ' +
+      'NΩ-5: skills containing irreversible steps (send/delete/pay/submit...) were recorded with approval ' +
+      'tokens that are necessarily expired now — pass a freshly granted approval_token to authorize the ' +
+      'dangerous steps of the replay through the same gate chain as live tool calls.',
     parameters: {
       id: { type: 'number', description: 'Skill ID from match_skill (omit when using template_id).' },
       template_id: { type: 'number', description: 'W4-1: Parameterized template ID from match_skill (hole binding; falls back to parent skill on failure).' },
       confirm: { type: 'boolean', required: true, description: 'Must be explicitly true to execute.' },
       text: { type: 'string', description: 'W4-1: Parameterized text argument — overrides type_text steps and binds string holes.' },
+      approval_token: {
+        type: 'string',
+        description: 'NΩ-5: One-shot token from request_approval (freshly granted via grant_approval). ' +
+          'Required when the skill contains irreversible steps (send/delete/pay/submit...): the tokens ' +
+          'recorded inside the skill steps are expired by now, so this parameter replaces them for the ' +
+          'dangerous steps and is validated through the same approval gate as live tool calls. Without it ' +
+          'the dangerous steps fail honestly and are NOT dispatched.',
+      },
     },
     output: {
       schema: { type: 'string' },
@@ -423,9 +434,23 @@ export function createRunSkillTool(config: Config) {
       // D-G5（W8-C1 收口 · run_skill 公证）：轨迹见证采集 —— 步指纹序列 + 三态
       // 结局（replay_actions 循环同款接线），重放完成时铸入 notary 锚。
       const witnessSteps: ReplayStepWitness[] = [];
+      // ── ΝΩ-5（令牌通道）：run_skill 的 approval_token 参数透传 ──
+      // 技能步里录制的旧令牌必失效（一次性 + TTL）—— 含危险步的技能此前
+      // 结构性永远失败（replayOne 校验 steps 里的旧令牌 ⇒ token-not-granted-
+      // or-expired）。修法：调用方新令牌覆盖危险步（click_mouse）的令牌槽，
+      // 走 replayOneTraced 的同一校验链；无参数 ⇒ 旧语义保持（诚实拒绝）。
+      const runToken = typeof args.approval_token === 'string' && args.approval_token !== ''
+        ? args.approval_token
+        : undefined;
       for (const [i, step] of resolved.steps.entries()) {
         // Δ 纪元（审计#1）：重放步与 live 工具同闸门 —— 危险步无有效令牌即失败
-        const line = await replayOne(step, config);
+        // ΝΩ-5：新令牌只覆盖闸门读令牌的通道（click_mouse 危险步）；其余步的
+        // 录制 args 逐字节保持（type_text 的闸门不读令牌、无预留语义）。
+        const effective = runToken !== undefined && step.tool === 'click_mouse'
+          ? { tool: step.tool, args: { ...step.args, approval_token: runToken } }
+          : step;
+        const outcome = await replayOneTraced(effective, config);
+        const line = outcome.line;
         if (line.startsWith('FAILED') || line.startsWith('SKIPPED')) failed++;
         log.push(`  ${step.tool}: ${line}`);
         witnessSteps.push({
@@ -434,6 +459,12 @@ export function createRunSkillTool(config: Config) {
           fingerprint: replayStepFingerprint(step),
           executed: replayStepExecuted(line),
         });
+        // ΝΩ-5（审批悬账结算）：危险步的 beginAttempt 预留在步终按世界判决
+        // 结算 —— run_skill 无死步观测面（失败步只计数不中止）⇒ 判决 = FAILED
+        // 与否：失败 ⇒ attemptFailed 续期（令牌保留可重试），成功 ⇒ consume
+        // 验收式（世界已承接不可逆效果）。
+        settleReservedApproval(
+          outcome.reservedApprovalToken, line.startsWith('FAILED:'), 'skill-step-failure');
         await sleep(150);
       }
 

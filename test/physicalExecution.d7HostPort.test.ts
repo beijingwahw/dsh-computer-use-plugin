@@ -19,14 +19,29 @@
 //   3. execute(click_mouse) 返回 status='failure'，失败分类正确（链路通顺）
 //   4. dispose() 后再 execute → host-error（已 disposed）
 //   5. ServiceManager.dispose() 杀进程 + 清理临时文件
-import { test } from 'node:test';
+//
+// ΝΩ-49（全量套件提速）：测试级共享服务 —— 本册原 11 例各自 spawn Python
+// （每例探活 2-3s，册内串行累计 ~25s+）。现册顶起一次共享实例（动态端口 +
+// 随机 HMAC 密钥 tmp 文件 + TEST_SCREEN=1），常规各例改连共享实例；after()
+// 统一 dispose。语义必须独立生命周期的三例保留独立 spawn（各自也改动态端口，
+// 免缺省 8421 在全量并行册间被占坑误伤）：
+//   - dispose 幂等/已处置降级例（生命周期执法）
+//   - capability cache 例（env DSH_PHYSICAL_WINDOW_BACKEND=hotkey-only 专属形态）
+//   - ΑΩ-R27 broken-pyautogui 例（PYTHONPATH 劫持注入假 pyautogui）
+// 认证面不受影响：adapter 每请求自铸新鲜 token/nonce（X-Cap-Token + X-Request-Id），
+// 共享的只是服务进程与密钥文件 —— 与生产「一服务多请求」同一形态。
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   D7PhysicalHostPort,
 } from '../src/physicalExecution/index.ts';
 import type { AtomicAction } from '../src/knowledge/contracts.ts';
+import { freePort, makeTempKey } from './lib/serviceHarness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PYTHON_ROOT = resolve(__dirname, '..', 'python_service');
@@ -35,156 +50,145 @@ function makeAction(kind: AtomicAction['kind'], args: Record<string, unknown> = 
   return { kind, args, rationale: 'test action' };
 }
 
-// 跳过条件：Python 服务启动失败（无 python3 / 无依赖）时整个套件跳过
-async function canStartService(): Promise<boolean> {
+// ΝΩ-49：探活上限（非耗时 —— 实际启动 ~2s；宽上限免负载下把「起得慢」误判
+// 成「环境缺席」而整册 skip —— 旧 5s 闸在并行全量下已实际触发过这种假阴性）
+const STARTUP_CEILING_MS = 25_000;
+
+// ── ΝΩ-49 共享服务：册顶一次 spawn，常规各例连接 ──
+// 动态端口（freePort）+ 随机 HMAC 密钥 tmp 文件（外部提供 ⇒ manager 不代管
+// 清理，after() 统一删）+ TEST_SCREEN=1 合成图兜底。
+// 启动失败（无 python / 缺依赖）⇒ null ⇒ 整册 skip（与旧 canStartService 闸
+// 同一诚实降级，少 spawn 一次探测进程）。
+let sharedKeyCleanup: (() => void) | null = null;
+
+async function startSharedHost(): Promise<D7PhysicalHostPort | null> {
+  const port = await freePort();
+  const key = makeTempKey('dsh-d7-shared-');
   const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 5000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
+    service: {
+      pythonServiceRoot: PYTHON_ROOT,
+      startupTimeoutMs: STARTUP_CEILING_MS,
+      tcpPort: port,
+      keyPath: key.keyPath,
+      env: { DSH_PHYSICAL_TEST_SCREEN: '1' },
+    },
   });
-  try {
-    const r = await host.prewarm();
-    await host.dispose();
-    return r.ok;
-  } catch {
-    await host.dispose().catch(() => {});
-    return false;
+  const pw = await host.prewarm();
+  if (!pw.ok) {
+    await host.dispose().catch(() => { /* noop */ });
+    key.cleanup();
+    return null;
   }
+  sharedKeyCleanup = key.cleanup;
+  return host;
 }
 
-const canRun = await canStartService();
-const skip = !canRun;
+const shared = await startSharedHost();
+const skip = shared === null;
 const maybeTest = skip ? test.skip : test;
+
+if (shared) {
+  after(async () => {
+    await shared.dispose().catch(() => { /* noop */ });
+    try { sharedKeyCleanup?.(); } catch { /* noop */ }
+  });
+}
 
 // ── 双端口躯体：perceive（感知面）e2e ──
 // 验证桩纪元终结的视觉侧：getUiTree 反双盲漏斗 → 归一化 → 网格分派 → ScenePatch[]。
 maybeTest('perceive: SceneSourcePort 契约 —— getUiTree → ScenePatch[]（网格分区 + 坐标同一性）', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    await host.prewarm();
-    const patches = await host.perceive({ grid: { cols: 2, rows: 2 } });
-    // 结构执法：分区数 = cols×rows，region.id 走 'g{col}x{row}' 方言
-    assert.equal(patches.length, 4, '2x2 网格 ⇒ 4 个分区补丁');
-    const ids = patches.map(p => p.region.id).sort();
-    assert.deepEqual(ids, ['g0x0', 'g0x1', 'g1x0', 'g1x1'], '坐标同一性方言');
-    // 诚实执法：无 X + 无 OCR 环境 ⇒ fault 或 empty（有结构的感知，绝不崩溃）
-    for (const p of patches) {
-      assert.ok(p.funnelDepth === 'empty' || p.funnelDepth === 'L1' || p.funnelDepth === 'L2',
-        `funnelDepth 合法域，实际 ${p.funnelDepth}`);
-      assert.ok(typeof p.capturedAt === 'number');
-    }
-  } finally {
-    await host.dispose();
+  const host = shared!;
+  const patches = await host.perceive({ grid: { cols: 2, rows: 2 } });
+  // 结构执法：分区数 = cols×rows，region.id 走 'g{col}x{row}' 方言
+  assert.equal(patches.length, 4, '2x2 网格 ⇒ 4 个分区补丁');
+  const ids = patches.map(p => p.region.id).sort();
+  assert.deepEqual(ids, ['g0x0', 'g0x1', 'g1x0', 'g1x1'], '坐标同一性方言');
+  // 诚实执法：无 X + 无 OCR 环境 ⇒ fault 或 empty（有结构的感知，绝不崩溃）
+  for (const p of patches) {
+    assert.ok(p.funnelDepth === 'empty' || p.funnelDepth === 'L1' || p.funnelDepth === 'L2',
+      `funnelDepth 合法域，实际 ${p.funnelDepth}`);
+    assert.ok(typeof p.capturedAt === 'number');
   }
 });
 
 maybeTest('perceive 后 execute：同一躯体的两面共享一个 Python 进程（零二次 spawn）', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    const patches = await host.perceive({ grid: { cols: 1, rows: 1 } }); // 感知触发懒启动
-    assert.equal(patches.length, 1);
-    const pid1 = host.manager.pid;
-    const r = await host.execute(makeAction('noop')); // 执行复用同一进程
-    assert.equal(r.status, 'success');
-    assert.equal(host.manager.pid, pid1, '感知与执行共享同一 Python 进程 —— 双端口同躯体');
-  } finally {
-    await host.dispose();
-  }
+  const host = shared!;
+  const patches = await host.perceive({ grid: { cols: 1, rows: 1 } });
+  assert.equal(patches.length, 1);
+  const pid1 = host.manager.pid;
+  const r = await host.execute(makeAction('noop')); // 执行复用同一进程
+  assert.equal(r.status, 'success');
+  assert.equal(host.manager.pid, pid1, '感知与执行共享同一 Python 进程 —— 双端口同躯体');
 });
 
 maybeTest('prewarm: spawns Python service, reports pid, baseUrl resolves via /health', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    const pw = await host.prewarm();
-    assert.equal(pw.ok, true, 'prewarm must succeed');
-    assert.ok(host.initialized, 'router should be initialized after prewarm');
-    assert.ok(host.manager.pid != null, 'process pid should be non-null');
-    assert.ok(host.manager.isRunning, 'service should be running');
-    assert.ok(host.capability.isInitialized(), 'capability cache should be synced from health');
-  } finally {
-    await host.dispose();
-  }
+  // ΝΩ-49：共享实例上 prewarm 走「已启动 ⇒ 汇流复用」臂（spawn 语义由册顶
+  // startSharedHost 的真 spawn 覆盖）；本例执法 prewarm 契约面：
+  // ok / initialized / pid / isRunning / capability 同步。
+  const host = shared!;
+  const pw = await host.prewarm();
+  assert.equal(pw.ok, true, 'prewarm must succeed');
+  assert.ok(host.initialized, 'router should be initialized after prewarm');
+  assert.ok(host.manager.pid != null, 'process pid should be non-null');
+  assert.ok(host.manager.isRunning, 'service should be running');
+  assert.ok(host.capability.isInitialized(), 'capability cache should be synced from health');
 });
 
 maybeTest('execute(noop): immediate success (router internal short-circuit, no micro-service call)', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    // 首次执行触发懒启动
-    const r = await host.execute(makeAction('noop'));
-    assert.equal(r.status, 'success');
-    assert.ok(!('failure' in r && r.failure), 'success must not carry failure');
-  } finally {
-    await host.dispose();
-  }
+  const host = shared!;
+  // 首次执行触发懒启动
+  const r = await host.execute(makeAction('noop'));
+  assert.equal(r.status, 'success');
+  assert.ok(!('failure' in r && r.failure), 'success must not carry failure');
 });
 
 maybeTest('execute(click_mouse out_of_bounds): honest failure with correct kind', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    await host.prewarm();
-    // (2.0, 2.0) 超出归一化范围 [0,1] —— 应被 Python 端拒绝为 out_of_bounds，
-    // router.toFailureResult 映射为 host-error（PhysicalErrorKind.out_of_bounds → ...）
-    const r = await host.execute(makeAction('click_mouse', { x: 2.0, y: 2.0, button: 'left' }));
-    assert.equal(r.status, 'failure');
-    assert.ok(r.failure, 'failure must carry detail');
-    // 无 X 环境：pyautogui 不可用 ⇒ 错误可能是 out_of_bounds 或 host-error，只要不是 success 就是诚实链路
-    assert.ok(['host-error', 'sandbox-degraded', 'gate-rejected', 'timeout', 'cancelled', 'timed-out']
-      .includes(r.failure.kind), `unexpected failure kind: ${r.failure.kind}`);
-  } finally {
-    await host.dispose();
-  }
+  const host = shared!;
+  // (2.0, 2.0) 超出归一化范围 [0,1] —— 应被 Python 端拒绝为 out_of_bounds，
+  // router.toFailureResult 映射为 host-error（PhysicalErrorKind.out_of_bounds → ...）
+  const r = await host.execute(makeAction('click_mouse', { x: 2.0, y: 2.0, button: 'left' }));
+  assert.equal(r.status, 'failure');
+  assert.ok(r.failure, 'failure must carry detail');
+  // 无 X 环境：pyautogui 不可用 ⇒ 错误可能是 out_of_bounds 或 host-error，只要不是 success 就是诚实链路
+  assert.ok(['host-error', 'sandbox-degraded', 'gate-rejected', 'timeout', 'cancelled', 'timed-out']
+    .includes(r.failure.kind), `unexpected failure kind: ${r.failure.kind}`);
 });
 
 maybeTest('execute(click_mouse valid): works or honest degradation (link must be open)', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    await host.prewarm();
-    const r = await host.execute(makeAction('click_mouse', { x: 0.5, y: 0.5, button: 'left' }));
-    // 无 X 环境：诚实降级为 failure（host-error 或 internal_error 翻译）
-    // 有 X 环境：返回 success。两者都接受，关键是不抛错 + status 合法。
-    assert.ok(
-      r.status === 'success' || r.status === 'failure',
-      `status must be success|failure, got ${JSON.stringify(r)}`,
-    );
-    if (r.status === 'failure') {
-      assert.ok(r.failure, 'failure status must have failure object');
-    }
-  } finally {
-    await host.dispose();
+  const host = shared!;
+  const r = await host.execute(makeAction('click_mouse', { x: 0.5, y: 0.5, button: 'left' }));
+  // 无 X 环境：诚实降级为 failure（host-error 或 internal_error 翻译）
+  // 有 X 环境：返回 success。两者都接受，关键是不抛错 + status 合法。
+  assert.ok(
+    r.status === 'success' || r.status === 'failure',
+    `status must be success|failure, got ${JSON.stringify(r)}`,
+  );
+  if (r.status === 'failure') {
+    assert.ok(r.failure, 'failure status must have failure object');
   }
 });
 
 maybeTest('execute(press_hotkey with unknown keys): fails with invalid_args → host-error', async () => {
-  const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
-  });
-  try {
-    await host.prewarm();
-    const r = await host.execute(makeAction('press_hotkey', { keys: ['totally-bogus-key-that-does-not-exist'] }));
-    // press_hotkey 的 unknown_key 错误 → 翻译为 host-error (或等价)
-    assert.ok(r.status === 'success' || r.status === 'failure',
-      `status must be valid (actually: ${JSON.stringify(r).slice(0, 80)})`);
-    if (r.status === 'failure') {
-      assert.ok(r.failure, 'failure must carry payload');
-    }
-  } finally {
-    await host.dispose();
+  const host = shared!;
+  const r = await host.execute(makeAction('press_hotkey', { keys: ['totally-bogus-key-that-does-not-exist'] }));
+  // press_hotkey 的 unknown_key 错误 → 翻译为 host-error (或等价)
+  assert.ok(r.status === 'success' || r.status === 'failure',
+    `status must be valid (actually: ${JSON.stringify(r).slice(0, 80)})`);
+  if (r.status === 'failure') {
+    assert.ok(r.failure, 'failure status must have payload');
   }
 });
 
+// ── 独立生命周期例（ΝΩ-49 保留独立 spawn —— 语义必须独占一个 Python 进程）──
+
 maybeTest('dispose: idempotent + disposed host returns host-error', async () => {
   const host = new D7PhysicalHostPort({
-    service: { pythonServiceRoot: PYTHON_ROOT, startupTimeoutMs: 8000, env: { DSH_PHYSICAL_TEST_SCREEN: '1' } },
+    service: {
+      pythonServiceRoot: PYTHON_ROOT,
+      startupTimeoutMs: STARTUP_CEILING_MS,
+      tcpPort: await freePort(), // 动态端口：免并行册占坑 8421 误伤
+      env: { DSH_PHYSICAL_TEST_SCREEN: '1' },
+    },
   });
   await host.prewarm();
   assert.equal(host.initialized, true);
@@ -206,10 +210,12 @@ maybeTest('dispose: idempotent + disposed host returns host-error', async () => 
 });
 
 maybeTest('capability cache: switch_window_method reported from health → accessible via host.capability', async () => {
+  // 独立 spawn：env 专属形态（hotkey-only 后端）—— 共享实例的 auto 后端会稀释本例语义
   const host = new D7PhysicalHostPort({
     service: {
       pythonServiceRoot: PYTHON_ROOT,
-      startupTimeoutMs: 8000,
+      startupTimeoutMs: STARTUP_CEILING_MS,
+      tcpPort: await freePort(),
       env: { DSH_PHYSICAL_TEST_SCREEN: '1', DSH_PHYSICAL_WINDOW_BACKEND: 'hotkey-only' },
     },
   });
@@ -227,7 +233,79 @@ maybeTest('capability cache: switch_window_method reported from health → acces
   }
 });
 
+// ── ΑΩ-R27：screenSize 僵尸状态处决执法 ──
+// 定谳：删除字段与就绪判据，不做 TTL 活化（J 纪元后本端零读方；归一化基准的
+// 活依赖在服务端 /v1/get_ui_tree 每请求现场重探 —— 详见 d7HostPort.ts 类内定谳注）。
+// 三层执法：运行期结构（实例无僵尸属性）/ 源文本（器官不复活）/ 行为
+//（health.screen 探测失败时 perceive 不再被 Node 侧判据短路）。
+
+test('ΑΩ-R27: screenSize 僵尸已死 —— 实例不再携带该自有属性（运行期结构执法）', async () => {
+  const host = new D7PhysicalHostPort({}); // 懒启动：构造不 spawn，零 Python 依赖
+  try {
+    assert.equal('screenSize' in host, false,
+      'private 字段已删除 —— 运行期不得再出现该自有属性（防僵尸借尸还魂）');
+  } finally {
+    await host.dispose();
+  }
+});
+
+test('ΑΩ-R27: screenSize 僵尸已死 —— 源文本不再含懒同步器官与就绪判据（防复活执法）', () => {
+  const src = readFileSync(new URL('../src/physicalExecution/d7HostPort.ts', import.meta.url), 'utf8');
+  assert.ok(!/private screenSize/.test(src), '字段声明已删除');
+  assert.ok(!src.includes('_syncScreenSize'), '懒同步方法已删除');
+  assert.ok(!src.includes('screen size unavailable (health screen probe failed)'),
+    'perceive 就绪判据 fault 已删除');
+  assert.ok(src.includes('ΑΩ-R27'), '定谳注释在册（删而非活化的证据链留档）');
+});
+
+// 行为执法脚手架：PYTHONPATH 劫持注入假 pyautogui（import 即 raise）——
+// health 的 get_screen_size 走 except 分支 ⇒ health.screen = {error: ...}，
+// 而 /v1/get_ui_tree 的 L1 归一化与 L2 OCR 由服务端每请求独立处理。
+function brokenPyautoguiDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-r27-nopa-'));
+  writeFileSync(join(dir, 'pyautogui.py'),
+    'raise RuntimeError("AΩ-R27 synthetic: pyautogui unavailable")\n');
+  return dir;
+}
+
+maybeTest('ΑΩ-R27: health.screen 探测失败 ⇒ perceive 不再被 Node 侧就绪判据短路（诚实边界由漏斗单一裁决）', async () => {
+  // 独立 spawn：PYTHONPATH 劫持是本例专属的畸形环境 —— 不得污染共享实例
+  const noPa = brokenPyautoguiDir();
+  const host = new D7PhysicalHostPort({
+    service: {
+      pythonServiceRoot: PYTHON_ROOT,
+      startupTimeoutMs: STARTUP_CEILING_MS,
+      tcpPort: await freePort(),
+      env: { PYTHONPATH: noPa }, // 故意不设 DSH_PHYSICAL_TEST_SCREEN（合成图会兜底出尺寸）
+    },
+  });
+  try {
+    await host.prewarm();
+    // 场景真实性证明：health 确实报 screen error（而非测试空转）
+    const resp = await fetch(`${host.manager.baseUrl}/health`);
+    const body = (await resp.json()) as { data?: { screen?: unknown } };
+    assert.ok(body.data && typeof body.data.screen === 'object' && body.data.screen !== null
+      && 'error' in (body.data.screen as object), `场景在位：health.screen 应为 error 形态，实际 ${JSON.stringify(body.data?.screen)}`);
+    // 旧判据会在此短路成 fault 'screen size unavailable (health screen probe
+    // failed)'；删除后 perceive 直达 getUiTree —— 结果（元素/诚实 fault）由
+    // 漏斗每请求现场重探的 screen size 单一裁决。
+    const patches = await host.perceive({ grid: { cols: 2, rows: 2 } });
+    assert.equal(patches.length, 4, '2x2 网格 ⇒ 4 个分区补丁（形状契约不因判据删除而破）');
+    for (const p of patches) {
+      assert.ok(p.funnelDepth === 'empty' || p.funnelDepth === 'L1' || p.funnelDepth === 'L2'
+        || p.funnelDepth === 'L3', `funnelDepth 合法域，实际 ${p.funnelDepth}`);
+      assert.ok(typeof p.capturedAt === 'number');
+      const detail = (p as { fault?: { detail?: string } }).fault?.detail ?? '';
+      assert.ok(!detail.includes('screen size unavailable (health screen probe failed)'),
+        `不得再出现旧就绪判据 fault，实际 ${detail}`);
+    }
+  } finally {
+    await host.dispose().catch(() => { /* noop */ });
+    try { rmSync(noPa, { recursive: true, force: true }); } catch { /* noop */ }
+  }
+});
+
 if (skip) {
   console.warn('⚠️  D7PhysicalHostPort tests SKIPPED — cannot start Python micro-service ' +
-    '(missing python3 / fastapi / pillow / numpy / uvicorn dependencies).');
+    '(missing python / fastapi / pillow / numpy / uvicorn dependencies).');
 }

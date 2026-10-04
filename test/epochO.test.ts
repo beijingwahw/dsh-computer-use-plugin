@@ -455,6 +455,33 @@ test('O-#14: 标签页栈 —— 指针循环移动有证据；栈 <2 诚实反�
   assert.equal(e6.effectDetected, false, '无标签方言 ⇒ 反证');
 });
 
+// ─── ΝΩ-30：switch_tab 指针模型 —— 有序数组 + 当前索引（重排跟随元素）───
+
+test('ΝΩ-30: 标签重排 —— 索引跟随元素而非位置（宿主 ctrl+tab 顺序对齐）', async () => {
+  const { VirtualScreen } = await import('../src/sandbox/virtualScreen.ts');
+  const tab = (name: string, x: number) => ({
+    role: 'tab', name, rect: { x, y: 0.05, width: 0.1, height: 0.04 },
+  });
+  const A = tab('A', 0.05), B = tab('B', 0.2), C = tab('C', 0.35);
+  const vs = new VirtualScreen([A, B, C]);
+  const e1 = vs.applyAction({ kind: 'switch_tab', args: { direction: 'next' } } as never);
+  assert.match(e1.note, /A → B/, `首切指针落 B：${e1.note}`);
+  // 宿主重排：C 拖到最前（新序 C A B）—— 指针（B 元素）跟随元素移到序位 2
+  vs.reorderTabs([C, A, B]);
+  const e2 = vs.applyAction({ kind: 'switch_tab', args: { direction: 'next' } } as never);
+  assert.match(e2.note, /B → C/, `重排后从 B（元素）继续，next = 新序中 B 的下一个 C（位置跟随会得 A → B）：${e2.note}`);
+  // 新序中 C 的 next = A（循环序已按重排后的文档序）
+  const e3 = vs.applyAction({ kind: 'switch_tab', args: { direction: 'next' } } as never);
+  assert.match(e3.note, /C → A/, `新文档序循环：${e3.note}`);
+  // 防御式：非法重排（缺员/重复/非数组/未知元素）⇒ 整体忽略（世界不变，绝不抛）
+  vs.reorderTabs([A, B]);                       // 缺员
+  vs.reorderTabs([A, A, B]);                    // 重复
+  vs.reorderTabs(null as never);                // 非数组
+  vs.reorderTabs([A, B, { role: 'tab', name: 'X', rect: { x: 0.5, y: 0.05, width: 0.1, height: 0.04 } }]); // 未知元素
+  const e4 = vs.applyAction({ kind: 'switch_tab', args: { direction: 'next' } } as never);
+  assert.match(e4.note, /A → B/, `非法重排被忽略（序仍 C A B ⇒ A 的 next = B）：${e4.note}`);
+});
+
 // ─── O-#15：沙箱 L3 语义层（场景 OCR 点燃休眠的 L3-semantic）───
 
 test('O-#15: 场景 OCR —— expectedText 瞄准验证 + L3 层激活 + 误瞄反证', async () => {

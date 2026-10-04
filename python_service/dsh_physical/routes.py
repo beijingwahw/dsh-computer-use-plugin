@@ -22,8 +22,13 @@ from .audio import audio_events_payload
 from .auth import ALL_CAPS
 from .config import AppConfig
 from .errors import ErrorKind, PhysicalError, safe_call, success
+from . import executors as executors_module  # ΝΩ-36：/v1/stats 的池态诊断面
+from .executors import (  # ΑΩ-R25 专属执行器:端点层残留的裸 executor 全部归池
+    DEVICE_POOL, INPUT_POOL, SCREEN_POOL, TREE_POOL, get as get_pool,
+)
 from .hid import HidController
 from .input import InputController
+from . import rawinput as rawinput_module  # ΝΩ-53：事件驱动输入镜像（默认关闭）
 from .screen import ScreenCapture, list_displays
 from .ui_tree import UIFunnel
 from .uvc import UvcController
@@ -245,6 +250,13 @@ def set_controllers(
         _controllers["uvc"] = uvc
     if hid is not None:
         _controllers["hid"] = hid
+    # ΝΩ-53：Raw Input 镜像按配置启动（enabled=False ⇒ no-op 零回归）。
+    # best-effort：装配失败不击穿 set_controllers —— 事实留在 rawinput 状态机
+    # （describe），调用侧诚实回退轮询。
+    try:
+        rawinput_module.ensure_started(config.raw_input)
+    except Exception as e:  # noqa: BLE001 —— 装配期也不许抛（诚实降级进状态机）
+        print(f"[warn] raw-input mirror start failed: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def _get(name: str) -> Any:
@@ -272,8 +284,12 @@ def _android_ctrl() -> AndroidController:
 
 
 def _run_android(fn: Any, /, *args: Any) -> Any:
-    """android 同步控制器方法 → executor（子进程阻塞不进事件循环）。"""
-    return asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    """android 同步控制器方法 → **device 专属池**（ΑΩ-R25）。
+
+    adb/scrcpy 子进程阻塞（command_timeout 15s 量级）不进事件循环，也
+    不再进缺省共享池 —— 否则一台失联设备可拖住截图/输入等其他面。
+    """
+    return asyncio.get_running_loop().run_in_executor(get_pool(DEVICE_POOL), fn, *args)
 
 
 # ─── W5-1（W4-6 落盘）：L2 零 API 设备面控制器取用（缺席 = 诚实拒绝）───
@@ -365,8 +381,9 @@ async def _surfaces_report() -> dict:
     android = _controllers.get("android")
     if android is not None:
         try:
+            # ΑΩ-R25：android 域读取（纯缓存 dict 拷贝）随 android 面 ⇒ device 池
             cached = await asyncio.get_running_loop().run_in_executor(
-                None, android.cached_inventory,
+                get_pool(DEVICE_POOL), android.cached_inventory,
             )
             if cached is not None:
                 report["android"] = [d["surface_id"] for d in cached.get("devices", [])]
@@ -726,12 +743,33 @@ async def switch_window(req: SwitchWindowRequest) -> dict:
 @router.get("/cursor")
 @safe_call
 async def cursor() -> dict:
-    """当前鼠标位置（全屏像素）—— SoM 准星与多屏感知的数据源。"""
-    import pyautogui
+    """当前鼠标位置（全屏像素）—— SoM 准星与多屏感知的数据源。
+
+    ΝΩ-53：Raw Input 镜像优先（零 Win32 调用、零 executor 往返 —— 事件驱动
+    替代轮询）；镜像陈旧度 > ``stale_after_s``（缺省 2s）或不可用 ⇒ 回退
+    pyautogui 轮询并诚实注记。默认关闭（``DSH_PHYSICAL_RAW_INPUT=1`` 开启）
+    ⇒ 响应与旧版逐字段一致（零回归铁律）。
+    """
+    cfg: AppConfig = _get("config")
+    shot = rawinput_module.read_position(cfg.raw_input.stale_after_s)  # 纯 dict 读
+    if shot.get("ok"):
+        # 镜像快路径：零 Win32 调用、零 executor 往返、零 pyautogui import
+        return {
+            "x": float(shot["x"]), "y": float(shot["y"]),
+            "source": "raw-input-mirror",
+            "age_ms": int(float(shot["age_s"]) * 1000),
+        }
+    out_extra: dict = {}
+    if cfg.raw_input.enabled:
+        # 开了但没成/陈旧：回退轮询必须留痕（诚实注记 —— 不静默装作没开过）
+        out_extra["source"] = "win32-poll"
+        out_extra["note"] = f"raw-input mirror not serving ({shot.get('reason')}); fell back to Win32 poll"
+    import pyautogui  # 仅回退路径需要（镜像路径不付 ~90ms 首导入税）
 
     loop = asyncio.get_running_loop()
-    pos = await loop.run_in_executor(None, pyautogui.position)
-    return {"x": float(pos.x), "y": float(pos.y)}
+    # ΑΩ-R25：pyautogui 读取 ⇒ input 池（快通道，不排在 adb/编码队尾）
+    pos = await loop.run_in_executor(get_pool(INPUT_POOL), pyautogui.position)
+    return {"x": float(pos.x), "y": float(pos.y), **out_extra}
 
 
 @router.get("/cursor_kind")
@@ -741,11 +779,42 @@ async def cursor_kind() -> dict:
 
     操作系统对「指针下是什么」的原生判断：手型 = 可点击热区，
     I 型 = 可选择文本。纯视觉架构中唯一无需 a11y 树的交互性 ground truth。
+
+    ΝΩ-53：镜像开启时响应附加 ``position``（(x,y) 优先读 Raw Input 镜像
+    零调用；句柄比对仍需 GetCursorInfo —— Raw Input 不给句柄，此为结构
+    差异注记）。默认关闭 ⇒ 响应形状不变。
     """
     from .cursor import cursor_kind as read_cursor_kind
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, read_cursor_kind)
+    # ΑΩ-R25：Win32 快读（GetCursorInfo）⇒ input 池 —— 悬停探针要低延迟
+    return await loop.run_in_executor(get_pool(INPUT_POOL), read_cursor_kind)
+
+
+@router.get("/input_events")
+@safe_call
+async def input_events() -> dict:
+    """ΝΩ-53：最近输入事件环（只读）—— 「人手 vs agent 注入」审计面。
+
+    镜像开启时返回最近 ``event_window_s``（缺省 1s）内的事件（环容量
+    ``ring_capacity`` 缺省 128；鼠标位移/按钮位图 + 键盘 vk—— 不含文本，
+    审计所需的最小证据流）。镜像关闭/不可用 ⇒ ``available=False`` + 真实
+    原因（诚实降级，不谎报空事件）。鉴权与 /v1/stats 同方言：不在
+    ENDPOINT_CAPABILITY ⇒ 不要求特定位图（持有效 Cap Token 即可读）。
+    """
+    cfg: AppConfig = _get("config")
+    desc = rawinput_module.describe()
+    events = rawinput_module.recent_events(cfg.raw_input.event_window_s) \
+        if desc.get("state") == "running" else []
+    return {
+        "available": desc.get("state") == "running",
+        "state": desc.get("state"),
+        "reason": desc.get("reason"),
+        "enabled": cfg.raw_input.enabled,
+        "window_s": cfg.raw_input.event_window_s,
+        "events": events,
+        "counts": rawinput_module.stats(),
+    }
 
 
 @router.post("/hit_test")
@@ -773,7 +842,9 @@ async def hit_test(req: HitTestRequest) -> dict:
     py = min(int(round(req.y * h)), h - 1)
 
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, run_hit_test, px, py)
+    # ΑΩ-R25：UIA 结构查询与 L1 树同域 ⇒ tree 池（与 OCR 共池互拖可容忍，
+    # 但绝不拖物理动作 —— 结构感知慢于动作是可接受的优先级排序）
+    result = await loop.run_in_executor(get_pool(TREE_POOL), run_hit_test, px, py)
     return {**result, "pixel": {"x": px, "y": py}}
 
 
@@ -807,7 +878,10 @@ async def devices() -> dict:
             "degraded": True,
             "reason": "android controller not initialized (mobile surface unavailable)",
         }
-    return await asyncio.get_running_loop().run_in_executor(None, android.list_devices)
+    # ΑΩ-R25：adb devices 子进程（15s 超时量级）⇒ device 池
+    return await asyncio.get_running_loop().run_in_executor(
+        get_pool(DEVICE_POOL), android.list_devices,
+    )
 
 
 # ─── W5-1（W4-6 落盘）：L2 零 API 设备面端点（UVC 眼睛 / HID 手）───
@@ -894,8 +968,9 @@ async def hid_type_text(req: HidTypeRequest) -> dict:
 async def frame_stats(req: FrameStatsRequest) -> dict:
     """缓存帧区域统计（intent.ts 物理规则 / popupDetector 几何传感的躯体）。"""
     screen_ctrl: ScreenCapture = _get("screen")
+    # ΑΩ-R25：numpy 统计是 CPU 图像工作 ⇒ screen 池
     stats = await asyncio.get_running_loop().run_in_executor(
-        None, screen_ctrl.frame_stats, req.frame_id, req.regions,
+        get_pool(SCREEN_POOL), screen_ctrl.frame_stats, req.frame_id, req.regions,
     )
     return {"frame_id": req.frame_id, "stats": stats}
 
@@ -903,10 +978,10 @@ async def frame_stats(req: FrameStatsRequest) -> dict:
 @router.post("/frame_rowmeans")
 @safe_call
 async def frame_rowmeans(req: FrameRowmeansRequest) -> dict:
-    """缓存帧行亮度序列（内容平移检测 —— scroll 物理规则）。"""
+    """缓存帧行亮度序列（内容平移检测 —— scroll 物理规则的躯体）。"""
     screen_ctrl: ScreenCapture = _get("screen")
     rows = await asyncio.get_running_loop().run_in_executor(
-        None, screen_ctrl.frame_rowmeans, req.frame_id, req.grid,
+        get_pool(SCREEN_POOL), screen_ctrl.frame_rowmeans, req.frame_id, req.grid,
     )
     return {"frame_id": req.frame_id, "rows": rows}
 
@@ -919,7 +994,8 @@ async def frame_diff(req: FrameDiffRequest) -> dict:
 
     screen_ctrl: ScreenCapture = _get("screen")
     result = await asyncio.get_running_loop().run_in_executor(
-        None, screen_ctrl.frame_diff, req.frame_a, req.frame_b, req.block, req.annotate,
+        get_pool(SCREEN_POOL), screen_ctrl.frame_diff,
+        req.frame_a, req.frame_b, req.block, req.annotate,
     )
     annotated = result.pop("annotated_jpeg")
     if annotated is not None:
@@ -938,7 +1014,8 @@ async def audio_events() -> dict:
     （health 能力申报读缓存，不在探活路径上建链）。
     """
     loop = asyncio.get_running_loop()
-    payload = await loop.run_in_executor(None, audio_events_payload)
+    # ΑΩ-R25：WASAPI 建链/读环是阻塞 COM 设备 I/O ⇒ device 池
+    payload = await loop.run_in_executor(get_pool(DEVICE_POOL), audio_events_payload)
     _audio_state.update({
         "probed": True,
         "available": payload.get("available"),
@@ -946,6 +1023,74 @@ async def audio_events() -> dict:
         "probed_at": int(time.time() * 1000),
     })
     return payload
+
+
+# ─── ΝΩ-36：/v1/stats 诊断端点（只读聚合，永不抛）───
+
+
+def _collect_stats() -> dict:
+    """ΝΩ-36：诊断面聚合（纯读；任何一面缺席/抛错 ⇒ 诚实 absent，绝不击穿）。
+
+    聚合五面：
+      - ``executors``：四池容量/在役态（executors.describe）；
+      - ``shm``：mmap 治理账面（shm.get_stats，ΑΩ-R26 既有）；
+      - ``streams``：scrcpy 常驻流枢纽（StreamHub.stats —— 未建枢纽 ⇒ absent，
+        不触发惰性构造：诊断读不得引发 scrcpy 探测/解码器解析副作用）；
+      - ``audio``：声学通道缓存态（``_audio_state``，health 同源）；
+      - ``frame_ring``：帧环水位（ScreenCapture 帧环公有快照 frame_ids + 容量）。
+    另附 drain 状态（ΝΩ-27 的在飞计数 —— 关停排空的现场可观测面）。
+    """
+    stats: dict = {"ts": int(time.time() * 1000)}
+
+    def _face(name: str, reader: Any) -> None:
+        try:
+            stats[name] = reader()
+        except Exception as e:  # noqa: BLE001 —— 诊断端点绝不抛（safe_call 外的第二道）
+            stats[name] = {"absent": True, "reason": f"{type(e).__name__}: {e}"}
+
+    _face("executors", executors_module.describe)
+    _face("shm", shm_module.get_stats)
+    _face("drain", lambda: {
+        "draining": bool(_drain_state["draining"]),
+        "in_flight": int(_drain_state["in_flight"]),
+    })
+
+    android = _controllers.get("android")
+    if android is None:
+        stats["streams"] = {"absent": True,
+                            "reason": "android controller not assembled"}
+    else:
+        _face("streams", android.stream_stats)
+
+    stats["audio"] = dict(_audio_state)
+
+    screen = _controllers.get("screen")
+    if screen is None:
+        stats["frame_ring"] = {"absent": True,
+                               "reason": "screen controller not initialized"}
+    else:
+        def _ring_watermark() -> dict:
+            ids = screen.frame_ids()
+            return {
+                "frames": len(ids),
+                "capacity": ScreenCapture.MAX_CACHED_FRAMES,
+                "latest_frame_id": ids[-1] if ids else None,
+            }
+        _face("frame_ring", _ring_watermark)
+    return stats
+
+
+@router.get("/stats")
+@safe_call
+async def stats() -> dict:
+    """ΝΩ-36：诊断端点 —— 池/shm/常驻流/声学/帧环水位的只读聚合。
+
+    鉴权按 auth 现状最小实现（与 /v1/shutdown 同管理面方言）：不在
+    ``ENDPOINT_CAPABILITY`` ⇒ 不要求特定位图，X-Cap-Token + X-Request-Id
+    nonce 强制校验照走（密钥持有者即可读诊断 —— 不加新能力位，Node 端
+    capToken 的 Capability 闭集不动）。缺数据的面诚实 ``{"absent": true}``。
+    """
+    return _collect_stats()
 
 
 # ─── /v1/shm/{name}：共享内存显式释放（DELETE 方法）───
@@ -969,3 +1114,105 @@ async def release_shm(name: str) -> dict:
 #      capability 模型形同虚设。
 # 信任根在密钥文件（0600）—— Node 端读密钥自铸（capToken.ts 与 auth.py
 # 字节级镜像），无需服务端铸造入口。
+
+
+# ─── ΝΩ-27：优雅关停（drain 语义）───
+# Windows 上 SIGTERM 即硬杀（TerminateProcess），Node 端 serviceManager 的
+# 3s 优雅窗形同虚设。管理面改走 HTTP：``POST /v1/shutdown`` 收到即
+#   1. 置 draining 标志 —— server.py 的 drain 中间件对新请求（/v1/shutdown
+#      自身除外）回 503+failure 信封（先于 auth/logging，不浪费鉴权开销）；
+#   2. 等在飞请求完成（上限 SHUTDOWN_DRAIN_MAX_WAIT_S=3s —— 卡死的在飞
+#      动作不拖住下线，到点强制走退出）；
+#   3. 触发退出钩子 —— server.run() 注入的 uvicorn.Server 翻转器
+#      （should_exit / 超时 force_exit），lifespan finally 链（shm 清理、
+#      UVC/HID/执行器池收口）随之执行后进程自退。
+# 鉴权（按 auth.py 能力位图现状最小实现，不加新能力位）：/v1/shutdown 不在
+# allow_no_token_endpoints ⇒ 走既有管理面 = X-Cap-Token + X-Request-Id nonce
+# 强制校验；不在 ENDPOINT_CAPABILITY ⇒ 不要求特定位图（密钥持有者即可关停
+# —— 关停权与密钥信任根同源，Node 端 capToken.mintToken(ALL_CAPS) 即可）。
+
+SHUTDOWN_DRAIN_MAX_WAIT_S = 3.0
+SHUTDOWN_POLL_INTERVAL_S = 0.02
+
+# drain 状态（模块级单例 —— server.py 的 drain 中间件与本端点共享；
+# ``_audio_state`` 同款模块 dict 方言）。in_flight 由 drain 中间件 enter/leave。
+_drain_state: dict = {"draining": False, "in_flight": 0}
+
+# 退出钩子：``hook(force: bool) -> None`` —— server.run() 注入（翻转
+# uvicorn.Server.should_exit / force_exit）；缺席（测试/裸 app）⇒ 退化为
+# 仅排空（不真正退出 —— 单测可观察 drain 语义而不杀测试进程）。
+_shutdown_hook: Any = None
+
+
+def register_shutdown_hook(hook: Any) -> None:
+    """注入退出钩子（server.run() 装配期调用）。hook(force) 永不期待抛错。"""
+    global _shutdown_hook
+    _shutdown_hook = hook
+
+
+def reset_shutdown_state() -> None:
+    """归零 drain 状态/钩子（测试隔离用；生产单次进程本就用不上）。"""
+    global _shutdown_hook
+    _drain_state["draining"] = False
+    _drain_state["in_flight"] = 0
+    _shutdown_hook = None
+
+
+def is_draining() -> bool:
+    """draining 标志读口 —— server.py drain 中间件的拒绝判据。"""
+    return bool(_drain_state["draining"])
+
+
+def drain_should_reject(path: str) -> bool:
+    """drain 中间件的纯函数判决（测试面）：draining 且非 /v1/shutdown ⇒ 拒。
+
+    /v1/shutdown 自身放行 —— 幂等（二次调用回 ``already_draining``，
+    Node 端重试/竞态双 dispose 不至于拿到 503 反而误判失败）。
+    """
+    return is_draining() and not path.rstrip("/").endswith("/shutdown")
+
+
+def drain_enter() -> None:
+    """在飞计数 +1（server.py drain 中间件 call_next 前）。"""
+    _drain_state["in_flight"] += 1
+
+
+def drain_leave() -> None:
+    """在飞计数 -1（中间件 finally —— 异常路径同样归还）。"""
+    _drain_state["in_flight"] = max(0, _drain_state["in_flight"] - 1)
+
+
+async def drain_and_exit(max_wait_s: float = SHUTDOWN_DRAIN_MAX_WAIT_S) -> tuple[bool, bool]:
+    """等在飞完成（上限 max_wait_s）后触发退出钩子。返回 ``(forced, drained)``：
+    ``forced`` = 到点仍在飞（钩子以 force=True 调用）；``drained`` = 触发钩子时
+    在飞是否已归零。钩子缺席 ⇒ 仅排空（返回值仍如实）。永不抛错。
+    """
+    deadline = time.monotonic() + max_wait_s
+    while _drain_state["in_flight"] > 0 and time.monotonic() < deadline:
+        await asyncio.sleep(SHUTDOWN_POLL_INTERVAL_S)
+    forced = _drain_state["in_flight"] > 0
+    hook = _shutdown_hook
+    if hook is not None:
+        try:
+            hook(forced)
+        except Exception:  # noqa: BLE001 —— 关停路径不得被钩子拖死
+            pass
+    return forced, not forced
+
+
+@router.post("/shutdown")
+@safe_call
+async def shutdown() -> dict:
+    """ΝΩ-27：优雅关停入口（drain 语义，见上方模块段注）。
+
+    幂等：已在 draining ⇒ 成功信封 + ``already_draining=True``（不重复
+    排空任务）。首调立即应答（drain 排空在后台任务）—— 调用方不必等服务
+    自退，Node 端 serviceManager 收到 ack 即开始等 ``exit``。
+    """
+    if _drain_state["draining"]:
+        return {"draining": True, "already_draining": True}
+    _drain_state["draining"] = True
+    # 后台排空 + 退出（create_task 需事件循环 —— ASGI 端点内必有；
+    # 单测经 asyncio.run 驱动同样成立）
+    asyncio.get_running_loop().create_task(drain_and_exit())
+    return {"draining": True, "already_draining": False}

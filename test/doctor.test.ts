@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { doctor, DOCTOR_RULES } from '../src/qualityDoctor.ts';
+import { doctor, DOCTOR_RULES, doctorSourceCacheStats, resetDoctorSourceCache } from '../src/qualityDoctor.ts';
 import type { ScanContext, DoctorConfig } from '../src/qualityDoctor.ts';
 import type { JournalEntry } from '../src/journal.ts';
 import type { Config } from '../src/config.ts';
@@ -38,6 +38,7 @@ export function ok(x: number): boolean {
 beforeEach(() => {
   doctor.resetMemory();
   doctor.resetConfig();
+  resetDoctorSourceCache(); // ΝΩ-22：源码缓存簿记每用例归零
 });
 
 // ─── 规则抗体（单规则单元测试，喂合成证据） ───
@@ -311,6 +312,38 @@ test('D-4 金丝雀: 手术锁守卫存在于 heal 写盘路径（规则对医�
   const out = await R('genesis.zero-intrusion-guard').scan(ctxOf([
     { path: 'qualityDoctor.ts', content: self }]));
   assert.equal(out.length, 0);
+});
+
+// ─── ΝΩ-22（热路径 IO 放大④）：walkSource mtime 缓存执法册 ───
+
+test('ΝΩ-22 mtime 缓存：未变文件零重读；变更文件恰重读；缓存键含绝对路径（跨根不串档）', async () => {
+  const { root, cfg } = makeFixture();
+  put(root, 'a.ts', 'try { a(); } catch (e) {}\n');
+  put(root, 'b.ts', CLEAN);
+  await doctor.configure(cfg);
+  await doctor.diagnose();
+  const s1 = doctorSourceCacheStats();
+  assert.equal(s1.misses, 2, '首诊全量读（2 文件）');
+  // 二诊：文件未变 ⇒ 零重读、命中走缓存
+  await doctor.diagnose();
+  const s2 = doctorSourceCacheStats();
+  assert.equal(s2.misses, s1.misses, '未变文件零重读');
+  assert.equal(s2.hits, s1.hits + 2, '两文件全部命中缓存');
+  // 变更文件（内容/长度变化 ⇒ mtime+size 键失效）⇒ 恰该文件重读，诊断吃新内容
+  put(root, 'a.ts', 'try { changed(); } catch (e) { /* ok */ }\n');
+  const r3 = await doctor.diagnose();
+  const s3 = doctorSourceCacheStats();
+  assert.equal(s3.misses, s1.misses + 1, '恰变更文件重读（b.ts 仍命中）');
+  assert.equal(r3.findings.some(f => f.ruleId === 'smell.empty-catch'), false, '缓存不吐旧文（新内容生效）');
+  // 另一根目录的同相对路径文件：缓存键含绝对路径 ⇒ 独立读取不串档
+  const other = makeFixture();
+  put(other.root, 'a.ts', 'try { z(); } catch (e) {}\n');
+  await doctor.configure(other.cfg);
+  const r4 = await doctor.diagnose();
+  assert.equal(r4.findings.some(f => f.location.file === 'a.ts' && f.ruleId === 'smell.empty-catch'), true,
+    '另一根的同名文件独立读取（未命中前根缓存）');
+  rmSync(root, { recursive: true, force: true });
+  rmSync(other.root, { recursive: true, force: true });
 });
 
 test('D-4 规则统计: 20 条抗体覆盖四大类目与六条铁律（13 既有 + W6R-B9 七条安全不变量）', () => {

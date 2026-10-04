@@ -43,6 +43,11 @@
 //     一切端点照旧开放 —— 零配置环回语义不变。签名客户端姿势见
 //     scripts/README-federation.md（含 curl 示例；src/crossMachine.ts 的
 //     makeHttpBarrierTransport 可经注入 fetchImpl 加签 —— 见 README）。
+//   · ΝΩ-19（联邦逐源签名）：/aggregate 对带签摘要（附 pubkey/sig 域）**原样入环、
+//     原样回传** —— 聚合端是中继不是签证者，逐源 Ed25519 验签发生在各客户端
+//     （src/federation/sync.ts：验不过的源按缺席剔除并计数，绝不混入中位数）；
+//     本件不验签、不剥签名域、不造签名（looksLikeDigest 只看 v/keys，摘要自带的
+//     pubkey/sig 域随对象整体存活 —— 迁移期双端可独立升级）。
 //   · W9-2（DEBTS D-C2 落锤）：生产化 env 面（全部可选，未设 ⇒ 与参考实现
 //     逐字节同行为 —— 生产化是能力不是缺省切换）：
 //       DSH_FED_PORT            监听口（--port 参数优先；缺席 ⇒ 18433）
@@ -635,6 +640,8 @@ const server = http.createServer((req, res) => {
           const incoming = Array.isArray(parsed) ? parsed : [parsed];
           let rejected = 0;
           for (const d of incoming) {
+            // ΝΩ-19：带签摘要（附 pubkey/sig 域）原样入环 —— 转发时绝不剥签名
+            //（looksLikeDigest 只看 v/keys，其余域随对象整体存活，回传 digests 供客户端逐源验签）
             if (looksLikeDigest(d)) buffer.push(d);
             else rejected += 1; // 坏件不入环（缺席处理 —— 与鲁棒律同源）
           }

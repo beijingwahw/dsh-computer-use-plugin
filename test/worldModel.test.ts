@@ -211,3 +211,261 @@ test('计费器 #2：熟悉的世界回到便宜眼睛 —— 惊讶平息即降
   assert.deepEqual(rig.forceL3Log, [false, false, true, false],
     `实际 ${JSON.stringify(rig.forceL3Log)}`);
 });
+
+// ─── ΝΩ-15：世界模型聚类的在线化升级（碎片化治理）───
+// 旧疾：质心冻结于铸造时刻 ⇒ 布局渐变时相似度跌破 0.62 ⇒ 分铸碎片 ⇒
+// 转移表按 fromType|action 稀释、predict 证据摊薄、novel 率虚高。
+// 修法三件套：在线质心吸收（α=1/members）+ 近邻合并（cosine ≥ 0.85）+
+// 软量化签名（WM-2 跨格线脆性）。
+
+/** ΝΩ-15 行夹具：4 个短名元素整列 —— 位置质量占比高，渐变可测 */
+function rowScene(x: number): ScenePatch[] {
+  return scene([['A', x, 0.2], ['B', x, 0.4], ['C', x, 0.6], ['D', x, 0.8]]);
+}
+
+/** ΝΩ-15 有机碎片化剧本：row(0.10)/row(0.55) 互不相似（cos≈0.53）分铸两型，
+ *  中间布局反复出现（双端渐变）⇒ 双质心相向漂移至 cos≈0.87 —— 碎片化现场。
+ *  返回 [近端 id, 远端 id]（远端 = 后铸的 screen-2，members 少 ⇒ 被收拢方）。 */
+function fragmentByDrift(wm: InMemoryWorldModel): [string, string] {
+  const nearId = wm.typeOf(rowScene(0.10))!;
+  const farId = wm.typeOf(rowScene(0.55))!;
+  assert.notEqual(nearId, farId, '两端布局不相似 ⇒ 分铸（碎片化现场）');
+  for (let pass = 0; pass < 6; pass++) {
+    for (let i = 0; i <= 7; i++) wm.typeOf(rowScene(+(0.15 + i * 0.05).toFixed(2)));
+  }
+  return [nearId, farId];
+}
+
+test('ΝΩ-15 在线质心：渐变序列不铸新类型（质心吸收后仍命中）', () => {
+  const wm = new InMemoryWorldModel();
+  const id = wm.typeOf(rowScene(0.10))!;
+  // 整列右移 0.10→0.55（跨多条格线与格中点）：每步被当前质心吸收，
+  // 质心随布局漂移 —— 全程同型（冻结质心在同剧本下 5 次分铸，探针实测）
+  for (let i = 1; i <= 9; i++) {
+    const x = +(0.10 + i * 0.05).toFixed(2);
+    assert.equal(wm.typeOf(rowScene(x)), id, `渐变步 x=${x} 仍命中同型`);
+  }
+  assert.equal(wm.stats().types, 1, '零分铸');
+  assert.equal(wm.exportSnapshot().types[0].members, 10, '会员计数 = 观察次数');
+  // 异构屏照常分型（吸收不灭分辨力）
+  assert.notEqual(wm.typeOf(MENU_BAR), id);
+  assert.equal(wm.stats().types, 2);
+});
+
+test('ΝΩ-15 软量化（WM-2）：跨格线移动签名严格保留，跨格中点部分保留', () => {
+  // 格线 x=0.25：OK 中心 0.249→0.251，主/邻格恰好互换 —— 签名集合不变
+  const left = [['OK', 0.209, 0.7], ['Cancel', 0.6, 0.7]] as Array<[string, number, number]>;
+  const right = [['OK', 0.211, 0.7], ['Cancel', 0.6, 0.7]] as Array<[string, number, number]>;
+  const wm1 = new InMemoryWorldModel();
+  const idL = wm1.typeOf(scene(left))!;
+  assert.equal(wm1.typeOf(scene(right)), idL, '跨格线微移（约 4px）仍同型');
+  // 独立模型铸右侧：两侧签名集合严格相等（集合语义 —— 脆性闭合的直接证据）
+  const wm2 = new InMemoryWorldModel();
+  wm2.typeOf(scene(right));
+  const tokL = wm1.exportSnapshot().types[0].tokens.slice().sort();
+  const tokR = wm2.exportSnapshot().types[0].tokens.slice().sort();
+  assert.deepEqual(tokL, tokR, '跨格线：主/邻格互换 ⇒ 签名集合严格相等');
+  // 跨格中点（x=0.375）：翻一枚 token —— 部分保留（同型但签名已变）
+  const mid = [['OK', 0.336, 0.7], ['Cancel', 0.6, 0.7]] as Array<[string, number, number]>;
+  assert.equal(wm1.typeOf(scene(mid)), idL, '跨中点移动仍同型（部分保留兜底）');
+  const wm3 = new InMemoryWorldModel();
+  wm3.typeOf(scene(mid));
+  const tokM = wm3.exportSnapshot().types[0].tokens.slice().sort();
+  const shared = tokL.filter(t => tokM.includes(t));
+  assert.ok(shared.length > 0 && shared.length < tokL.length,
+    `部分保留：共享 ${shared.length}/${tokL.length} 枚 token`);
+});
+
+test('ΝΩ-15 mergeSimilarTypes：碎片收拢 —— 计数守恒 + alias 透明', () => {
+  const wm = new InMemoryWorldModel();
+  const [nearId, farId] = fragmentByDrift(wm);
+  // 转移账本：双向 + next 侧同时涉及两型（合并最复杂的面）
+  assert.ok(wm.observe(nearId, 'act', farId, true).ok);
+  assert.ok(wm.observe(nearId, 'act', farId, true).ok);
+  assert.ok(wm.observe(farId, 'act', nearId, false).ok);
+  assert.ok(wm.observe(nearId, 'act2', nearId, true).ok);
+  const before = wm.exportSnapshot();
+  const beforeMembers = before.types.reduce((s, t) => s + t.members, 0);
+  const beforeObs = wm.stats().observations;
+
+  const r = wm.mergeSimilarTypes();
+  assert.deepEqual(r.merged, [{ from: farId, into: nearId }], '远端（证据少）并入近端（证据多）');
+  assert.equal(wm.stats().types, 1, '碎片收拢为一型');
+  assert.equal(wm.stats().observations, beforeObs, '转移总质量守恒');
+  const after = wm.exportSnapshot();
+  assert.equal(after.types.reduce((s, t) => s + t.members, 0), beforeMembers, '会员计数守恒（相加）');
+  assert.deepEqual(after.aliases, [[farId, nearId]], 'alias 留档');
+
+  // 同 actionKey 的 next 分布加权合并：act 三笔（两笔 near→far + 一笔 far→near）
+  // 全部改道幸存 id；act2 不受扰
+  const act = after.transitions.find(t => t.action === 'act')!;
+  assert.equal(act.from, nearId);
+  assert.equal(act.total, 3);
+  assert.deepEqual(act.next, [[nearId, 3]]);
+  const act2 = after.transitions.find(t => t.action === 'act2')!;
+  assert.equal(act2.total, 1);
+  assert.deepEqual(act2.next, [[nearId, 1]]);
+
+  // alias 查询透明：旧 id 的 predict/surprise/observe 与幸存 id 完全等价
+  assert.deepEqual(wm.predict(farId, 'act'), wm.predict(nearId, 'act'));
+  assert.deepEqual(wm.surprise(farId, 'act', nearId), wm.surprise(nearId, 'act', nearId));
+  assert.ok(wm.observe(farId, 'act', nearId, true).ok);
+  assert.equal(wm.exportSnapshot().transitions.find(t => t.action === 'act')!.total, 4,
+    '旧 id 入账透明改道幸存键');
+  // typeOf 产出恒为幸存 id（收拢后的两端布局都命中漂移质心）
+  assert.equal(wm.typeOf(rowScene(0.30)), nearId);
+  assert.equal(wm.typeOf(rowScene(0.55)), nearId);
+  // 负例：不相似对绝不合并（收拢有口径，不是大杂烩）
+  wm.typeOf(MENU_BAR);
+  assert.equal(wm.mergeSimilarTypes().merged.length, 0, 'cos < 0.85 不合并');
+});
+
+test('ΝΩ-15 fork/merge 次序 A：维护在先 ⇒ 重放按 alias 改写，碎片不复活', () => {
+  const root = new InMemoryWorldModel();
+  const [nearId, farId] = fragmentByDrift(root);
+  // run 内 fork：继承两型，观察远端布局 + 双向转移
+  const f = root.fork();
+  assert.equal(f.typeOf(rowScene(0.55)), farId, 'fork 继承指认（member op）');
+  f.observe(farId, 'act', nearId, true);
+  f.observe(nearId, 'act', farId, true);
+  // 维护在 merge() 重放之先：farId 收拢进 nearId
+  assert.equal(root.mergeSimilarTypes().merged.length, 1);
+  const before = root.exportSnapshot();
+  const membersBefore = before.types.reduce((s, t) => s + t.members, 0);
+  assert.equal(root.stats().observations, 0);
+
+  root.merge(f);
+  const after = root.exportSnapshot();
+  assert.equal(root.stats().types, 1, '重放不复活已收拢碎片');
+  assert.ok(!after.types.some(t => t.id === farId), '被合并 id 不回册');
+  assert.equal(root.stats().observations, 2, '重放观察守恒');
+  assert.equal(after.types.reduce((s, t) => s + t.members, 0), membersBefore + 1,
+    'fork 的 member op 计入幸存者（含质心吸收）');
+  // 转移按 alias 改道：两笔观察同落幸存键，next 全指幸存 id
+  const act = after.transitions.find(t => t.action === 'act')!;
+  assert.equal(act.from, nearId);
+  assert.equal(act.total, 2);
+  assert.deepEqual(act.next, [[nearId, 2]]);
+});
+
+test('ΝΩ-15 fork/merge 次序 B：重放在先 ⇒ 下一幕收拢，终态与次序 A 等价', () => {
+  /** 同剧本跑两种次序，返回可比较的终态摘要 */
+  const run = (maintenanceFirst: boolean) => {
+    const root = new InMemoryWorldModel();
+    const [nearId, farId] = fragmentByDrift(root);
+    const f = root.fork();
+    f.typeOf(rowScene(0.55));
+    f.observe(farId, 'act', nearId, true);
+    f.observe(nearId, 'act', farId, true);
+    if (maintenanceFirst) {
+      root.mergeSimilarTypes();
+      root.merge(f);
+    } else {
+      root.merge(f); // 重放在先：farId 侧 +1 会员、转移按原 id 落地
+      root.mergeSimilarTypes(); // 维护在后：按当刻余弦收拢
+    }
+    const snap = root.exportSnapshot();
+    return {
+      types: root.stats().types,
+      observations: root.stats().observations,
+      members: snap.types.reduce((s, t) => s + t.members, 0),
+      act: snap.transitions.find(t => t.action === 'act'),
+      aliasOk: JSON.stringify(root.predict(farId, 'act')) === JSON.stringify(root.predict(nearId, 'act')),
+      nearId,
+    };
+  };
+  const orderA = run(true);
+  const orderB = run(false);
+  // 两种次序的确定性语义：计数守恒同果、分布同形、alias 透明同律
+  assert.equal(orderB.types, 1);
+  assert.deepEqual(orderB.act, orderA.act, '转移分布逐项等价（total/next 同形）');
+  assert.equal(orderB.observations, orderA.observations);
+  assert.equal(orderB.members, orderA.members, '会员总数等价（fork 的观察不因次序丢失/重复）');
+  assert.ok(orderB.aliasOk && orderA.aliasOk);
+  assert.equal(orderB.act!.from, orderB.nearId);
+  assert.deepEqual(orderB.act!.next, [[orderB.nearId, 2]]);
+});
+
+test('ΝΩ-15 fork/merge：维护已收拢的号，fork 后铸的同号类型不复活碎片', () => {
+  const root = new InMemoryWorldModel();
+  const nearId = root.typeOf(rowScene(0.10))!; // screen-1（root 计数器=1）
+  // 两个 fork 都在 root 只有 screen-1 时分出（各自计数器=1 ⇒ 都会铸 screen-2）
+  const f1 = root.fork();
+  const f2 = root.fork();
+  const f1Id = f1.typeOf(rowScene(0.55))!; // 同布局 —— 与 root 后铸的 screen-2 同型
+  assert.equal(f1Id, 'screen-2');
+  const f2Id = f2.typeOf(MENU_BAR)!; // 无关内容 —— 也占了 screen-2 号
+  assert.equal(f2Id, 'screen-2');
+  // root 并发自己也铸 screen-2（row55），随后渐变漂移 + 维护收拢
+  const rootFarId = root.typeOf(rowScene(0.55))!;
+  assert.equal(rootFarId, 'screen-2');
+  for (let pass = 0; pass < 6; pass++) {
+    for (let i = 0; i <= 7; i++) root.typeOf(rowScene(+(0.15 + i * 0.05).toFixed(2)));
+  }
+  assert.deepEqual(root.mergeSimilarTypes().merged, [{ from: 'screen-2', into: nearId }]);
+
+  // f1 的铸造（screen-2，同型异号）：降级为幸存者的会员吸收 —— 不复活
+  const membersBefore = root.exportSnapshot().types[0].members;
+  root.merge(f1);
+  const snap1 = root.exportSnapshot();
+  assert.equal(root.stats().types, 1, '同型异号铸造不复活碎片');
+  assert.ok(!snap1.types.some(t => t.id === 'screen-2'));
+  assert.equal(snap1.types[0].members, membersBefore + 1, '降级为会员吸收');
+
+  // f2 的铸造（screen-2 号，无关内容）：与幸存者不相似 ⇒ 重铸新号，绝不
+  // 污染幸存者向量、绝不复活别名 id
+  root.merge(f2);
+  const snap2 = root.exportSnapshot();
+  assert.equal(root.stats().types, 2, '无关内容另立新型');
+  assert.ok(!snap2.types.some(t => t.id === 'screen-2'), '别名占用的 id 不复活为类型');
+  const newType = snap2.types.find(t => t.id !== nearId)!;
+  assert.equal(newType.id, 'screen-3', '按父计数器重铸新号');
+  assert.ok(newType.tokens.some(t => t.startsWith('File@')), '新号承载 MENU 内容');
+});
+
+test('ΝΩ-15 快照往返：漂移质心与 alias 表无损水合；旧档（无新字段）兼容', () => {
+  const wm = new InMemoryWorldModel();
+  const [nearId, farId] = fragmentByDrift(wm);
+  wm.observe(nearId, 'act', farId, true);
+  assert.equal(wm.mergeSimilarTypes().merged.length, 1);
+
+  const snap = JSON.parse(JSON.stringify(wm.exportSnapshot())); // 真实 JSON 往返（磁盘同构）
+  const reborn = new InMemoryWorldModel();
+  assert.ok(reborn.restoreSnapshot(snap).ok);
+  assert.deepEqual(reborn.exportSnapshot().aliases, [[farId, nearId]], 'alias 表往返');
+  // 漂移质心往返存活：若 vec 丢失（由铸造 tokens 重铸）则 row(0.30) 必分铸
+  assert.equal(reborn.typeOf(rowScene(0.30)), nearId, '质心漂移不因落盘遗忘');
+  assert.deepEqual(reborn.predict(farId, 'act'), reborn.predict(nearId, 'act'), '旧 id 透明');
+
+  // 旧档兼容：无 vec / 无 aliases 字段 ⇒ 空表 + tokens 重铸（诚实降级）
+  const legacy = {
+    version: 1,
+    types: (snap.types as Array<Record<string, unknown>>).map(t => ({
+      id: t.id, tokens: t.tokens, members: t.members,
+    })),
+    transitions: snap.transitions,
+    typeCounter: snap.typeCounter,
+  };
+  const rebornLegacy = new InMemoryWorldModel();
+  assert.ok(rebornLegacy.restoreSnapshot(legacy).ok, '旧档（ΝΩ-15 前格式）可水合');
+  assert.equal(rebornLegacy.stats().types, 1);
+  assert.notEqual(rebornLegacy.typeOf(rowScene(0.55)), nearId,
+    '质心重铸自铸造签名 ⇒ 漂移历史不虚构（vec 字段是承重墙的证据）');
+
+  // 非法新字段 ⇒ 整体拒绝（异常诚实，绝不半水合）
+  const reject = (s: unknown, why: string) =>
+    assert.ok(!(new InMemoryWorldModel()).restoreSnapshot(s).ok, why);
+  reject({ ...legacy, aliases: [['screen-9', 'screen-404']] }, 'alias 链悬空');
+  reject({ ...legacy, aliases: [[nearId, 'screen-1']] }, 'alias source 是活类型');
+  reject({ ...legacy, aliases: [['a', 'b'], ['b', 'a']] }, 'alias 环');
+  reject({
+    ...legacy,
+    types: [{ id: 'screen-1', tokens: ['OK@22'], members: 1, vec: { dims: [[5, 1], [5, 1]], norm: 1 } }],
+    transitions: [], aliases: [],
+  }, 'vec 桶号重复（cosine 双指针前提破坏）');
+  reject({
+    ...legacy,
+    types: [{ id: 'screen-1', tokens: ['OK@22'], members: 1, vec: { dims: [[9, 1], [5, 1]], norm: 1 } }],
+    transitions: [], aliases: [],
+  }, 'vec 桶号乱序');
+});

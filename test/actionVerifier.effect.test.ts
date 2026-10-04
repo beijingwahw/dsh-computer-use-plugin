@@ -6,7 +6,8 @@
 //      邻近阈值三点扫（0.98/0.984375/0.99）+ 中程相似度阈值扫；
 //   ③ 退化三形态 → null + unverifiable 原因：
 //      absent（空串，归一化**前**检查 —— hexToBits 会把 '' 回退成全零位串）、
-//      zero（hex 全零 / 位串全零 / 损坏 hex 的回退值）、
+//      zero（hex 全零 / 位串全零 / 损坏 hex 的回退值；ΝΩ-24 起非 16 位 hex 同律 ——
+//        hexToBits 长度校验非法返 null，normalizeHash 防御收敛全零）、
 //      length（归一化后长度不等：位串域与 hex 域各一例）；
 //   ④ 优先序 absent > zero > length（分支序锁定）；
 //   ⑤ 证据保留：退化时 distance/similarity_pct 照报原始测量值（含 absent-both
@@ -98,8 +99,15 @@ test('W6R-effect③d: length —— 归一化后位长不等（位串域与 hex 
   assert.equal(bits.unverifiable, 'length');
   assert.equal(bits.distance, 64, 'hammingDistance 长度不齐取 max(len) —— 保守最大距离');
   assert.equal(bits.similarity_pct, 0, '旧实现据此虚报 effect_detected=true 的假阳性面，今以 null 否决');
-  const hex = reportEffect(H_A, '01234567', 0.98);
-  assert.equal(hex.unverifiable, 'length');
+  // ΝΩ-24：非 16 位 hex 不再产出错误长度的位串（旧 '01234567' → 32 位串走
+  // length 臂），而是判非法收敛全零（zero 保守臂 —— 判决仍 null，原因码
+  // 从 length 迁到 zero，与 Δ-7 保守律同向）；hex 域的长度不等例改由
+  // 「位串 vs 合法 16-hex（64 位展开）」承载，判决语义零回归。
+  const shortHex = reportEffect(H_A, '01234567', 0.98);
+  assert.equal(shortHex.unverifiable, 'zero', 'ΝΩ-24：8 位 hex（截断）⇒ 非法 → 全零哨兵（zero 臂）');
+  assert.equal(shortHex.effect_detected, null, '判决仍无法判定（保守律不回归）');
+  const hex = reportEffect('01'.repeat(16), 'ffffffffffffffff', 0.98);
+  assert.equal(hex.unverifiable, 'length', '32 位位串 vs 64 位（16-hex 展开）⇒ length');
   assert.equal(hex.effect_detected, null);
 });
 

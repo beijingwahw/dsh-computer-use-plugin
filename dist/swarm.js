@@ -275,7 +275,10 @@ class Swarm {
         if (typeof this.timer === 'object' && 'unref' in this.timer)
             this.timer.unref?.();
     }
-    /** 手动触发一次同步（swarm_sync 工具 / 卸载钩子调用；同样非阻塞） */
+    /** 手动触发一次同步（卸载钩子调用；同样非阻塞）。
+     *  ΑΩ-R34：旧注释称「swarm_sync 工具」—— 本插件无此工具面（工具注册表里
+     *  技能联邦同步由 federation_sync 承担、且走 federation/ 证据账流程），
+     *  syncNow 的现实调用方只有卸载钩子（index.ts 卸载时序）。 */
     syncNow() {
         if (!this.endpoint)
             return;

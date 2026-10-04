@@ -87,34 +87,34 @@ import { PolicyEngine } from './policyEngine.js';
 import { AutonomyConstitution } from './autonomyConstitution.js';
 import { EvolutionEngine } from './evolutionEngine.js';
 import { runAutonomousLoop } from './autoPilot.js';
-// ─── 确定性 PRNG（自带 mulberry32，零依赖） ───
+// ΑΩ-R14（方言统一）：① 判据核对复用 criteriaEval 纯函数（runtime 主路径 W9-1
+// D-G9 收口的同一器官 —— gym 内联折叠子串方言退役，接线与取舍论证见
+// gymCriteriaEvidence JSDoc）；② rng 单源化 —— mulberry32/fnv1a 流实现改自
+// src/dialects/random.ts 导入（私有副本退役，随机流逐字节同源、消费顺序不变
+// = 确定性回放锚；gym 侧种子归一卫兵见下方 mulberry32 定义）。
+import { evaluateCriteria, buildCriteriaPairs } from './criteriaEval.js';
+import { mulberry32 as dialectMulberry32 } from '../dialects/random.js';
+// ─── 确定性 PRNG（ΑΩ-R14 起 rng 单源：流实现自 src/dialects/random.ts） ───
 /**
- * mulberry32：32 位确定性 PRNG（种子钉死 ⇒ 序列钉死）。
- * 返回 [0,1) 均匀浮点；非有限种子按 0 记。任务生成与世界变奏的唯一随机源。
+ * mulberry32（gym 消费面）：单源流内核 + gym 种子归一卫兵。
+ * ΑΩ-R14（方言统一②rng 单源）：流实现退役 —— 单源模块 src/dialects/random.ts
+ * （照抄 evolutionPrimitives.ts:77/90 现实现，种子流逐字节同源）。卫兵保 gym
+ * 旧方言的种子归一律（有限值 Math.floor / 非有限值按 0 记）：单源内核的
+ * `seed >>> 0` 在 ToInt32 下对负小数种子截断（-1.5→-1）而 gym 旧律取 floor
+ * （-1.5→-2），卫兵在 gym 边界包一层（dialects/random 头注的分工律）—— gym
+ * 全域（含负小数种子）与旧实现逐字节一致，零回归。随机流消费顺序不变。
  */
 export function mulberry32(seed) {
-    let a = (typeof seed === 'number' && Number.isFinite(seed) ? Math.floor(seed) : 0) >>> 0;
-    return () => {
-        a = (a + 0x6d2b79f5) | 0;
-        let t = a;
-        t = Math.imul(t ^ (t >>> 15), t | 1);
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
+    return dialectMulberry32(typeof seed === 'number' && Number.isFinite(seed) ? Math.floor(seed) : 0);
 }
 /**
- * FNV-1a 32 位字符串散列（状态戳定位用，非密码学）。
- * W8-B1 起加 export：卫星件（noise/world/pcgDerive/pcgWorld/pcgCampaign）经
- * 「立法在源」纪律从本件导入 —— 域分离派生纪律只此一份，不改任何行为。
+ * FNV-1a 32 位字符串散列（状态戳定位用，非密码学）。两旧方言（gym 私有副本与
+ * evolutionPrimitives）逐字节同源 ⇒ 无卫兵直迁：W8-B1 起卫星件（noise/world/
+ * pcgDerive/pcgWorld/pcgCampaign）经「立法在源」纪律从本件导入 —— 域分离派生
+ * 纪律只此一份。ΑΩ-R14：实现自 src/dialects/random.ts 单源再导出（gym 导入面
+ * 零改动），行为零变化。
  */
-export function fnv1a(s) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-    }
-    return h >>> 0;
-}
+export { fnv1a } from '../dialects/random.js';
 /** 保留两位小数（总结句里的权重展示）。W8-B1 起加 export：gym.noise.ts 消费（立法在源）。 */
 export function r2(x) {
     return Math.round(x * 100) / 100;
@@ -141,6 +141,30 @@ function goalOf(kind, pages) {
         case 'danger-gate':
             return '处理待办订单提醒并选择稍后提醒';
     }
+}
+/**
+ * ΑΩ-R14（方言统一①判据核对）：gym 世界的判据证据判定 —— criteriaEval 单一
+ * 器官（runtime 主路径 W9-1 D-G9 收口的同源器官）的纯函数封装，内联折叠子串
+ * evidenceOf 方言就此退役。调用方式取舍（差异面由 test/r14.gymDialect.test.ts
+ * 钉死；须与 gym 既有测试与 runtime 侧 w9criteria 测试都相容）：
+ *   · 肯定面 tolerance=0（纯精确匹配）：器官缺省的 fuzzy ⌈m/6⌉ 会把「距判据
+ *     一字之差」的语料判 met —— W1-4 噪声诊所的 OCR 词形腐蚀（下→不/完→元/
+ *     成→城…）恰是一字差的主产地，declare 通道的 textDigest 走腐蚀词面，fuzzy
+ *     会把诊所刻意测量的「噪声下退化」吸收掉（noiseSweep 单调性失真）；而
+ *     execute 抽查通道（world.ocrText()）无字符级腐蚀、四世界/PCG 判据字面由
+ *     立法原样入读 ⇒ 精确匹配与旧折叠子串方言逐字节等价（零回归铁律）；
+ *   · 否定面（mustNotAppear:/不得出现： 前缀）随器官获得证伪能力：命中禁词 ⇒
+ *     violated（经 runAutonomousLoop ⑧ 回填 goalState「任一 violated ⇒ failed」
+ *     既有执法）—— 四世界与 PCG 现行判据全为肯定面，此能力为零漂移纯增益。
+ * 证据下标锚定 criteria 原位（buildCriteriaPairs 同律：非法条目剔除不平移
+ * 下标）；语料缺席/不可读 ⇒ 零证据（器官诚实降级，与旧空摘要行为一致）。
+ * 纯函数、绝不抛。
+ */
+export function gymCriteriaEvidence(criteria, text) {
+    // polarity 是器官审计面 —— 按 runtime.checkCriteria 同律投影剥离，只载
+    // index+status（消费方 runAutonomousLoop ⑧ 按状态回填 goalState）
+    const out = evaluateCriteria(buildCriteriaPairs(criteria), text, { tolerance: 0 });
+    return out.evidence.map(({ index, status }) => ({ index, status }));
 }
 /**
  * 任务铸造核心（generateTasks 与纪元 Κ 课程采样共用）：难度按序号 4 个一块
@@ -821,20 +845,12 @@ export class AutonomyGym {
         const now = this.clock;
         const lastSnapshotRef = { current: null };
         const criteria = meta.criteria;
-        const fold = (s) => typeof s === 'string' ? s.toLowerCase().replace(/\s+/g, ' ').trim() : '';
-        /** 判据证据：折叠子串匹配（判据文字出现在 readWords 口径的全文里 ⇒ met） */
-        const evidenceOf = (text) => {
-            const digest = fold(text);
-            if (digest.length === 0)
-                return [];
-            const out = [];
-            criteria.forEach((criterion, index) => {
-                const needle = fold(criterion);
-                if (needle.length > 0 && digest.includes(needle))
-                    out.push({ index, status: 'met' });
-            });
-            return out;
-        };
+        // ΑΩ-R14（方言统一①判据核对）：内联折叠子串 evidenceOf 方言退役 —— 判据
+        // 证据判定改走 criteriaEval 单一器官（runtime 主路径 W9-1 D-G9 收口同源；
+        // 肯定面精确匹配 / 否定面证伪的调用方式取舍与差异钉死见 gymCriteriaEvidence
+        // JSDoc 与 test/r14.gymDialect.test.ts —— 四世界与 PCG 既有判据全为肯定面
+        // ⇒ 证据产出与旧方言逐字节等价，零回归）。
+        const evidenceOf = (text) => gymCriteriaEvidence(criteria, text);
         // ─── Θ-3 内核进化记账基建（全部观察式：只记账，绝不改变闭环任何产物） ───
         //
         // ground truth 三源（虚拟世界立法自带，真实世界拿不到这种对账单）：
@@ -1141,6 +1157,9 @@ export class AutonomyGym {
 // 卫星件的件内实现导出不外溢）。卫星件回导本件立法常量（mulberry32/fnv1a/
 // r2/castTask/KIND_ORDER/DEFAULT_* 等）是「立法在源」纪律：缺省值与轮转律只此
 // 一份，测试锁定口径不变。
+// ΑΩ-R14（方言统一②rng 单源）：mulberry32/fnv1a 的流实现已上移单源模块
+// src/dialects/random.ts —— 本件 mulberry32 是「单源流内核 + gym 种子归一
+// 卫兵」的门面、fnv1a 原样再导出（卫星件从本件的消费链与导入面分毫不动）。
 // W1-4 病态感知诊所（gym.noise.ts；corruptOcrLabel/GYM_NOISY_OCR_CONF 为件内
 // 实现面，只供世界铸造侧兄弟件导入 —— 不进公共再导出，导入面与拆分前逐符对齐）
 export { noiseSweep, resolveGymNoise } from './gym.noise.js';

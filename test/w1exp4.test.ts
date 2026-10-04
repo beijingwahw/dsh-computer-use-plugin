@@ -216,16 +216,21 @@ test('W1-5: 重放确定性——同 seed 同历史逐字节一致；采样流�
 
 // ─── 验收四：旧用例兼容（θ=0 ⇒ 旧固定规则行为；双轨互不扰动） ───
 
-test('W1-5: 旧律兼容——θ=0 时 heuristics 逐字节保持旧权重律；bandit 轨不扰动旧表；贪心臂与旧建议同裁', () => {
-  // 经典旧律例（与 autonomy.evolutionEngine.test.ts 同构）：成功去重 +0.1 / 末两罚 −0.15 / popup 恢复 +0.05
+test('W1-5: 旧律兼容——θ=0 时 heuristics 逐字节保持权重律（ΝΩ-11 折扣版）；bandit 轨不扰动旧表；贪心臂与旧建议同裁', () => {
+  // 经典旧律例（与 autonomy.evolutionEngine.test.ts 同构）：成功去重折扣 +0.1·γ^k /
+  // 全轨迹折扣罚 −0.15·γ^k / popup 恢复 +0.05（ΝΩ-11 升级后的权重律）
   const mkRuns = (): RunRecord[] => [
     R({ strategies: ['click', 'scroll', 'click'] }),
     R({ success: false, strategies: ['scroll', 'click', 'click'], failureRootCause: 'popup overlay' }),
   ];
   const plain = new EvolutionEngine();
   for (const r of mkRuns()) plain.ingest(r);
-  assert.deepEqual(plain.heuristics(), { scroll: 1.1, inspect: 1.05, ask_vlm: 1, recall_skill: 1, click: 0.8 },
-    '旧权重律原样：成功 +0.1、末两 click 各 −0.15、popup ⇒ inspect +0.05');
+  // ΝΩ-11 手算（γ=0.7）：
+  //   成功轮 N=3：click 最晚 i=2 ⇒ γ⁰ ⇒ +0.1；scroll i=1 ⇒ γ¹ ⇒ +0.07 ⇒ 1.07
+  //   失败轮 N=3：scroll i=0 ⇒ γ² ⇒ -0.073 ⇒ 0.997；click i=1 ⇒ γ¹ -0.105、i=2 ⇒ γ⁰ -0.15 ⇒ 0.845
+  //   popup ⇒ inspect +0.05 ⇒ 1.05
+  assert.deepEqual(plain.heuristics(), { scroll: 0.997, inspect: 1.05, ask_vlm: 1, recall_skill: 1, click: 0.845 },
+    '权重律原样：成功折扣 +、全轨迹折扣 −、popup ⇒ inspect +0.05');
   // 无 bandit 标注 ⇒ θ 恒零、账本恒空（第一轨道用户零感知）
   assert.deepEqual(plain.thetaNorms(), { scroll: 0, inspect: 0, ask_vlm: 0, recall_skill: 0, click: 0 });
   assert.equal(plain.exportAuditLedger().length, 0);
@@ -237,8 +242,8 @@ test('W1-5: 旧律兼容——θ=0 时 heuristics 逐字节保持旧权重律；
   assert.deepEqual(tagged.heuristics(), plain.heuristics(), 'bandit 轨学习不扰动旧权重表（逐键相等）');
   assert.ok(tagged.thetaNorms().inspect > 0 || Object.values(tagged.thetaNorms()).some(v => v > 0), 'θ 轨确实在学');
   // θ=0 退化裁决：贪心臂 = 旧建议分支一（最高权重先行，平票固定序）同一裁决
-  assert.equal(plain.greedyArm(), 'scroll', '贪心 argmax(ln w) = 最高旧权重 scroll(1.1)');
-  assert.ok(plain.report().nextRunAdvice[0]!.includes('scroll'), '旧建议同裁');
+  assert.equal(plain.greedyArm(), 'inspect', '贪心 argmax(ln w) = 最高权重 inspect(1.05)');
+  assert.ok(plain.report().nextRunAdvice[0]!.includes('inspect'), '旧建议同裁');
   // 上下文变化不改变 θ=0 退化行为（θ=0 ⇒ 分布与上下文无关，只随旧权重走）
   assert.deepEqual(plain.armProbabilities({ scene: 'whatever', worldKind: 'x', stepsRemaining: 0 }), plain.armProbabilities());
 });

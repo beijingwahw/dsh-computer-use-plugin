@@ -5,12 +5,13 @@
 //      逐字段一致（含派生 trust）；落盘字节确定（字典序 + 注入时钟）；
 //   T-2 防御恢复（垃圾归先验）—— 档级垃圾（非对象/版本错配/accounts 非数组/
 //      坏 JSON）⇒ 整档拒绝（内存账不动）；条目级垃圾（无 sourceId）⇒ skipped；
-//      字段级垃圾（applied/regressed 非数/负数）⇒ 归 0（regressed 垃圾 ⇒ trust
-//      回先验 1）；恢复是整体替换（不与内存残账合并）；幂等；
+//      字段级垃圾（applied/regressed/merges/cleanMerges/dirty 垃圾）⇒ 归 0/false
+//      （regressed 垃圾 ⇒ 账面干净；ΑΩ-R6 后初见账仍罩试用期封顶 0.35）；
+//      恢复是整体替换（不与内存残账合并）；幂等；
 //   T-3 节流 —— 突变计数制：armed + flushEvery=N ⇒ 每 N 次记账恰一次落盘；
 //      写失败保留计数 ⇒ 下次突变即重试；未武装 ⇒ flush 幂等 no-op、零落盘；
 //      resetFederationRuntime 解除武装；
-//   T-4 掺入闸语义零变化 —— 恢复档上的 regressed=1 ⇒ 掺入配额折半，与同状态
+//   T-4 掺入闸语义零变化 —— 恢复档上的 regressed=1 ⇒ 掺入配额按信任折减，与同状态
 //      在线会话（recordFederationTrust 现记）逐字段一致；恢复后 applied 续账；
 //   T-5 AGENT_NOTE 白名单隔离 —— marker 入链（status='MARKER'、哈希链完整）
 //      但绝不进 ACTION_TOOLS：list(true)/sinceTaskStart（重放与技能归纳的原料
@@ -107,13 +108,13 @@ test('T-1: 文件存储往返 —— 落盘原子（无 .tmp 残留）、恢复�
   const file = path.join(dir, 'trust.json');
   const store = createFederationTrustFileStore(file);
 
-  // 在线记账：先回归折半，再由掺入累计 applied
+  // 在线记账：先回归折半，再由掺入累计 applied（ΑΩ-R6：初见账均罩试用期封顶 0.35）
   recordFederationTrust('src-a', { regressed: 1 });
   recordFederationTrust('src-b', { applied: 7 });
   const before = federationTrustReport();
   assert.deepEqual(before, [
-    { sourceId: 'src-a', applied: 0, regressed: 1, trust: 0.5 },
-    { sourceId: 'src-b', applied: 7, regressed: 0, trust: 1 },
+    { sourceId: 'src-a', applied: 0, regressed: 1, merges: 0, cleanMerges: 0, probation: true, trust: 0.35 },
+    { sourceId: 'src-b', applied: 7, regressed: 0, merges: 1, cleanMerges: 1, probation: true, trust: 0.35 },
   ]);
 
   assert.equal(armFederationTrustPersistence(store), true, '武装成功');
@@ -129,10 +130,10 @@ test('T-1: 文件存储往返 —— 落盘原子（无 .tmp 残留）、恢复�
   const rep = loadFederationTrust(store);
   assert.equal(rep.restored, 2);
   assert.equal(rep.skipped, 0);
-  assert.deepEqual(federationTrustReport(), before, '恢复后 dump 面逐字段一致');
-  assert.equal(federationTrustOf('src-a'), 0.5, '派生 trust 由 regressed 重算');
-  assert.equal(federationTrustOf('src-b'), 1);
-  assert.equal(federationTrustOf('src-unknown'), 1, '未立账源：初见全信先验');
+  assert.deepEqual(federationTrustReport(), before, '恢复后 dump 面逐字段一致（含试用期原始计数）');
+  assert.ok(Math.abs(federationTrustOf('src-a') - 0.35) < 1e-12, 'raw 0.5 与试用期 0.35 取小（ΑΩ-R6）');
+  assert.ok(Math.abs(federationTrustOf('src-b') - 0.35) < 1e-12, 'applied 立账但试用期未满 ⇒ 0.35');
+  assert.ok(Math.abs(federationTrustOf('src-unknown') - 0.35) < 1e-12, '未立账源：初见 ⇒ 试用期封顶 0.35（ΑΩ-R6 新先验）');
 });
 
 test('T-1: 序列化字节确定 —— 注入时钟两次同字节；sourceId 字典序；trust 不落盘', () => {
@@ -142,18 +143,25 @@ test('T-1: 序列化字节确定 —— 注入时钟两次同字节；sourceId �
   const s2 = serializeFederationTrust(() => 123456);
   assert.equal(s1, s2, '同账本态 + 同时钟 ⇒ 同字节');
   const doc = JSON.parse(s1) as { v: number; savedAt: number; accounts: Array<Record<string, unknown>> };
-  assert.equal(doc.v, 1);
+  assert.equal(doc.v, 2, 'ΑΩ-R6：档版本升 2（试用期计数入档）');
   assert.equal(doc.savedAt, 123456);
   assert.deepEqual(doc.accounts.map(a => a.sourceId), ['aa', 'zz'], '字典序落盘');
   for (const a of doc.accounts) assert.ok(!('trust' in a), '派生 trust 不落盘（单一真值源，档上无可投毒值）');
 });
 
 test('T-1: 恢复幂等 —— 同档恢复两次结果一致', () => {
-  const doc = { v: 1, savedAt: 0, accounts: [{ sourceId: 'x', applied: 3, regressed: 1 }] };
+  const doc = {
+    v: 2, savedAt: 0,
+    accounts: [{ sourceId: 'x', applied: 3, regressed: 1, merges: 2, cleanMerges: 3, dirty: false }],
+  };
   const r1 = restoreFederationTrust(doc);
   const r2 = restoreFederationTrust(doc);
   assert.deepEqual(r1, r2);
-  assert.deepEqual(federationTrustReport(), [{ sourceId: 'x', applied: 3, regressed: 1, trust: 0.5 }]);
+  assert.deepEqual(
+    federationTrustReport(),
+    [{ sourceId: 'x', applied: 3, regressed: 1, merges: 2, cleanMerges: 3, probation: false, trust: 0.5 }],
+    '档上 cleanMerges=3 ⇒ 毕业续账（试用期不因重启重启）',
+  );
 });
 
 // ─── T-2：防御恢复（垃圾归先验） ───
@@ -161,7 +169,7 @@ test('T-1: 恢复幂等 —— 同档恢复两次结果一致', () => {
 test('T-2: 档级垃圾 ⇒ 整档拒绝（内存账不动）', () => {
   recordFederationTrust('live', { applied: 1 });
   const snapshot = federationTrustReport();
-  for (const garbage of [null, 42, 'text', [], true, {}, { v: 2, accounts: [] }, { v: 1, accounts: 'no' }]) {
+  for (const garbage of [null, 42, 'text', [], true, {}, { v: 3, accounts: [] }, { v: 1, accounts: 'no' }]) {
     const rep = restoreFederationTrust(garbage);
     assert.equal(rep.restored, 0, `垃圾档不恢复：${JSON.stringify(garbage)}`);
     assert.ok(rep.note, '拒绝原因注记在案');
@@ -169,9 +177,9 @@ test('T-2: 档级垃圾 ⇒ 整档拒绝（内存账不动）', () => {
   }
 });
 
-test('T-2: 条目级垃圾跳过、字段级垃圾归先验（regressed 垃圾 ⇒ trust 1）', () => {
+test('T-2: 条目级垃圾跳过、字段级垃圾归先验（regressed 垃圾 ⇒ 账面干净但试用期照罩）', () => {
   const rep = restoreFederationTrust({
-    v: 1, savedAt: 0,
+    v: 2, savedAt: 0,
     accounts: [
       null, 42, { applied: 1 }, { sourceId: '', applied: 1 },               // 条目级垃圾 → skipped
       { sourceId: 'bad', applied: 'abc', regressed: -3 },                    // 字段级垃圾 → 归 0
@@ -181,18 +189,21 @@ test('T-2: 条目级垃圾跳过、字段级垃圾归先验（regressed 垃圾 �
   assert.equal(rep.restored, 2);
   assert.equal(rep.skipped, 4);
   assert.deepEqual(federationTrustReport(), [
-    { sourceId: 'bad', applied: 0, regressed: 0, trust: 1 },   // 垃圾归先验：trust 回 1
-    { sourceId: 'floor', applied: 2, regressed: 1, trust: 0.5 },
+    { sourceId: 'bad', applied: 0, regressed: 0, merges: 0, cleanMerges: 0, probation: true, trust: 0.35 },   // 垃圾归先验：账面干净（ΑΩ-R6 初见封顶仍罩）
+    { sourceId: 'floor', applied: 2, regressed: 1, merges: 0, cleanMerges: 0, probation: true, trust: 0.35 },
   ]);
-  assert.equal(federationTrustOf('bad'), 1);
+  assert.ok(Math.abs(federationTrustOf('bad') - 0.35) < 1e-12);
 });
 
 test('T-2: 恢复是整体替换（不与内存残账合并）', () => {
   recordFederationTrust('stale', { applied: 100 });
-  const rep = restoreFederationTrust({ v: 1, savedAt: 0, accounts: [{ sourceId: 'fresh', applied: 1, regressed: 0 }] });
+  const rep = restoreFederationTrust({ v: 2, savedAt: 0, accounts: [{ sourceId: 'fresh', applied: 1, regressed: 0 }] });
   assert.equal(rep.restored, 1);
-  assert.equal(federationTrustOf('stale'), 1, '残账源已被档替换（初见全信）');
-  assert.deepEqual(federationTrustReport(), [{ sourceId: 'fresh', applied: 1, regressed: 0, trust: 1 }]);
+  assert.ok(Math.abs(federationTrustOf('stale') - 0.35) < 1e-12, '残账源已被档替换（初见 ⇒ 试用期封顶）');
+  assert.deepEqual(
+    federationTrustReport(),
+    [{ sourceId: 'fresh', applied: 1, regressed: 0, merges: 0, cleanMerges: 0, probation: true, trust: 0.35 }],
+  );
 });
 
 test('T-2: loadFederationTrust —— 档缺席/坏 JSON/端口异常各按诚实方向收敛', () => {
@@ -217,10 +228,12 @@ test('T-3: 节流 —— 每 N 次突变恰一次落盘；冲刷后计数归零�
   recordFederationTrust('b', { applied: 1 });   // 突变 3 → 触发
   assert.equal(spy.saves.length, 1, '第 3 次突变恰一次落盘');
   assert.equal(federationTrustPersistenceStatus().pendingMutations, 0, '成功落盘后计数归零');
-  const doc = JSON.parse(spy.saves[0]) as { accounts: Array<{ sourceId: string; applied: number; regressed: number }> };
+  const doc = JSON.parse(spy.saves[0]) as {
+    accounts: Array<{ sourceId: string; applied: number; regressed: number; merges: number; cleanMerges: number; dirty: boolean }>;
+  };
   assert.deepEqual(doc.accounts, [
-    { sourceId: 'a', applied: 1, regressed: 1 },
-    { sourceId: 'b', applied: 1, regressed: 0 },
+    { sourceId: 'a', applied: 1, regressed: 1, merges: 1, cleanMerges: 0, dirty: true },   // 先掺后退：污点未结算（ΑΩ-R6）
+    { sourceId: 'b', applied: 1, regressed: 0, merges: 1, cleanMerges: 1, dirty: false },
   ]);
   // 垃圾记账也是突变（recordFederationTrust 的 set 语义不变 —— 掺入闸零变化）
   assert.ok(recordFederationTrust('a', { applied: Number.NaN }) === undefined);
@@ -241,7 +254,11 @@ test('T-3: 写失败保留计数 ⇒ 下次突变即重试；重武装可换好�
   assert.equal(failing.saves.length, 2, '强制冲刷是显式尝试（不算突变写放大）');
   recordFederationTrust('a', { applied: 1 });
   assert.equal(failing.saves.length, 3, '下次突变即重试（每突变至多一次尝试）');
-  assert.deepEqual(federationTrustReport(), [{ sourceId: 'a', applied: 2, regressed: 0, trust: 1 }], '持久化失败不反噬内存执法');
+  assert.deepEqual(
+    federationTrustReport(),
+    [{ sourceId: 'a', applied: 2, regressed: 0, merges: 2, cleanMerges: 2, probation: true, trust: 0.35 }],
+    '持久化失败不反噬内存执法（raw=1 仍罩试用期封顶）',
+  );
   // 重武装换好盘（幂等：以后一次为准）→ 冲刷成功
   const good = spyStore();
   assert.equal(armFederationTrustPersistence(good, { flushEvery: 1 }), true);
@@ -276,15 +293,16 @@ test('T-3: arm 拒绝结构非法端口；非法 flushEvery 回落缺省', () =>
 
 // ─── T-4：掺入闸语义零变化 ───
 
-test('T-4: 恢复档的信任照常执法 —— 配额折半与在线会话逐字段一致；applied 续账', () => {
-  // 会话 1（在线）：regressed=1 ⇒ trust 0.5 ⇒ 配额折半（cap 5 → quota 2）
+test('T-4: 恢复档的信任照常执法 —— 配额折减与在线会话逐字段一致；applied 续账', () => {
+  // 会话 1（在线）：regressed=1 ⇒ raw 0.5 × 试用期封顶 0.35 ⇒ 配额 floor(5×0.35)=1
+  //     （ΑΩ-R6：先票后掺 ⇒ 该轮污点结算、不计干净 —— 报告 cleanMerges=0 在案）
   recordFederationTrust('src-a', { regressed: 1 });
   const r1 = applyFederatedEvidence(localLedgerN10(), REMOTE_DIGEST, { sourceId: 'src-a', now: () => 999 });
   assert.equal(r1.ok, true);
-  assert.equal(r1.trust, 0.5);
-  assert.equal(r1.applied, 2);
-  assert.deepEqual(r1.perKey.map(p => ({ quota: p.quota, injected: p.injected, reason: p.reason })), [{ quota: 2, injected: 2, reason: 'blended' }]);
-  const report1 = federationTrustReport(); // 含掺入自动续账 applied=2
+  assert.ok(Math.abs(r1.trust - 0.35) < 1e-12);
+  assert.equal(r1.applied, 1);
+  assert.deepEqual(r1.perKey.map(p => ({ quota: p.quota, injected: p.injected, reason: p.reason })), [{ quota: 1, injected: 1, reason: 'blended' }]);
+  const report1 = federationTrustReport(); // 含掺入自动续账 applied=1
 
   // 崩溃 → 落盘 → 恢复
   const dir = freshDir('w6gate-');
@@ -294,26 +312,30 @@ test('T-4: 恢复档的信任照常执法 —— 配额折半与在线会话逐�
   resetFederationRuntime();
   const rep = loadFederationTrust(store);
   assert.equal(rep.restored, 1);
-  assert.deepEqual(federationTrustReport(), report1, '恢复后账本态 = 崩溃前（含续账）');
+  assert.deepEqual(federationTrustReport(), report1, '恢复后账本态 = 崩溃前（含试用期计数续账）');
 
   // 会话 2（恢复态）：同摘要同靶 ⇒ 同配额（闸语义零变化的实证）
   const r2 = applyFederatedEvidence(localLedgerN10(), REMOTE_DIGEST, { sourceId: 'src-a', now: () => 999 });
   assert.equal(r2.trust, r1.trust);
   assert.equal(r2.applied, r1.applied);
   assert.deepEqual(r2.perKey, r1.perKey);
-  assert.deepEqual(federationTrustReport(), [{ sourceId: 'src-a', applied: 4, regressed: 1, trust: 0.5 }], '恢复态上继续续账');
+  assert.deepEqual(
+    federationTrustReport(),
+    [{ sourceId: 'src-a', applied: 2, regressed: 1, merges: 2, cleanMerges: 1, probation: true, trust: 0.35 }],
+    '恢复态上继续续账（第 2 轮合并干净：cleanMerges 0→1）',
+  );
 });
 
 test('T-4: 显式 trust 注入优先 —— 恢复态不改变既有解析序', () => {
-  restoreFederationTrust({ v: 1, savedAt: 0, accounts: [{ sourceId: 'src-a', applied: 0, regressed: 3 }] });
-  assert.equal(federationTrustOf('src-a'), 0.25);
+  restoreFederationTrust({ v: 2, savedAt: 0, accounts: [{ sourceId: 'src-a', applied: 0, regressed: 3, merges: 3, cleanMerges: 3, dirty: false }] });
+  assert.ok(Math.abs(federationTrustOf('src-a') - 0.25) < 1e-12, '已毕业源：raw 0.25 低于封顶 ⇒ 取 raw');
   const r = applyFederatedEvidence(localLedgerN10(), REMOTE_DIGEST, { sourceId: 'src-a', trust: 1, now: () => 1 });
   assert.equal(r.trust, 1, '显式 trust 覆盖信任账（既有语义）');
   assert.equal(r.applied, 5, 'cap=floor(0.5×10)=5 全额');
-  // 未恢复过的源：初见全信（既有语义）
+  // 未恢复过的源：初见 ⇒ 试用期封顶（ΑΩ-R6 新先验；匿名 '' 才是 1）
   const r2 = applyFederatedEvidence(localLedgerN10(), REMOTE_DIGEST, { sourceId: 'stranger', now: () => 1 });
-  assert.equal(r2.trust, 1);
-  assert.equal(r2.applied, 5);
+  assert.ok(Math.abs(r2.trust - 0.35) < 1e-12, '初见试用期封顶 0.35');
+  assert.equal(r2.applied, 1, 'quota = floor(5 × 0.35) = 1');
 });
 
 // ─── T-5：AGENT_NOTE 白名单隔离（绝不污染动作重放） ───

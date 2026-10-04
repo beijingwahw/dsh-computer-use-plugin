@@ -7,8 +7,11 @@
 // 途。本模块给恢复态补一条途：按 (元素区域 × 模态 × 策略) 三元组维护已探索集
 // 位图，用 UCB（Upper Confidence Bound）前沿分数择路：
 //
-//   score = 区域未探测不确定度 + 新颖度 + c·√(ln N / n_i)
+//   score = 区域未探测不确定度 + 新颖度 + c·√(ln N / n_i) + k·Beta 后验均值
 //           − riskGate 代价 − failureMemory 负先验降权 − 同模态连打惩罚
+//           （ΝΩ-12：第四项 k·(s+1)/(n+2) Laplace 利用项 —— 成功账入式，
+//           explore-exploit 平衡；k 经内核键 exploration.exploitWeight 可调 [0,2]，
+//           0 ⇒ 纯探索旧行为）
 //
 //   区域    elementTracker 框量化网格（只读消费其 TrackedRect 方言 —— 类型级
 //           引用，零运行时耦合）：元素中心落格，12×8 网格覆盖整屏；
@@ -40,8 +43,8 @@ import { kernelRegistry } from '../kernel/registry.js';
 // ./explorationCore —— 本文件保留 ExplorationLedger 账本类，导入面不变（公共面
 // 原位再导出；buildCandidates/riskCostOf 两个零 this 私有方法搬运为自由函数，
 // 调用点同步改名，行为零变化）。
-export { EXPLORATION_GRID_COLS, EXPLORATION_GRID_ROWS, EXPLORATION_UCB_C, EXPLORATION_ALTERNATION_PENALTY, EXPLORATION_NEG_PRIOR_UNIT, EXPLORATION_NEG_PRIOR_CAP, EXPLORATION_RISK_COST_DANGER, EXPLORATION_RISK_COST_SENSITIVE, EXPLORATION_RECOVERY_MIN_RUN, EXPLORATION_MAX_ADVISES_PER_RUN, EXPLORATION_MODALITIES, quantizeRegion, quantizePoint, regionLabel, trailingFailureRun, explorationScore, } from './explorationCore.js';
-import { DEFAULT_VIEWPORT, EXPLORATION_GRID_COLS, EXPLORATION_GRID_ROWS, EXPLORATION_MAX_ADVISES_PER_RUN, EXPLORATION_MAX_CELLS_DEFAULT, EXPLORATION_MAX_COUNT, EXPLORATION_MODALITIES, EXPLORATION_NEG_PRIOR_CAP, EXPLORATION_NEG_PRIOR_K, EXPLORATION_NEG_PRIOR_UNIT, EXPLORATION_RECOVERY_MIN_RUN, EXPLORATION_UCB_C, EXPLORATION_VERSION, STRATEGY_MAX, buildExplorationCandidates, cellKey, explorationRiskCostOf, explorationScore, modalityOfKind, quantizePoint, regionLabel, strategyOf, trailingFailureRun, } from './explorationCore.js';
+export { EXPLORATION_GRID_COLS, EXPLORATION_GRID_ROWS, EXPLORATION_UCB_C, EXPLORATION_EXPLOIT_WEIGHT, EXPLORATION_ALTERNATION_PENALTY, EXPLORATION_NEG_PRIOR_UNIT, EXPLORATION_NEG_PRIOR_CAP, EXPLORATION_RISK_COST_DANGER, EXPLORATION_RISK_COST_SENSITIVE, EXPLORATION_RECOVERY_MIN_RUN, EXPLORATION_MAX_ADVISES_PER_RUN, EXPLORATION_MODALITIES, quantizeRegion, quantizePoint, regionLabel, trailingFailureRun, explorationScore, } from './explorationCore.js';
+import { DEFAULT_VIEWPORT, EXPLORATION_GRID_COLS, EXPLORATION_GRID_ROWS, EXPLORATION_MAX_ADVISES_PER_RUN, EXPLORATION_MAX_CELLS_DEFAULT, EXPLORATION_MAX_COUNT, EXPLORATION_MODALITIES, EXPLORATION_EXPLOIT_WEIGHT, EXPLORATION_NEG_PRIOR_CAP, EXPLORATION_NEG_PRIOR_K, EXPLORATION_NEG_PRIOR_UNIT, EXPLORATION_RECOVERY_MIN_RUN, EXPLORATION_UCB_C, EXPLORATION_VERSION, STRATEGY_MAX, buildExplorationCandidates, cellKey, explorationRiskCostOf, explorationScore, modalityOfKind, quantizePoint, regionLabel, evictIndexHeapify, evictIndexPopMin, evictIndexPush, strategyOf, trailingFailureRun, } from './explorationCore.js';
 // ── W3-7：探索账本 ──
 /**
  * W3-7（R2）：探索前沿账本 —— 已探索集 + UCB 择路 + 独立原子持久化。
@@ -62,6 +65,10 @@ export class ExplorationLedger {
     persistPath = null;
     observesSincePersist = 0;
     tick = 0;
+    /** ΑΩ-R22：容量驱逐索引 —— (lru,key) 懒最小堆（弹出侧双元校验弃陈旧目） */
+    evictIndex = [];
+    /** ΑΩ-R22：索引降级注记（覆盖不变量破损回退全扫后置位 —— 粘性，reset 归零） */
+    evictDegraded = false;
     constructor(goal, opts = {}) {
         this.goal = typeof goal === 'string' ? goal.slice(0, 200) : '';
         this.enabled = opts?.enabled === true; // W3-7：缺省关闭
@@ -116,6 +123,9 @@ export class ExplorationLedger {
             if (candidates.length === 0)
                 return null;
             const ucbC = kernelRegistry.getOrDefault('exploration.ucbC', EXPLORATION_UCB_C);
+            // ΝΩ-12：利用项系数 k —— 内核键 exploration.exploitWeight [0,2]（与 ucbC 同律：
+            // 未注册 ⇒ 缺省模块常量，行为与显式 0.5 逐字节一致）
+            const exploitWeight = kernelRegistry.getOrDefault('exploration.exploitWeight', EXPLORATION_EXPLOIT_WEIGHT);
             let best = null;
             let bestScore = Number.NEGATIVE_INFINITY;
             for (const cand of candidates) {
@@ -123,11 +133,15 @@ export class ExplorationLedger {
                 const score = explorationScore({
                     regionTries: this.regionTries.get(cand.region) ?? 0,
                     cellTries: cell ? cell.tries : 0,
+                    // ΝΩ-12：成功账入式 —— advise 侧传入格 Beta 成功计数（未试格 successes=0
+                    // ⇒ Laplace 先验均值 0.5，与 snapshot 后验口径同源）
+                    cellSuccesses: cell ? cell.successes : 0,
                     totalTries: this.totalTries,
                     riskCost: explorationRiskCostOf(cand.riskText),
                     negativePriorPenalty: this.negativePriorFor(cand.region, cand.modality, goal),
                     sameModalityAsLast: this.lastModality === cand.modality,
                     ucbC,
+                    exploitWeight,
                 });
                 if (score > bestScore) {
                     bestScore = score;
@@ -201,6 +215,8 @@ export class ExplorationLedger {
             }
             cell.lru = ++this.tick;
             this.cells.set(key, cell);
+            // ΑΩ-R22：驱逐索引同步（新建/更新都追加目；陈旧目由弹出侧双元校验弃置）
+            evictIndexPush(this.evictIndex, cell.lru, key);
             this.regionTries.set(region, Math.min(EXPLORATION_MAX_COUNT, (this.regionTries.get(region) ?? 0) + 1));
             this.totalTries = Math.min(EXPLORATION_MAX_COUNT, this.totalTries + 1);
             this.lastModality = modality;
@@ -250,6 +266,11 @@ export class ExplorationLedger {
     /** 全账总尝试数（只读） */
     get totalTryCount() {
         return this.totalTries;
+    }
+    /** ΑΩ-R22：驱逐索引降级注记（只读审计面）—— true = 曾检测到索引无法供驱逐、
+     *  回退全扫（驱逐结果仍与旧判据一致，性能退回 O(n)/次）；正常路径恒 false */
+    get evictIndexDegraded() {
+        return this.evictDegraded;
     }
     /** 账本快照（审计/metrics 消费面 —— 只读投影，键序确定） */
     snapshot() {
@@ -376,6 +397,9 @@ export class ExplorationLedger {
                 });
                 restored++;
             }
+            // ΑΩ-R22：驱逐索引整体重建（恢复路径同步 + 自愈：O(n) Floyd 堆化，清空一
+            // 切陈旧目 —— 覆盖不变量（每在册格恰有一条最新目）由此复位）
+            this.rebuildEvictIndex();
             if (Array.isArray(file.regionTries)) {
                 for (const v of file.regionTries) {
                     if (v === null || typeof v !== 'object' || Array.isArray(v))
@@ -435,6 +459,8 @@ export class ExplorationLedger {
         this.advisesThisRun = 0;
         this.observesSincePersist = 0;
         this.tick = 0;
+        this.evictIndex = []; // ΑΩ-R22：驱逐索引随账本归零
+        this.evictDegraded = false; // ΑΩ-R22：降级注记随账本归零
         this.persistPath = null;
     }
     // ── 内部 ──
@@ -446,9 +472,38 @@ export class ExplorationLedger {
             height: typeof s.height === 'number' && Number.isFinite(s.height) && s.height > 0 ? s.height : DEFAULT_VIEWPORT.height,
         };
     }
-    /** 容量驱逐：超上限 ⇒ 最久未更新格让位（探索账的有界承诺） */
+    /**
+     * 容量驱逐：超上限 ⇒ 最久未更新格让位（探索账的有界承诺）。
+     * ΑΩ-R22：逐格全扫 O(n)/次（最坏 O(n²)）⇒ 懒最小堆索引 O(log n)/次。等价性：
+     * 覆盖不变量（每笔格新建/更新都追加 (lru,key) 目）⇒ 在册格的最新目必在堆中；
+     * 弹出侧按 lru 升序弹至第一条双元校验（cells 有键且 lru 一致）通过的目 ——
+     * tick 严格递增 ⇒ 在册格 lru 两两互异 ⇒ 最低有效目恰为唯一最低 lru 格，与旧
+     * 全扫 min-lru 选格逐字节同一（旧 Map 迭代序破平仅在 lru 并列时启用，而并列
+     * 在真实 tick 下不可构造）。索引枯竭仍超容（覆盖不变量破损的防御信号）⇒ 回退
+     * 旧全扫判据驱逐并注记降级，驱逐完成后整体重建索引自愈。
+     */
     evictOverflow() {
+        let degradedNow = false;
         while (this.cells.size > this.maxCells) {
+            let evicted = false;
+            while (this.evictIndex.length > 0) {
+                const entry = evictIndexPopMin(this.evictIndex);
+                if (entry === null)
+                    break; // 防御：长度条件已排除 —— 回退全扫
+                const current = this.cells.get(entry.key);
+                if (current !== undefined && current.lru === entry.lru) {
+                    this.cells.delete(entry.key); // 双元校验通过 ⇒ 堆顶即最低 lru 在册格
+                    evicted = true;
+                    break;
+                }
+                // 陈旧目（格已删 / 已更新到更高 lru）⇒ 弃之续弹
+            }
+            if (evicted)
+                continue;
+            // ΑΩ-R22：索引枯竭仍超容 ⇒ 防御回退全扫（判据与旧实现逐字节同：min-lru、
+            // Map 迭代序破平），注记降级（粘性 —— reset 才归零）
+            degradedNow = true;
+            this.evictDegraded = true;
             let oldestKey = null;
             let oldest = Infinity;
             for (const [k, c] of this.cells) {
@@ -461,5 +516,16 @@ export class ExplorationLedger {
                 break;
             this.cells.delete(oldestKey);
         }
+        // ΑΩ-R22：降级自愈或陈旧目占比过高（堆长 > 2×在册格 + 64）⇒ 整体重建
+        // （Floyd O(n)）—— 索引内存压回 O(格数)，均摊每笔 O(1)
+        if (degradedNow || this.evictIndex.length > this.cells.size * 2 + 64) {
+            this.rebuildEvictIndex();
+        }
+    }
+    /** ΑΩ-R22：驱逐索引整体重建 —— 在册格各铸一条目 + Floyd 堆化（O(n)；restore
+     *  后同步、降级自愈与陈旧目压实共用，顺带清空一切陈旧目） */
+    rebuildEvictIndex() {
+        this.evictIndex = Array.from(this.cells, ([key, c]) => ({ lru: c.lru, key }));
+        evictIndexHeapify(this.evictIndex);
     }
 }

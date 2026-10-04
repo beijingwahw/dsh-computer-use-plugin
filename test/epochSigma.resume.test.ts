@@ -11,6 +11,9 @@
 //   Σ-3④ 已 done 的 token ⇒ toolErr（已完成无需续）
 //   Σ-3⑤ tracePath 落盘往返：begin/step/finish 后 new PilotStore(path) load/list 复原
 //   Σ-3⑥ autonomyEnabled=false ⇒ 两工具均 toolErr；tools/index.ts 挂载门源码正则
+//   Σ-3⑧⑨⑩ ΑΩ-R17 档案有界：超限驱逐最旧已完成（进行中永不驱逐、恰在上限
+//          不抖动）、tmp+rename 快照压缩重写可再恢复、缺省 500 端到端 +
+//          被驱逐 token 经 autonomy_resume 诚实拒绝（老令牌过期是设计）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -421,4 +424,127 @@ test('Σ-3⑦: 宪法审批中断 ⇒ ACTION_REQUIRED 锚点携带 resume_token 
     restoreEnv(savedEnv);
     resetGlmClient();
   }
+});
+
+// ─── Σ-3⑧ ΑΩ-R17 档案有界：超限驱逐最旧已完成 + 原子压缩重写可再恢复 ───
+
+test('Σ-3⑧: ΑΩ-R17 超限 ⇒ 最旧已完成被驱逐且新档可查；恰在上限不抖动；快照重写后文件可再恢复', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sigma3-bound-'));
+  const file = join(dir, 'pilots.jsonl');
+  const lineTypes = (p: string) =>
+    readFileSync(p, 'utf8').trim().split('\n').map(l => (JSON.parse(l) as { type: string }).type);
+
+  const s = new PilotStore(file, { maxRuns: 4 });
+  const tk: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const t = s.begin({ goal: `目标${i}`, successCriteria: [`判据${i}`] }, 1_000 + i * 100);
+    tk.push(t);
+    s.finish(t, 'achieved', `完成${i}`, 1_050 + i * 100);
+  }
+
+  // 恰在上限：不驱逐、不重写（文件仍纯追加行型 —— 无抖动）
+  assert.equal(s.list().length, 4);
+  assert.equal(s.dump().evicted, 0);
+  assert.equal(s.dump().total, 4);
+  assert.ok(
+    lineTypes(file).every(t => t === 'begin' || t === 'finish'),
+    '上限内纯追加，未触发压缩重写',
+  );
+
+  // 第 5 档：驱逐最旧已完成 tk[0]；新档在库可查；其余幸存
+  const t5 = s.begin({ goal: '新跑', successCriteria: ['n1'] }, 9_000);
+  assert.equal(s.dump().evicted, 1, '驱逐留痕（审计可见）');
+  assert.equal(s.dump().total, 4, '在库数守恒于上限');
+  assert.equal(s.load(tk[0]), null, '最旧已完成被驱逐 —— 老 token 失效（设计而非事故）');
+  assert.ok(s.load(t5), '新档在库可查（驱逐不伤新人）');
+  assert.ok(tk.slice(1).every(t => s.load(t)), '较新的已完成档幸存');
+
+  // 压缩阈值 = max(1, ⌊4/10⌋) = 1 ⇒ 已原子重写：文件只含幸存快照行
+  assert.deepEqual(lineTypes(file), ['snapshot', 'snapshot', 'snapshot', 'snapshot']);
+  assert.equal(s.dump().compactions, 1);
+  assert.equal(s.dump().persistent, true);
+
+  // 重写后文件可再恢复：new PilotStore(path) 重放快照行铸态，死档不复活
+  const s2 = new PilotStore(file, { maxRuns: 4 });
+  assert.equal(s2.load(tk[0]), null, '盘上死行已随重写消失');
+  assert.equal(s2.list().length, 4);
+  assert.equal(s2.dump().evicted, 0, '压缩后的档案重放不再触发驱逐');
+  const r2 = s2.load(tk[1]!);
+  assert.ok(r2, '幸存终局档复原');
+  assert.equal(r2!.status, 'done');
+  assert.equal(r2!.phase, 'achieved');
+  assert.equal(r2!.summary, '完成1');
+  assert.equal(r2!.goal.successCriteria[0], '判据1');
+  const r5 = s2.load(t5);
+  assert.ok(r5, '进行中档随快照复原');
+  assert.equal(r5!.status, 'running');
+
+  // 恢复后续脉不断：快照行 + 追加行混合文件照常重放
+  s2.recordStep(
+    t5,
+    { stepIndex: 0, action: { kind: 'click', target: { label: '按钮N' } }, outcome: 'progress', at: 9_100 },
+    [{ criterion: 'n1', status: 'met' }],
+  );
+  s2.finish(t5, 'achieved', '续跑达成', 9_200);
+  const s3 = new PilotStore(file, { maxRuns: 4 });
+  const r5b = s3.load(t5);
+  assert.ok(r5b);
+  assert.equal(r5b!.status, 'done');
+  assert.equal(r5b!.steps, 1, '快照后的追加步账照常累计');
+  assert.equal(r5b!.trajectory[0]!.label, '按钮N');
+  assert.ok(r5b!.criteriaStatus.every(c => c.status === 'met'));
+});
+
+// ─── Σ-3⑨ ΑΩ-R17 驱逐政策：进行中永不驱逐；全在进行中诚实跳过 ───
+
+test('Σ-3⑨: ΑΩ-R17 进行中档案永不驱逐（超限诚实跳过）；完成即参与驱逐 —— 最旧者优先', () => {
+  const s = new PilotStore(undefined, { maxRuns: 2 }); // 纯内存小上限
+  const t1 = s.begin({ goal: '长跑一', successCriteria: ['a'] }, 100);
+  const t2 = s.begin({ goal: '长跑二', successCriteria: ['b'] }, 200);
+  const t3 = s.begin({ goal: '长跑三', successCriteria: ['c'] }, 300); // 超限但全在进行中
+  assert.equal(s.dump().total, 3, '全在进行中 ⇒ 诚实跳过（不驱逐活跃血脉来凑数）');
+  assert.equal(s.dump().evicted, 0);
+  assert.ok([t1, t2, t3].every(t => s.load(t)), '三档全在（running 不驱逐）');
+
+  // t1 完成 ⇒ 成为「最旧已完成」候选，finish 补驱
+  s.finish(t1, 'failed', '终局失败', 400);
+  assert.equal(s.dump().total, 2);
+  assert.equal(s.dump().evicted, 1);
+  assert.equal(s.load(t1), null, '完成后即遭驱逐（最旧已完成优先于较新进行中）');
+  assert.ok(s.load(t2) && s.load(t3), '进行中两档幸存');
+  assert.equal(s.dump().maxRuns, 2, '审计面携带上限配置');
+});
+
+// ─── Σ-3⑩ ΑΩ-R17 端到端：缺省上限 500；被驱逐 token 经 autonomy_resume 诚实拒绝 ───
+
+test('Σ-3⑩: ΑΩ-R17 缺省上限 500 —— 第 501 档驱逐最旧；盘上死行未达阈值不重写；老令牌 resume ⇒ toolErr', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sigma3-cap500-'));
+  const file = join(dir, 'pilots.jsonl');
+  const cfg = makeConfig({ autonomyTracePath: file });
+  const store = pilotStoreFor(cfg); // 与工具同源的缓存实例（pilotStoreFor 同路径同实例）
+
+  let oldest = '';
+  for (let i = 0; i < 501; i++) {
+    const t = store.begin({ goal: `高频运行${i}`, successCriteria: ['c'] }, 1_000 + i);
+    if (i === 0) oldest = t;
+    store.finish(t, 'achieved', `done ${i}`, 1_100 + i);
+  }
+  assert.equal(store.dump().total, 500, '缺省上限 500 守恒');
+  assert.equal(store.dump().evicted, 1, '恰第 501 档驱逐最旧一份');
+  assert.equal(store.load(oldest), null, '最老令牌失效');
+  assert.equal(store.dump().compactions, 0, '驱逐 1 < 阈值 50 ⇒ 未重写（追加为主，防抖动）');
+
+  // 纯追加文件（1002 行）重放：盘上死行铸态后再驱逐 —— 死档不复活、计数守恒
+  const re = new PilotStore(file);
+  assert.equal(re.dump().total, 500, '重放守恒于上限（list 另有 50 条展示帽，计数走 dump）');
+  assert.equal(re.list().length, 50, 'list 展示帽照常');
+  assert.equal(re.load(oldest), null);
+  assert.equal(re.dump().evicted, 1, '重放后补驱留痕');
+  assert.equal(re.dump().persistent, true);
+
+  // 老令牌过期诚实：autonomy_resume 走既有「No pilot run found」拒绝路径
+  const resume = createAutonomyResumeTool(cfg);
+  const out = await runTool(resume, { token: oldest });
+  assert.equal(out.status, 'FAILED');
+  assert.match(String(out.state_anchor.error), /No pilot run found/, '失效 token 明确拒绝而非谎报可续');
 });

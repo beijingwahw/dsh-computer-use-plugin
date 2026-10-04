@@ -636,7 +636,14 @@ class ContextManager {
 
   /** 变化门控支持：最近一张仍在窗口内的图片记录（降级后无 base64 的不算） */
   public lastImageRecord(): ScreenshotRecord | undefined {
-    return [...this.history].reverse().find(h => h.base64);
+    // ΝΩ-3：[...history].reverse() 全量拷贝改为尾部反向线性扫（零分配）——
+    // 行为等价（自尾向头找首个 base64 非空记录）；调用面含逐动作场景指纹
+    // （selfmodel/orchestrator observeSeed）等高频读，每次调用 O(n) 拷贝纯浪费。
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const h = this.history[i];
+      if (h && h.base64) return h;
+    }
+    return undefined;
   }
 
   /** Token 仪表盘：当前窗口内真实图片数 */

@@ -1,13 +1,15 @@
-import { resetGlmClient, getGlmClient, attachFailoverPool, attachCascadeFace } from './glmClient.js';
-import { vlmMeter } from './metering.js';
+import { resetGlmClient, getGlmClient, attachFailoverPool, attachCascadeFace, attachVlmRateLimiter } from './glmClient.js';
+import { vlmMeter, VlmRateLimiter } from './metering.js';
+import { kernelRegistry } from '../kernel/registry.js';
 import { createProviderPool } from './providers/failover.js';
 // W3-0（W2-8 C2 接线）：成本级联执行体 —— cascade 全族已经 './providers/index'
 // （第 44 行 export * from './cascade'）再分发，本文件只额外按值引入铸造所需的
 // 执行体与谓词类型（与 createProviderPool 自 './providers/failover' 直引同律）。
 import { VlmCascade } from './providers/cascade.js';
+import { matchesDangerPatterns, matchesRiskPatterns } from '../riskGate.js';
 // 纪元 Β（反驳法院）：第二意见面的装配物料 + 法院本体再分发
-import { createEnsembleCourt } from './providers/ensemble.js';
-import { attachRefuteFace } from './refute.js';
+import { createEnsembleCourt, EnsembleCourt } from './providers/ensemble.js';
+import { attachRefuteFace, isSameRefuteSource } from './refute.js';
 // 纪元 Λ（开箱即亮）：连接存档 / 本地自动接管 / 向导服务 三模块再分发
 export * from './connection.js';
 export * from './autoAdopt.js';
@@ -119,6 +121,254 @@ const cascadeStructuralValidator = {
         return value !== null && (Array.isArray(value) || typeof value === 'object');
     },
 };
+// ─── ΝΩ-18（桥面语义谓词）：按请求类型注册的便宜臂法定校验 ───
+//
+// 病灶：级联桥原只内建「非空对象/数组」一条结构性谓词 —— grounding 空 elements
+// 数组、verdict 缺字段（或枚举外值）、OCR 缺 words 的便宜答案都过检直采，语义
+// 空转白省钱且错答上屏风险全靠下游兜底。修法：咨询桥按请求类型（prompt/system
+// 的稳定标记词，与 som.ts 三提示词构造器同源）追加语义谓词 —— 谓词不过 ⇒ 走
+// cascade 既有升级路径（便宜答案作废、主力档重做）；未命中任何类型的泛化请求
+//（ask_screen 等）保持纯结构校验（零行为变化律）。
+/** verdict 合法枚举（verdict.ts VlmVerdictLevel 同集 —— 本地声明避免器官耦合） */
+const CASCADE_VERDICT_ENUM = new Set(['confirmed', 'refuted', 'uncertain']);
+/** bbox 双形态判定（grounding.parseBbox 同律）：[x0,y0,x1,y1] ≥4 有限数 或
+ *  {x0,y0,x1,y1} 四有限数 —— 其余形态（缺字段/非有限）不可验证 */
+function hasParseableBbox(raw) {
+    let ns;
+    if (Array.isArray(raw)) {
+        if (raw.length < 4)
+            return false;
+        ns = [raw[0], raw[1], raw[2], raw[3]];
+    }
+    else if (raw !== null && typeof raw === 'object') {
+        const o = raw;
+        ns = [o.x0, o.y0, o.x1, o.y1];
+    }
+    else {
+        return false;
+    }
+    return ns.every(n => typeof n === 'number' && Number.isFinite(n));
+}
+export function classifyCascadeRequest(req) {
+    try {
+        const sys = typeof req?.system === 'string' ? req.system : '';
+        const p = typeof req?.prompt === 'string' ? req.prompt : '';
+        if (sys.includes('屏幕元素定位器') || p.includes('列出图中所有可交互元素'))
+            return 'grounding';
+        if (p.includes('对比前图与后图'))
+            return 'verdict';
+        if (p.includes('识别图中所有可见文字'))
+            return 'ocr';
+        return 'generic';
+    }
+    catch {
+        return 'generic';
+    }
+}
+/**
+ * ΝΩ-18：按请求类型注册的语义谓词集（级联桥的 perCall 追加面）：
+ *  - grounding ⇒ elements 数组非空且首条有 bbox（双方言：裸数组 / {elements}，
+ *    与 grounding.ts 的双形态收窄同律）—— 空 elements = 便宜脑没看见东西，
+ *    主力档值得再试一次；
+ *  - verdict ⇒ verdict ∈ {confirmed, refuted, uncertain} 枚举（verdict.ts 同集）；
+ *  - OCR ⇒ words 在场（{words:[...]} 或裸数组方言，与 vlmOcr.ts 同律 ——
+ *    空数组是合法 OCR 结果「屏上无字」，只要求字段在场）。
+ * 谓词不过 ⇒ cascade 现有升级路径（validation-failed:<name> 点名）。
+ * 导出面：测试/可观测消费。
+ */
+export function cascadeSemanticValidators(req) {
+    const kind = classifyCascadeRequest(req);
+    if (kind === 'grounding') {
+        return [{
+                name: 'semantic-grounding',
+                check(value) {
+                    try {
+                        const els = Array.isArray(value)
+                            ? value
+                            : value !== null && typeof value === 'object' && Array.isArray(value.elements)
+                                ? value.elements
+                                : null;
+                        if (!Array.isArray(els) || els.length === 0)
+                            return false;
+                        const first = els[0];
+                        return first !== null && typeof first === 'object'
+                            && hasParseableBbox(first.bbox);
+                    }
+                    catch {
+                        return false;
+                    }
+                },
+            }];
+    }
+    if (kind === 'verdict') {
+        return [{
+                name: 'semantic-verdict',
+                check(value) {
+                    try {
+                        if (value === null || typeof value !== 'object' || Array.isArray(value))
+                            return false;
+                        const v = value.verdict;
+                        return typeof v === 'string' && CASCADE_VERDICT_ENUM.has(v);
+                    }
+                    catch {
+                        return false;
+                    }
+                },
+            }];
+    }
+    if (kind === 'ocr') {
+        return [{
+                name: 'semantic-ocr',
+                check(value) {
+                    try {
+                        if (Array.isArray(value))
+                            return true; // 裸数组方言 = words 本体
+                        return value !== null && typeof value === 'object'
+                            && Array.isArray(value.words);
+                    }
+                    catch {
+                        return false;
+                    }
+                },
+            }];
+    }
+    return [];
+}
+/**
+ * ΝΩ-18：级联咨询桥的装配体（从 configureVlm 提取为具名函数 —— 同一表达式
+ * 供生产接线与测试直用）：perCall 供请求级动态因子（ΑΩ-R2）+ 按请求类型的
+ * 语义谓词（追加在实例结构谓词之后 —— cascade 的 [...base, ...extra] 合并律）。
+ * 绝不抛。
+ */
+export function wireCascadeConsultFace(cascade) {
+    attachCascadeFace({
+        consultJson: req => {
+            const semantic = cascadeSemanticValidators(req);
+            return cascade.runJson(req, {
+                factors: cascadeRequestFactors(req),
+                ...(semantic.length > 0 ? { validators: semantic } : {}),
+            });
+        },
+    });
+}
+// ─── ΑΩ-R2（级联因子源点亮）：请求级三因子分诊（接线层注入）───
+//
+// 病灶（暗功能）：W3-0 原接线把 factors 供成静态保守值（中危/新场景/中性置信 ⇒
+// danger 恒 0.6 > 缺省阈值 0.35）—— 便宜臂在缺省配置下永不触发，配了便宜档的
+// 部署买不到一次省钱。修法：咨询桥携带的请求文本（prompt/system）在此变现为
+// 真实动态因子，经 perCall.factors 压过实例保守源（W2-8g 优先级律）：
+//   · risk —— riskGate 词法风险分级（混淆归一同律）：危险词/凭据词 ⇒ high
+//     （danger ≥ 0.4 恒主力）；只读观察语义且无危险词 ⇒ low；不可分类 ⇒
+//     medium（保守回落，诚实原则：无证据不便宜）；
+//   · sceneFamiliar —— 便宜信号：近期同 prompt 记忆命中（LRU 上限 32）。dhash
+//     指纹在咨询桥上不可得（解码截图是重操作），同 prompt 复现是场景熟悉度的
+//     廉价代理；首见记新场景（false 保守）；
+//   · confidence —— 调用方上下文在 GlmVisionRequest 上不可得（无置信字段），
+//     诚实保持中性 0.5。
+// 校准一致性（缺省权重 0.4/0.4/0.2 与缺省阈值 0.35 均被 w2cascade/w3wire 既有
+// 断言钉死，本接线只校准因子不动数学）：低危 + 同 prompt 复现 ⇒ danger =
+// 0.4×(1−0.5) = 0.2 < 0.35 ⇒ 便宜臂真正点亮；危险词 ⇒ risk=high ⇒ danger ≥
+// 0.4×1 = 0.4 > 0.35 ⇒ 恒主力（场景再熟、置信再高也压不进便宜臂）。
+/** 只读观察语义标记（中文动词族 —— 观察语义；不含动作词，命中且无危险词 ⇒ low） */
+const CASCADE_READONLY_MARKERS_ZH = [
+    '列出', '识别', '读取', '读出', '描述', '对比', '比较', '判断', '找出', '检查', '观察', '转写',
+];
+/** 只读观察语义标记（英文 —— 词边界匹配，防 'already' ⊃ 'read' 类子串误判） */
+const CASCADE_READONLY_MARKERS_EN = /\b(describe|list|read|detect|recogni[sz]e|compare|locate|identify|observe|transcribe|ocr)\b/i;
+/** 近期同 prompt 记忆上限（无界记忆 = 无界账 —— 满后逐出最旧，Map 保序即 LRU） */
+const CASCADE_FAMILIAR_PROMPT_LIMIT = 32;
+/** 模块级同 prompt 记忆 —— 键 = prompt 原文，值恒 true（在场性即全部信息） */
+const cascadeFamiliarPrompts = new Map();
+/**
+ * 场景熟悉度代理（记账式读取，绝不抛）：近期同 prompt 命中 ⇒ true 并刷新新近度
+ * （LRU 触碰 = 删后重插）；首见 ⇒ 记账后返回 false（新场景保守）。空 prompt
+ * 不可熟悉也不记账（无文本无身份）。
+ */
+function cascadeSceneFamiliar(prompt) {
+    if (prompt === '')
+        return false;
+    if (cascadeFamiliarPrompts.has(prompt)) {
+        cascadeFamiliarPrompts.delete(prompt);
+        cascadeFamiliarPrompts.set(prompt, true);
+        return true;
+    }
+    if (cascadeFamiliarPrompts.size >= CASCADE_FAMILIAR_PROMPT_LIMIT) {
+        const oldest = cascadeFamiliarPrompts.keys().next().value;
+        if (oldest !== undefined)
+            cascadeFamiliarPrompts.delete(oldest);
+    }
+    cascadeFamiliarPrompts.set(prompt, true);
+    return false;
+}
+/**
+ * ΑΩ-R2：请求文本的词法风险分级（纯读，绝不抛）。
+ * 危险词（matchesDangerPatterns）/ 凭据词（matchesRiskPatterns）任一命中 ⇒
+ * 'high' —— riskGate 归一化同律（leet/同形/全角混淆还原后包含匹配，宁高不低）；
+ * 只读观察标记命中 ⇒ 'low'；其余不可分类 ⇒ 'medium'（与旧静态保守源同档）。
+ * 导出面：测试/可观测消费。
+ */
+export function classifyCascadeRiskText(text) {
+    try {
+        if (typeof text !== 'string' || text === '')
+            return 'medium';
+        if (matchesDangerPatterns(text, '') || matchesRiskPatterns(text, ''))
+            return 'high';
+        if (CASCADE_READONLY_MARKERS_EN.test(text))
+            return 'low';
+        for (const m of CASCADE_READONLY_MARKERS_ZH) {
+            if (text.includes(m))
+                return 'low';
+        }
+        return 'medium';
+    }
+    catch {
+        return 'medium'; // 信号不可用 ⇒ 保守回落（诚实原则）
+    }
+}
+/**
+ * ΑΩ-R2：请求级三因子 —— 咨询桥的 perCall 因子源（真实动态信号）。
+ * 信号不可用（无 prompt 文本/分类失败）时各项回落保守值 medium/false/0.5 ——
+ * 与 W3-0 静态保守源逐字节同值（旧行为的诚实降级面）。导出面：测试/可观测消费。
+ */
+export function cascadeRequestFactors(req) {
+    const prompt = typeof req?.prompt === 'string' ? req.prompt : '';
+    const system = typeof req?.system === 'string' ? req.system : '';
+    return {
+        risk: classifyCascadeRiskText(prompt === '' && system === '' ? '' : `${prompt}\n${system}`),
+        sceneFamiliar: cascadeSceneFamiliar(prompt),
+        confidence: 0.5, // 调用方上下文不可得 ⇒ 中性（不褒不贬，诚实）
+    };
+}
+/** ΑΩ-R2：同 prompt 记忆归零（测试隔离缝；configureVlm 重铸新纪元时清账） */
+export function resetCascadeTriageFamiliarity() {
+    cascadeFamiliarPrompts.clear();
+}
+// ─── ΝΩ-47（合议庭点亮）：反驳法院的多脑裁决面装配 ───
+/**
+ * ΝΩ-47：把合议庭的**异构子庭**（同源剔除后的庭员）铸为反驳法院的多脑裁决面。
+ *
+ * 铸造律：整庭名册经 isSameRefuteSource 剔除与主脑同源（providerId/baseUrl
+ * 双因子）的庭员 —— 主脑不得入陪审席反驳自己（确认偏误马戏律）；剔除后
+ * ≥2 颗才铸（多数票最少需要两票 —— 1 颗异构脑成不了合议，退回单脑通道
+ * 诚实降级，不静默凑数）；子庭复用整庭已铸的适配器实例（零重解析零网络）。
+ * 返回的 face 结构满足 RefuteQuorumFace（EnsembleCourt.askVerdict 天然契合，
+ * census 即 members 普查）。绝不抛：任何读取故障 ⇒ null（多脑缺席 = 单脑
+ * 旧行为）。导出面：测试/可观测消费（wireCascadeConsultFace 同律）。
+ */
+export function buildRefuteQuorumFace(court, primary) {
+    try {
+        const jury = court.listRoster().filter(p => !isSameRefuteSource({ id: primary.id, baseUrl: primary.baseUrl }, p));
+        if (jury.length < 2)
+            return null; // 异构庭员 <2 ⇒ 多数票无从谈起 —— 单脑路径保底
+        const bench = new EnsembleCourt(jury);
+        return {
+            askVerdict: req => bench.askVerdict(req),
+        };
+    }
+    catch {
+        return null; // 装配故障 = 多脑缺席：单脑路径行为不变（绝不抛）
+    }
+}
 /**
  * 宿主血脉接线：以插件配置铸造云脑单例 + 备选池（config 优先于 env）。
  *
@@ -142,7 +392,9 @@ const cascadeStructuralValidator = {
  *   + 备选全部入席），庭员名册（listRoster）连同主脑身份注入 vlm/refute 的
  *   attachRefuteFace —— 危险点击派发前 askRefutation 按身份剔除同源庭员后请
  *   首颗异构脑反驳「目标=描述」；空链 ⇒ attachRefuteFace(null)（单脑部署：
- *   法院诚实缺席，零调用零行为）。
+ *   法院诚实缺席，零调用零行为）。ΝΩ-47（opt-in）：内核参 vlm.refuteQuorum > 0
+ *   且异构子庭 ≥2 ⇒ 另挂多脑裁决面（quorum）—— 反驳通道升级 askVerdict
+ *   多数票，census 透传；缺省未供参 ⇒ 单脑路径逐字节不变。
  *
  * 计量接线（纪元 Δ-6）：铸造的单例与池缺省挂 `rec => vlmMeter.record(rec)`
  *（GlmMeterRecord 与 VlmCallRecord 字段同名同型，零适配直落台账）；直接
@@ -210,12 +462,38 @@ export function configureVlm(config) {
         // 空池 ⇒ 摘除。此后 getGlmClient 的 chat/chatJson 自身重试全败后按池序取
         // 首个健康脑救回；不配 fallbacks ⇒ null 注入 ⇒ 单例行为与既往逐字段一致。
         attachFailoverPool(poolSingleton);
+        // ── ΝΩ-18（限流器接线）：VlmRateLimiter 的 configureVlm 注入面 ──
+        // 内核注册表供参（与 metering.VlmApiBreaker 的 Ξ-D 读法同律，不动 config
+        // schema）：vlm.maxPerMinute > 0 ⇒ 铸双桶限流闸挂入单例 chat/chatJson 前置
+        //（vlm.maxPerHour 可选，缺省 = 分钟 × 60）；未注册/ ≤0 ⇒ 摘除（缺省零行为
+        // 变化律 —— 限流器全库原本零消费，未显式供参的部署行为逐字节不变）。
+        try {
+            const mpm = Math.floor(kernelRegistry.getOrDefault('vlm.maxPerMinute', 0));
+            if (Number.isFinite(mpm) && mpm > 0) {
+                const mph = Math.floor(kernelRegistry.getOrDefault('vlm.maxPerHour', mpm * 60));
+                attachVlmRateLimiter(new VlmRateLimiter({
+                    maxPerMinute: mpm,
+                    maxPerHour: Number.isFinite(mph) && mph > 0 ? mph : mpm * 60,
+                }));
+            }
+            else {
+                attachVlmRateLimiter(null);
+            }
+        }
+        catch {
+            attachVlmRateLimiter(null); // 供参面故障 ⇒ 摘除（绝不抛）
+        }
         // ── 纪元 Β（反驳法院）：第二意见面装配（照 P2a attachFailoverPool 的注入模式）──
         // 备选链在场（≥2 颗脑配置）才有异构可言：铸一座合议庭（主力 + 备选全部入席，
         // 铸造面零网络 —— 只是适配器落座），把庭员名册连同主脑身份注入反驳面 ——
         // askRefutation 按身份（providerId/baseUrl）剔除与主脑同源的庭员后请首颗
         // 异构脑作证。单脑部署（无 fallbacks）⇒ attachRefuteFace(null) —— 法院
         // 诚实缺席（零调用零行为，绝不静默把主脑自己请上证人席反驳自己）。
+        // ΝΩ-47（合议庭点亮，opt-in）：内核参 vlm.refuteQuorum > 0 时另铸多脑
+        // 裁决面 —— 同源剔除后的异构子庭 ≥2 颗 ⇒ askRefutation 的反驳通道整体
+        // 升级为 askVerdict 多数票（不可逆动作核验从单脑单票变多脑多数票，
+        // census 透传）；未供参 / 子庭不足 ⇒ quorum 缺席 = 单脑路径逐字节保持
+        //（缺省零行为变化律）。
         try {
             if (fallbacks !== '') {
                 const chain = fallbacks.split(',').map(s => s.trim()).filter(s => s !== '');
@@ -227,6 +505,16 @@ export function configureVlm(config) {
                     ...(url ? { baseUrl: url } : {}),
                     extraProviders: chain,
                 });
+                // ΝΩ-47：多脑裁决面（opt-in —— 内核参未注册时 getOrDefault 回声 0 ⇒ 恒缺席）
+                let quorumFace = null;
+                try {
+                    if (kernelRegistry.getOrDefault('vlm.refuteQuorum', 0) > 0) {
+                        quorumFace = buildRefuteQuorumFace(court, { id: primary, ...(url ? { baseUrl: url } : {}) });
+                    }
+                }
+                catch {
+                    quorumFace = null; // 供参面故障 ⇒ 多脑缺席（绝不抛）
+                }
                 attachRefuteFace({
                     primaryId: primary,
                     ...(url ? { primaryBaseUrl: url } : {}),
@@ -237,6 +525,7 @@ export function configureVlm(config) {
                         configured: p.configured === true,
                         chatJson: (req) => p.chatJson(req),
                     })),
+                    ...(quorumFace !== null ? { quorum: quorumFace } : {}),
                 });
             }
             else {
@@ -252,25 +541,26 @@ export function configureVlm(config) {
         // VlmCascade 并 attachCascadeFace —— glmClient.chatJson 的最前置咨询闸自此
         // 有真实消费面；任一缺席 ⇒ attachCascadeFace(null)（摘除，幂等），单例
         // chatJson 行为与未接线逐字节一致（缺省零行为变化律）。
-        // 因子源诚实声明：glmClient 桥不携带逐调用分诊因子（置信/风险/场景新旧度
-        // 在桥的另一端不可得），铸池面只能供保守静态因子（中危/新场景/中性置信 ⇒
-        // danger = 0.4×0.5+0.4×0.5+0.2×1 = 0.6）—— 配缺省阈值 0.35 ⇒ 高危直行
-        // 主力（弃权），把「无证据不便宜」的失败安全缺省落在接线层；vlmCascadeDangerMax
-        // 配置 ≥0.6 才真正点亮便宜臂（两钥激活，绝不静默便宜）。
+        // ΑΩ-R2（级联因子源点亮）：咨询桥以请求文本供真实动态因子（词法风险分级 +
+        // 同 prompt 熟悉度，见 cascadeRequestFactors）—— 只读低危 + 同 prompt 复现
+        // ⇒ danger 0.2 < 缺省阈值 0.35，配置了便宜档的部署真正能路由到便宜臂；
+        // 危险词 ⇒ 恒 high 恒主力。信号不可用 ⇒ 各项回落保守值（与旧静态源同值 ⇒
+        // 弃权，无证据不便宜）。vlmCascadeDangerMax 仍可配置覆盖阈值（收紧/放宽皆可）。
         try {
             if (poolSingleton !== null && Object.values(tiers).includes('cheap')) {
                 const dm = Number(config?.vlmCascadeDangerMax);
+                resetCascadeTriageFamiliarity(); // 重铸新纪元 —— 旧纪元的同 prompt 记忆不作数
                 cascadeSingleton = new VlmCascade(poolSingleton, {
                     ...(Number.isFinite(dm) ? { dangerMax: Math.min(1, Math.max(0, dm)) } : {}),
+                    // 实例级因子源保持 W3-0 静态保守值：直接 runJson（无 perCall）的调用面
+                    // 旧行为逐字节保持（danger 0.6 ⇒ 弃权）；咨询桥恒供 perCall 动态因子
+                    // （W2-8g 优先级律压过本源），本源退居「无请求语境」的诚实缺省。
                     factors: () => ({ risk: 'medium', sceneFamiliar: false, confidence: 0.5 }),
                     validators: [cascadeStructuralValidator],
                 });
-                attachCascadeFace({
-                    consultJson: req => {
-                        const c = cascadeSingleton;
-                        return c === null ? Promise.resolve(null) : c.runJson(req);
-                    },
-                });
+                // ΝΩ-18：咨询桥经 wireCascadeConsultFace 装配（请求级动态因子 + 按
+                // 请求类型的语义谓词 —— grounding/verdict/OCR 三型，见上方谓词面）。
+                wireCascadeConsultFace(cascadeSingleton);
             }
             else {
                 cascadeSingleton = null;

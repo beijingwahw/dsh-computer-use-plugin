@@ -23,7 +23,9 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import queue
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -31,6 +33,7 @@ from typing import Literal, Protocol
 from PIL import Image
 
 from .errors import ErrorKind, PhysicalError
+from .executors import DEVICE_POOL, SCREEN_POOL, get as get_pool  # ΑΩ-R25 专属池
 from .screen import compute_dhash, hamming_hex  # 只读复用:指纹与门控方言同源
 
 ImageFormat = Literal["png", "jpeg"]
@@ -53,6 +56,16 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"env {name} must be int, got {raw!r}") from e
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as e:
+        raise ValueError(f"env {name} must be float, got {raw!r}") from e
+
+
 @dataclass(frozen=True)
 class UvcConfig:
     """UVC 采集配置(W4-6)。
@@ -73,6 +86,10 @@ class UvcConfig:
     fps: int | None = None
     jpeg_quality: int = 85
     gate_distance: int = 3
+    # ΝΩ-36:单帧等待上限(秒)—— cap.read() 无原生超时护栏,DirectShow 信号
+    # 丢失时 read 可无限挂起(旧实现会拖死 device 池 worker);后台缓冲线程
+    # + 队列超时读把它变成有界等待 + 诚实超时信封。
+    read_timeout_s: float = 5.0
 
 
 def load_uvc_config_from_env() -> UvcConfig:
@@ -92,6 +109,7 @@ def load_uvc_config_from_env() -> UvcConfig:
         fps=_env_int("DSH_PHYSICAL_UVC_FPS", 0) or None,
         jpeg_quality=max(0, min(100, _env_int("DSH_PHYSICAL_UVC_JPEG_QUALITY", 85))),
         gate_distance=max(0, min(64, _env_int("DSH_PHYSICAL_UVC_GATE_DISTANCE", 3))),
+        read_timeout_s=max(0.1, _env_float("DSH_PHYSICAL_UVC_READ_TIMEOUT_S", 5.0)),
     )
 
 
@@ -242,7 +260,14 @@ class FrameSource(Protocol):
 
 
 class Cv2FrameSource:
-    """cv2.VideoCapture 后端(缺省;Windows 经 DirectShow,Linux 经 V4L2)(W4-6)。"""
+    """cv2.VideoCapture 后端(缺省;Windows 经 DirectShow,Linux 经 V4L2)(W4-6)。
+
+    ΝΩ-36 读超时护栏:``cap.read()`` 无原生超时 —— DirectShow 信号丢失时
+    可无限挂起,旧实现会把 device 池 worker 一起拖死。现在 read 移入后台
+    守护缓冲线程(绑定各自的 cap 实例),消费侧 ``queue.get(timeout=
+    read_timeout_s)``:超时 ⇒ 诚实 ``PhysicalError`` 超时信封,worker 立即
+    归还;后台线程保持运行,信号恢复后续帧自然到达(设备池不再被挂起链拖死)。
+    """
 
     def __init__(
         self,
@@ -250,14 +275,24 @@ class Cv2FrameSource:
         width: int | None = None,
         height: int | None = None,
         fps: int | None = None,
+        read_timeout_s: float = 5.0,
     ) -> None:
         self.index = index
         self.width = width
         self.height = height
         self.fps = fps
+        self.read_timeout_s = max(0.1, float(read_timeout_s))
         self._cap = None
+        # ΝΩ-36:后台缓冲读线程状态(线程绑定构造时的 cap —— 换 cap 必换线程,
+        # 杜绝两线程并发读同一 cv2 句柄)
+        self._frames_q: queue.Queue = queue.Queue(maxsize=1)  # 满则丢旧保新
+        self._reader_stop = threading.Event()
+        self._reader_thread: threading.Thread | None = None
+        self._reader_cap = None
+        self.read_timeouts = 0  # 超时计数(describe 申报 —— 信号健壮度的可观测面)
 
     def open(self) -> None:
+        self._stop_reader()  # ΝΩ-36:旧 cap 的读线程先停再换新句柄
         try:
             import cv2  # 懒加载:无 cv2 环境导入本模块零代价
         except Exception as e:  # noqa: BLE001
@@ -284,12 +319,71 @@ class Cv2FrameSource:
         if self.fps:
             self._cap.set(cv2.CAP_PROP_FPS, self.fps)
 
+    def _reader_loop(self, cap) -> None:
+        """后台缓冲:持续 ``cap.read()`` → 有界队列(满则丢旧保新)。"""
+        q = self._frames_q
+        while not self._reader_stop.is_set():
+            try:
+                ok, frame = cap.read()  # 信号丢失时可无限挂起 —— 挂的是本守护线程
+            except Exception:  # noqa: BLE001 —— cv2 原生异常等价无帧
+                ok, frame = False, None
+            if self._reader_stop.is_set():
+                return
+            try:
+                q.put_nowait((ok, frame))
+            except queue.Full:
+                try:
+                    q.get_nowait()  # 丢旧保新(诊断/消费以最新帧为准)
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait((ok, frame))
+                except queue.Full:
+                    pass
+
+    def _ensure_reader(self) -> None:
+        """当前 cap 的读线程在场性保证(线程↔cap 一一绑定)。"""
+        cap = self._cap
+        if cap is None:
+            return
+        t = self._reader_thread
+        if t is not None and t.is_alive() and self._reader_cap is cap:
+            return
+        self._stop_reader()
+        self._frames_q = queue.Queue(maxsize=1)
+        self._reader_stop.clear()
+        self._reader_cap = cap
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, args=(cap,), name="dsh-uvc-reader", daemon=True,
+        )
+        self._reader_thread.start()
+
+    def _stop_reader(self) -> None:
+        self._reader_stop.set()
+        t = self._reader_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            # 卡死在 cap.read 里的线程:join 有界,超时放行(守护线程随进程退)
+            t.join(timeout=0.3)
+        self._reader_thread = None
+        self._reader_cap = None
+
     def read(self) -> Image.Image:
         import numpy as np  # cv2 在场 ⇒ numpy 必在场
 
         if self._cap is None:
             raise PhysicalError(ErrorKind.INTERNAL_ERROR, "capture not opened")
-        ok, frame = self._cap.read()
+        self._ensure_reader()
+        try:
+            ok, frame = self._frames_q.get(timeout=self.read_timeout_s)
+        except queue.Empty:
+            # ΝΩ-36:诚实超时信封 —— worker 立即归还(有界等待,不再被拖死)
+            self.read_timeouts += 1
+            raise PhysicalError(
+                ErrorKind.SCREEN_CAPTURE_FAILED,
+                f"uvc frame not available within {self.read_timeout_s:.1f}s "
+                "(cap.read() hung or signal lost; background reader keeps "
+                "running and resumes when signal returns)",
+            )
         if not ok or frame is None:
             raise PhysicalError(
                 ErrorKind.SCREEN_CAPTURE_FAILED,
@@ -299,6 +393,7 @@ class Cv2FrameSource:
         return cv2_to_rgb(frame, np)
 
     def close(self) -> None:
+        self._stop_reader()  # ΝΩ-36:先停读线程再释放句柄(正常路径无并发读)
         if self._cap is not None:
             self._cap.release()
             self._cap = None
@@ -308,6 +403,12 @@ class Cv2FrameSource:
             "backend": "cv2",
             "index": self.index,
             "opened": self._cap is not None,
+            # ΝΩ-36:读超时护栏的可观测面
+            "read_timeout_s": self.read_timeout_s,
+            "read_timeouts": self.read_timeouts,
+            "reader_alive": bool(
+                self._reader_thread is not None and self._reader_thread.is_alive()
+            ),
         }
 
 
@@ -419,7 +520,8 @@ def resolve_frame_source(cfg: UvcConfig, source: FrameSource | None = None) -> F
     try:
         import cv2  # noqa: F401
 
-        return Cv2FrameSource(cfg.device_index, cfg.width, cfg.height, cfg.fps)
+        return Cv2FrameSource(cfg.device_index, cfg.width, cfg.height, cfg.fps,
+                              read_timeout_s=cfg.read_timeout_s)
     except Exception:  # noqa: BLE001
         return UnsupportedFrameSource("cv2 not importable in current environment")
 
@@ -461,18 +563,22 @@ class UvcController:
         return self._source
 
     async def open(self) -> dict:
-        """打开设备(线程池内执行;失败 ⇒ PhysicalError 信封)(W4-6)。"""
+        """打开设备(线程池内执行;失败 ⇒ PhysicalError 信封)(W4-6)。
+
+        ΑΩ-R25:cv2.VideoCapture 打开(DirectShow 首帧协商可达秒级)是长阻塞
+        设备 I/O ⇒ device 池,不与主机截屏/编码共池。
+        """
         src = self._ensure_source()
         loop = asyncio.get_running_loop()
         if self._opened_at is None:
-            await loop.run_in_executor(None, src.open)
+            await loop.run_in_executor(get_pool(DEVICE_POOL), src.open)
             self._opened_at = time.monotonic()
         return {"opened": True, **src.describe()}
 
     async def close(self) -> dict:
         if self._source is not None and self._opened_at is not None:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._source.close)
+            await loop.run_in_executor(get_pool(DEVICE_POOL), self._source.close)
         self._opened_at = None
         return {"closed": True}
 
@@ -510,7 +616,9 @@ class UvcController:
             return rectify(img, self.calibration)
 
         try:
-            clean = await loop.run_in_executor(None, _grab)
+            # ΑΩ-R25:硬件读帧(src.read 阻塞在采集卡/信号上,信号丢失时可达
+            # 秒级)⇒ device 池;与主机截图/编码物理隔离
+            clean = await loop.run_in_executor(get_pool(DEVICE_POOL), _grab)
         except PhysicalError:
             self._opened_at = None  # 设备态可疑:下次 capture 重新打开
             raise
@@ -545,7 +653,9 @@ class UvcController:
                 img = img.resize((max_width, max(1, int(img.height * ratio))), Image.LANCZOS)
             return img
 
-        img = await loop.run_in_executor(None, _compose)
+        # ΑΩ-R25:裁剪/缩放/编码是 CPU 图像工作 ⇒ screen 池 —— 大图编码不再
+        # 拖住设备池里的串口写帧/adb 单帧链(head-of-line blocking 的根治点)
+        img = await loop.run_in_executor(get_pool(SCREEN_POOL), _compose)
 
         def _encode() -> bytes:
             buf = io.BytesIO()
@@ -557,7 +667,7 @@ class UvcController:
             return buf.getvalue()
 
         try:
-            data = await loop.run_in_executor(None, _encode)
+            data = await loop.run_in_executor(get_pool(SCREEN_POOL), _encode)
         except Exception as e:  # noqa: BLE001
             raise PhysicalError(ErrorKind.SCREEN_CAPTURE_FAILED, f"image encode failed: {e}") from e
         extras["width"], extras["height"] = img.width, img.height
@@ -717,6 +827,89 @@ def _run_selftest() -> int:
         except PhysicalError as e:
             degraded_ok = e.kind is ErrorKind.SCREEN_CAPTURE_FAILED and "opencv-python" in e.detail
     check("honest unsupported when cv2 absent", degraded_ok)
+
+    # ── 5. ΝΩ-36 读超时护栏(离线:fake cv2 —— 挂死的 cap 不再拖死消费方) ──
+    import types as _types
+
+    class _HangingCap:
+        """信号丢失的 DirectShow 句柄:read() 永不返回。"""
+
+        def __init__(self) -> None:
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return True
+
+        def set(self, *_a) -> None:
+            return None
+
+        def read(self):
+            time.sleep(1.0)
+            return False, None
+
+        def release(self) -> None:
+            self.released = True
+
+    class _FastCap:
+        """健康句柄:read() 即时返回 BGR ndarray。"""
+
+        def __init__(self) -> None:
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return True
+
+        def set(self, *_a) -> None:
+            return None
+
+        def read(self):
+            arr = np.zeros((4, 6, 3), dtype=np.uint8)
+            arr[:, :, 0] = 200  # B 通道非零 ⇒ RGB 通道序可验
+            return True, arr
+
+        def release(self) -> None:
+            self.released = True
+
+    hanging, fast = _HangingCap(), _FastCap()
+    _fake_cv2 = _types.ModuleType("cv2")
+    _fake_cv2.CAP_DSHOW = 1
+    _fake_cv2.CAP_PROP_FRAME_WIDTH = 3
+    _fake_cv2.CAP_PROP_FRAME_HEIGHT = 4
+    _fake_cv2.CAP_PROP_FPS = 5
+    _fake_cv2.VideoCapture = lambda *a, **k: hanging
+    _saved_cv2 = sys.modules.get("cv2")
+    sys.modules["cv2"] = _fake_cv2
+    try:
+        src = Cv2FrameSource(0, read_timeout_s=0.2)
+        src.open()
+        t0 = time.monotonic()
+        try:
+            src.read()
+            timeout_ok = False
+        except PhysicalError as e:
+            timeout_ok = (
+                e.kind is ErrorKind.SCREEN_CAPTURE_FAILED and "within 0.2s" in e.detail
+            )
+        elapsed = time.monotonic() - t0
+        check("hanging cap.read -> honest timeout envelope", timeout_ok)
+        check("timeout is bounded (worker freed, <0.9s)", elapsed < 0.9)
+        check("timeout counted once", src.read_timeouts == 1)
+        src.close()
+        check("close releases hung cap", hanging.released)
+        # 健康句柄:后台缓冲线程交付真帧
+        _fake_cv2.VideoCapture = lambda *a, **k: fast
+        src2 = Cv2FrameSource(0, read_timeout_s=1.0)
+        src2.open()
+        img = src2.read()
+        check("buffered read returns PIL frame",
+              img.size == (6, 4) and img.getpixel((0, 0)) == (0, 0, 200))
+        src2.close()
+        check("fast cap released", fast.released)
+    finally:
+        if _saved_cv2 is None:
+            sys.modules.pop("cv2", None)
+        else:
+            sys.modules["cv2"] = _saved_cv2
 
     print(f"\nuvc selftest: {'OK' if not failures else 'FAILED: ' + '; '.join(failures)}")
     return 0 if not failures else 1

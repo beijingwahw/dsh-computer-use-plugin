@@ -1,5 +1,5 @@
 // src/tools/metricsDashboard.ts
-// 纪元 Σ（Σ-7 遥测仪表盘）：metrics_dashboard —— 五分区文本仪表盘。
+// 纪元 Σ（Σ-7 遥测仪表盘）：metrics_dashboard —— 六分区文本仪表盘。
 // 把全系统健康折叠为一张 ≤80 列、中文标签、等宽对齐的多行文本仪表盘：
 //   · 工具区（tools）   —— telemetry.snapshot 每工具 调用/成功率/p50/p95
 //                          （按调用量降序 top 10）+ 全局延迟尾报告（若在）
@@ -11,6 +11,15 @@
 //                          （src/guards/hooks.ts deny 分支打点）
 //   · 内核区（kernel）  —— kernelRegistry.list() 的十颗生产内核读点台账
 //                          （key/器官/现值 vs 缺省/漂移%/证据/代际 —— 纪元 Θ-4）
+//   · 能力区（capability）—— 行为开关实账（ΑΩ-R36「默认关闭功能面」透明化）：
+//                          睡眠周期/探索/可逆性分道/步数拍卖/课程/内核进化/联邦/
+//                          级联…逐项 当前 on/off + 一句话描述（提取自 config.ts
+//                          注释）+ 点亮键名；缺省条目标 "OFF (default)"，把
+//                          「宣称能力 vs 默认运行形态」的差距折叠成诚实账。
+//                          数据源 = 可选 config 视图（挂载点未接线 ⇒ 按 D-B
+//                          立法缺省物化呈现）+ 运行时单例在场性只读探测
+//                          （故障切换池/级联 getProviderPool/getVlmCascade），
+//                          只读绝不写。
 // 铁律：纯只读、零配置依赖（恒挂载）、绝不抛异常；锚点一律走 toolResult 工厂。
 //
 // ─── 自主区数据口径（诚实三源，JSDoc 备案） ───
@@ -28,11 +37,13 @@ import { telemetry } from '../telemetry.js';
 import { vlmMeter } from '../vlm/metering.js';
 import { isGlmConfigured } from '../vlm/glmClient.js';
 import { kernelRegistry } from '../kernel/registry.js';
+import { Config as ConfigSchema } from '../config.js'; // ΑΩ-R36：值面 —— Config({}) 物化 D-B 立法缺省
+import { getProviderPool, getVlmCascade } from '../vlm/index.js'; // ΑΩ-R36：运行时单例只读探测面
 /** 仪表盘行宽纪律（≤80 列的工程甜点：分隔线铺满 78，留边距） */
 const COLS = 78;
 const WIDTH_LIMIT = 80;
-/** 合法 section 名（缺省 'all' = 五分区全渲染） */
-const VALID_SECTIONS = ['all', 'tools', 'vlm', 'autonomy', 'guards', 'kernel'];
+/** 合法 section 名（缺省 'all' = 六分区全渲染） */
+const VALID_SECTIONS = ['all', 'tools', 'vlm', 'autonomy', 'guards', 'kernel', 'capability'];
 /** 单分区名 → 中文区名（顶栏标签用） */
 const SECTION_TITLES = {
     tools: '工具区',
@@ -40,6 +51,7 @@ const SECTION_TITLES = {
     autonomy: '自主区',
     guards: '守卫区',
     kernel: '内核区',
+    capability: '能力区', // ΑΩ-R36：行为开关实账分区
 };
 // ─── 等宽栅格：CJK 视觉宽度（中英混排对齐的事实源） ───
 /** 视觉宽度：全角字符（CJK/全角标点/谚文等）计 2 列，其余计 1 列 */
@@ -238,30 +250,206 @@ function renderKernelPane() {
     }
     return lines;
 }
-/** 全分区渲染器表（section 筛选的分派面） */
+/** ΑΩ-R36：立法缺省账的惰性缓存（Config({}) 物化；任何故障收敛为空对象） */
+let configDefaultsCache = null;
+function legislatedDefaults() {
+    if (configDefaultsCache === null) {
+        try {
+            const materialized = ConfigSchema({});
+            configDefaultsCache = (materialized ?? {});
+        }
+        catch {
+            configDefaultsCache = {};
+        }
+    }
+    return configDefaultsCache;
+}
+/** ΑΩ-R36：能力面开关清单（覆盖立法默认关的行为面 + 常被误读为关的默认开面） */
+const CAPABILITY_SWITCHES = [
+    {
+        name: '睡眠周期',
+        key: 'enableSleepCycle',
+        desc: '会话结束时离线执行 回放→蒸馏→免疫→校准→审计→晨报 六幕',
+        kind: 'boolean',
+    },
+    {
+        name: '探索前沿',
+        key: 'enableExploration',
+        desc: '铸 ExplorationLedger 注入 deps.exploration（UCB 择路 + 步落账回报）',
+        kind: 'boolean',
+    },
+    {
+        name: '可逆性分道',
+        key: 'enableReversibilityLanes',
+        desc: 'click/type/drag 派发前 classify → dispatchLaneFor 三路',
+        kind: 'boolean',
+    },
+    {
+        name: '步数拍卖',
+        key: 'enableStepAuction',
+        desc: 'maxSteps 变共享池每 K 步重拍卖；false（缺省）= 各代理独立预算',
+        kind: 'boolean',
+    },
+    {
+        name: '惊异课程',
+        key: 'curriculumEnabled',
+        desc: 'gym 世界生成按生产端 worldModel 惊异谱加权采样；false（缺省）= 均匀',
+        kind: 'boolean',
+    },
+    {
+        name: '内核进化',
+        key: 'kernelEvolutionEnabled',
+        desc: '用户消息钩子按节流窗驱动内核校准器 tick；false（缺省）= 只记账不进化',
+        kind: 'boolean',
+    },
+    {
+        name: '万脑联邦',
+        key: 'federationEndpoint',
+        desc: '联邦聚合端点；空 = 零网络（本地铸摘要/合并/应用依然全功能）',
+        kind: 'nonempty-string',
+    },
+    {
+        name: '自主环',
+        key: 'autonomyEnabled',
+        desc: '自主识别→自主判断→自主执行；关闭时工具不挂载',
+        kind: 'boolean',
+    },
+    {
+        name: '云脑级联',
+        key: 'vlmProviderTiers',
+        desc: '成本级联路由的 tier 标注表；空（缺省）⇒ 级联恒弃权',
+        kind: 'nonempty-string',
+        probe: () => getVlmCascade() !== null, // 级联执行体单例在场 = 实测点亮
+    },
+    {
+        name: '故障切换池',
+        key: 'vlmFallbackProviders',
+        desc: '备选平台链铸成故障切换池，主力失败按序补位；空 = 不铸池',
+        kind: 'nonempty-string',
+        probe: () => getProviderPool() !== null, // 备选池单例在场 = 实测点亮
+    },
+    {
+        name: '审批闸门',
+        key: 'enableApprovalGate',
+        desc: '启用不可逆操作审批闸门：危险目标需一次性令牌方可执行',
+        kind: 'boolean',
+    },
+    {
+        name: '金丝雀试演',
+        key: 'allowUnverifiedDangerous',
+        desc: '携带审批令牌的调用探针缺席/失败 ⇒ 拦截；true（显式逃生门）',
+        kind: 'inverted-boolean', // 缺省 false = fail-closed 执法 ON；true = 旁路 OFF
+    },
+    {
+        name: 'UI 记忆',
+        key: 'enableUIMemory',
+        desc: '启用场景式 UI 记忆（remember_ui / recall_ui 工具）',
+        kind: 'boolean',
+    },
+    {
+        name: '技能库',
+        key: 'enableSkillLibrary',
+        desc: '启用自进化技能库（save_skill / match_skill / run_skill + 自动归纳）',
+        kind: 'boolean',
+    },
+];
+/** ΑΩ-R36：按取值律判定单条开关是否点亮（防御式：类型不符按熄灭处理） */
+function isSwitchOn(kind, raw) {
+    if (kind === 'boolean')
+        return raw === true;
+    if (kind === 'nonempty-string')
+        return typeof raw === 'string' && raw.trim() !== '';
+    return raw !== true; // inverted-boolean：非 true（含缺省 false）= 执法点亮
+}
+/**
+ * ΑΩ-R36：能力面实账行集。view 为显式 config 视图（null = 未接线）：
+ * probe 在场 ⇒ ON (runtime)；键在 view ⇒ 裸 ON/OFF（实配呈现）；
+ * 否则落立法缺省账 ⇒ ON/OFF (default)。纯函数、只读、绝不抛。
+ */
+function capabilityRows(view) {
+    const defaults = legislatedDefaults();
+    return CAPABILITY_SWITCHES.map(sw => {
+        if (sw.probe) {
+            try {
+                if (sw.probe())
+                    return { name: sw.name, key: sw.key, desc: sw.desc, label: 'ON (runtime)' };
+            }
+            catch {
+                /* 单例探测故障 ⇒ 落回配置/缺省面（绝不抛纪律） */
+            }
+        }
+        const fromView = view !== null && Object.prototype.hasOwnProperty.call(view, sw.key);
+        const raw = fromView ? view[sw.key] : defaults[sw.key];
+        const tag = fromView ? '' : ' (default)';
+        return {
+            name: sw.name,
+            key: sw.key,
+            desc: sw.desc,
+            label: `${isSwitchOn(sw.kind, raw) ? 'ON' : 'OFF'}${tag}`,
+        };
+    });
+}
+/** ΑΩ-R36：能力区列宽（名 12 / 状态 15 —— "OFF (default)"=13 列） */
+const CAP_NAME_W = 12;
+const CAP_STATE_W = 15;
+/** ΑΩ-R36：能力区渲染器 —— 行为开关实账表（名/状态/点亮键 + 缩进描述行） */
+function renderCapabilityPane(view) {
+    const lines = [rule('能力区（capability surface · 行为开关实账）')];
+    lines.push(view === null
+        ? '口径: config 未接线 ⇒ 缺省按 D-B 立法；池/级联为运行时单例实测'
+        : '口径: config 已接线（实配呈现）；池/级联为运行时单例实测');
+    lines.push(padEndV('能力', CAP_NAME_W) + padEndV('状态', CAP_STATE_W) + '点亮键（config）');
+    const rows = capabilityRows(view);
+    let offDefault = 0;
+    for (const r of rows) {
+        if (r.label === 'OFF (default)')
+            offDefault += 1;
+        lines.push(padEndV(r.name, CAP_NAME_W) + padEndV(r.label, CAP_STATE_W) + r.key);
+        lines.push('  ' + r.desc);
+    }
+    lines.push(`OFF (default) ${offDefault}/${rows.length} —— 宣称能力 vs 默认形态的诚实账（点亮方式见各行键名）`);
+    return lines;
+}
+/**
+ * 全分区渲染器表（section 筛选的分派面）。ΑΩ-R36：能力区独走 renderCapabilityPane
+ * （需要 config 视图参数；其余五区零参数纯遥测渲染）—— 见 execute 内分派。
+ */
 const PANE_RENDERERS = {
-    tools: renderToolsPane,
-    vlm: renderVlmPane,
-    autonomy: renderAutonomyPane,
-    guards: renderGuardsPane,
-    kernel: renderKernelPane,
+    tools: () => renderToolsPane(),
+    vlm: () => renderVlmPane(),
+    autonomy: () => renderAutonomyPane(),
+    guards: () => renderGuardsPane(),
+    kernel: () => renderKernelPane(),
+    capability: renderCapabilityPane, // ΑΩ-R36：直接吃 config 视图
 };
-export function createMetricsDashboardTool() {
+/**
+ * ΑΩ-R36：工厂接受可选 config 视图（能力区数据源之一）。挂载点
+ * tools/index.ts 的恒挂载行 createMetricsDashboardTool() 不传 ⇒ null ⇒
+ * 能力区按 D-B 立法缺省账如实呈现（默认运行形态的诚实账）；未来接线传参即
+ * 切换为实配呈现，零迁移成本。绝不因 config 缺席而抛错或拒渲染。
+ */
+export function createMetricsDashboardTool(config) {
+    /** ΑΩ-R36：能力区 config 视图（工厂捕获一次；null = 未接线缺省账口径） */
+    const configView = config ?? null;
     return defineTool({
         name: 'metrics_dashboard',
-        description: 'Renders a five-pane TEXT dashboard of whole-system health (monospace-aligned, <=80 columns): ' + // doctor-exempt: 文案字符串（终端排版说明），非阈值比较（W6-2）
+        description: 'Renders a six-pane TEXT dashboard of whole-system health (monospace-aligned, <=80 columns): ' + // doctor-exempt: 文案字符串（终端排版说明），非阈值比较（W6-2）
             'tools pane (per-tool calls / success rate / P50 / P95, top 10 by volume, plus the global GPD ' +
             'latency-tail report when available), vlm pane (VlmMeter calls / failures / P50 / P95 / tokens / ' +
             'by-kind, plus live isGlmConfigured state), autonomy pane (autonomous_run telemetry record, a ' +
             'lightweight outcome ledger, and an honest "evolution ledger not wired" notice), guards pane ' +
-            "(per-tool 'guard:*' deny-interception counters), and kernel pane (the production kernel registry: " +
-            'per-key organ / value vs default / drift% / evidence / generation). Read-only, never throws. ' +
-            "Pass section: 'tools' | 'vlm' | 'autonomy' | 'guards' | 'kernel' to zoom into one pane (default all).",
+            "(per-tool 'guard:*' deny-interception counters), kernel pane (the production kernel registry: " +
+            'per-key organ / value vs default / drift% / evidence / generation), and capability pane ' +
+            '(the default-off capability surface made transparent: each behavior switch ON/OFF vs its ' +
+            'legislated default, a one-line description, and the config key that lights it up). ' +
+            'Read-only, never throws. ' +
+            "Pass section: 'tools' | 'vlm' | 'autonomy' | 'guards' | 'kernel' | 'capability' to zoom into " +
+            'one pane (default all).',
         parameters: {
             section: {
                 type: 'string',
-                description: "Which pane to render: 'tools' | 'vlm' | 'autonomy' | 'guards' | 'kernel', or 'all' (default) " +
-                    'for the full five-pane dashboard.',
+                description: "Which pane to render: 'tools' | 'vlm' | 'autonomy' | 'guards' | 'kernel' | 'capability', " +
+                    "or 'all' (default) for the full six-pane dashboard.",
             },
         },
         output: {
@@ -284,13 +472,16 @@ export function createMetricsDashboardTool() {
                     section = null;
                 }
                 if (section === null) {
-                    return toolErr('metrics_dashboard validation failed.', `Invalid section value: ${JSON.stringify(raw)}. Valid sections: all | tools | vlm | autonomy | guards | kernel.`, "Omit section (or pass 'all') for the full five-pane dashboard, or pass one of " +
-                        "'tools' | 'vlm' | 'autonomy' | 'guards' | 'kernel' to zoom into a single pane.");
+                    return toolErr('metrics_dashboard validation failed.', `Invalid section value: ${JSON.stringify(raw)}. Valid sections: all | tools | vlm | autonomy | guards | kernel | capability.`, "Omit section (or pass 'all') for the full six-pane dashboard, or pass one of " +
+                        "'tools' | 'vlm' | 'autonomy' | 'guards' | 'kernel' | 'capability' to zoom into a single pane.");
                 }
-                const chosen = section === 'all' ? ['tools', 'vlm', 'autonomy', 'guards', 'kernel'] : [section];
+                // ΑΩ-R36：六分区全集（能力区殿后 —— 读完健康账，最后一眼落在形态账）
+                const chosen = section === 'all'
+                    ? ['tools', 'vlm', 'autonomy', 'guards', 'kernel', 'capability']
+                    : [section];
                 // 铸盘：总栏（all 模式附全局一行）+ 各分区 + 底栏；每行 80 列硬纪律
                 const lines = [
-                    heavyRule(`遥测仪表盘 · ${section === 'all' ? '全系统健康（五分区）' : SECTION_TITLES[section]}`),
+                    heavyRule(`遥测仪表盘 · ${section === 'all' ? '全系统健康（六分区）' : SECTION_TITLES[section]}`),
                 ];
                 if (section === 'all') {
                     const snap = telemetry.snapshot();
@@ -298,7 +489,7 @@ export function createMetricsDashboardTool() {
                         ` │ noop率 ${snap.global.noop_rate ?? '-'}%`);
                 }
                 for (const name of chosen)
-                    lines.push(...PANE_RENDERERS[name]());
+                    lines.push(...PANE_RENDERERS[name](configView));
                 lines.push(heavyRule('Σ-7 · 只读透视 · 绝不抛'));
                 const dashboard = lines.map(l => trimToWidth(l, WIDTH_LIMIT)).join('\n');
                 // 机读速览（文本之外的程序化消费面 —— 与 dashboard 同源同刻）
@@ -308,6 +499,11 @@ export function createMetricsDashboardTool() {
                     .filter(c => c.counter.startsWith('guard:'))
                     .reduce((n, c) => n + c.misses, 0);
                 const vlmSummary = vlmMeter.summary();
+                // ΑΩ-R36：能力面机读速览（与能力区文本同源同刻 —— OFF (default) 条数即
+                // 「默认运行形态与宣称能力的距离」的量化账）
+                const capRows = capabilityRows(configView);
+                const capOffDefault = capRows.filter(r => r.label === 'OFF (default)').length;
+                const capOn = capRows.filter(r => r.label.startsWith('ON')).length;
                 const health = {
                     uptime_sec: snap.uptime_sec,
                     global_calls: snap.global.calls,
@@ -317,17 +513,23 @@ export function createMetricsDashboardTool() {
                     autonomous_run_calls: auto?.calls ?? 0,
                     autonomous_run_success_rate: auto?.success_rate ?? null,
                     guard_blocks: guardBlocks,
+                    capability: {
+                        total: capRows.length,
+                        off_default: capOffDefault,
+                        on: capOn,
+                    },
                 };
-                return toolOk(`metrics_dashboard: rendered ${section === 'all' ? 'five panes' : `the ${SECTION_TITLES[section]} pane`} ` +
+                return toolOk(`metrics_dashboard: rendered ${section === 'all' ? 'six panes' : `the ${SECTION_TITLES[section]} pane`} ` +
                     `(${lines.length} lines, <=${WIDTH_LIMIT} cols).`, {
                     section,
                     sections: chosen,
                     dashboard,
                     health,
                 }, 'Read the panes for a whole-system snapshot. For machine-readable detail call get_metrics; ' +
-                    'pass section (tools|vlm|autonomy|guards|kernel) to zoom into one pane. High failure rate on a tool? ' +
-                    'Re-ground with take_screenshot before retrying; guard interceptions point to rejected calls ' +
-                    'worth reading the deny reasons for.');
+                    'pass section (tools|vlm|autonomy|guards|kernel|capability) to zoom into one pane. High failure ' +
+                    'rate on a tool? Re-ground with take_screenshot before retrying; guard interceptions point to ' +
+                    'rejected calls worth reading the deny reasons for; the capability pane lists which behavior ' +
+                    'switches are dark by legislated default and the config key that lights each one.');
             }
             catch (error) {
                 // 绝不抛纪律的兜底臂（理论不可达 —— 渲染全程只读且防御式）

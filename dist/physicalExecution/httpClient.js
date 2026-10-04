@@ -21,8 +21,13 @@
 // 调用点（enableAuth=false 的诊断路径、health 探活、业务端点一视同仁）。
 //
 // Node 18+ 内置 fetch + AbortSignal.timeout（无外部依赖）
-// O 纪元（#16）：UDS 客户端半兑现 —— http+unix:// 经 undici Agent(socketPath)
-// dispatcher 传输（全局 fetch 即 undici，init.dispatcher 是其原生扩展）。
+// O 纪元（#16）：UDS 基址 http+unix:// 合法化。
+// ΑΩ-R3：UDS 传输全兑现 —— 修半兑现实坏点：全局 fetch **忽略** init.dispatcher
+// （仅 undici 自家 fetch 认它），旧实现只传 dispatcher 给全局 fetch ⇒ 无宿主桥时
+// UDS 请求一律 transport_error。现改为：宿主桥（setUndiciBridge）最优先，缺省
+// 懒加载 npm undici（本项目 runtime 依赖），用 undici.fetch + Agent({
+// connections, connect: { socketPath } }) 专用连接池传输；undici 不可用时
+// 诚实降级 transport_error（detail 归因 undici-unavailable），绝不静默走 TCP。
 import { randomUUID } from 'node:crypto';
 import { PhysicalErrorKind } from './contracts.js';
 /** http+unix:// 基址解析：socket 路径 + URL path。纯函数导出：测试面。
@@ -48,49 +53,143 @@ export function parseUnixBaseUrl(baseUrl) {
         urlPath: decoded.slice(idx + '.sock'.length) || '/',
     };
 }
-/** UDS dispatcher 缓存（每 socket 一个 Agent —— 连接池复用；模块级单例） */
 const udsAgents = new Map();
+/** ΑΩ-R3：UDS 池单 socket 连接上限 —— 同 socket 并发请求复用同一池不炸连接；
+ *  undici 缺省无上限，此处显式封顶（本机微服务场景 64 绰绰有余）。 */
+const UDS_AGENT_CONNECTIONS = 64;
+/** ΝΩ-27：UDS 池空闲回收 TTL —— 无请求（且无在飞）持续此时长即 close+逐出。 */
+const UDS_AGENT_IDLE_TTL_MS = 60_000;
+/** best-effort 关闭单个 Agent —— close 失败/抛错皆吞（运行层零阻塞铁律）。 */
+function bestEffortCloseAgent(agent) {
+    try {
+        const closing = agent.close?.();
+        if (closing && typeof closing.catch === 'function')
+            closing.catch(() => { });
+    }
+    catch { /* 同步抛错也吞 */ }
+}
+/** ΝΩ-27：（重）布防某 socket 的空闲 TTL 计时器 —— 请求时刷新即调用本函数；
+ *  到期时在飞 >0 ⇒ 顺延一整个 TTL（不能关在役池），否则回收。 */
+function armIdleTimer(socketPath) {
+    const entry = udsAgents.get(socketPath);
+    if (!entry)
+        return;
+    if (entry.timer)
+        clearTimeout(entry.timer);
+    const t = setTimeout(() => {
+        const cur = udsAgents.get(socketPath);
+        if (!cur || cur !== entry)
+            return; // 已被失效/清桥路径处理：此处不动
+        if (cur.inFlight > 0) {
+            armIdleTimer(socketPath); // 在飞：顺延（计时器模式复用 —— 重布防）
+            return;
+        }
+        udsAgents.delete(socketPath);
+        bestEffortCloseAgent(entry.agent);
+    }, UDS_AGENT_IDLE_TTL_MS);
+    t.unref?.();
+    entry.timer = t;
+}
+/** ΝΩ-27：失效重建 —— 传输层失败后对该 socketPath 的池立即 close+逐出，
+ *  下一次请求用新 Agent 重拨（服务可能已换 socket 路径重启）。 */
+function invalidateUdsAgent(socketPath) {
+    const entry = udsAgents.get(socketPath);
+    if (!entry)
+        return;
+    udsAgents.delete(socketPath);
+    if (entry.timer)
+        clearTimeout(entry.timer);
+    bestEffortCloseAgent(entry.agent);
+}
+/** ΑΩ-R3：缺省 undici 懒加载缓存 —— import('undici') 成败各缓存一次
+ *  （失败缓存后续请求不再重复导入；成功走 ESM 模块缓存本就只装一次）。 */
+let lazyCarrier;
+function loadUndici() {
+    if (!lazyCarrier) {
+        // undici 是本项目 runtime 依赖；宿主环境未装/损坏 ⇒ reject ⇒ 缓存 null
+        // （旁路义务：导入失败静默缓存，UDS 请求时按不可用诚实归因）
+        lazyCarrier = import('undici').then((m) => {
+            const Agent = m.Agent;
+            const udsFetch = m.fetch;
+            if (typeof Agent !== 'function' || typeof udsFetch !== 'function')
+                return null;
+            return { Agent: Agent, fetch: udsFetch };
+        }, () => null);
+    }
+    return lazyCarrier;
+}
+/** ΑΩ-R3：载面解析 —— 宿主桥最优先（字段级覆盖：只给 Agent 或只给 fetch 也成立，
+ *  缺的半边由缺省 undici 补齐）；桥缺席 ⇒ 懒加载 npm undici；
+ *  桥 === false ⇒ 宿主明示 undici 不可用（禁懒加载）。不可用 ⇒ null。 */
+async function resolveUndici() {
+    const injected = globalThis.__undiciBridge;
+    if (injected === false)
+        return null;
+    const bridge = injected && typeof injected === 'object' ? injected : null;
+    if (bridge && (typeof bridge.Agent === 'function' || typeof bridge.fetch === 'function')) {
+        const base = typeof bridge.Agent === 'function' && typeof bridge.fetch === 'function'
+            ? null
+            : await loadUndici();
+        const Agent = typeof bridge.Agent === 'function' ? bridge.Agent : base?.Agent;
+        const udsFetch = typeof bridge.fetch === 'function' ? bridge.fetch : base?.fetch;
+        return Agent && udsFetch ? { Agent, fetch: udsFetch } : null;
+    }
+    const loaded = await loadUndici();
+    return loaded?.Agent && loaded?.fetch ? { Agent: loaded.Agent, fetch: loaded.fetch } : null;
+}
+/** ΑΩ-R3：UDS 请求面 —— { agent（按 socketPath 池化复用）, fetch, release }。
+ *  不可用 ⇒ null。ΝΩ-27：acquire 即 inFlight+1 并刷新空闲 TTL；请求结束后
+ *  调用 release 归还计数（microFetch 的 fetch finally 统一收口）。 */
+async function udsTransport(socketPath) {
+    const carrier = await resolveUndici();
+    if (!carrier)
+        return null;
+    let entry = udsAgents.get(socketPath);
+    if (!entry) {
+        entry = {
+            agent: new carrier.Agent({ connections: UDS_AGENT_CONNECTIONS, connect: { socketPath } }),
+            timer: null,
+            inFlight: 0,
+        };
+        udsAgents.set(socketPath, entry);
+    }
+    entry.inFlight += 1;
+    armIdleTimer(socketPath); // 请求时刷新：距最近请求重新计 60s
+    let released = false;
+    return {
+        agent: entry.agent,
+        fetch: carrier.fetch,
+        release: () => {
+            if (released)
+                return; // 幂等防御（microFetch 单点调用，双调不增负）
+            released = true;
+            entry.inFlight = Math.max(0, entry.inFlight - 1);
+        },
+    };
+}
+/** ΑΩ-R3：best-effort 关闭全部 UDS 池（桥更换时调用）—— close 失败/抛错皆吞
+ *  （运行层零阻塞铁律），只保证不再复用旧桥的池。ΝΩ-27：一并拆 TTL 计时器。 */
+function closeAgents() {
+    for (const entry of udsAgents.values()) {
+        if (entry.timer)
+            clearTimeout(entry.timer);
+        bestEffortCloseAgent(entry.agent);
+    }
+    udsAgents.clear();
+}
 /** HTTP 401 Unauthorized：Python 端认证失败的信号位（HMAC 密钥两端不一致、
  *  Cap Token 过期、X-Request-Id nonce 重放或本机时钟偏移 —— 客户端侧可修）。
  *  是 unauthorized 与 transport_error 的分流判据，具名以脱离「裸状态码」面。 */
 const HTTP_STATUS_UNAUTHORIZED = 401;
-/** 获取/铸造 UDS dispatcher（undici Agent）。不可用（非 Node undici 环境）⇒ null。 */
-function udsDispatcher(socketPath) {
-    let agent = udsAgents.get(socketPath);
-    if (agent)
-        return agent;
-    try {
-        // 全局 fetch 的 dispatcher 需要 undici 的 Agent —— Node 内置 fetch 自带
-        // undici，但 Agent 类不全局暴露；经 fetch 自身的 undici 引用获取
-        // （require('node:undici') 在内置环境不可用 —— 用 fetch.constructor?.dispatcher?
-        // 兜底：Node >=18.17 全局暴露 undici 无望，但 process.binding 不可用）。
-        // 现实路径：动态 require('undici')（若宿主装了独立 undici 包），或
-        // Node >=20 的 fetch 直连 socketPath dispatcher 注入。此处诚实降级：
-        // 尝试动态导入 undici，失败返回 null（transport_error 诚实归因）。
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const undici = globalThis.__undiciBridge ?? null;
-        if (!undici?.Agent)
-            return null;
-        agent = new undici.Agent({ connect: { socketPath } });
-        udsAgents.set(socketPath, agent);
-        return agent;
-    }
-    catch {
-        return null;
-    }
-}
-/** O 纪元（#16）：undici 桥注入点 —— 宿主/测试可注入 { Agent } 实现。
- *  缺省自动装载：模块加载即异步 import('undici')（装了包 ⇒ 桥自通；
- *  未装 ⇒ UDS 诚实降级 transport_error）。 */
+/** O 纪元（#16）→ ΑΩ-R3：undici 桥注入点 —— 宿主/测试可注入 { Agent, fetch }
+ *  全量或半量（半量 = 字段级覆盖，缺的半边由缺省 undici 补齐；桥最优先）。
+ *  null = 撤销注入（回到缺省懒加载 npm undici 路径）；
+ *  false = 宿主明示 undici 不可用（UDS 诚实降级 transport_error，绝不静默走 TCP）。
+ *  换桥/清桥时旧桥建池被 best-effort 关闭。 */
 export function setUndiciBridge(bridge) {
     globalThis.__undiciBridge = bridge;
-    udsAgents.clear();
+    closeAgents();
 }
-// 缺省桥装载（旁路义务：失败静默 —— UDS 请求时按无桥诚实归因）
-void import('undici').then(m => {
-    if (!globalThis.__undiciBridge && m?.Agent)
-        setUndiciBridge(m);
-}).catch(() => { });
 /**
  * 异常诚实的 HTTP 调用 —— 永不抛错。
  *
@@ -104,22 +203,30 @@ void import('undici').then(m => {
 export async function microFetch(config, path, options = {}) {
     const timeout = options.timeoutMs ?? config.defaultTimeoutMs;
     const method = options.method ?? 'POST';
-    // O 纪元（#16）：UDS 基址翻译 —— http+unix://<sock>[/path] → dispatcher 传输
+    // O 纪元（#16）+ ΑΩ-R3：UDS 基址翻译 —— http+unix://<sock>[/path] ⇒
+    // undici.fetch + Agent(socketPath) dispatcher 传输（全局 fetch 不认 dispatcher）
     const uds = parseUnixBaseUrl(config.baseUrl);
     let url = joinUrl(config.baseUrl, path);
+    let fetchFn = fetch; // TCP 主路径仍走全局 fetch（零回归）
     let dispatcher = null;
+    let udsRelease;
     if (uds) {
-        dispatcher = udsDispatcher(uds.socketPath);
-        if (!dispatcher) {
+        const transport = await udsTransport(uds.socketPath);
+        if (!transport) {
             return {
                 ok: false,
                 error: {
                     kind: PhysicalErrorKind.TRANSPORT_ERROR,
-                    detail: `UDS transport unavailable: no undici bridge injected for ${uds.socketPath} ` +
-                        '(call setUndiciBridge(require("undici")) on the host, or use http://127.0.0.1:<port>)',
+                    detail: `undici-unavailable: UDS fetch for ${uds.socketPath} needs undici ` +
+                        '(dynamic import(\'undici\') failed, or host disabled it via setUndiciBridge(false)); ' +
+                        'install the undici runtime dependency, inject setUndiciBridge({ Agent, fetch }), ' +
+                        'or use http://127.0.0.1:<port> — never silently falling back to TCP',
                 },
             };
         }
+        dispatcher = transport.agent;
+        fetchFn = transport.fetch;
+        udsRelease = transport.release;
         // 与 joinUrl 同律：基址 path 尾斜杠去重（'…sock/v1/' + '/exec' 不得拼出 '//exec'）
         const basePath = uds.urlPath === '/' ? '' : uds.urlPath.replace(/\/+$/, '');
         url = `http://localhost${basePath}${path.startsWith('/') ? path : '/' + path}`;
@@ -174,7 +281,9 @@ export async function microFetch(config, path, options = {}) {
     }
     let resp;
     try {
-        resp = await fetch(url, {
+        // TCP ⇒ 全局 fetch；UDS ⇒ undici 方言 fetch（认 init.dispatcher，ΑΩ-R3）。
+        // 超时/中止/错误分类对所有传输走同一 catch（语义零回归）。
+        resp = await fetchFn(url, {
             method,
             headers,
             body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
@@ -195,6 +304,11 @@ export async function microFetch(config, path, options = {}) {
         }
         // fetch 错误：连接拒绝 / DNS / 网络断开 / UDS 文件不存在
         const code = e?.cause?.code ?? e?.code ?? 'UNKNOWN';
+        // ΝΩ-27：传输层失败 ⇒ 该 socketPath 的池立即失效重建（旧池可能握着
+        // 死 socket 的陈旧连接；服务换路径重启后旧路径池永不可用）。仅网络级
+        // 抛错走此分支 —— HTTP 5xx（resp.ok=false）不失效：服务还活着且应答了。
+        if (uds)
+            invalidateUdsAgent(uds.socketPath);
         return {
             ok: false,
             error: {
@@ -208,6 +322,9 @@ export async function microFetch(config, path, options = {}) {
         // 长命外部 signal 上不留残听（body 读取阶段无需 signal：abort 只断传输本身）
         if (cleanupComposed)
             cleanupComposed();
+        // ΝΩ-27：UDS 池在飞计数归还（成功/失败/失效重建皆然 —— 失效后 entry 已
+        // 出 map，此处的 -1 落在孤儿 entry 上，无害）
+        udsRelease?.();
     }
     // HTTP 状态检查 —— Python 端认证失败以 401 如实表达（错误信封 JSON 结构不变）；
     // 其余非 2xx 仍按传输层异常归因（服务崩溃 / 代理干预 / 协议漂移）

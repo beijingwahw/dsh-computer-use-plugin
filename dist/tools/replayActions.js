@@ -6,6 +6,12 @@
 // D-G5（W8 第 2 批）：回放完成时把轨迹摘要（步指纹序列 + 三态结局 + 整体
 // 成败）铸入 notary 锚 —— DEBTS「replayOne 重放层不采集公证证据」清偿；
 // 公证缺席 ⇒ 降级标注（notarization.status='degraded' + reason），不阻断回放。
+// ΝΩ-5（审批悬账结算）：危险重放步的 approval.beginAttempt 预留此前派发后
+// 无人结算（循环内无 consume/attemptFailed）⇒ 令牌永久 in-flight（同令牌
+// 重放被在途互斥结构性拒绝）。修法：replayOneTraced 的返回结构携带预留标记
+// （reservedApprovalToken），replay_actions / run_skill 的步循环在步终按世界
+// 判决结算（settleReservedApproval：死步/失败 ⇒ attemptFailed 续期，成功 ⇒
+// consume 验收式）；旧字符串方言面（replayOne 包装）就地结算。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import { journal } from '../journal.js';
@@ -55,8 +61,23 @@ export function createReplayActionsTool(config) {
             'successful action sequence, e.g., re-opening the same workflow. Requires confirm=true.',
         parameters: {
             confirm: { type: 'boolean', required: true, description: 'Must be explicitly true to execute.' },
-            from_step: { type: 'number', description: '0-based start index in the journal. Default 0.' },
-            to_step: { type: 'number', description: '0-based end index (inclusive). Default: latest.' },
+            // ΝΩ-31（索引语义立法）：索引域 = **全局行动日志**（journal 的 ACTION_TOOLS
+            // 过滤视图 —— 只数动作条目，marker/观察行不计），跨任务累计、非任务内编号；
+            // 与 save_skill 的 from_step/to_step、what_if 决策点同一索引空间
+            // （journal.findDecisionPoints 头注在案的统一律，不搞两套坐标）。任务内偏移
+            // 可由本工具 ACTION_REQUIRED 回执的 state_anchor.current_task_start_index 换算。
+            from_step: {
+                type: 'number',
+                description: '0-based start index in the GLOBAL action journal (action entries only, across ALL tasks ' +
+                    'this session — NOT task-local; same index space as save_skill/what_if). Default 0. ' +
+                    'The ACTION_REQUIRED receipt reports journal_actions and current_task_start_index to convert: ' +
+                    'global = current_task_start_index + task-local offset.',
+            },
+            to_step: {
+                type: 'number',
+                description: '0-based end index (inclusive) in the same GLOBAL action-journal space as from_step. ' +
+                    'Default: latest.',
+            },
         },
         output: {
             schema: { type: 'string' },
@@ -67,7 +88,20 @@ export function createReplayActionsTool(config) {
                 return toolErr('Replay unavailable.', 'Journal is disabled (enableJournal=false). Nothing to replay.', 'Enable the journal in config to record and replay actions.');
             }
             if (args.confirm !== true) {
-                return toolActionRequired('Replay awaiting explicit confirmation.', 'replay-needs-confirm', { current_state: 'Replay is a real-world side-effect operation.' }, 'Set confirm=true to execute the replay, or inspect the plan first via the dry-run report.');
+                // ΝΩ-31（假 affordance 修）：旧文案指引「inspect the plan first via the
+                // dry-run report」—— 该报告不存在，是幽灵出口。改为真实可用的排练路径：
+                // save_skill 把区间固化成技能 → run_skill 的沙箱虚拟排练闸（低可靠性
+                // 技能先过 sandbox rehearsal 才许宿主派发）。锚点同时给出索引换算物料
+                //（全局行动流长度 + 当前任务起点 —— 模型据此计算任务内偏移）。
+                const taskStart = journal.list().length - journal.sinceTaskStart().length;
+                return toolActionRequired('Replay awaiting explicit confirmation.', 'replay-needs-confirm', {
+                    current_state: 'Replay is a real-world side-effect operation.',
+                    journal_actions: journal.list().length,
+                    current_task_start_index: taskStart,
+                    index_space: 'global action journal (all tasks this session); task-local = index - current_task_start_index',
+                }, 'Set confirm=true to execute the replay directly. To rehearse safely first: save_skill the range ' +
+                    '(same from_step/to_step index space) into a skill, then run_skill it — low-reliability skills must ' +
+                    'pass the sandbox rehearsal gate before host dispatch.');
             }
             const all = journal.list();
             // J 纪元修正：to_step 补下界钳制 —— 旧实现只有上界 min(len-1)，
@@ -102,7 +136,10 @@ export function createReplayActionsTool(config) {
                 const before = gated && isActionStep
                     ? await backend.captureProcessed({ metaOnly: true, wantHashes: true })
                     : null;
-                const line = await replayOne(entry, config);
+                // ΝΩ-5：replayOneTraced 携带预留标记（reservedApprovalToken）—— 步终
+                // 按世界判决结算（见下方三处 settleReservedApproval）。
+                const outcome = await replayOneTraced(entry, config);
+                const line = outcome.line;
                 log.push(`#${entry.ts} ${entry.tool}: ${line}`);
                 witnessSteps.push({
                     index: i,
@@ -115,6 +152,8 @@ export function createReplayActionsTool(config) {
                 // 被拦截的不可逆步骤之上，继续只会制造半途而废的世界状态（与 Y-6 死步
                 // 即停同律：诚实中止并报告分叉点）。
                 if (line.includes(SAFETY_GATE_BLOCK)) {
+                    // ΝΩ-5：拦截步无预留（拦截在预留之前）—— 结算幂等防御
+                    settleReservedApproval(outcome.reservedApprovalToken, true, 'safety-gate');
                     halted = { index: i, tool: entry.tool };
                     haltGate = 'safety-gate';
                     log.push(`  [GATE] step ${i} 重放被安全闸门拦截 — replay halted (dangerous/gated step was NOT executed)`);
@@ -124,19 +163,30 @@ export function createReplayActionsTool(config) {
                 // 死步（执行了但无效）更强的事实，后续步骤的前提同样已崩塌，继续只会
                 // 制造连锁错误（与 Y-6 死步即停 / Δ 纪元闸门即停同律）
                 if (line.startsWith('FAILED:')) {
+                    // ΝΩ-5：失败步的预留按 attemptFailed 结算（异常续期语义 —— 令牌
+                    // 保留、预留释放，绝不悬账为永久 in-flight）
+                    settleReservedApproval(outcome.reservedApprovalToken, true, 'step-failure');
                     halted = { index: i, tool: entry.tool };
                     haltGate = 'step-failure';
                     log.push(`  [GATE] step ${i} dispatch FAILED — replay halted (the step did NOT execute)`);
                     break;
                 }
+                let deadStep = false;
                 if (before?.dhash) {
                     const after = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
-                    if (isDeadStep(before.dhash, after.dhash ?? null)) {
-                        halted = { index: i, tool: entry.tool };
-                        haltGate = 'dead-step';
-                        log.push(`  [GATE] step ${i} produced NO screen change — replay halted (the UI has diverged from the recorded scene)`);
-                        break;
-                    }
+                    deadStep = isDeadStep(before.dhash, after.dhash ?? null);
+                }
+                // ΝΩ-5（审批悬账结算）：危险重放步的 beginAttempt 预留在步终按世界判决
+                // 结算 —— 死步（执行了但世界未动）/ 失败 ⇒ attemptFailed 续期（同一
+                // 授权内重试不再打扰用户）；成功 ⇒ consume 验收式（世界已承接不可逆
+                // 效果，用户的同意兑现）。重放层无 clickMouse 的取证链 ⇒ 步循环就是
+                // 验收面。
+                settleReservedApproval(outcome.reservedApprovalToken, deadStep, deadStep ? 'dead-step' : 'replay-step-verified');
+                if (deadStep) {
+                    halted = { index: i, tool: entry.tool };
+                    haltGate = 'dead-step';
+                    log.push(`  [GATE] step ${i} produced NO screen change — replay halted (the UI has diverged from the recorded scene)`);
+                    break;
                 }
             }
             // D-G5（重放公证接线）：回放完成（走完或 halt 诚实中止 —— 中止也是结局，
@@ -187,29 +237,46 @@ export function createReplayActionsTool(config) {
         },
     });
 }
-/** 单条日志/技能步骤 → 系统层调用。依赖运行时缓存的工具（click_element）显式跳过。
- *  Δ 纪元（审计#1）：重放不再豁免工具层闸门 —— click_mouse/type_text 步前置
- *  assertActionAllowed（与 clickMouse/typeText 工具同一事实源）：危险词命中且
- *  步骤无有效审批令牌、或凭据/超长输入 ⇒ 该步返回结构化失败（FAILED 形态，
- *  不派发物理动作）；replay_actions 循环据此 fail-fast 中止，run_skill 据此
- *  计失败步。config 由调用方透传（缺省 = 与 Config 缺省同值的保守闸门）。 */
-export async function replayOne(entry, config) {
+/** ΝΩ-5：预留令牌的步终结算（世界判决 → 账本动作）。纯旁路义务：结算失败
+ *  绝不炸重放主流程（运行层铁律）。token 缺席 ⇒ no-op（无预留的步零行为）。 */
+export function settleReservedApproval(token, failed, reason) {
+    if (token === undefined)
+        return;
+    try {
+        if (failed)
+            approval.attemptFailed(token, reason);
+        else
+            approval.consume(token);
+    }
+    catch { /* 运行层铁律：结算旁路失败不炸重放 */ }
+}
+/** ΝΩ-5：重放核心（带预留标记）—— replay_actions / run_skill 的步循环走此面，
+ *  在步终按世界判决结算预留（见 settleReservedApproval）。 */
+export async function replayOneTraced(entry, config) {
     const a = entry.args ?? {};
+    // ΝΩ-5：预留簿记前置到 try 外 —— catch 路径标记随身携带（异常 ⇒ 调用方按
+    // FAILED 结算 attemptFailed，预留不悬账；与 clickElement/clickMouse 的
+    // attemptReserved 前置同律）。
+    let reservedApprovalToken;
+    const traced = (line) => reservedApprovalToken === undefined ? { line } : { line, reservedApprovalToken };
     try {
         if (entry.tool === 'click_mouse' || entry.tool === 'type_text') {
             const gate = assertActionAllowed(entry.tool, a, config);
             if (!gate.allowed) {
-                return `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (${gate.reason}) — replayed journal/skill steps ` +
-                    'pass through the SAME approval/risk gates as live tool calls; re-run this step live via the real tool ' +
-                    'with a valid approval_token (or user-entered credentials for sensitive input).';
+                return { line: `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (${gate.reason}) — replayed journal/skill steps ` +
+                        'pass through the SAME approval/risk gates as live tool calls; re-run this step live via the real tool ' +
+                        'with a valid approval_token (or user-entered credentials for sensitive input).' };
             }
             // 带有效令牌的危险重放步：派发前预留尝试预算（审计#2 同律 —— 重放不经
             // clickMouse 的验收链路，预算即预算）；在途/耗尽 ⇒ 拦截，不派发。
+            // ΝΩ-5：预留标记随结果携带 —— 步循环在步终按世界判决结算（本函数
+            // 自身不 consume/attemptFailed，结算权在能看到死步/失败事实的调用方）。
             if (entry.tool === 'click_mouse' && gate.dangerous && a.approval_token) {
                 if (!approval.beginAttempt(String(a.approval_token))) {
-                    return `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (attempt-in-flight-or-budget-exhausted) — ` +
-                        "the approval token's retry budget is exhausted or another attempt is still in flight.";
+                    return { line: `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (attempt-in-flight-or-budget-exhausted) — ` +
+                            "the approval token's retry budget is exhausted or another attempt is still in flight." };
                 }
+                reservedApprovalToken = String(a.approval_token);
             }
         }
         switch (entry.tool) {
@@ -217,38 +284,47 @@ export async function replayOne(entry, config) {
                 // 尺寸只取一次：两次独立异步读在分辨率切换间隙会用不同比例映射 x/y
                 const s = await system.getScreenSize();
                 await system.clickMouse(a.x * s.width, a.y * s.height, a.button ?? 'left');
-                return 'clicked';
+                return traced('clicked');
             }
             case 'type_text':
                 await system.typeText(a.text ?? '', a.clearFirst ?? false);
-                return 'typed';
+                return traced('typed');
             case 'scroll_page':
                 await system.scroll(a.direction ?? 'down', a.amount ?? 5);
-                return 'scrolled';
+                return traced('scrolled');
             case 'press_hotkey':
                 await system.pressHotkey(a.keys ?? []);
-                return 'hotkey pressed';
+                return traced('hotkey pressed');
             case 'drag_mouse': {
                 const s = await system.getScreenSize();
                 await system.dragMouse({ x: a.startX * s.width, y: a.startY * s.height }, { x: a.endX * s.width, y: a.endY * s.height });
-                return 'dragged';
+                return traced('dragged');
             }
             case 'switch_tab':
                 await system.pressHotkey(a.direction === 'previous' ? ['ctrl', 'shift', 'tab'] : ['ctrl', 'tab']);
-                return 'tab switched';
+                return traced('tab switched');
             case 'switch_window':
                 await system.switchWindowByTitle(String(a.titleKeyword ?? ''));
-                return 'window switched';
+                return traced('window switched');
             case 'click_element':
-                return 'SKIPPED (element-ID tools depend on runtime cache; replay with click_mouse coordinates instead)';
+                return traced('SKIPPED (element-ID tools depend on runtime cache; replay with click_mouse coordinates instead)');
             case 'dismiss_popup':
                 // 纯模型侧恢复指令（无机械动作）—— 宏里是无害占位，不作为失败计
-                return 'OK (model-side recovery instruction; nothing to execute)';
+                return traced('OK (model-side recovery instruction; nothing to execute)');
             default:
-                return `SKIPPED (unsupported for replay: ${entry.tool})`;
+                return traced(`SKIPPED (unsupported for replay: ${entry.tool})`);
         }
     }
     catch (e) {
-        return `FAILED: ${e.message}`;
+        return traced(`FAILED: ${e.message}`);
     }
+}
+/** 旧字符串方言面（index.ts 宏派发接线 / orchestrator 技能回退 / 既有测试）：
+ *  ΝΩ-5 —— 该面没有步终世界判决观测（无死步检测/见证循环），包装层就地结算：
+ *  FAILED/闸门拦截 ⇒ attemptFailed 释放预留；成功 ⇒ consume（验收式的保守近
+ *  似）。绝不让预留悬账（否则同令牌的下一次调用被在途互斥永久拒绝）。 */
+export async function replayOne(entry, config) {
+    const r = await replayOneTraced(entry, config);
+    settleReservedApproval(r.reservedApprovalToken, r.line.startsWith('FAILED:') || r.line.includes(SAFETY_GATE_BLOCK), 'replay-step-failed');
+    return r.line;
 }

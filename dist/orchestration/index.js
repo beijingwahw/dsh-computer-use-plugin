@@ -253,7 +253,14 @@ export async function apply(ctx, config) {
         // O 纪元（#8）：决策工位自报探针（chat 包装器累计）；vision/execution
         // 未装探针 ⇒ 报告 0（未计量 ≠ 未消耗 —— 命名 Reported 如实申报）
         usageMeter: { decision: () => decisionTokensUsed },
-    }, { reportDir: config?.reportDir ?? '' });
+    }, {
+        reportDir: config?.reportDir ?? '',
+        // ΝΩ-26（四修之四）：D-4 判决回收内联进 persistReport 之前 —— 报告一次
+        // 成稿，盘上 verdict 与内存同刻（旧序 run 返回后才 reconcile ⇒ 盘上停旧）。
+        // run 返回后的外层 reconcileVerdicts 保留（幂等）：兜住落盘与返回之间
+        // 理论上迟到的判决，内存面永不落单。
+        reconcileReport: (report) => reconcileVerdicts(report, attemptVerdicts),
+    });
     // ── 事件总线接线（与 D-1/D-4 的唯一咬合通道）──
     // D-1 意图投喂：cognition/plan-ready 到达即启动流水线（中枢主循环入口）
     // P1-3 消费门控：consumePlanReady=false（缺省）让渡 D-7 主消费 —— 同通道双流水线

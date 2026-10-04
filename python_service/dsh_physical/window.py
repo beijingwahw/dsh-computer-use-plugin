@@ -25,10 +25,12 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from typing import Literal
 
 from .config import WindowConfig
 from .errors import ErrorKind, PhysicalError
+from .executors import INPUT_POOL, get as get_pool  # ΑΩ-R25:切窗走输入专属池
 
 WindowMethod = Literal["native", "hotkey_only", "unavailable"]
 
@@ -67,10 +69,25 @@ def escape_applescript(text: str) -> str:
 class WindowManager:
     """窗口管理器 —— 平台分治 + hotkey 降级。"""
 
+    _FALLBACK_TTL_SECONDS = 60.0
+    """ΝΩ-9：降级 latch 的 TTL —— 瞬时异常（shell 重启 / COM 忙 / 枚举抖动）
+    旧实现一次失败即永久放弃原生路径（会话级能力损失）。TTL 到点自动清
+    latch 重试原生；再失败再计时降级 —— 永不把瞬时故障升格为永久降级。"""
+
     def __init__(self, config: WindowConfig) -> None:
         self.config = config
         self._backend = self._resolve_backend(config.backend)
         self._hotkey_fallback = False  # 原生失败时自动切到 hotkey-only 模式
+        self._fallback_until = 0.0     # ΝΩ-9：latch 生效截止（time.monotonic 基准）
+
+    def _fallback_active(self) -> bool:
+        """降级 latch 是否生效（ΝΩ-9：TTL 过期 ⇒ 视同未 latch，原生路径复活）。"""
+        return self._hotkey_fallback and time.monotonic() < self._fallback_until
+
+    def _latch_fallback(self) -> None:
+        """置降级 latch 并起 TTL 计时（ΝΩ-9）。"""
+        self._hotkey_fallback = True
+        self._fallback_until = time.monotonic() + self._FALLBACK_TTL_SECONDS
 
     def _resolve_backend(self, backend: str) -> str:
         if backend == "disabled":
@@ -94,7 +111,7 @@ class WindowManager:
         """
         if self._backend == "disabled":
             return "unavailable"
-        if self._backend == "hotkey-only" or self._hotkey_fallback:
+        if self._backend == "hotkey-only" or self._fallback_active():  # ΝΩ-9：TTL 化
             return "hotkey_only"
         if not self._native_available():
             return "hotkey_only"
@@ -128,8 +145,8 @@ class WindowManager:
                 "window backend disabled (set DSH_PHYSICAL_WINDOW_BACKEND!=disabled)",
             )
 
-        # 原生尝试 → 失败降级到 hotkey
-        if not self._hotkey_fallback and self._backend != "hotkey-only":
+        # 原生尝试 → 失败降级到 hotkey（ΝΩ-9：latch 带 TTL —— 过期即重试原生）
+        if not self._fallback_active() and self._backend != "hotkey-only":
             try:
                 if self._backend == "osascript":
                     return await self._switch_darwin(keyword)
@@ -145,11 +162,11 @@ class WindowManager:
                 # alt+tab。只有 WINDOW_UNAVAILABLE 这类后端缺席才允许降级。
                 if e.kind == ErrorKind.ELEMENT_NOT_FOUND:
                     raise
-                # 原生失败 → 切到 hotkey 模式（永久降级，本会话不再尝试原生）
-                self._hotkey_fallback = True
+                # 原生失败 → 切到 hotkey 模式（ΝΩ-9：60s TTL，到期自动复活原生）
+                self._latch_fallback()
             except Exception as e:  # noqa: BLE001
-                # 原生未预期失败 → 同样降级
-                self._hotkey_fallback = True
+                # 原生未预期失败 → 同样降级（ΝΩ-9：瞬时故障不永久毒化 —— TTL 重试）
+                self._latch_fallback()
                 print(f"[warn] window native failed, falling back to hotkey: {e}", file=sys.stderr)
 
         # Hotkey 降级：Cmd+Tab (Mac) / Alt+Tab (其他)
@@ -243,7 +260,9 @@ class WindowManager:
             )
 
         loop = asyncio.get_running_loop()
-        title = await loop.run_in_executor(None, _do_switch)
+        # ΑΩ-R25:pygetwindow 枚举/激活是快主机 GUI 动作(数十 ms)⇒ input 池
+        # (小而快)—— 不得排在 adb(15s)/大图编码队尾拖住切窗语义的"动作"。
+        title = await loop.run_in_executor(get_pool(INPUT_POOL), _do_switch)
         return {"method": "native", "matched": title, "keyword": keyword}
 
     async def _switch_linux_wmctrl(self, keyword: str) -> dict:

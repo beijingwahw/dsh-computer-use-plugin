@@ -24,6 +24,10 @@ import { system } from '../src/system.ts';
 import { setAccessibilityProvider, extractInteractiveElements } from '../src/uiExtractor.ts';
 import { createClickElementTool, elementVerify } from '../src/tools/clickElement.ts';
 import type { BeforeState, CombinedEffect } from '../src/actionVerifier.ts';
+// ΝΩ-5：clickElement 的 W6R 收口（freshness fail-closed）落地后，危险+令牌
+// 路径须过新鲜度探针 —— 本册 beforeEach 武装恒 fresh 假端口（双指全同 ⇒
+// verdict='fresh'，零真截屏零服务孵化；fail-closed 分支执法见文末 ΝΩ-5 组）。
+import { setFreshnessPort, resetFreshnessProbe } from '../src/popupDetector.ts';
 
 // ═══ P2b-1：通道 EMA 的隔离边界（卸载归零 + 跨任务保持）═══
 
@@ -169,6 +173,8 @@ beforeEach(() => {
   clicks = 0;
   verifyCalls = 0;
   detectedOutcome = true;
+  // ΝΩ-5：恒 fresh 假探针 —— 过 W6R fail-closed 闸（epochDelta.safety W6R-A 同法）
+  setFreshnessPort({ groundingHash: () => 'a'.repeat(64), captureCurrentHash: async () => 'a'.repeat(64) });
   system.clickMouse = async () => { clicks++; };
   system.getScreenSize = async () => ({ width: 1920, height: 1080 });
   // 元素树：id 1 = 危险（删除全部）；id 2 = 安全（保存设置）。
@@ -197,6 +203,7 @@ afterEach(() => {
   elementVerify.captureBefore = originalVerify.captureBefore;
   elementVerify.settleAndVerify = originalVerify.settleAndVerify;
   setAccessibilityProvider(null as any);
+  resetFreshnessProbe(); // ΝΩ-5：卸下假探针（恢复端口缺席的 fail-closed 默认）
 });
 
 /** click_element 工具配置：审批闸门开、公证通道关（聚焦验收式消费）、验证开（取证走假件） */
@@ -315,4 +322,65 @@ test('P2b-3e: 无令牌普通点击零变化（快照/预留/验收全链路零�
   assert.equal(out.state_anchor.effect, undefined, '效果键不入场');
   assert.equal(verifyCalls, 0, '验收取证面零调用（无令牌路径逐字节旧路径）');
   assert.equal(out.next_step, "Call 'take_screenshot' to verify the interaction took effect.", '指引原样');
+});
+
+// ═══ ΝΩ-5：click_element 的 W6R 双收口（clickMouse 语义对齐 —— 体检发现 ═══
+// ═══ 四通道令牌方言各不相同，ID 寻址通道补齐 freshness fail-closed 与验证旁路拒绝）
+
+test('ΝΩ-5a: 新鲜度探针缺席 ⇒ 危险令牌派发被拒（fail-closed，不再 degraded 放行）', async () => {
+  resetFreshnessProbe(); // 端口缺席（默认态：组合根接线前 / 离线测试）
+  const tool = createClickElementTool(elCfg); // allowUnverifiedDangerous 缺席 = false
+  const token = grantedToken('点击「删除全部」清空列表');
+  const id = await elId('删除全部'); // 单次取 ID（发号器跨提取递增，勿二次提取比对）
+  const out = await runJson(tool, { id, approval_token: token });
+  assert.equal(out.status, 'ACTION_REQUIRED', '探针缺席 ⇒ 拒绝派发（fail-closed）');
+  assert.equal(out.state_anchor.reason, 'freshness-probe-unavailable');
+  assert.equal(out.state_anchor.element_id, id, '锚点方言保持（element_id 键）');
+  assert.equal(out.state_anchor.freshness_probe.note, 'probe-port-absent', '缺席原因如实随锚点');
+  assert.match(out.next_step, /allowUnverifiedDangerous=true/, '出路：显式逃生门');
+  assert.equal(clicks, 0, '物理零派发');
+  assert.equal(verifyCalls, 1, '快照先于探针（clickMouse 同序）；settle 未调用（阻断在预留前）');
+  assert.equal(approval.validate(token), true, '令牌未烧（阻断在预留之前）');
+  assert.equal(approval.status(token).attempts, 0, '无预留即无计数');
+});
+
+test('ΝΩ-5b: 逃生门 allowUnverifiedDangerous=true ⇒ 探针缺席恢复 degraded 放行（旧方言 + 观测不静默）', async () => {
+  resetFreshnessProbe();
+  const escaped = createClickElementTool({ ...elCfg, allowUnverifiedDangerous: true } as unknown as Config);
+  const token = grantedToken('点击「删除全部」清空列表');
+  const out = await runJson(escaped, { id: await elId('删除全部'), approval_token: token });
+  assert.equal(out.status, 'SUCCESS', '逃生门 ⇒ 探针缺席降级放行（旧行为）');
+  assert.equal(clicks, 1);
+  assert.equal(out.state_anchor.freshness.verdict, 'degraded', '降级不静默 —— 锚点观测');
+  assert.equal(out.state_anchor.acceptance.verdict, 'verified', '验证仍开 ⇒ 验收式消费照走');
+  assert.equal(approval.validate(token), false, '世界验证通过 ⇒ 令牌焚毁');
+});
+
+test('ΝΩ-5c: verifyActions=false 单独关闭 ⇒ 危险令牌派发前拒绝（双钥匙：还须 allowUnverifiedDangerous=true）', async () => {
+  // 恒 fresh 探针在 beforeEach 已装（越过 freshness fail-closed，聚焦验证旁路执法）
+  const tool = createClickElementTool({ ...elCfg, verifyActions: false } as unknown as Config);
+  const token = grantedToken('点击「删除全部」清空列表');
+  const out = await runJson(tool, { id: await elId('删除全部'), approval_token: token });
+  assert.equal(out.status, 'ACTION_REQUIRED', '验证不可用 ⇒ 拒绝派发（不再派发即消费）');
+  assert.equal(out.state_anchor.reason, 'effect-verification-required');
+  assert.match(out.next_step, /verifyActions=true/, '出路一：重开验证');
+  assert.match(out.next_step, /allowUnverifiedDangerous=true/, '出路二：显式逃生门');
+  assert.equal(clicks, 0, '物理零派发');
+  assert.equal(approval.validate(token), true, '令牌未烧（阻断在预留之前）');
+  // 非 dangerous 动作不受双钥匙约束：verifyActions=false 的原语义保持
+  const benign = await runJson(tool, { id: await elId('保存设置') });
+  assert.equal(benign.status, 'SUCCESS', 'benign 动作照常派发（无误杀）');
+  assert.equal(clicks, 1);
+});
+
+test('ΝΩ-5d: 双钥匙齐备（verifyActions=false + allowUnverifiedDangerous=true）⇒ 旧方言 unverified-dispatch-consumed 保持', async () => {
+  const legacy = createClickElementTool({
+    ...elCfg, verifyActions: false, allowUnverifiedDangerous: true,
+  } as unknown as Config);
+  const token = grantedToken('点击「删除全部」清空列表');
+  const out = await runJson(legacy, { id: await elId('删除全部'), approval_token: token });
+  assert.equal(out.status, 'SUCCESS');
+  assert.equal(clicks, 1);
+  assert.equal(out.state_anchor.acceptance.verdict, 'unverified-dispatch-consumed', '两把显式钥匙 ⇒ 旧方言');
+  assert.equal(approval.validate(token), false, '派发即消费（用后即焚）');
 });

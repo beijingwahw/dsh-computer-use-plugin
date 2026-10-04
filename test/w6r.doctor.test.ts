@@ -211,10 +211,12 @@ test('W6R 规则 sec.android-shell-escape：shlex.quote 缺席 = critical；docs
   assert.equal(warn.length, 0);
 });
 
-// ─── e：审计 WAL 下限守护（MUTATING_TOOLS ≥18） ───
+// ─── e：审计 WAL 下限守护（MUTATING_TOOL_NAMES ≥18） ───
+// ΑΩ-R28 锚点同步：名单已迁 tools/index.ts（单源导出）—— 夹具随之换形换径，
+// 检测语义（回缩/消失报警、满额干净）不变。
 
 const auditSrc = (tools: string[]): string =>
-  `import { onToolPre } from './hooks';\nconst MUTATING_TOOLS = new Set([\n${tools.map(t => `  '${t}',`).join('\n')}\n]);\n`;
+  `import type { ToolDefinition } from '@deepseek-ai/dsh-tools';\nexport const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([\n${tools.map(t => `  '${t}',`).join('\n')}\n]);\n`;
 
 test('W6R 规则 sec.audit-wal-floor：名单回缩到下限之下/宣言消失 = major；满额干净', async () => {
   const names = Array.from({ length: 18 }, (_, i): string =>
@@ -223,16 +225,16 @@ test('W6R 规则 sec.audit-wal-floor：名单回缩到下限之下/宣言消失 
       'autonomous_run', 'autonomy_resume', 'save_skill', 'save_checkpoint', 'switch_vision_model', 'vlm_wizard'][i]);
   assert.equal(names.length, 18, '夹具自检：满额 18 件');
   assert.equal((await R('sec.audit-wal-floor').scan(ctxOf([
-    { path: 'guards/auditGuard.ts', content: auditSrc(names) }]))).length, 0);
+    { path: 'tools/index.ts', content: auditSrc(names) }]))).length, 0);
 
   const shrunk = await R('sec.audit-wal-floor').scan(ctxOf([
-    { path: 'guards/auditGuard.ts', content: auditSrc(names.slice(0, 17)) }]));
+    { path: 'tools/index.ts', content: auditSrc(names.slice(0, 17)) }]));
   assert.equal(shrunk.length, 1);
   assert.equal(shrunk[0].severity, 'major');
   assert.match(shrunk[0].evidence, /17 mutating tools/);
 
   const gone = await R('sec.audit-wal-floor').scan(ctxOf([
-    { path: 'guards/auditGuard.ts', content: "export function registerAuditGuard() {}\n" }]));
+    { path: 'tools/index.ts', content: "export function buildAllTools() { return []; }\n" }]));
   assert.equal(gone.length, 1);
   assert.match(gone[0].evidence, /declaration is gone/);
 });
@@ -258,9 +260,12 @@ test('W6R 注册表：新增安全不变量规则入册（20 条），全部 sec
 test('W6R 金丝雀：真实源码树上七条安全不变量规则零命中（回改即报警）', async () => {
   // W8-B3 拆分同步：grantDetailed 落点已迁至 approval.ledger.ts（approval.ts
   // 降为桶文件）—— 金丝雀源清单随之补入主账本文件，断言零变化。
+  // ΑΩ-R28 锚点同步：sec.audit-wal-floor 的名单锚点已随单源迁至 tools/index.ts
+//（MUTATING_TOOL_NAMES）—— 清单补入工具装配桶；guards/auditGuard.ts 保留
+//（sec.confirm-code-oob-leak 全源扫描面不变）。
   const sources = [
     'approval.ts', 'approval.ledger.ts', 'doctorChannel.ts', 'system.ts', 'environmentShaper.ts', 'config.ts',
-    'qualityDoctor.ts', 'guards/auditGuard.ts',
+    'qualityDoctor.ts', 'guards/auditGuard.ts', 'tools/index.ts',
   ].map(p => ({ path: p, content: readFileSync(join(REAL_SRC, p), 'utf8') }));
   const ctx = ctxOf(sources);
   for (const id of ['sec.approval-fail-closed', 'sec.confirm-code-oob-leak', 'sec.shell-launch-cmd',

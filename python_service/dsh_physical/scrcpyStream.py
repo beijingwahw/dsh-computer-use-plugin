@@ -13,7 +13,7 @@ CLI 调研结论(实读 scrcpy v2.7 ``doc/develop.md``,2026-10):
     adb -s <serial> shell CLASSPATH=/data/local/tmp/scrcpy-server.jar \
         app_process / com.genymobile.scrcpy.Server <version> \
         scid=<31bit> log_level=error video_codec=h264 audio=false \
-        control=false send_device_meta=false tunnel_forward=true \
+        control=true send_device_meta=false tunnel_forward=true \
         max_size=<n> max_fps=<n> video_bit_rate=<n>
 
   然后 TCP 连 ``127.0.0.1:<port>`` 读 video socket(读线程消费,与
@@ -39,10 +39,16 @@ video socket 字节序列(v2.x,framing_profile="2x"):
     自动 kill 子进程 + 关 socket(省电);下次 grab 惰性重启。
   - **启动失败降级**:spawn/首帧超时 ⇒ 流退出 + 冷却退避,控制器降回
     既有单帧链(android.py 的降级链分毫不动)。
-  - **清理执法**:close = kill 子进程 + ``wait()`` + 关 socket + 移除
-    adb forward(尽力,失败不阻塞)+ join 读线程 + decoder.close()。
-  - 解码器可注入:pyav(真流式)→ cv2(POSIX fifo,实验)→ 都缺席则
-    诚实 unsupported(不引第三方硬依赖, ImportError 即降级)。
+    - **清理执法**:close = kill 子进程 + ``wait()`` + 关 socket + 移除
+      adb forward(尽力,失败不阻塞)+ join 读线程 + decoder.close()。
+    - **ΝΩ-52 控制通道复用**:``control=true`` 起流,控制连接是同一
+      forward 端口的第二次 connect(forward 模式 server 收齐 video+control
+      两个 accept 才开流,故在 spawner ``open()`` 内紧跟视频连接完成)。
+      ``ControlWriter`` 写控制消息(tap/swipe/scroll/key 从 adb 一次性
+      子进程 50-200ms → 写 socket <10ms);写失败 ⇒ 通道病亡随流同葬,
+      动作降级 adb —— 运行层零异常、零新增依赖、缺席即旧行为。
+    - 解码器可注入:pyav(真流式)→ cv2(POSIX fifo,实验)→ 都缺席则
+      诚实 unsupported(不引第三方硬依赖, ImportError 即降级)。
 """
 from __future__ import annotations
 
@@ -90,6 +96,13 @@ class StreamConfig:
     server_jar: str = "auto"        # scrcpy-server 路径;auto = 依 scrcpy 可执行文件探测
     tunnel_port: int = 27183        # adb forward 本地端口基
     framing_profile: str = "2x"     # 2x | 4x(帧头位序剖面,见模块 docstring)
+    # ΝΩ-36:adb forward 端口冲突时的 scid 重掷上限(0 = 不重掷,旧行为)。
+    # ``port = base + (scid % 512)`` 的随机冲突曾直接判 spawn 失败 ⇒ 30s
+    # 冷却退避;冲突(而非永久故障)场景下重掷即愈。
+    port_conflict_retries: int = 3
+    # ΝΩ-52:控制通道单次 send 墙钟上限 —— server 常驻读控制 socket,健康时
+    # 写入 <1ms;超时 ⇒ 通道病亡(socket close)降级 adb(写延迟有界铁律)。
+    control_send_timeout_s: float = 2.0
 
 
 def stream_config_from_env() -> StreamConfig:
@@ -130,6 +143,8 @@ def stream_config_from_env() -> StreamConfig:
         server_jar=os.environ.get(f"{pfx}_SERVER_JAR", "auto"),
         tunnel_port=_i(f"{pfx}_PORT", 27183),
         framing_profile=profile,
+        port_conflict_retries=max(0, _i(f"{pfx}_PORT_RETRIES", 3)),
+        control_send_timeout_s=max(0.05, _f(f"{pfx}_CONTROL_SEND_TIMEOUT_S", 2.0)),
     )
 
 
@@ -269,6 +284,104 @@ class FrameParser:
                     pts = int(u64 & 0x3FFF_FFFF_FFFF_FFFF)
                 out.append(Packet(payload, None if config else pts, config, keyframe))
         return out
+
+
+# ─── ΝΩ-52 控制消息编码器(scrcpy ≥2.0 控制协议;纯函数区,与 FrameParser 对称)───
+#
+# 线格式实读 scrcpy 源码定谛(app/src/control_msg.c 的 ``sc_control_msg_serialize``
+# + server 端 ``ControlMessageReader.java``;v2.0 / v2.7 / 3.x 四类消息字节布局
+# 逐字节一致,单测向量与 scrcpy 自带 test_control_msg_serialize.c 对齐):
+#   INJECT_KEYCODE (type=0, 14B): action(u8) keycode(u32be) repeat(u32be) metastate(u32be)
+#   INJECT_TOUCH_EVENT (type=2, 32B): action(u8) pointer_id(u64be) x(u32be) y(u32be)
+#       screen_w(u16be) screen_h(u16be) pressure(u16fp) action_button(u32be) buttons(u32be)
+#   INJECT_SCROLL_EVENT (type=3, 21B): x(u32be) y(u32be) screen_w(u16be) screen_h(u16be)
+#       hscroll(i16fp) vscroll(i16fp) buttons(u32be)
+#   BACK_OR_SCREEN_ON (type=4, 2B): action(u8)
+#
+# 坐标语义(scrcpy ≥1.19 的通用方言):位置 = 像素点 + **视频帧尺寸对**;
+# server 侧 ``Device.getPhysicalPoint`` 要求 position.screen_size 与其视频尺寸
+# 全等,否则事件被静默丢弃 ⇒ 编码必须用流视频坐标系(本模块 ``video_size()``),
+# 设备物理像素换算由 server 按比例代劳(max_size 降采样天然正确)。
+# 工单表述校准:「绝对归一 ×65535」是 1.17-1.18 旧方言(u16 归一坐标、无
+# 尺寸对);1.19 起即为本实现采用的「绝对像素 + 尺寸对」—— 以源码为准注记。
+#
+# 2.x/3.x 方言差异(按既有 framing_profile 同律处理,见 FrameParser):
+#   - 触控/键码/BACK 消息:2.x 与 3.x 布局一致,无剖面分叉;
+#   - 滚动消息:i16fp 解码后 2.x server 直接作 AXIS_*SCROLL 值([-1,1] = 1 tick),
+#     3.x server 再乘 16([-16,16] 尺度)⇒ "4x" 剖面把 tick 值 ÷16 编码
+#     (server/…/ControlMessageReader.java:2.7 无 ×16、master 有 ×16)。
+
+MSG_TYPE_INJECT_KEYCODE = 0        # 工单表述「type=0 键码注入」
+MSG_TYPE_INJECT_TOUCH_EVENT = 2
+MSG_TYPE_INJECT_SCROLL_EVENT = 3
+MSG_TYPE_BACK_OR_SCREEN_ON = 4     # 工单表述「type=4 INJECT_KEY_EVENT」
+
+ACTION_DOWN = 0   # AMOTION_EVENT_ACTION_DOWN == AKEY_EVENT_ACTION_DOWN
+ACTION_UP = 1     # AMOTION_EVENT_ACTION_UP   == AKEY_EVENT_ACTION_UP
+ACTION_MOVE = 2   # AMOTION_EVENT_ACTION_MOVE
+
+POINTER_ID_GENERIC_FINGER = -2  # SC_POINTER_ID_GENERIC_FINGER(server 注入
+                                # TOOL_TYPE_FINGER/SOURCE_TOUCHSCREEN,对齐 input tap 语义)
+
+_U64_MASK = (1 << 64) - 1
+
+
+def float_to_u16fp(f: float) -> int:
+    """[0,1] → u16 定点(scrcpy ``sc_float_to_u16fp`` 同律:向零截断 + 0xFFFF 钳位;
+    0xFFFF 由 server 特判解码为精确 1.0)。"""
+    if f <= 0.0:
+        return 0
+    if f >= 1.0:
+        return 0xFFFF
+    u = int(f * 65536.0)  # Python int() 向零截断,与 C 同律
+    return 0xFFFF if u >= 0xFFFF else u
+
+
+def float_to_i16fp(f: float) -> int:
+    """[-1,1] → i16 定点(scrcpy ``sc_float_to_i16fp`` 同律:向零截断 + ±满幅钳位)。"""
+    if f >= 1.0:
+        return 0x7FFF
+    if f <= -1.0:
+        return -0x8000
+    return int(f * 32768.0)
+
+
+def encode_keycode(action: int, keycode: int, repeat: int = 0, metastate: int = 0) -> bytes:
+    """INJECT_KEYEVENT(键码注入:down/up 各一条 = input keyevent 的设备侧等价物)。"""
+    return struct.pack(">BBIII", MSG_TYPE_INJECT_KEYCODE, action, keycode, repeat, metastate)
+
+
+def encode_touch(action: int, pointer_id: int, x: int, y: int,
+                 screen_w: int, screen_h: int, pressure: float = 1.0,
+                 action_button: int = 0, buttons: int = 0) -> bytes:
+    """INJECT_TOUCH_EVENT(pointer_id 按有符号 u64 编码,-2 手指惯用语同律)。"""
+    return struct.pack(
+        ">BBQIIHHHII", MSG_TYPE_INJECT_TOUCH_EVENT, action,
+        pointer_id & _U64_MASK, int(x), int(y), int(screen_w), int(screen_h),
+        float_to_u16fp(pressure), int(action_button), int(buttons),
+    )
+
+
+def scroll_ticks_per_message(profile: str) -> int:
+    """单条滚动消息可承载的 tick 上限(方言尺度:2x = 1,4x = 16)。"""
+    return 16 if profile == "4x" else 1
+
+
+def encode_scroll(x: int, y: int, screen_w: int, screen_h: int,
+                  hticks: float = 0.0, vticks: float = 0.0,
+                  buttons: int = 0, profile: str = "2x") -> bytes:
+    """INJECT_SCROLL_EVENT(hticks/vticks = 滚轮 tick 数;剖面决定编码尺度)。"""
+    scale = 16.0 if profile == "4x" else 1.0
+    return struct.pack(
+        ">BIIHHhhI", MSG_TYPE_INJECT_SCROLL_EVENT,
+        int(x), int(y), int(screen_w), int(screen_h),
+        float_to_i16fp(hticks / scale), float_to_i16fp(vticks / scale), int(buttons),
+    )
+
+
+def encode_back_or_screen_on(action: int) -> bytes:
+    """BACK_OR_SCREEN_ON(2B;动作面未接线 —— 留作协议完备性,键码路径已覆盖 back)。"""
+    return struct.pack(">BB", MSG_TYPE_BACK_OR_SCREEN_ON, action)
 
 
 # ─── W6-6 解码器(可注入;pyav → cv2 → 诚实 unsupported)───
@@ -431,17 +544,30 @@ mock = 内存字节队列(--selftest 的离线契约根基)。"""
 class AdbTunnelByteSource:
     """真机字节源:adb forward 隧道 socket + 承载它的 ``adb shell`` 进程。
 
+    ΝΩ-52 起携带可选控制 socket(同一 forward 端口的第二次 connect;
+    ``take_control_socket()`` 一次性移交给 ControlWriter,close 执法仍在此
+    侧兜底 —— 双重 close 无害)。
+
     close 纪律:先 kill ``adb shell``(server 进程死 ⇒ socket 必断,阻塞
     中的 recv 立刻现形)再 ``wait()``(不留僵尸),关 socket,最后尽力移除
     adb forward(失败不阻塞 —— 端口随 adb server 生命周期自愈)。
     """
 
-    def __init__(self, sock: socket.socket, proc: subprocess.Popen, adb: str, port: int) -> None:
+    def __init__(self, sock: socket.socket, proc: subprocess.Popen, adb: str, port: int,
+                 control_sock: "socket.socket | None" = None) -> None:
         self._sock = sock
         self._proc = proc
         self._adb = adb
         self._port = port
         self._closed = False
+        self._control_sock = control_sock
+        self._control_taken = False
+
+    def take_control_socket(self) -> "socket.socket | None":
+        """ΝΩ-52:控制 socket 一次性移交(spawner 未开控制 ⇒ None ⇒ 调用方降级 adb)。"""
+        sock = self._control_sock if not self._control_taken else None
+        self._control_taken = True
+        return sock
 
     def read(self, n: int) -> bytes:
         try:
@@ -466,6 +592,11 @@ class AdbTunnelByteSource:
             self._sock.close()
         except OSError:
             pass
+        if self._control_sock is not None:  # ΝΩ-52:控制通道随流同葬(未移交/已移交都兜底)
+            try:
+                self._control_sock.close()
+            except OSError:
+                pass
         try:  # 尽力撤隧道;失败不阻塞(诚实记录由调用方 stats 承担)
             subprocess.run(
                 [self._adb, "forward", "--remove", f"tcp:{self._port}"],
@@ -475,15 +606,54 @@ class AdbTunnelByteSource:
             pass
 
 
+def reroll_tunnel_port(
+    fwd: Callable[[int, int], tuple[int, str]],
+    base_port: int,
+    max_retries: int = 3,
+    rng: Callable[[], int] | None = None,
+) -> tuple[int, int, int]:
+    """ΝΩ-36:端口冲突自愈 —— adb forward 失败 ⇒ scid 重掷(至多 ``max_retries`` 次)。
+
+    ``port = base + (scid % 512)`` 把 31bit scid 折进 512 端口窗,随机冲突
+    (他进程占用/同机多流撞窗)曾直接判 spawn 失败 ⇒ 30s 冷却退避;现在冲突
+    场景重掷即愈,重掷耗尽才如实失败(调用方落冷却)。
+
+    ``fwd(scid, port) -> (rc, detail)`` 由调用方注入(真实现 = adb forward
+    子进程;单测注入桩 —— 纯函数可离线测)。返回 ``(scid, port, attempts)``。
+    """
+    roll = rng if rng is not None else (lambda: random.getrandbits(31))
+    retries = max(0, int(max_retries))
+    attempts = 0
+    detail = ""
+    while True:
+        attempts += 1
+        scid = roll()
+        port = base_port + (scid % 512)
+        rc, detail = fwd(scid, port)
+        if rc == 0:
+            return scid, port, attempts
+        if attempts > retries:
+            raise RuntimeError(
+                f"adb forward failed after {attempts} attempt(s) "
+                f"(port window {base_port}..{base_port + 511} conflicts?): {detail}"
+            )
+
+
 class AdbScrcpyServerSpawner:
     """真机 spawner:三条 adb 命令 + server 进程 + 隧道 socket。
 
     server 参数表(实读 v2.7 develop.md;真机清单逐项校验):
       ``<version> scid=<31bit> log_level=error video_codec=h264 audio=false
-      control=false send_device_meta=false tunnel_forward=true
+      control=true send_device_meta=false tunnel_forward=true
       max_size=… max_fps=… video_bit_rate=…``
     version 必须与 jar 完全一致(scrcpy 无前后兼容承诺)—— 由控制器的
     ``scrcpy --version`` 探测结果传入。
+
+    ΝΩ-52:``control=true`` 起,open() 在视频 socket 连上后**立即**对同一
+    forward 端口做第二次 connect 作为控制通道 —— forward 模式下 server 的
+    accept 顺序是 video→(audio)→control 且收齐才返回开流
+    (``DesktopConnection.open``);控制连接缺席 ⇒ server 永远不开始编码 ⇒
+    流必死。因此控制 connect 是开流的一部分,不是动作时才惰性补连。
     """
 
     _DEV_JAR = "/data/local/tmp/scrcpy-server.jar"
@@ -526,23 +696,25 @@ class AdbScrcpyServerSpawner:
                 f"{(push.stderr or b'').decode('utf-8', 'replace')[:200]}"
             )
         scid = random.getrandbits(31)
-        port = self._scfg.tunnel_port + (scid % 512)
-        fwd = subprocess.run(
-            [self._acfg.adb_path, "-s", serial, "forward",
-             f"tcp:{port}", f"localabstract:scrcpy_{scid}"],
-            capture_output=True, timeout=10,
-        )
-        if fwd.returncode != 0:
-            raise RuntimeError(
-                f"adb forward failed (rc={fwd.returncode}): "
-                f"{(fwd.stderr or b'').decode('utf-8', 'replace')[:200]}"
+        # ΝΩ-36:端口冲突 ⇒ scid 重掷(至多 port_conflict_retries 次)——
+        # 随机冲突不再直接落 30s 冷却退避;真失败(adb 缺席/设备离线)语义不变。
+        def _fwd(try_scid: int, try_port: int) -> tuple[int, str]:
+            r = subprocess.run(
+                [self._acfg.adb_path, "-s", serial, "forward",
+                 f"tcp:{try_port}", f"localabstract:scrcpy_{try_scid}"],
+                capture_output=True, timeout=10,
             )
+            return r.returncode, (r.stderr or b"").decode("utf-8", "replace")[:200]
+
+        scid, port, _attempts = reroll_tunnel_port(
+            _fwd, self._scfg.tunnel_port, self._scfg.port_conflict_retries,
+        )
         argv = [
             self._acfg.adb_path, "-s", serial, "shell",
             f"CLASSPATH={self._DEV_JAR}", "app_process", "/",
             "com.genymobile.scrcpy.Server", self._version,
             f"scid={scid}", "log_level=error", "video_codec=h264",
-            "audio=false", "control=false", "send_device_meta=false",
+            "audio=false", "control=true", "send_device_meta=false",
             "tunnel_forward=true",
             f"max_size={self._scfg.max_size}", f"max_fps={self._scfg.max_fps}",
             f"video_bit_rate={self._scfg.video_bit_rate}",
@@ -552,6 +724,7 @@ class AdbScrcpyServerSpawner:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 5.0
         last_err: Exception | None = None
+        sock: socket.socket | None = None
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(
@@ -561,20 +734,149 @@ class AdbScrcpyServerSpawner:
             try:
                 sock = socket.create_connection(("127.0.0.1", port), timeout=2.0)
                 sock.settimeout(None)  # 常驻读:阻塞语义(EOF 由进程死保证)
-                return AdbTunnelByteSource(sock, proc, self._acfg.adb_path, port)
+                break
             except OSError as e:
                 last_err = e
                 time.sleep(0.25)
+        if sock is None:
+            self._reap(proc)
+            raise RuntimeError(f"scrcpy video socket never accepted on tcp:{port}: {last_err}")
+        # ΝΩ-52:控制通道 = 同一 forward 端口的第二次 connect(server 侧
+        # accept 顺序 video→control,此刻正阻塞等此连接,连上即开流)。
+        # 失败 ⇒ 如实判 spawn 失败(冷却退避,降级单帧链)—— 绝不带病
+        # 返回「有视频无控制」的半残流(server 不收齐不开流,半残不存在)。
+        csock: socket.socket | None = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                csock = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+                break
+            except OSError as e:
+                last_err = e
+                time.sleep(0.25)
+        if csock is None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self._reap(proc)
+            raise RuntimeError(
+                f"scrcpy control socket never accepted on tcp:{port}: {last_err}"
+            )
+        return AdbTunnelByteSource(sock, proc, self._acfg.adb_path, port, control_sock=csock)
+
+    @staticmethod
+    def _reap(proc: subprocess.Popen) -> None:
         proc.kill()
         try:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
-        raise RuntimeError(f"scrcpy video socket never accepted on tcp:{port}: {last_err}")
 
     def __call__(self, serial: str) -> ByteSourceLike:
         """StreamSpawnerLike 签名适配(serial → 字节源)。"""
         return self.open(serial)
+
+
+# ─── ΝΩ-52 控制通道写器(活跃流的控制 socket 专用)───
+
+
+class ControlWriter:
+    """控制 socket 的写通道:``send``/``send_sequence`` 全部**不抛**
+    (运行层铁律),任何写异常 ⇒ 通道病亡 + 关闭 + 返回 ``False``,
+    调用方(AndroidController)据此降级 adb —— 每次发送 35B 级字节,
+    相比 ``adb shell input`` 的 50-200ms 子进程税即 tap <10ms 的来源。
+
+    - ``send_sequence`` 持锁贯穿整串(down-move-up 手势不可被并发动作
+      穿插);``inter_s`` 为相邻消息间隔(长按/拖拽的时长语义);
+      中途失败 ⇒ 尽力补发 ``rescue``(孤儿 down 的现场清理,如 touch UP),
+      补发成败不影响「如实报败 + 通道病亡」的判决。
+    - 死通道不复活(流重启才有新通道)—— 调用方拿到 ``None``/``False``
+      即走 adb,绝不在病通道上重试。
+    """
+
+    def __init__(self, sock: "socket.socket | None", profile: str = "2x",
+                 send_timeout_s: float = 2.0) -> None:
+        self.profile = profile
+        self._sock = sock
+        self._lock = threading.Lock()
+        self._alive = sock is not None
+        self.sent_count = 0
+        self.last_error: str | None = None
+        if sock is not None:
+            try:
+                sock.settimeout(send_timeout_s)  # 写延迟有界:server 病亡 ⇒ 超时现形
+            except Exception as e:  # noqa: BLE001 —— 运行层不抛:设置失败即病亡
+                self.last_error = f"settimeout failed: {type(e).__name__}: {e}"
+                self._die()
+
+    @property
+    def alive(self) -> bool:
+        return self._alive
+
+    def _die(self) -> None:
+        self._alive = False
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except Exception:  # noqa: BLE001 —— 收尾尽力,失败不放大
+            pass
+
+    def _write(self, msg: bytes) -> bool:
+        """单条写入(调用方持锁)。失败只记因不死通道 —— 病亡时序由调用方
+        安排(send_sequence 要先做 rescue 清场再关 socket)。"""
+        try:
+            self._sock.sendall(msg)
+            self.sent_count += 1
+            return True
+        except Exception as e:  # noqa: BLE001 —— OSError 为主;mock/怪源全兜
+            self.last_error = f"control send failed: {type(e).__name__}: {e}"
+            return False
+
+    def send(self, msg: bytes) -> bool:
+        """发一条控制消息(原子;通道病亡 ⇒ False,不抛)。"""
+        if not self._alive:
+            return False
+        with self._lock:
+            if not self._alive:
+                return False
+            if self._write(msg):
+                return True
+            self._die()
+            return False
+
+    def send_sequence(self, msgs: list[bytes], inter_s: float = 0.0,
+                      rescue: bytes | None = None) -> bool:
+        """整串原子发送(锁贯穿 ⇒ 手势不可穿插)。首条即败 ⇒ 未注入任何
+        字节,调用方可无痕降级;中途败 ⇒ 先在原 socket 上补发 rescue 清场
+        (超时类瞬断可能救回;失败忽略)再病亡,如实报败。"""
+        if not msgs:
+            return True
+        if not self._alive:
+            return False
+        with self._lock:
+            if not self._alive:
+                return False
+            for i, msg in enumerate(msgs):
+                if i > 0 and inter_s > 0:
+                    time.sleep(inter_s)  # 时长语义(持锁 = 手势原子性优先)
+                if not self._write(msg):
+                    if i > 0 and rescue is not None:
+                        try:  # 孤儿 down 清理:先于 _die(socket 尚开着,超时类
+                            # 瞬断有机会送达);成败不改变「报败 + 病亡」判决
+                            self._sock.sendall(rescue)
+                            self.sent_count += 1
+                        except Exception:  # noqa: BLE001
+                            pass
+                    self._die()
+                    return False
+            return True
+
+    def close(self) -> None:
+        """主动关闭(幂等;与 source.close 的兜底双重 close 无害)。"""
+        with self._lock:
+            self._die()
 
 
 # ─── W6-6 单设备常驻流(读线程 + 环形缓冲 + 流内门控)───
@@ -602,6 +904,7 @@ class ScrcpyStream:
         self._decoder: H264DecoderLike | None = None
         self._reader: threading.Thread | None = None
         self._parser = FrameParser(profile=cfg.framing_profile)
+        self._control_writer: ControlWriter | None = None  # ΝΩ-52(惰建,随流同葬)
         self.last_error: str | None = None
         self.stats = {
             "spawn_count": 0, "frames_decoded": 0, "gate_dropped": 0,
@@ -617,6 +920,40 @@ class ScrcpyStream:
     def last_access(self) -> float:
         with self._lock:
             return self._last_access
+
+    def control_writer(self) -> ControlWriter | None:
+        """ΝΩ-52:本流的控制写通道(仅 running 态;mock 源无控制 socket ⇒
+        None;通道病亡 ⇒ 恒 None 直到流重启)。控制面使用计入活跃消费
+        (idle 看门狗不误杀纯动作突发)。"""
+        with self._lock:
+            if self._state != "running":
+                return None
+            w = self._control_writer
+            if w is not None:
+                return w if w.alive else None
+            taker = getattr(self._source, "take_control_socket", None)
+            raw = taker() if callable(taker) else None
+            if raw is None:
+                return None
+            self._control_writer = ControlWriter(
+                raw, self.cfg.framing_profile,
+                send_timeout_s=self.cfg.control_send_timeout_s,
+            )
+            self._last_access = time.monotonic()
+            return self._control_writer
+
+    def video_size(self) -> tuple[int, int] | None:
+        """ΝΩ-52:控制消息 position 所需的视频坐标系(server 要求 screen_size
+        与其视频尺寸全等,否则事件被静默丢弃)。最新解码帧尺寸优先(旋转
+        自愈),兜底 codec meta(首帧未出但 meta 已解析)。"""
+        with self._lock:
+            if self._ring:
+                last = self._ring[-1]
+                return (last.width, last.height)
+            meta = self._parser.meta
+            if meta:
+                return (meta["width"], meta["height"])
+            return None
 
     def start(self) -> None:
         """spawn + 起读线程。失败抛异常(state 回 idle),调用方退避。"""
@@ -636,6 +973,7 @@ class ScrcpyStream:
             self._source = source
             self._decoder = decoder
             self._parser = FrameParser(profile=self.cfg.framing_profile)
+            self._control_writer = None  # ΝΩ-52:新流新通道(旧 writer 已随旧流关闭)
             self._seq = 0
             self._ring.clear()
             self._last_access = time.monotonic()
@@ -718,10 +1056,17 @@ class ScrcpyStream:
             if self._state in ("stopping", "stopped"):
                 return
             self._state = "stopping"
-        source, decoder, reader = self._source, self._decoder, self._reader
+        source, decoder, reader, cwriter = (
+            self._source, self._decoder, self._reader, self._control_writer,
+        )
         if source is not None:
             try:
                 source.close()  # kill+wait 进程 ⇒ 阻塞中的 read 立刻 EOF
+            except Exception:
+                pass
+        if cwriter is not None:  # ΝΩ-52:控制通道随流同葬(动作侧据此降级 adb)
+            try:
+                cwriter.close()
             except Exception:
                 pass
         if reader is not None and reader.is_alive() and reader is not threading.current_thread():
@@ -786,6 +1131,21 @@ class StreamHub:
                     **st.stats,
                 }
             return out
+
+    def control_writer(self, serial: str) -> "ControlWriter | None":
+        """ΝΩ-52:活跃流的控制写通道 —— **绝不 spawn**(动作路径不付启动税,
+        也不触发探测);无流/流死/无控制 socket ⇒ None(调用方降级 adb)。"""
+        with self._lock:
+            st = self._streams.get(serial)
+        if st is None or st.state != "running":
+            return None
+        return st.control_writer()
+
+    def video_size(self, serial: str) -> tuple[int, int] | None:
+        """ΝΩ-52:该设备流视频尺寸(控制消息的坐标系锚点;无流 ⇒ None)。"""
+        with self._lock:
+            st = self._streams.get(serial)
+        return st.video_size() if st is not None else None
 
     def close(self) -> None:
         """进程退出清理:停所有流 + join 看门狗。幂等。"""
@@ -1205,6 +1565,173 @@ def _run_selftest() -> int:
     check("S16 cooldown blocks respawn",
           hub16.grab("slow", timeout_s=0.3) is None and fake16.opens == 1)
     hub16.close()
+
+    # ── S17 ΝΩ-36 端口冲突 ⇒ scid 重掷(纯函数,确定性 rng) ──
+    occupied = {27183 + 100}  # 第一个掷出的端口被占(见下方确定性 scid 序)
+    dice = iter([100, 101, 102, 103, 104])
+
+    def fwd_stub(scid: int, port: int) -> tuple[int, str]:
+        if port in occupied:
+            return 1, f"error: cannot bind to '127.0.0.1:{port}'"
+        return 0, ""
+
+    scid, port, attempts = reroll_tunnel_port(
+        fwd_stub, 27183, max_retries=3, rng=lambda: next(dice))
+    check("S17 conflict rerolled to free port",
+          scid == 101 and port == 27183 + 101 and attempts == 2)
+
+    dice2 = iter([200, 201, 202, 203, 204])
+    occupied2 = {27183 + i for i in (200, 201, 202, 203)}
+    try:
+        reroll_tunnel_port(lambda s, p: (1, "busy") if p in occupied2 else (0, ""),
+                           27183, max_retries=3, rng=lambda: next(dice2))
+        check("S17 exhausted retries raise honest error", False)
+    except RuntimeError as e17:
+        check("S17 exhausted retries raise honest error",
+              "after 4 attempt" in str(e17) and "busy" in str(e17))
+
+    scid0, port0, att0 = reroll_tunnel_port(
+        lambda s, p: (0, ""), 27183, max_retries=0, rng=lambda: 7)
+    check("S17 first try free passes at retries=0",
+          scid0 == 7 and port0 == 27183 + 7 and att0 == 1)
+    check("S17 config default retries = 3",
+          StreamConfig().port_conflict_retries == 3)
+
+    # ── S18 ΝΩ-52 控制消息编码器字节级手算(scrpy 官方单测向量对齐) ──
+    check("S18 keycode vector",
+          encode_keycode(ACTION_UP, 66, 5, 65).hex()
+          == "0001" + "00000042" + "00000005" + "00000041"
+          and len(encode_keycode(ACTION_UP, 66, 5, 65)) == 14)
+    tvec = encode_touch(ACTION_DOWN, 0x1234567887654321, 100, 200, 1080, 1920,
+                        pressure=1.0, action_button=1, buttons=1)
+    check("S18 touch vector (scrcpy test_control_msg_serialize.c)",
+          tvec.hex() == "0200" + "1234567887654321" + "00000064" + "000000c8"
+          + "0438" + "0780" + "ffff" + "00000001" + "00000001" and len(tvec) == 32)
+    tfing = encode_touch(ACTION_DOWN, POINTER_ID_GENERIC_FINGER, 0, 0, 32, 48)
+    check("S18 generic finger pointer = -2 u64-wrapped",
+          tfing[2:10].hex() == "fffffffffffffffe" and tfing[22:24].hex() == "ffff")
+    tup = encode_touch(ACTION_UP, POINTER_ID_GENERIC_FINGER, 0, 0, 32, 48, pressure=0.0)
+    check("S18 up carries zero pressure", tup[1] == ACTION_UP and tup[22:24].hex() == "0000")
+    svec = encode_scroll(260, 1026, 1080, 1920, hticks=1.0, vticks=-1.0, buttons=1)
+    check("S18 scroll 2x vector",
+          svec.hex() == "03" + "00000104" + "00000402" + "0438" + "0780"
+          + "7fff" + "8000" + "00000001" and len(svec) == 21)
+    s4 = encode_scroll(16, 24, 32, 48, vticks=1.0, profile="4x")
+    check("S18 scroll 4x dialect (tick/16 → 0x0800)",
+          s4[13:15].hex() == "0000" and s4[15:17].hex() == "0800"
+          and scroll_ticks_per_message("2x") == 1 and scroll_ticks_per_message("4x") == 16)
+    check("S18 back-or-screen-on 2B",
+          encode_back_or_screen_on(ACTION_DOWN).hex() == "0400")
+    check("S18 fixed point laws",
+          float_to_u16fp(1.0) == 0xFFFF and float_to_u16fp(0.5) == 0x8000
+          and float_to_i16fp(-1.0) == -0x8000 and float_to_i16fp(1 / 16) == 0x0800)
+    check("S18 encoders deterministic",
+          encode_touch(ACTION_MOVE, -2, 1, 2, 32, 48) == encode_touch(ACTION_MOVE, -2, 1, 2, 32, 48))
+
+    # ── S19 ΝΩ-52 ControlWriter 生命周期(假 socket;写失败 ⇒ 病亡降级) ──
+    class SelfFakeSock:
+        def __init__(self, fail_at=()):
+            self.sent = []
+            self.timeouts = []
+            self.closed = 0
+            self._closed = False
+            self.fail_at = set(fail_at)
+            self._n = 0
+
+        def settimeout(self, t):
+            self.timeouts.append(t)
+
+        def sendall(self, b):
+            if self._n in self.fail_at:
+                self._n += 1
+                raise OSError(f"stub failure #{self._n - 1}")
+            self._n += 1
+            self.sent.append(bytes(b))
+
+        def close(self):
+            if not self._closed:
+                self._closed = True
+                self.closed += 1
+
+    sok = SelfFakeSock()
+    wok = ControlWriter(sok, "2x", send_timeout_s=0.5)
+    check("S19 writer sets send timeout", sok.timeouts == [0.5])
+    check("S19 send ok", wok.send(b"\x02") and sok.sent == [b"\x02"] and wok.alive)
+    sdead = SelfFakeSock(fail_at={0})
+    wdead = ControlWriter(sdead)
+    check("S19 send failure returns False (no raise)",
+          wdead.send(b"\x02") is False and not wdead.alive and sdead.closed == 1)
+    check("S19 dead writer stays dead", wdead.send(b"\x02") is False and sdead.sent == [])
+    check("S19 empty sequence true", ControlWriter(SelfFakeSock()).send_sequence([]))
+    smid = SelfFakeSock(fail_at={1})
+    wmid = ControlWriter(smid)
+    check("S19 mid-sequence failure rescues orphan then dies",
+          wmid.send_sequence([b"down", b"move", b"up"], rescue=b"UP") is False
+          and smid.sent == [b"down", b"UP"] and not wmid.alive)
+    sfirst = SelfFakeSock(fail_at={0})
+    check("S19 first-message failure injects nothing",
+          ControlWriter(sfirst).send_sequence([b"down", b"up"], rescue=b"UP") is False
+          and sfirst.sent == [])
+    check("S19 born-dead writer (None socket)",
+          ControlWriter(None).alive is False and ControlWriter(None).send(b"\x00") is False)
+    sclose = SelfFakeSock()
+    wclose = ControlWriter(sclose)
+    wclose.close()
+    wclose.close()
+    check("S19 close idempotent", sclose.closed == 1 and not wclose.alive)
+
+    # ── S20 ΝΩ-52 hub 控制面:绝不 spawn + video_size + 随流同葬 ──
+    class ControlFakeSource(FakeByteSource):
+        """FakeByteSource + 可移交控制 socket(假 socket,非真 fd)。"""
+
+        def __init__(self, spawner_ref):
+            super().__init__(spawner_ref)
+            self.control_sock: SelfFakeSock | None = None
+            self._control_taken = False
+
+        def take_control_socket(self):
+            sock = self.control_sock if not self._control_taken else None
+            self._control_taken = True
+            return sock
+
+    class ControlFakeSpawner(FakeSpawner):
+        """FakeSpawner + 每源一枚假控制 socket(ΝΩ-52 注入口)。"""
+
+        def open(self, serial):
+            self.opens += 1
+            src = ControlFakeSource(self)
+            src.control_sock = SelfFakeSock()
+            self.sources.append(src)
+            self._emit(src, [next(self._seeds)], header=True)
+            return src
+
+        __call__ = open  # 基类的 __call__ 绑定基类 open,子类须重绑
+
+    fake20 = FakeSpawner()
+    hub20 = StreamHub(StreamConfig(enabled=True, first_frame_timeout_s=2.0),
+                      fake20, mk_fake_decoder({"made": 0, "closed": 0}), decoder_name="fake")
+    check("S20 control never spawns", hub20.control_writer("emu1") is None and fake20.opens == 0)
+    check("S20 video_size absent without stream", hub20.video_size("emu1") is None)
+    hub20.grab("emu1")
+    check("S20 video_size anchors to frame", hub20.video_size("emu1") == (32, 48))
+    check("S20 legacy source (no control face) degrades to None",
+          hub20.control_writer("emu1") is None)
+    hub20.close()
+
+    fake20b = ControlFakeSpawner()
+    hub20b = StreamHub(StreamConfig(enabled=True, first_frame_timeout_s=2.0),
+                       fake20b, mk_fake_decoder({"made": 0, "closed": 0}), decoder_name="fake")
+    hub20b.grab("emu1")
+    src20 = fake20b.sources[-1]
+    w20 = hub20b.control_writer("emu1")
+    check("S20 writer handed over once",
+          w20 is not None and w20.profile == "2x"
+          and hub20b.control_writer("emu1") is w20)
+    check("S20 writer send ok", w20.send(encode_keycode(ACTION_DOWN, 4)) is True)
+    hub20b.close()
+    check("S20 writer dies with stream",
+          w20.alive is False and src20.control_sock.closed >= 1
+          and hub20b.control_writer("emu1") is None)
 
     print(f"\nscrcpyStream selftest: {'OK' if not failures else 'FAILED'} "
           f"({passed} passed, {len(failures)} failed)")

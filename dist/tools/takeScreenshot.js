@@ -6,6 +6,14 @@
 // 门控语义保留：与窗口内最新指纹距离 ≤ stableScreenDistance ⇒ 返回缓存引用。
 // 纪元 Σ-5（多显示器感知）：display 参数（索引，0 起）⇒ 跨屏捕获 —— 服务端在
 // PIL 最上游按显示器矩形裁剪；准星/元素框/锚点坐标基准随之切到该显示器。
+//
+// ΑΩ-R29 老工具方言整治审计：两处 SUCCESS 与 catch FAILED 均**不收编** ——
+// unchanged 回执含顶层 unchanged:true 键、主回执含顶层 image_attachment /
+// message / interactive_elements 键且均无 action 键（toolOk 四件套装不下这些
+// 顶层键）；catch FAILED 为 {status, error, next_step} —— error 在顶层、无
+// action/state_anchor（toolErr 产 state_anchor.error）；另有 [Error]: 前缀方言
+// （region/display 快速失败，工厂只产 JSON）。键位差异零回归优先，
+// 维持 JSON.stringify 现状。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import { normalizeHash } from '../perceptualHash.js';
@@ -51,7 +59,14 @@ export function createTakeScreenshotTool(config) {
                 ...imageBlockFromValue(value),
             ],
         },
-        async execute(args) {
+        // ΑΩ-R24：rc.6 ToolRunContext 的会话身份面（结构最小匹配：宿主递完整
+        // ToolRunContext，此处只取会话键）。提取式与 guards/hooks.normalizeExec
+        // 逐字同源（agent.id ?? agent.session.id；真值才采）—— 保证写键与守卫
+        // 读键同键。缺席（旧表面 rc.5 / 本地测试）= undefined ⇒ popupGuard 回落
+        // 'default' 单例键，写读行为与旧进程级单例逐字节一致。
+        async execute(args, exec) {
+            const rawSid = exec?.agent?.id ?? exec?.agent?.session?.id;
+            const sessionId = rawSid ? String(rawSid) : undefined;
             try {
                 const region = args?.region || 'full';
                 if (region !== 'full' && region !== 'active_window') {
@@ -163,7 +178,7 @@ export function createTakeScreenshotTool(config) {
                         unchanged: true,
                         state_anchor: {
                             same_as_screenshot: last.id,
-                            popup_detected: getPopupState(),
+                            popup_detected: getPopupState(sessionId), // ΑΩ-R24: 按会话读（缺席回落全局视图）
                             context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
                             change_gate: `screen identical to #${last.id} (dHash distance <= ${config.stableScreenDistance})`,
                         },
@@ -187,7 +202,8 @@ export function createTakeScreenshotTool(config) {
                     popupKeywords: config.popupKeywords,
                     ocrLang: config.ocrLang,
                 }, cap.frameId);
-                updatePopupState(popup.popup);
+                // ΑΩ-R24：按会话写弹窗态（缺席回落 'default'；镜像规则见 popupGuard 头注）
+                updatePopupState(popup.popup, sessionId);
                 // 6. C-3 观察登记：截图锚点喂给因果链
                 journal.noteObservation(`#${currentId} dHash=${rawHash.slice(0, 8)} popup=${popup.popup}`);
                 // 7. 状态锚点：让模型对输入保真度有元认知

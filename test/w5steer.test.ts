@@ -625,6 +625,100 @@ test('W5-5 缝2: runPilotLoop 注入真实 journal 面 —— 落账锚 = journa
   }
 });
 
+// ─── ΝΩ-11：岔路账接候选（decision.candidates ?? [action]）───
+
+test('ΝΩ-11: 岔路账接候选 —— 假 candidates 注入 ⇒ record 收多支且失败铸卡候选 ≥2；字段缺席 ⇒ [action] 单支旧路', async () => {
+  // 三候选（选中支 wait + 两个备选）：假注入 —— 与 ΝΩ-10 的 PolicyDecision.candidates 合流
+  const chosen: PolicyAction = {
+    kind: 'wait', rationale: '选中支：静止一拍', expectedEffect: '世界自行变化',
+    utility: 0.5, riskTier: 'benign',
+  };
+  const altClick: PolicyAction = {
+    kind: 'click',
+    target: { bbox: { x0: 80, y0: 80, x1: 120, y1: 120 }, center: { x: 100, y: 100 }, label: '按钮' },
+    rationale: '备选：直击按钮', expectedEffect: '页面状态变化',
+    utility: 0.4, riskTier: 'benign',
+  };
+  const altScroll: PolicyAction = {
+    kind: 'scroll', payload: { direction: 'down' },
+    rationale: '备选：下滚找元素', expectedEffect: '视口移动',
+    utility: 0.3, riskTier: 'benign',
+  };
+
+  // ① 端到端（真实 BranchLedgerBook）：wait 双步 ⇒ 步保险丝 aborted ⇒ 铸卡；
+  //    落账候选面 = 注入的三支（rankTopK 排名）⇒ 卡候选 ≥2（岔路不再退化为单支）
+  const book = new BranchLedgerBook({ now: () => 1234 });
+  const realPort: BranchLedgerWirePort = {
+    record: (o, c, m) => book.record(o, c, m),
+    generateCard: f => generateBranchCard(book, f),
+  };
+  const goal1 = new GoalStateMachine(
+    { goal: '开关门流程演示', successCriteria: ['开门标记', '关门标记'], maxSteps: 6 }, mkClock(1000),
+  );
+  const res = await runAutonomousLoop({
+    perceive: async () => unrelatedSnapshot(),
+    policy: { decide: async () => ({ action: chosen, uncertain: false, degraded: false, candidates: [chosen, altClick, altScroll] }) },
+    execute: async () => ({ outcome: 'no_effect' as const }),
+    goal: goal1,
+    branchLedger: realPort,
+    now: () => 1_700_000_000_000,
+    sleep: async () => {},
+  }, { maxSteps: 2 });
+  assert.equal(res.phase, 'aborted', '双判据缺一 ⇒ 步保险丝中止（失败终局相）');
+  assert.ok(book.size >= 1, '岔路账逐决策落账');
+  for (const entry of book.dump().entries) {
+    assert.ok(entry.candidates.length >= 2, `落账候选多支（实测 ${entry.candidates.length}）—— 不再退化为单支`);
+  }
+  const card = lastBranchCard();
+  assert.notEqual(card, null, '失败终局相铸卡（W4-0 既有面）');
+  assert.ok(card!.candidates.length >= 2, `岔路卡候选 ≥2（实测 ${card!.candidates.length}）—— 换支有真岔路可换`);
+  const sigs = card!.candidates.map(c => c.signature);
+  assert.ok(sigs.some(s => s.startsWith('wait:')), '选中支在卡上');
+  assert.ok(sigs.some(s => s.startsWith('click:')), '备选点击支在卡上');
+  assert.ok(sigs.some(s => s.startsWith('scroll:')), '备选滚动支在卡上');
+
+  // ② 缺席回退（零回归红律）：decision 不带 candidates ⇒ record 收 [action] 单支
+  const stub = recStub();
+  const goal2 = new GoalStateMachine(
+    { goal: '开关门流程演示', successCriteria: ['开门标记', '关门标记'], maxSteps: 6 }, mkClock(1000),
+  );
+  await runAutonomousLoop({
+    perceive: async () => unrelatedSnapshot(),
+    policy: { decide: async () => ({ action: chosen, uncertain: false, degraded: false }) },
+    execute: async () => ({ outcome: 'no_effect' as const }),
+    goal: goal2,
+    branchLedger: stub.port,
+    now: () => 1_700_000_000_000,
+    sleep: async () => {},
+  }, { maxSteps: 2 });
+  assert.ok(stub.calls.length >= 1, '缺席面照常落账');
+  assert.ok(
+    stub.calls.every(c => c.options.length === 1 && c.options[0] === chosen),
+    'candidates 缺席 ⇒ [action] 单支（逐字节旧路）',
+  );
+
+  // ③ 防御面：垃圾 candidates（非数组 / 空数组 / 全脏）⇒ 同样回 [action]
+  for (const junk of [undefined, null, 'x', [], [null, 42, {}]] as unknown[]) {
+    const stub2 = recStub();
+    const goal3 = new GoalStateMachine(
+      { goal: '开关门流程演示', successCriteria: ['开门标记', '关门标记'], maxSteps: 6 }, mkClock(1000),
+    );
+    await runAutonomousLoop({
+      perceive: async () => unrelatedSnapshot(),
+      policy: { decide: async () => ({ action: chosen, uncertain: false, degraded: false, candidates: junk as never }) },
+      execute: async () => ({ outcome: 'no_effect' as const }),
+      goal: goal3,
+      branchLedger: stub2.port,
+      now: () => 1_700_000_000_000,
+      sleep: async () => {},
+    }, { maxSteps: 1 });
+    assert.ok(
+      stub2.calls.length >= 1 && stub2.calls.every(c => c.options.length === 1 && c.options[0] === chosen),
+      `垃圾 candidates ${JSON.stringify(junk)} ⇒ [action] 回退（绝不抛绝不伪造候选）`,
+    );
+  }
+});
+
 test('W5-5 缺省: 无会话无卡时 runPilotLoop 零 steer 注记 —— 达成锚点不带 [Steer] 段', async () => {
   resetW4PilotWire(); // 无在役会话：缝1/缝3 消费面全部空转
   const { out } = await runPilot({ goal: '开关门演示', criteria: ['开门标记'], maxSteps: 3 });

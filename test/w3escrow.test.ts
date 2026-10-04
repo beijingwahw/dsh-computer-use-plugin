@@ -27,7 +27,7 @@
 // 不依赖 CSPRNG 具体取值（只断言格式与行为）。
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -40,6 +40,40 @@ import {
 import {
   shaper, createShaperCompensationExecutor, type SystemAdapter,
 } from '../src/environmentShaper.ts';
+
+// ─── ΝΩ-22：行式 WAL 解析助手（头行魔数 + 事件行；重放视图 = 等价内存态） ───
+
+function readWalLines(wal: string): Array<Record<string, any>> {
+  return readFileSync(wal, 'utf8')
+    .split('\n')
+    .filter(l => l.trim() !== '')
+    .map(l => JSON.parse(l));
+}
+
+function walHeader(wal: string): Record<string, any> {
+  return readWalLines(wal)[0];
+}
+
+function walEvents(wal: string): Array<Record<string, any>> {
+  return readWalLines(wal).filter(l => l.wal === undefined);
+}
+
+/** 事件流重放出的等价内存态视图（在途 planId 清单 + 账册记录序） */
+function walState(wal: string): { inFlight: string[]; ledger: Array<Record<string, any>> } {
+  const inFlight: string[] = [];
+  const ledger: Array<Record<string, any>> = [];
+  for (const e of walEvents(wal)) {
+    if (e.event === 'mint') {
+      inFlight.push(e.payload.plan.planId);
+      if (e.payload.superseded) ledger.push(e.payload.superseded);
+    } else if (e.event === 'settle' || e.event === 'close' || e.event === 'compensate') {
+      const i = inFlight.indexOf(e.payload.record.planId);
+      if (i >= 0) inFlight.splice(i, 1);
+      ledger.push(e.payload.record);
+    }
+  }
+  return { inFlight, ledger };
+}
 
 // ─── 测试基建（离线确定性） ───
 
@@ -182,11 +216,15 @@ test('S1-1b 预案先行落盘：铸造返回时 WAL 文件已在场且含预案
   const mint = await reversalEscrow.mintPlan({ semantics: 'file-delete', description: '删除 report.docx' });
   assert.equal(mint.ok, true);
   if (!mint.ok) return;
-  const saved = JSON.parse(readFileSync(wal, 'utf8')) as { version: number; inFlight: ReversalPlan[]; ledger: unknown[] };
-  assert.equal(saved.version, 1);
-  assert.equal(saved.inFlight.length, 1);
-  assert.equal(saved.inFlight[0].planId, mint.plan.planId);
-  assert.equal(saved.inFlight[0].compensation.length, 2);
+  // ΝΩ-22 行式档：头行魔数 + 单 mint 事件行（预案自包含在 payload.plan）
+  const header = walHeader(wal);
+  assert.equal(header.wal, 'dsh-escrow-wal');
+  assert.equal(header.version, 2);
+  const mints = walEvents(wal).filter(e => e.event === 'mint');
+  assert.equal(mints.length, 1);
+  assert.equal(mints[0].planId, mint.plan.planId);
+  assert.equal(mints[0].payload.plan.planId, mint.plan.planId);
+  assert.equal(mints[0].payload.plan.compensation.length, 2);
 });
 
 // ─── S1-2 策略表命中与缺失 ───
@@ -312,10 +350,10 @@ test('S1-4a attemptFailed(no-effect) ⇒ 按预案补偿：执行序正确、验
   assert.deepEqual(ledger[0].executedSteps, ['restore from recycle bin', 'Ctrl+Z undo the delete']);
   assert.equal(ledger[0].approvalToken, token);
   assert.equal(reversalEscrow.dumpInFlight().length, 0);
-  // WAL 同步：inFlight 清空、账册入档
-  const saved = JSON.parse(readFileSync(wal, 'utf8')) as { inFlight: unknown[]; ledger: Array<{ outcome: string }> };
-  assert.equal(saved.inFlight.length, 0);
-  assert.equal(saved.ledger.filter(r => r.outcome === 'compensated-verified').length, 1);
+  // WAL 同步：inFlight 清空、账册入档（ΝΩ-22 行式重放视图）
+  const st = walState(wal);
+  assert.deepEqual(st.inFlight, []);
+  assert.equal(st.ledger.filter(r => r.outcome === 'compensated-verified').length, 1);
   // 令牌侧语义原样（V 纪元：验收失败保留令牌供重试）
   assert.equal(approval.status(token).present, true);
 });
@@ -478,10 +516,10 @@ test('S1-8b 崩溃回读：重启后在途预案 ⇒ recovered-human-attention�
   assert.match(rec.escalation!.headline, /HUMAN ATTENTION REQUIRED/);
   assert.match(rec.escalation!.suggestedHumanAction, /提交订单表单/); // 描述与手工补偿路径随行
   assert.match(rec.escalation!.suggestedHumanAction, /drafts folder/);
-  // WAL 已改写：恢复结算落盘（inFlight 空、账册含恢复记录）
-  const saved = JSON.parse(readFileSync(wal, 'utf8')) as { inFlight: unknown[]; ledger: Array<{ outcome: string }> };
-  assert.equal(saved.inFlight.length, 0);
-  assert.equal(saved.ledger.filter(x => x.outcome === 'recovered-human-attention').length, 1);
+  // WAL 已改写：恢复结算落盘（inFlight 空、账册含恢复记录 —— ΝΩ-22 行式重放视图）
+  const st = walState(wal);
+  assert.deepEqual(st.inFlight, []);
+  assert.equal(st.ledger.filter(x => x.outcome === 'recovered-human-attention').length, 1);
   // acknowledge 后消隐
   reversalEscrow.acknowledge(mint.plan.planId);
   assert.equal(reversalEscrow.pendingHumanAttention().length, 0);
@@ -509,6 +547,13 @@ test('S1-8c 垃圾档/垃圾条目防御：坏档归零不抛，好预案不连�
   const r2 = reversalEscrow.recover();
   assert.equal(r2.recovered, 1); // 好预案回读，垃圾弃置
   assert.equal(execLog.length, 0); // 恢复不自动补偿
+  // ΝΩ-22：旧整档只读迁移 —— 重建后档已原子改写为行式（头行魔数 + 恢复账）
+  const header = walHeader(wal);
+  assert.equal(header.wal, 'dsh-escrow-wal');
+  const st = walState(wal);
+  assert.deepEqual(st.inFlight, []);
+  assert.equal(st.ledger.filter(x => x.outcome === 'recovered-human-attention').length, 1);
+  assert.equal(reversalEscrow.stats().walSkippedLines, 0, '旧档垃圾条目在净化面弃置（非行级跳过）');
 });
 
 // ─── S1-9 端口缺席降级 ───
@@ -617,6 +662,171 @@ test('S1-11b 同令牌重铸 ⇒ 旧在途预案 superseded 流产（无补偿�
   assert.equal(execLog.length, 0);
 });
 
+// ─── ΝΩ-22（热路径 IO 放大②）：行式 append-only WAL 执法册 ───
+//
+//   a 行重放等价：事件流重放的内存态与旧整档路径等价（已结算账逐字段保留、
+//     在途转 recovered-human-attention 与旧整档同律）；
+//   b 旧档迁移：旧整档只读迁移为行式（原子改写），账册与在途全保留，幂等；
+//   c 坏行/崩溃半行防御：跳过计数在册，好行照常重放；
+//   d mint 顶替单事件行：同令牌重铸 ⇒ 一次追加携带 superseded（双写合并），
+//     重放后顶替账与新预案在途等价；
+//   e append 面故障 ⇒ persist-failed 回滚（与旧存储面同律）。
+
+test('ΝΩ-22-a 行重放等价：事件流重放的内存态与旧整档路径等价', async () => {
+  const wal = path.join(dir, 'escrow-wal.json');
+  armStandard({ walFile: wal });
+  const t1 = grantedToken();
+  await reversalEscrow.mintPlan({ semantics: 'file-delete', approvalToken: t1, description: '删除 a.docx' });
+  await reversalEscrow.settleVerified(t1);
+  await reversalEscrow.idle();
+  const m2 = await reversalEscrow.mintPlan({ semantics: 'file-write', approvalToken: 'APR-NW2A', description: '写入 b.txt' });
+  assert.equal(m2.ok, true, JSON.stringify(m2));
+  const preLedger = JSON.parse(JSON.stringify(reversalEscrow.dumpLedger())) as Array<Record<string, any>>;
+  const preVerified = preLedger.find(x => x.outcome === 'verified');
+  assert.ok(preVerified, '崩溃前已有一笔 verified 结算');
+  assert.equal(reversalEscrow.dumpInFlight().length, 1, '崩溃前一枚在途预案');
+
+  // 崩溃重启：同一行式档重放
+  armStandard({ walFile: wal });
+  const r = reversalEscrow.recover();
+  assert.equal(r.recovered, 1);
+  assert.equal(execLog.length, 0, '恢复不自动补偿');
+  const post = reversalEscrow.dumpLedger();
+  assert.deepEqual(post.find(x => x.outcome === 'verified'), preVerified,
+    '等价①：事件流重放后已结算账逐字段等价');
+  const rec = post.find(x => x.outcome === 'recovered-human-attention')!;
+  assert.equal(rec.planId, m2.plan.planId, '等价②：在途预案转 recovered（planId 对得上）');
+  assert.equal(rec.trigger, 'crash-recovery');
+
+  // 等价③：同一预案走旧整档格式（手写 legacy 档）⇒ 恢复记录核心字段等价
+  const legacy = path.join(dir, 'escrow-wal-legacy.json');
+  writeFileSync(legacy, JSON.stringify({
+    version: 1, savedAt: 1,
+    inFlight: [m2.plan],
+    ledger: [preVerified],
+  }), 'utf8');
+  armStandard({ walFile: legacy });
+  const r2 = reversalEscrow.recover();
+  assert.equal(r2.recovered, 1);
+  const post2 = reversalEscrow.dumpLedger();
+  const rec2 = post2.find(x => x.outcome === 'recovered-human-attention')!;
+  assert.equal(rec2.planId, rec.planId, '两代格式 ⇒ 同一预案恢复等价');
+  assert.equal(rec2.semantics, rec.semantics);
+  assert.equal(rec2.outcome, rec.outcome);
+  assert.equal(rec2.escalation!.suggestedHumanAction, rec.escalation!.suggestedHumanAction);
+  assert.deepEqual(post2.find(x => x.outcome === 'verified'), preVerified,
+    '旧档路径的已结算账同样逐字段保留');
+});
+
+test('ΝΩ-22-b 旧档迁移：旧整档只读迁移为行式，账册与在途全保留，幂等', async () => {
+  const wal = path.join(dir, 'legacy-wal.json');
+  const plan = {
+    planId: 'ESC-OLDPLAN01', semantics: 'file-write', description: '写入配置', approvalToken: 'APR-OLD',
+    mintedAt: 1000, ttlMs: 30_000, expiresAt: 31_000,
+    compensation: [{ method: 'hotkey', label: 'Ctrl+Z undo the write', keys: ['ctrl', 'z'] }],
+    verifyMode: 'screen-hash' as const,
+  };
+  const ledgerRec = {
+    planId: 'ESC-OLDLEDGER', semantics: 'file-delete', mintedAt: 100, settledAt: 200,
+    outcome: 'compensated-verified', trigger: 'no-effect', executedSteps: ['restore from recycle bin'],
+  };
+  writeFileSync(wal, JSON.stringify({ version: 1, savedAt: 300, inFlight: [plan], ledger: [ledgerRec] }), 'utf8');
+  armStandard({ walFile: wal });
+  const r = reversalEscrow.recover();
+  assert.equal(r.recovered, 1, '在途预案恢复');
+  const ledger = reversalEscrow.dumpLedger();
+  assert.equal(ledger.length, 2);
+  assert.deepEqual(ledger.find(x => x.planId === 'ESC-OLDLEDGER')?.executedSteps,
+    ['restore from recycle bin'], '旧账册内容迁移保全');
+  // 迁移后档 = 行式：头行魔数 + 旧账(compensate) + 恢复账(close)
+  assert.equal(walHeader(wal).wal, 'dsh-escrow-wal');
+  assert.equal(walHeader(wal).version, 2);
+  const evs = walEvents(wal);
+  assert.deepEqual(evs.map(e => e.event).sort(), ['close', 'compensate'], '迁移 = 在途/账册各成一行');
+  const st = walState(wal);
+  assert.deepEqual(st.inFlight, []);
+  assert.equal(st.ledger.filter(x => x.outcome === 'compensated-verified').length, 1);
+  assert.equal(st.ledger.filter(x => x.outcome === 'recovered-human-attention').length, 1);
+  // 迁移档再次重启：幂等（不重复恢复 —— recovered 计数含历史恢复账，账册不膨胀）
+  armStandard({ walFile: wal });
+  assert.equal(reversalEscrow.recover().recovered, 1, 'recover 面计数为累计语义（历史恢复账仍在册）');
+  assert.equal(reversalEscrow.dumpLedger().length, 2, '无新增账（幂等 —— 在途已清不重复唠叨）');
+  assert.equal(reversalEscrow.dumpLedger().filter(x => x.outcome === 'recovered-human-attention').length, 1);
+  // 迁移后的档走增量追加（不再是全量重写形状）
+  const t = grantedToken();
+  const m = await reversalEscrow.mintPlan({ semantics: 'file-delete', approvalToken: t });
+  assert.equal(m.ok, true, JSON.stringify(m));
+  const linesAfter = readWalLines(wal).length;
+  assert.equal(linesAfter, 4, '头 + compensate + close + 新 mint（追加不重写）');
+  assert.equal(walEvents(wal).filter(e => e.event === 'mint').length, 1);
+});
+
+test('ΝΩ-22-c 坏行/崩溃半行防御：跳过计数在册，好行照常重放', async () => {
+  const wal = path.join(dir, 'dirty-wal.json');
+  armStandard({ walFile: wal });
+  const t = grantedToken();
+  await reversalEscrow.mintPlan({ semantics: 'file-delete', approvalToken: t });
+  await reversalEscrow.settleVerified(t);
+  await reversalEscrow.idle();
+  // 模拟崩溃中断的尾部半行 + 人为垃圾行
+  appendFileSync(wal, '{"planId": "ESC-X", "event": "mint", ts trun\n', 'utf8');
+  appendFileSync(wal, 'garbage-not-json\n', 'utf8');
+  reversalEscrow.arm({
+    now, storage: createEscrowFileStorage(wal), executorPort, hashPort, focusPort, clipboardPort,
+  });
+  assert.equal(reversalEscrow.stats().walSkippedLines, 2, '坏行/半行跳过计数在册');
+  assert.equal(reversalEscrow.dumpLedger().filter(x => x.outcome === 'verified').length, 1, '好行照常重放');
+  assert.equal(reversalEscrow.dumpInFlight().length, 0);
+  // 重放后继续追加新事件 —— 运行面无残迹
+  const t2 = grantedToken();
+  const m2 = await reversalEscrow.mintPlan({ semantics: 'file-write', approvalToken: t2 });
+  assert.equal(m2.ok, true, JSON.stringify(m2));
+});
+
+test('ΝΩ-22-d mint 顶替单事件行：双写合并为一行，重放等价', async () => {
+  const wal = path.join(dir, 'supersede-wal.json');
+  armStandard({ walFile: wal });
+  const token = grantedToken();
+  const first = await reversalEscrow.mintPlan({ semantics: 'file-delete', approvalToken: token });
+  const second = await reversalEscrow.mintPlan({ semantics: 'file-delete', approvalToken: token });
+  assert.ok(first.ok && second.ok);
+  const evs = walEvents(wal);
+  const mints = evs.filter(e => e.event === 'mint');
+  assert.equal(mints.length, 2);
+  assert.equal(mints[0].payload.superseded, undefined, '首次铸造无顶替');
+  const sup = mints[1].payload.superseded;
+  assert.equal(sup.planId, first.plan.planId);
+  assert.equal(sup.outcome, 'aborted-pre-dispatch');
+  assert.equal(sup.trigger, 'superseded');
+  assert.equal(evs.filter(e => e.event === 'settle' || e.event === 'close' || e.event === 'compensate').length, 0,
+    '顶替流产未另发结算行 —— 双写合并为单事件行');
+  // 重放等价：重启后新预案在途被恢复、顶替流产账在场（与旧整档行为一致）
+  armStandard({ walFile: wal });
+  assert.equal(reversalEscrow.dumpInFlight().length, 0, '恢复语义：在途转人工处置');
+  const ledger = reversalEscrow.dumpLedger();
+  assert.equal(ledger.length, 2);
+  assert.equal(ledger.find(x => x.outcome === 'aborted-pre-dispatch')?.planId, first.plan.planId);
+  assert.equal(ledger.find(x => x.outcome === 'recovered-human-attention')?.planId, second.plan.planId);
+});
+
+test('ΝΩ-22-e append 面故障 ⇒ persist-failed 回滚（与旧存储面同律）', async () => {
+  const okSaveBadAppend: EscrowStorage = {
+    load: () => null,
+    save: () => ({ ok: true }),
+    append: () => ({ ok: false, error: 'append failed (disk full)' }),
+  };
+  reversalEscrow.arm({ now, storage: okSaveBadAppend, executorPort, hashPort, focusPort, clipboardPort });
+  const first = await reversalEscrow.mintPlan({ semantics: 'file-delete', approvalToken: 'APR-NWE1' });
+  assert.equal(first.ok, true, '首写建档走全量重写面（save ok）');
+  const second = await reversalEscrow.mintPlan({ semantics: 'file-write', approvalToken: 'APR-NWE2' });
+  assert.equal(second.ok, false);
+  if (second.ok) return;
+  assert.equal(second.reason, 'persist-failed');
+  assert.match(second.detail ?? '', /append failed/);
+  assert.equal(reversalEscrow.dumpInFlight().length, 1, '失败铸造回滚（仅首枚在途）');
+  assert.ok((reversalEscrow.stats().persistError ?? '').includes('append failed'));
+});
+
 // ─── S1-12 shaper 桥（environmentShaper 撤销栈 → 补偿执行端口） ───
 
 test('S1-12 shaper 补偿执行器：shaper-undo 落到 restoreAll；路由错配醒目拒绝；绝不抛', async () => {
@@ -661,6 +871,6 @@ test('S1-13 全链路：铸造→预留→派发后用户喊停→补偿验证�
   assert.equal(reversalEscrow.pendingHumanAttention().length, 0); // 无失败 ⇒ 无升级
   // 令牌侧：V 纪元语义原样（中断不焚令牌 —— 是否重试由审批层裁决）
   assert.equal(approval.status(token).present, true);
-  const saved = JSON.parse(readFileSync(wal, 'utf8')) as { inFlight: unknown[] };
-  assert.equal(saved.inFlight.length, 0); // WAL 与内存一致（在途清空）
+  const st = walState(wal);
+  assert.deepEqual(st.inFlight, []); // WAL 与内存一致（在途清空 —— ΝΩ-22 行式重放视图）
 });

@@ -1,8 +1,30 @@
 // src/kernel/productionSpecs.ts
 // W6-1（doctor 债清偿·smell.over-engineering）：从 kernel/index.ts 提取的生产内核
-// 入册单数据面 —— 纯数据（ReadonlyArray<KernelParamSpec>），零逻辑零副作用，
+// 入册单数据面 —— 纯数据（ReadonlyArray<ProductionKernelParamSpec>），零逻辑零副作用，
 // 逐字节搬运（数值/键名/注记零变更）；index.ts 保留桶职责与 registerProductionKernels()。
+//
+// ΝΩ-6（安全参数分池）：入册单为参数增补 safetyCritical 标记 —— 承载安全语义
+// 结构前提的键（uncertainty.highProceed 的「高危无免检直通道」、宪法两律、popup
+// 施密特对等安全语义键）隔离出自动校准池：KernelCalibrator.tick 对其跳过自动
+// 校准（值只经 gym 实验室 → 显式 promoteFrom 通道移动；见 calibrator.ts 的
+// 立法注释）。标记只在本册声明（register 的 normalizeSpec 不透传未知字段 ——
+// 注册表条目零形状变化），SAFETY_CRITICAL_KERNEL_KEYS 为其唯一派生只读视图。
 import type { KernelParamSpec } from './registry';
+
+/**
+ * 生产内核规格：KernelParamSpec + ΝΩ-6 安全分池标记。
+ * safetyCritical 仅由本册数据面声明（不进 KernelParamSpec / 注册表存储 —— 注册表
+ * 形状零变化），registerProductionKernels 的 `{ ...spec }` 展开传入 register 时
+ * 被 normalizeSpec 静默丢弃（无害超额字段）。
+ */
+export interface ProductionKernelParamSpec extends KernelParamSpec {
+  /**
+   * ΝΩ-6 安全分池标记：true ⇒ 该键承载安全语义的结构前提（校准器的阈学习可能
+   * 静默放宽它）⇒ KernelCalibrator.tick 跳过自动校准并立 skipped-safety-critical
+   * 报告；换值唯一合法通道 = gym 实验室进化 → 显式 promoteFrom。缺席 = 普通键。
+   */
+  safetyCritical?: boolean;
+}
 
 /**
  * 生产内核入册单：Θ-4 + Ξ-D 接线的全部读点键（55 键 / 21 读点文件）。
@@ -15,7 +37,7 @@ import type { KernelParamSpec } from './registry';
  *   · policyEngine 七处效用基线（escalate/utility 诸常量）：进化价值低 ——
  *     它们只在日志/注记里排序次序，不参与任何判决翻转。
  */
-export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
+export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<ProductionKernelParamSpec> = [
   // ── 感知器官（worldSnapshot.snapshotChanged 的 dhash 汉明容差） ──
   {
     key: 'world.hammingTolerance',
@@ -67,6 +89,31 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     max: 0.2,
     note: '候选并列判定：最佳与次佳得分差小于此值 ⇒ uncertain（缺省 0.05）',
   },
+  // ── 策略器官（autonomy/counterfactual 效用权重三键 —— ΝΩ-10 与 tieGap 同律入册）──
+  {
+    key: 'policy.progressWeight',
+    organ: 'policy',
+    defaultValue: 0.5,
+    min: 0,
+    max: 1,
+    note: 'Φ-9 反事实效用进展权重缺省（U = w_p·progress + w_i·info − w_r·risk；缺省 0.5 = counterfactualUtil.DEFAULT_WEIGHTS.progress 字面量锚，未注册回声零漂移；调用方显式 ctx.weights 仍最高优先）',
+  },
+  {
+    key: 'policy.infoWeight',
+    organ: 'policy',
+    defaultValue: 0.3,
+    min: 0,
+    max: 1,
+    note: 'Φ-9 反事实效用信息增益权重缺省（缺省 0.3 = DEFAULT_WEIGHTS.info 字面量锚；三键全被置 0 时 resolveWeights 整组回退模块字面量——纪元 Δ 全零设防不随内核漂移）',
+  },
+  {
+    key: 'policy.riskWeight',
+    organ: 'policy',
+    defaultValue: 0.2,
+    min: 0,
+    max: 1,
+    note: 'Φ-9 反事实效用风险惩罚权重缺省（缺省 0.2 = DEFAULT_WEIGHTS.risk 字面量锚；风险分层分表 RISK_SCORES 的量级由此键放大/收敛）',
+  },
   // ── 认识论器官（autonomy/uncertainty 的校准常数与三档双阈值） ──
   {
     key: 'uncertainty.alpha',
@@ -90,7 +137,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 0.85,
     min: 0.7,
     max: 1,
-    note: 'high 档 proceed 直放线（缺省 0.85 > 校准值域上限 0.8 —— 高危无免检直通道的刻意设计）',
+    safetyCritical: true,
+    note: 'high 档 proceed 直放线（缺省 0.85 > 校准值域上限 0.8 —— 高危无免检直通道的刻意设计）。ΝΩ-6 safetyCritical：本键区间 [0.7,1] 与校准值域 [0.2,0.8] 交叠，在线校准器的阈学习可能把值学到 ≤0.8 ⇒ proceed×high 从不可达变可达、静默拆掉金丝雀守卫的设计前提 —— 故隔离出自动校准池，换值仅经 gym→显式 promoteFrom',
   },
   {
     key: 'uncertainty.highVlm',
@@ -366,7 +414,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 4.0,
     min: 1,
     max: 6,
-    note: '几何证据强度（nats；缺省 4.0 —— 单帧几何 ⇒ 后验 ≈0.98 立即 ON）。结构序守护：语义 ≥ 几何是模块立法 —— specs 层 sem 下限 5、消费处再 Math.max(sem, geo) 兜序（geo 可探至 6 越过 sem 下限，越序值就地抬正）',
+    safetyCritical: true,
+    note: '几何证据强度（nats；缺省 4.0 —— 单帧几何 ⇒ 后验 ≈0.98 立即 ON）。结构序守护：语义 ≥ 几何是模块立法 —— specs 层 sem 下限 5、消费处再 Math.max(sem, geo) 兜序（geo 可探至 6 越过 sem 下限，越序值就地抬正）。ΝΩ-6 safetyCritical：「单帧几何立即越过 ON 线」是弹窗态机的安全语义前提，阈学习可能把它削到迟滞带内 —— 施密特对等安全语义键，隔离出自动校准池（仅经 gym→显式 promoteFrom 换值）',
   },
   {
     key: 'popup.evidenceSem',
@@ -374,7 +423,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 5.0,
     min: 5,
     max: 10,
-    note: '语义证据强度（nats；缺省 5.0 —— 词表命中是确定性更强的信号）。下限取 5 而非 6：缺省 5.0 必须落在区间内（入册值 = 字面量的零行为铁律优先于区间美学），「geo 上限 < sem 下限」的结构序由消费处 Math.max(sem, geo) 兜底保证',
+    safetyCritical: true,
+    note: '语义证据强度（nats；缺省 5.0 —— 词表命中是确定性更强的信号）。下限取 5 而非 6：缺省 5.0 必须落在区间内（入册值 = 字面量的零行为铁律优先于区间美学），「geo 上限 < sem 下限」的结构序由消费处 Math.max(sem, geo) 兜底保证。ΝΩ-6 safetyCritical：语义 ≥ 几何的模块立法驻留此键 —— 施密特对等安全语义键，隔离出自动校准池（仅经 gym→显式 promoteFrom 换值）',
   },
   {
     key: 'popup.evidenceClean',
@@ -382,7 +432,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: -1.5,
     min: -4,
     max: -0.5,
-    note: '清洁帧证据强度（nats；缺省 −1.5 —— 单帧清洁把 ON 态拉入迟滞带但不放行）',
+    safetyCritical: true,
+    note: '清洁帧证据强度（nats；缺省 −1.5 —— 单帧清洁把 ON 态拉入迟滞带但不放行）。ΝΩ-6 safetyCritical：「清洁不立即放行」是施密特迟滞的回程安全语义（削弱它 ⇒ ON 态被单帧噪声解除）—— 施密特对等安全语义键，隔离出自动校准池（仅经 gym→显式 promoteFrom 换值）',
   },
   {
     key: 'popup.onThreshold',
@@ -390,7 +441,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 0.6,
     min: 0.55,
     max: 0.9,
-    note: '施密特触发 ON 线：belief ≥ 此值进入弹窗态（缺省 0.6）。结构序守护：off 区间上限 0.5 < 本区间下限 0.55（specs 层不交叠），消费处再 Math.min(off, on) 兜序 —— 施密特退化为逐帧抖动是结构崩坏，非旋钮',
+    safetyCritical: true,
+    note: '施密特触发 ON 线：belief ≥ 此值进入弹窗态（缺省 0.6）。结构序守护：off 区间上限 0.5 < 本区间下限 0.55（specs 层不交叠），消费处再 Math.min(off, on) 兜序 —— 施密特退化为逐帧抖动是结构崩坏，非旋钮。ΝΩ-6 safetyCritical：施密特触发本体 —— 隔离出自动校准池（仅经 gym→显式 promoteFrom 换值）',
   },
   {
     key: 'popup.offThreshold',
@@ -398,7 +450,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 0.35,
     min: 0.1,
     max: 0.5,
-    note: '施密特触发 OFF 线：belief ≤ 此值退出弹窗态（缺省 0.35）。区间上限 0.5 < onThreshold 区间下限 0.55 —— 迟滞带恒非负宽的结构保证（消费处 Math.min(off, on) 二道兜底）',
+    safetyCritical: true,
+    note: '施密特触发 OFF 线：belief ≤ 此值退出弹窗态（缺省 0.35）。区间上限 0.5 < onThreshold 区间下限 0.55 —— 迟滞带恒非负宽的结构保证（消费处 Math.min(off, on) 二道兜底）。ΝΩ-6 safetyCritical：施密特触发本体 —— 隔离出自动校准池（仅经 gym→显式 promoteFrom 换值）',
   },
   {
     key: 'popup.geoLow',
@@ -466,7 +519,8 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 3,
     min: 2,
     max: 6,
-    note: '宪法卡死律阈值：连续无效果步上限（缺省 3；与 gym LAB_CONSTITUTION_KERNEL_SPECS 同键同区间 —— 晋升面就绪）',
+    safetyCritical: true,
+    note: '宪法卡死律阈值：连续无效果步上限（缺省 3；与 gym LAB_CONSTITUTION_KERNEL_SPECS 同键同区间 —— 晋升面就绪）。ΝΩ-6 safetyCritical：宪法律是安全硬顶 —— 隔离出自动校准池，生产换值仅经 gym 实验室进化 → 显式 promoteFrom',
   },
   {
     key: 'constitution.maxSteps',
@@ -474,6 +528,17 @@ export const PRODUCTION_KERNEL_SPECS: ReadonlyArray<KernelParamSpec> = [
     defaultValue: 40,
     min: 10,
     max: 80,
-    note: '宪法步数律硬顶：累计步数上限（缺省 40；与 gym 同键同区间）',
+    safetyCritical: true,
+    note: '宪法步数律硬顶：累计步数上限（缺省 40；与 gym 同键同区间）。ΝΩ-6 safetyCritical：宪法律是安全硬顶 —— 隔离出自动校准池，生产换值仅经 gym 实验室进化 → 显式 promoteFrom',
   },
 ];
+
+/**
+ * ΝΩ-6 安全分池的只读视图：PRODUCTION_KERNEL_SPECS 中 safetyCritical === true 的
+ * 键集（单一事实源 —— 手写清单会被 specs 演进悄悄甩脱）。KernelCalibrator 缺省
+ * 以此为跳过集（可经 CalibratorOptions.safetyCriticalKeys 显式注入覆盖：实验室
+ * 恢复进化用空集，属显式行为；生产路径绝不注入）。
+ */
+export const SAFETY_CRITICAL_KERNEL_KEYS: ReadonlySet<string> = new Set<string>(
+  PRODUCTION_KERNEL_SPECS.filter(s => s.safetyCritical === true).map(s => s.key),
+);

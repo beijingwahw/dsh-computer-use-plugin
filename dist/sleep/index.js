@@ -2,11 +2,18 @@ export * from './sleepTypes.js';
 // W8（D-B4 梦回放失败源接线）：组合根供源工装的桶再导出（dreamFeed 零运行期
 // 依赖 —— type-only 相对导入，装载器零耦合；导入面收口在桶，宿主单点可达）
 export { createDreamDeps } from './dreamFeed.js';
-import { actAudit, actDistill, actImmune, actReplay, appendLine, computeWatermark, errText, readTail, safeNow, sanitizeQueueSummary, snapshotUsage, } from './sleepActs.js';
+import { actAudit, actDistill, actImmune, actReplay, appendLine, computeWatermark, deferredDreamSidecar, errText, readTail, safeNow, sanitizeQueueSummary, snapshotUsage, } from './sleepActs.js';
 import { actCalibrate } from './calibrationAct.js';
 /** 缺省睡眠预算：2s（与 src/index.ts 卸载路径的保险丝同值 —— 宁短勿挂） */
 export const DEFAULT_SLEEP_BUDGET_MS = 2000;
-/** 六幕名（固定演出次序：回放→蒸馏→免疫→校准→审计→晨报） */
+/**
+ * 六幕名（固定演出次序：回放→蒸馏→免疫→校准→审计→晨报）。
+ * ΝΩ-34（梦回放移序立法）：梦回放不寄居第①幕 —— 在 audit 之后 report 之前
+ * 迟到演出（维护四幕 distill/immune/calibrate/audit 先吃预算：2s 预算下最贵
+ * 的梦若先行吃满，校准/审计恒 timeout 饿死）。梦不占幕名：六幕形状、幕序与
+ * 逐幕超时执法逐字节保持；梦的 counts/detail 账面仍归属第①幕条目（既有晨报
+ * 消费面零漂移）。
+ */
 const SIX_ACTS = ['replay', 'distill', 'immune', 'calibrate', 'audit', 'report'];
 /** 模块级内存水位线（路径空 = 唯一水位线；路径非空时与 trace 尾行互补） */
 let inMemoryWatermark = null;
@@ -50,9 +57,14 @@ export async function runSleepCycle(deps = {}, config = {}) {
         }
         const acts = [];
         // W3-2 第二批接线②的旁车：校准幕收敛摘要带给晨报顶层（approvalQueue 同律）；
-        // W5-2 的旁车：梦回放摘要（第①幕复合幕产出）同律带给晨报顶层
+        // W5-2 的旁车：梦回放摘要（ΝΩ-34 后由迟到梦幕产出）同律带给晨报顶层
         const sidecars = {};
         const overBudget = () => safeNow(now) - startedAt > budgetMs;
+        // ΑΩ-R40：剩余预算读数面（毫秒）—— 经 overBudget 闭包属性随既有 cfg 通道流转
+        // 到梦机房（sleepActs 零改线），供条间预算感知选梦（短梦优先/诚实收场）；
+        // 不携带该属性的旧直投调用方，梦侧自动回落既有布尔执法（零漂移）
+        overBudget.remainingMs =
+            () => budgetMs - (safeNow(now) - startedAt);
         // W5-2：幕体可为异步（梦回放的 sharp 面）—— 逐幕顺序 await（幕序不变、
         // 半程检查不变）；全同步 deps 下 await 只是微任务直落，「触发即完成主体」
         // 的同步性不变量对既有路径逐字节保持（梦是唯一申报的异步消化面）。
@@ -69,12 +81,18 @@ export async function runSleepCycle(deps = {}, config = {}) {
             }
         };
         // W5-2：梦回放独立水位线（内存优先，trace 尾行补跨进程）—— 防重复回放的锚
+        //（ΝΩ-34：锚 = 失败集身份×策略指纹 —— 策略显著进化允许重梦，同策略仍去重）
         const priorDreamWatermark = inMemoryDreamWatermark ?? tail.dreamWatermark;
-        await step('replay', () => actReplay(deps, { now, overBudget, priorDreamWatermark }, sidecars));
+        await step('replay', () => actReplay(deps));
         await step('distill', () => actDistill(deps));
         await step('immune', () => actImmune(deps));
         await step('calibrate', () => actCalibrate(deps, sidecars));
         await step('audit', () => actAudit(deps));
+        // ΝΩ-34（梦回放移序立法）：迟到梦幕 —— audit 之后 report 之前演出。维护四幕
+        // 先吃预算（校准/审计不再被最贵的梦饿死）；梦在剩余预算内工作（R40 自适应
+        // 选梦的条间执法照常）。不占幕名/不进 step 的超时执法（梦自身按条诚实饿死，
+        // 绝不炸睡眠）；counts/detail 并回第①幕条目 —— 既有晨报消费面零漂移。
+        await deferredDreamSidecar(deps, { now, overBudget, priorDreamWatermark }, sidecars, acts.find(a => a.name === 'replay'));
         // ⑥ 晨报幕：用量快照 + W2-1 待批清单 + JSONL 落盘 + 水位线前滚
         let usage;
         let approvalQueueSummary;
@@ -139,7 +157,8 @@ export async function runSleepCycle(deps = {}, config = {}) {
         // 宁可重复归纳（签名去重只强化可靠度）不可漏睡）
         inMemoryWatermark = current;
         // W5-2：梦回放独立水位线前滚（只在梦摘要真实在场时 —— noop/缺席/故障不动账；
-        // 磁盘面随晨报行 —— 下次进程经 readTail 恢复，同一失败集不再重复回放）
+        // 磁盘面随晨报行 —— 下次进程经 readTail 恢复；ΝΩ-34 后锚含策略指纹：同一
+        // 失败集×同一策略不再重复回放，策略显著进化则允许重梦）
         if (sidecars.dream !== undefined && sidecars.dream.watermark) {
             inMemoryDreamWatermark = sidecars.dream.watermark;
         }

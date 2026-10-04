@@ -17,7 +17,7 @@
 // 协议：POST {baseUrl}/chat/completions；headers = Content-Type +（有 key 时）
 // `Authorization: Bearer ${apiKey}` + extraHeaders 展开（同名后者覆盖前者）；
 // body 为 OpenAI 多模态消息形态：system（可选）在前，user = [text, image_url...]。
-import { buildDataUrl, extractProviderJson, fetchWithRetry, isLocalBaseUrl, sanitizeError, } from './types.js';
+import { buildDataUrl, extractProviderJson, fetchWithRetry, HTTP_STATUS_BAD_REQUEST, isLocalBaseUrl, sanitizeError, } from './types.js';
 const FALLBACK_BASE_URL = 'https://api.openai.com/v1';
 const FALLBACK_MODEL = 'gpt-4o-mini';
 const FALLBACK_ID = 'openai';
@@ -129,27 +129,47 @@ export function createOpenAiProvider(config) {
             if (!doFetch) {
                 return finish({ ok: false, text: '', error: `${providerId} fetch is not available (Node >= 18 required)` }); // doctor-exempt: 文案字符串，非阈值比较（W6-2）
             }
-            // OpenAI 多模态消息：system（可选）在前，user = 文本 + 图片序列
-            const messages = [];
-            if (req.system !== undefined && req.system !== '')
-                messages.push({ role: 'system', content: req.system });
-            messages.push({
-                role: 'user',
-                content: [
-                    { type: 'text', text: req.prompt },
-                    ...req.images.map(img => ({
-                        type: 'image_url',
-                        image_url: { url: buildDataUrl(img) },
-                    })),
-                ],
-            });
-            const payload = {
-                model,
-                messages,
-                max_tokens: maxTokens,
-                temperature,
-                // jsonMode 关闭时 response_format 根本不出现在 JSON 里（而非值为 undefined）
-                ...(req.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+            // OpenAI 多模态消息：system（可选）在前，user = 文本 + 图片序列。
+            // ΝΩ-18（response_format 400 回退）：消息/负载构造收进闭包 —— 首发带
+            // response_format（原行为），被网关 400 点名回退时剥字段重发一次。
+            // ΝΩ-44（结构化输出约束解码）：format 升格为三态 —— 'none'（无字段，
+            // 与旧 stripResponseFormat:true 逐字节同形）/ 'jsonObject'（旧 jsonMode
+            // 原行为）/ 'jsonSchemaStrict'（jsonMode + req.jsonSchema 在场 ⇒ 原生
+            // 约束解码：{type:'json_schema'} + strict 强 schema，schema 由请求方传入）。
+            // 缺省缺席（req.jsonSchema 未传）⇒ 永远只在 none/jsonObject 二态间走 ——
+            // 旧路径逐字节保持（零回归铁律）。
+            const buildInit = (promptText, format) => {
+                const messages = [];
+                if (req.system !== undefined && req.system !== '')
+                    messages.push({ role: 'system', content: req.system });
+                messages.push({
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: promptText },
+                        ...req.images.map(img => ({
+                            type: 'image_url',
+                            image_url: { url: buildDataUrl(img) },
+                        })),
+                    ],
+                });
+                const payload = {
+                    model,
+                    messages,
+                    max_tokens: maxTokens,
+                    temperature,
+                    // jsonMode 关闭（或回退已剥）时 response_format 根本不出现在 JSON 里
+                    ...(format === 'jsonObject'
+                        ? { response_format: { type: 'json_object' } }
+                        : format === 'jsonSchemaStrict'
+                            ? {
+                                response_format: {
+                                    type: 'json_schema',
+                                    json_schema: { name: 'dsh_response', strict: true, schema: req.jsonSchema },
+                                },
+                            }
+                            : {}),
+                };
+                return { method: 'POST', headers, body: JSON.stringify(payload) };
             };
             const headers = {
                 'Content-Type': 'application/json',
@@ -159,18 +179,76 @@ export function createOpenAiProvider(config) {
                 ...extraHeaders,
             };
             // 传输层统一交给 fetchWithRetry：AbortSignal.timeout(timeoutMs) 止损 +
-            // 429/5xx/网络错误退避重试 + 超时不重试（重试律见 types.ts 契约）
-            const fr = await fetchWithRetry({
+            // 429/5xx/网络错误退避重试 + 超时不重试（重试律见 types.ts 契约）。
+            // ΝΩ-44：jsonMode 且 jsonSchema 在场 ⇒ 首发即 strict json_schema（原生
+            // 约束解码）；缺席 ⇒ 旧二值行为逐字节保持。
+            let format = !req.jsonMode
+                ? 'none'
+                : (req.jsonSchema !== undefined ? 'jsonSchemaStrict' : 'jsonObject');
+            let fr = await fetchWithRetry({
                 doFetch,
                 url: `${baseUrl}/chat/completions`,
-                init: { method: 'POST', headers, body: JSON.stringify(payload) },
+                init: buildInit(req.prompt, format),
                 maxRetries,
                 timeoutMs,
             });
+            // ΝΩ-44 注记：约束解码被网关拒绝后的降级轨迹（仅 strict 路径可非空 ——
+            // 旧路径恒 undefined ⇒ error 串逐字节不变）；终败时并入 error 诚实归因。
+            let degradeNote;
+            // ΝΩ-44 一级回退（json_schema 不被网关支持）：400 且错误体点名
+            // json_schema（或宽泛的 response_format）⇒ 降级 json_object 重发恰一次；
+            // 降级后的 400 再点名 response_format ⇒ 交给下方 ΝΩ-18 二级回退剥字段，
+            // 三级链 json_schema → json_object → prompt-only 恰两次重发，无循环
+            //（每次条件都依赖当前 format 态，降到底后条件天然不成立）。
+            if (!fr.ok &&
+                fr.failureKind === 'http' &&
+                fr.status === HTTP_STATUS_BAD_REQUEST &&
+                format === 'jsonSchemaStrict' &&
+                /json_schema|response_format/.test(`${fr.body ?? ''}`.toLowerCase())) {
+                degradeNote = 'structured json_schema rejected by gateway (HTTP 400) - downgraded to json_object';
+                format = 'jsonObject';
+                fr = await fetchWithRetry({
+                    doFetch,
+                    url: `${baseUrl}/chat/completions`,
+                    init: buildInit(req.prompt, format),
+                    maxRetries,
+                    timeoutMs,
+                });
+            }
+            // ΝΩ-18（response_format 400 回退）：部分 OpenAI 兼容网关不认
+            // response_format:{type:'json_object'}，对 json_object 模式回 400 —— 而
+            // 4xx 不在重试域（types.ts 重试律：请求本身有病，重试无义），一次配置性
+            // 失败会把该网关上的全部结构化调用判死。回退律：400 且错误体点名
+            // response_format 且本次确实下发了该字段 ⇒ 剥字段重发**恰一次**
+            //（prompt-only jsonMode：prompt 尾部补 JSON 铁律 + 上方 extractProviderJson
+            // 剥壳提取兜底）；重发再败按终败处置（strip 后请求已无该字段，条件天然
+            // 不再成立，无循环）。startedAt/meter 收口不变 —— 一次 chat 仍恰一条遥测，
+            // latencyMs 如实涵盖多次拨号。ΝΩ-44 链衔接：strict 降级 json_object 后
+            // 再 400 ⇒ 从此处继续降 prompt-only（degradeNote 追加注记）。
+            if (!fr.ok &&
+                fr.failureKind === 'http' &&
+                fr.status === HTTP_STATUS_BAD_REQUEST &&
+                format === 'jsonObject' &&
+                req.jsonMode === true &&
+                `${fr.body ?? ''}`.toLowerCase().includes('response_format')) {
+                if (degradeNote !== undefined) {
+                    degradeNote = `${degradeNote}; response_format rejected - downgraded to prompt-only jsonMode`;
+                }
+                fr = await fetchWithRetry({
+                    doFetch,
+                    url: `${baseUrl}/chat/completions`,
+                    init: buildInit(`${req.prompt}\n\nRespond with a single valid JSON value only — no markdown fences, no extra text.`, 'none'),
+                    maxRetries,
+                    timeoutMs,
+                });
+            }
             if (!fr.ok) {
                 const raw = fr.error ??
                     `${providerId} chat/completions failed${fr.status !== undefined ? ` (HTTP ${fr.status})` : ''}`;
-                return finish({ ok: false, text: '', error: sanitizeError(raw, providerId) });
+                // ΝΩ-44 注记：约束解码降级轨迹并入终败归因（旧路径 degradeNote 恒
+                // undefined ⇒ 旧 error 串逐字节不变）
+                const noted = degradeNote !== undefined ? `${raw} [ΝΩ-44: ${degradeNote}]` : raw;
+                return finish({ ok: false, text: '', error: sanitizeError(noted, providerId) });
             }
             let body;
             try {
@@ -222,9 +300,13 @@ export function createOpenAiProvider(config) {
             return { ok: false, error: sanitizeError(e, providerId), raw: '' };
         }
     }
+    // ΑΩ-R35（类型严格化）：返回对象恰好是 VisionProvider 接口面 —— 此前携带
+    // 接口外属性 providerId 并以 `as VisionProvider` 压制检查（类型逃逸）。全库
+    // 检索确认无人从 provider 对象读 providerId（归因一律走 chat 结果的
+    // VisionChatResult.providerId 与本接口的 id），且其值恒等于 id —— 纯冗余，
+    // 删除；断言一并摘除，让结构化检查全量生效（与 anthropic/gemini 同形）。
     return {
         id: providerId,
-        providerId,
         protocol: 'openai',
         model,
         baseUrl,

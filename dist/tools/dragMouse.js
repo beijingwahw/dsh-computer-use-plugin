@@ -1,6 +1,16 @@
 // src/tools/dragMouse.ts
 // 四拍时序（移->按->移->放）下沉 system.dragMouse；本层负责校验与换算锚点。
 // 修复原版：Button 未导入的编译错误；四个坐标各自独立校验与换算。
+//
+// ΑΩ-R29 老工具方言整治：SUCCESS 回执收编 toolOk 工厂 —— 手拼对象的键序
+//（status/action/state_anchor/next_step）与缩进（null,2）与工厂产出逐字节相同，
+// 消除手拼零形状变化。不收编清单（差异键 + 为什么）：
+//   · 越界拒绝 `[Error]: Invalid drag coordinates...` 前缀方言 —— 工厂只产 JSON
+//     四件套，无法复现前缀串；epochDelta.perimeter.test.ts 正则钉死该形状。
+//   · 危险目的地 ACTION_REQUIRED：无顶层 action 键、reason 落位 state_anchor
+//     中部（toolActionRequired 会注入 action 并把 reason 前置合并，键序漂移）
+//     —— clickMouse ΑΩ-R11 同律定谳的方言族，保持现状。
+//   · catch `[Error]: Drag operation failed...` 前缀方言 —— 同上，非工厂可产。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import * as backend from '../physicalBackend.js';
@@ -10,6 +20,7 @@ import { quantum } from '../quantumSense.js';
 import { focusTracker } from '../focusTracker.js';
 import { matchesDangerPatterns } from '../riskGate.js';
 import { approval } from '../approval.js';
+import { toolOk } from '../toolResult.js';
 import { consumeApprovalAmendment, gateByReversibility, laneAnchorOf } from './clickMouse.js';
 export function judgeTransport(beforeStartHash, afterEndHash, afterStartHash, thresholds = { transported: 0.75, vacated: 0.85 }) {
     if (!beforeStartHash || !afterEndHash)
@@ -165,45 +176,41 @@ export function createDragMouseTool(config) {
                     }
                     catch { /* 运输验证是旁路义务：失败不毒化主判决 */ }
                 }
-                return JSON.stringify({
-                    status: 'SUCCESS',
-                    action: 'Mouse dragged.',
-                    state_anchor: {
-                        normalized: { start: { x: effStartX, y: effStartY }, end: { x: endX, y: endY } },
-                        absolute_pixels: { start: startPixel, end: endPixel },
-                        screen_resolution: `${size.width}x${size.height}`,
-                        effect: effect ? {
-                            detected: effect.detected,
-                            scale: effect.scale,
-                            screen_similarity_pct: effect.screen.similarity_pct,
-                            region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
-                        } : 'verification-off',
-                        // Y-4 运输三元组：内容级证据（比像素变化更强的「物走了」判决）
-                        transport: transport
-                            ? {
-                                transported: transport.transported,
-                                vacated: transport.vacated,
-                                ...(transport.copyLike ? { semantics: 'copy-like (content now at BOTH source and destination)' } : {}),
-                            }
-                            : undefined,
-                        // Δ#6 安检透明化：本次拖拽是否经审批令牌放行（危险目的地上的一发令牌
-                        // 已随派发消费）
-                        approval_gate: dangerous ? { described: true, token_consumed_on_dispatch: true } : undefined,
-                        // W2-2（W1-2）：批注修正透明化 —— 用户批注把计划修正成了什么
-                        amendment: amendment.stamp || undefined,
-                        // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
-                        reversibility_lane: laneAnchorOf(laneGate),
-                    },
-                    next_step: transport && !transport.transported && effect?.detected
-                        ? 'PIXELS CHANGED BUT NO TRANSPORT: something moved, yet the content you grabbed is NOT at the destination — ' +
-                            'you may have dragged the wrong object or dropped it midway. take_screenshot to see where it went.'
-                        : transport && transport.transported
-                            ? `TRANSPORT VERIFIED: the grabbed content now sits at the destination${transport.vacated ? ' and its old position is empty' : ''}. ` +
-                                "MANDATORY: take_screenshot to confirm the final layout."
-                            : noopSuspected
-                                ? 'WARNING: Neither the screen nor the start region changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
-                                : "MANDATORY: Call 'take_screenshot' to verify the drag result.",
-                }, null, 2);
+                // ΑΩ-R29：SUCCESS 收编 toolOk（工厂产出与旧手拼逐字节相同 —— 键序/缩进一致）。
+                return toolOk('Mouse dragged.', {
+                    normalized: { start: { x: effStartX, y: effStartY }, end: { x: endX, y: endY } },
+                    absolute_pixels: { start: startPixel, end: endPixel },
+                    screen_resolution: `${size.width}x${size.height}`,
+                    effect: effect ? {
+                        detected: effect.detected,
+                        scale: effect.scale,
+                        screen_similarity_pct: effect.screen.similarity_pct,
+                        region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
+                    } : 'verification-off',
+                    // Y-4 运输三元组：内容级证据（比像素变化更强的「物走了」判决）
+                    transport: transport
+                        ? {
+                            transported: transport.transported,
+                            vacated: transport.vacated,
+                            ...(transport.copyLike ? { semantics: 'copy-like (content now at BOTH source and destination)' } : {}),
+                        }
+                        : undefined,
+                    // Δ#6 安检透明化：本次拖拽是否经审批令牌放行（危险目的地上的一发令牌
+                    // 已随派发消费）
+                    approval_gate: dangerous ? { described: true, token_consumed_on_dispatch: true } : undefined,
+                    // W2-2（W1-2）：批注修正透明化 —— 用户批注把计划修正成了什么
+                    amendment: amendment.stamp || undefined,
+                    // W5-0（C 接线）：可逆性分道注记（快道/托管道 + 预案 id；未分道缺席）
+                    reversibility_lane: laneAnchorOf(laneGate),
+                }, transport && !transport.transported && effect?.detected
+                    ? 'PIXELS CHANGED BUT NO TRANSPORT: something moved, yet the content you grabbed is NOT at the destination — ' +
+                        'you may have dragged the wrong object or dropped it midway. take_screenshot to see where it went.'
+                    : transport && transport.transported
+                        ? `TRANSPORT VERIFIED: the grabbed content now sits at the destination${transport.vacated ? ' and its old position is empty' : ''}. ` +
+                            "MANDATORY: take_screenshot to confirm the final layout."
+                        : noopSuspected
+                            ? 'WARNING: Neither the screen nor the start region changed — the drag may not have grabbed the target. Verify with take_screenshot and retry with adjusted start point.'
+                            : "MANDATORY: Call 'take_screenshot' to verify the drag result.");
             }
             catch (error) {
                 return `[Error]: Drag operation failed. ${error.message}`;

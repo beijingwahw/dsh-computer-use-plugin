@@ -17,7 +17,9 @@
 // 全离线确定性：注入时钟零真睡、假 ctx/假策略/假执行器、无网络。
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { journal } from '../src/journal.ts';
 import { registerJournalGuard } from '../src/journal.ts';
 import { Config as ConfigSchema, type Config } from '../src/config.ts';
@@ -37,6 +39,14 @@ import { approvalQueue, resetApproval, setConfirmCodeChannel } from '../src/appr
 // ① 的装配补线（W8-B4 破环）：steer 会话工厂改为晚绑定注册 —— steerTools 装载
 // 即注册生产工厂；本文件不经 tools 桶，须显式装载否则 steer 端口点亮也无会话。
 import '../src/tools/steerTools.ts';
+// ②′（ΑΩ-R23）的被测面：铸栈共享账本的真实类型（exploration 桶不经 autonomy
+// 桶转发 —— 同 w7e2e 直指桶文件）。
+import { ExplorationLedger } from '../src/autonomy/exploration.ts';
+// ⑧（ΝΩ-46 model-based 反事实）的被测面：Φ-9 评分内核的世界模型只读面接线。
+import {
+  scoreOptions, wireCounterfactualWorldModel, counterfactualWorldModelWired,
+} from '../src/autonomy/counterfactual.ts';
+import { prophecyWorldModel, quantizedScreenType } from '../src/prophecy/index.ts';
 
 // ─── 假件工坊 ───
 
@@ -183,6 +193,73 @@ test('W4-C: enableExploration 缺省缺席零路径；true ⇒ 铸 ExplorationLe
     null,
     '常态零触发红律',
   );
+});
+
+// ─── ②′ 接线 C（ΑΩ-R23）：铸栈共享账本的读盘缓存 ───
+
+test('W4-C/ΑΩ-R23: 同路径两次铸栈 ⇒ 全档读盘恰一次（attach 共享实例）+ run 态归零 + 行为不变', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w4explore-r23-'));
+  try {
+    // 种子档：goal ''（铸栈账本 goal 恒 ''）、region 0 的 click 格 3 试 —— 首铸恢复的目标态
+    const fileA = join(dir, 'exploration.json');
+    writeFileSync(fileA, JSON.stringify({
+      version: 1, goal: '',
+      cells: [{ region: 0, modality: 'click', strategy: 'click#甲', tries: 3, successes: 1 }],
+      regionTries: [{ region: 0, tries: 3 }], lastModality: null,
+    }));
+    // 铸栈①：首铸显式恢复一次 ⇒ 读盘发生、种子格在账
+    const port1 = buildAutonomyStack(
+      makeConfig({ enableExploration: true, explorationPersistPath: fileA }), {},
+    ).exploration as ExplorationLedger;
+    assert.ok(port1, '端口在场');
+    assert.equal(port1.cellFor(0, 'click', 'click#甲')?.tries, 3, '首铸读盘恰一次 ⇒ 种子格在账');
+    // 恢复态问路（行为与接线时一致）：no-deterministic-action ⇒ benign 建议 + run 预算 +1
+    const advice1 = port1.advise({
+      goal: '填表', snapshot: null, history: [], escalateReason: 'no-deterministic-action',
+    });
+    assert.notEqual(advice1, null, '恢复态 ⇒ 探索建议在场');
+    assert.equal(advice1!.action.riskTier, 'benign', '建议一律 benign（不越权）');
+    assert.equal(port1.snapshot().advisesThisRun, 1, 'run 预算记账');
+    // 磁盘改档（读盘探针 —— 若第二次铸栈再读盘，region 5 的 99 试格会入账顶掉原档）
+    writeFileSync(fileA, JSON.stringify({
+      version: 1, goal: '',
+      cells: [{ region: 5, modality: 'hotkey', strategy: 'hotkey#tab', tries: 99, successes: 0 }],
+      regionTries: [{ region: 5, tries: 99 }], lastModality: null,
+    }));
+    // 铸栈②：同路径 ⇒ attach 共享实例 —— 零读盘（格账仍是首铸恢复的原档），run 态照常归零
+    const port2 = buildAutonomyStack(
+      makeConfig({ enableExploration: true, explorationPersistPath: fileA }), {},
+    ).exploration as ExplorationLedger;
+    assert.equal(port2, port1, '同路径两次铸栈 attach 同一共享账本实例');
+    assert.equal(port2.snapshot().advisesThisRun, 0, 'run 级预算随每次铸栈归零');
+    assert.equal(port2.cellFor(0, 'click', 'click#甲')?.tries, 3, '原档格仍在账（内存延续）');
+    assert.equal(port2.cellFor(5, 'hotkey', 'hotkey#tab'), null, '磁盘改档未被读入 ⇒ 第二次铸栈零读盘');
+    // 行为不变：attach 后恢复态问路照常在场、预算红线照常执法
+    const advice2 = port2.advise({
+      goal: '填表', snapshot: null, history: [], escalateReason: 'no-deterministic-action',
+    });
+    assert.notEqual(advice2, null, 'attach 后恢复态问路照常在场');
+    assert.equal(
+      port2.advise({ goal: '填表', snapshot: null, history: [], escalateReason: 'budget-low' }),
+      null,
+      '预算红线照常执法（绝不透支收手保护）',
+    );
+    // 缓存键含路径：换路 ⇒ 键失效重铸重读（fileB 种子格入账，旧路径格账不携带）
+    const fileB = join(dir, 'exploration-b.json');
+    writeFileSync(fileB, JSON.stringify({
+      version: 1, goal: '',
+      cells: [{ region: 7, modality: 'scroll', strategy: 'scroll#down', tries: 7, successes: 2 }],
+      regionTries: [{ region: 7, tries: 7 }], lastModality: null,
+    }));
+    const port3 = buildAutonomyStack(
+      makeConfig({ enableExploration: true, explorationPersistPath: fileB }), {},
+    ).exploration as ExplorationLedger;
+    assert.notEqual(port3, port1, '路径变化 ⇒ 缓存失效重铸新账本');
+    assert.equal(port3.cellFor(7, 'scroll', 'scroll#down')?.tries, 7, '新路径首铸重新读盘');
+    assert.equal(port3.cellFor(0, 'click', 'click#甲'), null, '新账本不携带旧路径格账');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ─── ③ 接线 B②：岔路账消费 ───
@@ -354,4 +431,74 @@ test('W4-G: orchestratorParallel 缺省 false + 生产透传表达式；四新�
     /\{ parallel: config\.orchestratorParallel === true \}/,
     'start_complex_task 把 config 透传为 RunOrchestratorOptions.parallel',
   );
+});
+
+// ─── ⑧ 接线 H（ΝΩ-46 model-based 反事实）：世界模型只读面进 Φ-9 评分内核 ───
+
+test('ΝΩ-46: buildAutonomyStack 注入世界模型只读面 —— 开关同门两向、同源 prophecy 单例、行为证明', () => {
+  try {
+    // 关臂：enableProphecy=false ⇒ 不注入且清除旧接线（逐字节旧路径 —— 零回归红律）
+    wireCounterfactualWorldModel(null); // 隔离前置（前面测试可能已接线）
+    const off = buildAutonomyStack(makeConfig({ enableProphecy: false }), {});
+    assert.equal(off.prophecy, undefined, '开关关闭 ⇒ prophecy 字段缺席');
+    assert.equal(counterfactualWorldModelWired(), false, '开关关闭 ⇒ 只读面未接线');
+
+    // 开臂（缺省 true）：注入；随后再铸 off 栈 ⇒ 清除（最新铸栈胜出）
+    const on = buildAutonomyStack(makeConfig({}), {});
+    assert.ok(on.prophecy, '缺省开 ⇒ 预言引擎在场');
+    assert.equal(counterfactualWorldModelWired(), true, '缺省开 ⇒ 只读面接线在册');
+    buildAutonomyStack(makeConfig({ enableProphecy: false }), {});
+    assert.equal(counterfactualWorldModelWired(), false, 'off 栈后铸 ⇒ 清除旧接线（最新铸栈胜出）');
+
+    // 行为证明：同一 (量化屏型 × click@00 格) 的转移分布经 prophecy 同源单例
+    // observe 入表、经评分内核 predict 读出 —— progress 乘 (0.5 + 0.5·top.prob)。
+    buildAutonomyStack(makeConfig({}), {}); // 最终态：接线在场
+    const dhash = 'feedface00112233'; // 16 hex 闭环方言（量化 ⇒ feedface00110000）
+    const fromType = quantizedScreenType(dhash);
+    assert.equal(
+      prophecyWorldModel.observe(fromType, 'click@00', 'screen-a', true).ok, true, '种子转移①入表',
+    );
+    assert.equal(
+      prophecyWorldModel.observe(fromType, 'click@00', 'screen-b', true).ok, true, '种子转移②入表',
+    );
+    // 满重合 click（先验 1.0），落点 (240,135)/1920×1080 ⇒ click@00（量化格方言同 prophecy）
+    const click: PolicyAction = {
+      kind: 'click',
+      target: {
+        bbox: { x0: 230, y0: 125, x1: 250, y1: 145 },
+        center: { x: 240, y: 135 },
+        label: '甲乙丙丁',
+      },
+      rationale: 'ΝΩ-46 接线测试：满重合点击',
+      expectedEffect: '甲乙丙丁被激活',
+      utility: 0.5,
+      riskTier: 'benign',
+    };
+    const s: WorldSnapshot = {
+      ...unrelatedSnapshot(),
+      dhash,
+      elements: [{
+        label: '甲乙丙丁', role: 'button',
+        bbox: { x0: 230, y0: 125, x1: 250, y1: 145 },
+        center: { x: 240, y: 135 }, confidence: 0.9, source: 'vlm', interactive: true,
+      }],
+    };
+    const kw = ['甲乙', '丙丁']; // 2-gram 关键词（分词方言：中文连续段按 2-gram 切分 ⇒ 与标签满重合）
+    // 接线在场（不带 ctx.worldModel —— 决策面调用点的真实形态）：top.prob=0.5 ⇒ ×0.75
+    const wired = scoreOptions([click], { goalKeywords: kw, snapshot: s });
+    assert.ok(wired);
+    assert.ok(Math.abs(wired.chosen.progressProbability - 0.75) <= 1e-9, `接线 ⇒ progress 0.75（实得 ${wired.chosen.progressProbability}）`);
+    // 对照：解线后同输入 ⇒ 中性 ×1.0（逐字节旧路）
+    wireCounterfactualWorldModel(null);
+    const unwired = scoreOptions([click], { goalKeywords: kw, snapshot: s });
+    assert.ok(unwired);
+    assert.equal(unwired.chosen.progressProbability, 1, '解线 ⇒ 中性旧值（零回归）');
+  } finally {
+    // 清场：模块默认解线 + prophecy 同源单例回空档（跨测试隔离）。restoreSnapshot
+    // 是 InMemoryWorldModel 的面（WorldModel 契约接口无此法）—— 结构子集收窄读取。
+    wireCounterfactualWorldModel(null);
+    const restore = (prophecyWorldModel as unknown as { restoreSnapshot(s: unknown): { ok?: boolean } })
+      .restoreSnapshot({ version: 1, types: [], transitions: [], typeCounter: 0, aliases: [] });
+    assert.equal(restore.ok, true, '世界模型单例清档');
+  }
 });

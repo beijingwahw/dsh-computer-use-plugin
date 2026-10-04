@@ -344,7 +344,10 @@ class _RawWasapi:
             ct.c_void_p(devp), ct.byref(wid))
         endpoint_id = wid.value if hr == 0 else None
         if endpoint_id:
-            self.ole32.CoTaskMemFree(None)
+            # ΝΩ-9：修端点 ID 字符串泄漏 —— 旧代码 CoTaskMemFree(None) 是
+            # no-op（每次探测漏一块 CoTaskMemAlloc 内存）。传 wid（其 value
+            # 即 GetId 输出的分配地址），与 audio.py:490 生产版修法对齐。
+            self.ole32.CoTaskMemFree(wid)
 
         iid_cli = ct.create_string_buffer(UUID(self.IID_IAudioClient).bytes_le)
         client = ct.c_void_p()

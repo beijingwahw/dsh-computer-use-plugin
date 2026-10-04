@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { Config } from '../src/config.ts';
 import { ConnectionStore, maskKey } from '../src/vlm/connection.ts';
 import type { OnboardingHandle } from '../src/vlm/onboarding.ts';
@@ -72,6 +74,18 @@ function restoreEnv(snap: EnvSnapshot): void {
 
 /** 测试全程使用的长钥（>12 字符走「前 4 … 后 4」打码路） */
 const LONG_KEY = 'sk-live-abcdef1234567890fedcba';
+
+/** 一次性动态口（真 listen(0) 摊派后即关 —— 仅取号不占坑；先例 epochMu2.aggregate.test.ts） */
+function ephemeralPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 // ─── Λ-3① switch 成功全链 ───
 
@@ -202,11 +216,13 @@ test('Λ-3④: switch_vision_model apply 抛错 ⇒ toolErr 如实报错并注�
 
 test('Λ-3⑤: vlm_wizard —— opener 收 127.0.0.1 地址；二次调用复用模块级单例（server 计数恰 1）', async () => {
   _resetVlmWizardForTest();
+  const wizPort = await ephemeralPort(); // 动态口（旧 8931 固定字面量已退役 —— 防环境撞口）
+  const wizUrl = `http://127.0.0.1:${wizPort}/wizard`;
   try {
     let serverCalls = 0;
     const fakeHandle: OnboardingHandle = {
-      port: 8931,
-      url: 'http://127.0.0.1:8931/wizard',
+      port: wizPort,
+      url: wizUrl,
       closed: false,
       close: async () => { fakeHandle.closed = true; },
     };
@@ -220,13 +236,13 @@ test('Λ-3⑤: vlm_wizard —— opener 收 127.0.0.1 地址；二次调用复�
 
     for (const out of [out1, out2]) {
       assert.equal(out.status, 'SUCCESS', JSON.stringify(out));
-      assert.equal(out.state_anchor.url, 'http://127.0.0.1:8931/wizard');
-      assert.equal(out.state_anchor.port, 8931);
+      assert.equal(out.state_anchor.url, wizUrl);
+      assert.equal(out.state_anchor.port, wizPort);
       assert.match(out.state_anchor.note, /手动访问/);
     }
     // 单例复用：两次调用只起一次服务；浏览器各开一次（同地址）
     assert.equal(serverCalls, 1, '向导服务必须复用模块级单例，绝不双起');
-    assert.deepEqual(openedUrls, ['http://127.0.0.1:8931/wizard', 'http://127.0.0.1:8931/wizard']);
+    assert.deepEqual(openedUrls, [wizUrl, wizUrl]);
     assert.match(openedUrls[0], /127\.0\.0\.1/, '向导地址必须是本机回环');
   } finally {
     _resetVlmWizardForTest();
@@ -237,10 +253,11 @@ test('Λ-3⑤: vlm_wizard —— opener 收 127.0.0.1 地址；二次调用复�
 
 test('Λ-3⑥: vlm_wizard opener 返回 dry-run ⇒ note 注明 dryRun（守卫拦截绝不谎报已打开）', async () => {
   _resetVlmWizardForTest();
+  const dryPort = await ephemeralPort(); // 动态口（旧 8932 固定字面量已退役）
   try {
     const server = async (): Promise<OnboardingHandle> => ({
-      port: 8932,
-      url: 'http://127.0.0.1:8932/wizard',
+      port: dryPort,
+      url: `http://127.0.0.1:${dryPort}/wizard`,
       closed: false,
       close: async () => { /* 假 handle：无事可关 */ },
     });

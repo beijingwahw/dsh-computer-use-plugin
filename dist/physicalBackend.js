@@ -15,6 +15,12 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PhysicalServiceManager, createPhysicalExecution, } from './physicalExecution/index.js';
+// ΑΩ-R27 端口策略单源：BASE/SPAN 不再本地铸造 —— 与 serviceManager 的缺省
+// 端口同源（完整策略对照表与「为何双策略并存」见 serviceManager.ts 文件头）。
+// 本模块走「扫描 + 同密钥收养」策略（稳定密钥 ⇒ 重载后可收养旧服务），
+// manager 走「单端口如实快报」策略（每回合随机密钥 ⇒ 收养永不可能成立）。
+// 直引子模块与 contracts.js/shmReader.js 先例同律（常量非器官表面，不经 barrel）。
+import { PHYSICAL_TCP_BASE_PORT as BASE_PORT, PHYSICAL_TCP_PORT_SPAN as PORT_SPAN, } from './physicalExecution/serviceManager.js';
 /** 稳定密钥路径 —— 与 Python 端默认值一致（收养已存活服务的前提） */
 export function defaultKeyPath() {
     return process.env.DSH_PHYSICAL_KEY_PATH ?? join(homedir(), '.dsh', 'physical.key');
@@ -22,8 +28,6 @@ export function defaultKeyPath() {
 export function defaultMmapDir() {
     return process.env.DSH_PHYSICAL_MMAP_DIR ?? join(homedir(), '.dsh', 'shots');
 }
-const BASE_PORT = 8421;
-const PORT_SPAN = 8; // 8421..8428
 const state = {
     starting: null, adapter: null, manager: null,
     health: null, screen: null, displays: null,
@@ -31,9 +35,29 @@ const state = {
 // W6-2（doctor smell.over-engineering 清偿）：私有生命周期小件（unwrap/probeAlive/versionLt）
 // 已分区提取至 physicalBackend.internal.ts；Surface 方言与 diff_view 帧环 →
 // physicalBackend.surface.ts。行为零变化；导入面不变 —— 再分发。
-import { unwrap, probeAlive, versionLt } from './physicalBackend.internal.js';
+import { probeAlive, versionLt } from './physicalBackend.internal.js';
 import { hostSurface as hostSurfaceOf, resetDiffFrameRing } from './physicalBackend.surface.js';
 export { parseSurfaceId, hostSurface, androidSurface, noteFrameForDiff, lastTwoDiffFrames } from './physicalBackend.surface.js';
+/**
+ * ΝΩ-25：physicalBackend 错误出口的结构化信封 —— Result 失败臂的 kind 通道
+ * 透传到异常面。消息文本与既有 unwrap 方言逐字节一致（零回归），新增的只有
+ * error.kind 字段：消费方（system.ts 的后端缺席判定）改读 kind，不再解析
+ * 消息文本 —— 错误方言（消息文案）变更不再静默改道控制流。
+ */
+export class PhysicalBackendError extends Error {
+    kind;
+    constructor(message, kind) {
+        super(message);
+        this.name = 'PhysicalBackendError';
+        this.kind = kind;
+    }
+}
+/** ΝΩ-25：unwrap 的 kind 透传版（消息格式与 physicalBackend.internal.unwrap 逐字节一致） */
+function unwrapK(result, what) {
+    if (result.ok)
+        return result.value;
+    throw new PhysicalBackendError(`[physicalBackend] ${what} failed: ${result.error.kind}: ${result.error.detail}`, result.error.kind);
+}
 async function startOnPort(port) {
     const manager = new PhysicalServiceManager({
         tcpPort: port,
@@ -44,7 +68,8 @@ async function startOnPort(port) {
     });
     const res = await manager.start();
     if (!res.ok) {
-        throw new Error(`[physicalBackend] service start failed on :${port}: ${res.error?.kind}: ${res.error?.detail}`);
+        // ΝΩ-25：启动失败同样透传 kind（spawn_failed/startup_timeout/crashed/port_squatted）
+        throw new PhysicalBackendError(`[physicalBackend] service start failed on :${port}: ${res.error?.kind}: ${res.error?.detail}`, res.error?.kind ?? 'spawn_failed');
     }
     const adapter = createPhysicalExecution({
         baseUrl: res.baseUrl,
@@ -52,8 +77,8 @@ async function startOnPort(port) {
         keyPath: res.keyPath,
     });
     try {
-        unwrap(await adapter.init(), 'adapter.init');
-        const health = unwrap(await adapter.health(), 'adapter.health');
+        unwrapK(await adapter.init(), 'adapter.init');
+        const health = unwrapK(await adapter.health(), 'adapter.health');
         state.manager = manager;
         state.adapter = adapter;
         state.health = health;
@@ -79,7 +104,7 @@ async function adoptExisting(port) {
         timeoutMs: 15_000,
         keyPath: defaultKeyPath(),
     });
-    unwrap(await adapter.init(), 'adapter.init(adopt)');
+    unwrapK(await adapter.init(), 'adapter.init(adopt)');
     const health = await adapter.health();
     if (!health.ok)
         return false;
@@ -99,7 +124,37 @@ async function adoptExisting(port) {
     }
     return true;
 }
-/** 懒启动（并发安全）：已在跑 → 复用；端口被占 → 尝试收养；否则逐端口 spawn */
+/**
+ * ΝΩ-25：候选端口并行探活（上限并发 limit）。返回「首活」序的活端口清单 ——
+ * 谁先给出活证据谁排前（Promise.any 的聚合等价物，但保留全量结果供回退）。
+ * 串行最坏探活墙 = 端口数 × 800ms（端口被非 HTTP 监听占住时每次吃满超时）；
+ * 并行后压缩为 ⌈n/limit⌉ 批。探活是只读 GET /health，并行无副作用。
+ */
+async function probeCandidatesOrdered(ports, limit) {
+    const alive = [];
+    let next = 0; // 单线程事件循环：同步段自增无交错
+    const workerCount = Math.max(1, Math.min(limit, ports.length));
+    const workers = [];
+    for (let w = 0; w < workerCount; w++) {
+        workers.push((async () => {
+            while (next < ports.length) {
+                const port = ports[next++];
+                if (await probeAlive(port))
+                    alive.push(port);
+            }
+        })());
+    }
+    await Promise.all(workers);
+    return alive;
+}
+/**
+ * 懒启动（并发安全）：已在跑 → 复用；端口被占 → 尝试收养；否则逐端口 spawn。
+ *  ΑΩ-R27：本「扫描+收养」策略与 serviceManager 的「单端口如实快报」有意不同
+ *  （密钥形态差异 + 重载收养收益），完整对照见 serviceManager.ts 文件头注释块。
+ *  ΝΩ-25：候选端口并行探活（cap 4）→ 活端口按「首活」序收养（version 闸门
+ *  语义不动：旧版本/密钥不通的服务不被收养，如实换位）→ 全不活/全不可收养
+ *  ⇒ 死端口按序串行 spawn（同屏只铸一具躯体 —— spawn 不并行，失败换下一端口）。
+ */
 export function ensureBackend() {
     if (state.adapter)
         return Promise.resolve(state.adapter);
@@ -107,21 +162,28 @@ export function ensureBackend() {
         return state.starting;
     const starting = (async () => {
         let lastErr = null;
-        for (let i = 0; i < PORT_SPAN; i++) {
-            const port = BASE_PORT + i;
+        const candidates = Array.from({ length: PORT_SPAN }, (_, i) => BASE_PORT + i);
+        const alive = await probeCandidatesOrdered(candidates, 4);
+        const aliveSet = new Set(alive);
+        for (const port of alive) {
             try {
-                if (await probeAlive(port)) {
-                    if (await adoptExisting(port))
-                        return state.adapter;
-                    // 有服务但密钥不通（外部实例）—— 换下一个端口
-                    continue;
-                }
+                if (await adoptExisting(port))
+                    return state.adapter;
+                // 有服务但密钥/版本不通（外部实例）—— 换下一个活端口
+            }
+            catch (e) {
+                lastErr = e; // 收养链路自身失败（传输/超时）→ 记因后继续
+            }
+        }
+        for (const port of candidates) {
+            if (aliveSet.has(port))
+                continue; // 活而不可收养（外部实例）—— 不在其上 spawn
+            try {
                 return await startOnPort(port);
             }
             catch (e) {
                 lastErr = e;
                 // spawn 失败（端口被占但探活超时/python 缺失等）→ 尝试下一端口
-                continue;
             }
         }
         state.starting = null;
@@ -150,7 +212,7 @@ export async function captureProcessed(opts = {}) {
         overlay.boxes = opts.boxes;
     // Σ-5：display 透传需 impl 的扩展参数面（contracts 的接口签名未含 display ——
     // 产权铁律下不改 contracts.ts，桥接类型断言到 impl）
-    const meta = unwrap(await a.takeScreenshot({
+    const meta = unwrapK(await a.takeScreenshot({
         format: opts.format ?? 'jpeg',
         quality: opts.quality,
         region: opts.region,
@@ -215,61 +277,61 @@ export async function clickMouse(x, y, button = 'left', dryRun = false, surface)
     const a = await adapter();
     // W4-5：surface 经 impl 扩展参数面透传（Σ-5 的 display 同型 —— contracts
     // 接口签名未含，桥接断言到 impl；undefined ⇒ JSON 丢键 ⇒ 请求字节等同现状）
-    unwrap(await a.clickMouse({ x, y, button, dryRun, surface }), 'click_mouse');
+    unwrapK(await a.clickMouse({ x, y, button, dryRun, surface }), 'click_mouse');
 }
 export async function typeText(text, clearFirst = false, dryRun = false, surface) {
     const a = await adapter();
-    const r = unwrap(await a.typeText({ text, clearFirst, dryRun, surface }), 'type_text');
+    const r = unwrapK(await a.typeText({ text, clearFirst, dryRun, surface }), 'type_text');
     return r.typed_chars;
 }
 export async function scrollPage(direction, amount, dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.scrollPage({ direction, amount, dryRun, surface }), 'scroll_page');
+    unwrapK(await a.scrollPage({ direction, amount, dryRun, surface }), 'scroll_page');
 }
 export async function pressHotkey(keys, dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.pressHotkey({ keys, dryRun, surface }), 'press_hotkey');
+    unwrapK(await a.pressHotkey({ keys, dryRun, surface }), 'press_hotkey');
 }
 export async function dragMouse(start, end, dryRun = false, surface) {
     const a = await adapter();
-    unwrap(await a.dragMouse({ start, end, dryRun, surface }), 'drag_mouse');
+    unwrapK(await a.dragMouse({ start, end, dryRun, surface }), 'drag_mouse');
 }
 /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
 export async function moveMouse(x, y, durationMs = 0, dryRun = false) {
     const a = await adapter();
-    unwrap(await a.moveMouse({ x, y, durationMs, dryRun }), 'move_mouse');
+    unwrapK(await a.moveMouse({ x, y, durationMs, dryRun }), 'move_mouse');
 }
 /** 当前全局光标形态 —— Z-1 交互性探针的 OS 判决通道 */
 export async function getCursorKind() {
     const a = await adapter();
-    return unwrap(await a.getCursorKind(), 'cursor_kind');
+    return unwrapK(await a.getCursorKind(), 'cursor_kind');
 }
 /** UIA 单点结构查询 —— Z-1 第三通道（结构层判决，零物理副作用） */
 export async function hitTest(x, y) {
     const a = await adapter();
-    return unwrap(await a.hitTest({ x, y }), 'hit_test');
+    return unwrapK(await a.hitTest({ x, y }), 'hit_test');
 }
 export async function switchWindow(keyword) {
     const a = await adapter();
-    return unwrap(await a.switchWindow({ keyword }), 'switch_window');
+    return unwrapK(await a.switchWindow({ keyword }), 'switch_window');
 }
 // ─── 感知辅助 ───
 export async function getCursor() {
     const a = await adapter();
-    return unwrap(await a.getCursor(), 'cursor');
+    return unwrapK(await a.getCursor(), 'cursor');
 }
 export async function getDisplays() {
     if (state.displays)
         return state.displays;
     const a = await adapter();
-    const r = unwrap(await a.getDisplays(), 'displays');
+    const r = unwrapK(await a.getDisplays(), 'displays');
     state.displays = r.displays;
     return state.displays;
 }
 /** adb 设备清单（真机/adb 缺席 ⇒ 空清单 + degraded + 真实原因 —— 诚实降级）。 */
 export async function listMobileDevices() {
     const a = await adapter();
-    return unwrap(await a.getDevices(), 'devices');
+    return unwrapK(await a.getDevices(), 'devices');
 }
 /** 全量 surface 清单（主机显示器 + 移动设备统一入列 —— 多屏感知的移动扩展）。 */
 export async function listSurfaces() {
@@ -285,7 +347,7 @@ export async function getScreenSize() {
     if (state.screen)
         return state.screen;
     const a = await adapter();
-    const h = unwrap(await a.health(), 'health');
+    const h = unwrapK(await a.health(), 'health');
     if (!h.screen || !('width' in h.screen)) {
         throw new Error(`[physicalBackend] screen size unavailable: ${JSON.stringify(h.screen)}`);
     }
@@ -294,19 +356,19 @@ export async function getScreenSize() {
 }
 export async function frameStats(frameId, regions) {
     const a = await adapter();
-    return unwrap(await a.frameStats(frameId, regions), 'frame_stats').stats;
+    return unwrapK(await a.frameStats(frameId, regions), 'frame_stats').stats;
 }
 export async function frameRowmeans(frameId, grid = 64) {
     const a = await adapter();
-    return unwrap(await a.frameRowmeans(frameId, grid), 'frame_rowmeans').rows;
+    return unwrapK(await a.frameRowmeans(frameId, grid), 'frame_rowmeans').rows;
 }
 export async function frameDiff(args) {
     const a = await adapter();
-    return unwrap(await a.frameDiff(args), 'frame_diff');
+    return unwrapK(await a.frameDiff(args), 'frame_diff');
 }
 export async function getUiTree(args) {
     const a = await adapter();
-    return unwrap(await a.getUiTree(args), 'get_ui_tree');
+    return unwrapK(await a.getUiTree(args), 'get_ui_tree');
 }
 export function healthSnapshot() {
     return state.health;

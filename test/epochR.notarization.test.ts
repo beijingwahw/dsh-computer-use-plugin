@@ -79,6 +79,10 @@ const toolCfg = {
   ocrLang: 'eng',
   dryRun: false,
   verifyActions: false,
+  // ΝΩ-5：verifyActions=false 已不再单独构成危险令牌旁路（click_element 与
+  // clickMouse 的 W6R 收口对齐）—— 本册聚焦公证执法，显式插入逃生门（两把
+  // 钥匙齐备）保持「派发即消费」旧方言；fail-closed 新语义见 p2b-fixes ΝΩ-5 组。
+  allowUnverifiedDangerous: true,
   intentVerify: false,
   autoRemember: false,
   adaptiveSettle: false,

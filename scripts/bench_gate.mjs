@@ -2,22 +2,33 @@
 // scripts/bench_gate.mjs —— W7-6 性能回归门：把 W5-6 一次性效能基准升级为可持续回归门。
 //
 // 用法（repo 根目录）：
-//   node scripts/bench_gate.mjs --update   采基线：子进程跑 w5*.bench.ts，TAP 解析
+//   node scripts/bench_gate.mjs --update   采基线：子进程跑确定性基准白名单（见
+//                                         BENCH_WHITELIST），TAP 解析
 //                                         （pass/fail + 注释行结构化指标），写
 //                                         bench/baselines/<日期>-<hash>.json（含环境
 //                                         戳：node 版本/平台/时间/命令）。仅当基准
 //                                         全绿才落盘 —— 基线必须可信。
 //   node scripts/bench_gate.mjs --check    回归门：重跑并与最近基线比对，口径分级：
 //                                         硬门 = pass/fail 回归/测试失踪/新失败 ⇒ 红
-//                                         （exit 1）；软门 = 指标偏离超阈仅告警（不改
-//                                         exit 码）—— 计数类阈值 ±15%（W5 基准确定性
-//                                         计数，容差只为防口径漂移），时间类
-//                                         duration_ms 波动大 ⇒ ±50% 且标注
-//                                         「仅告警」。环境不匹配（node/平台不同）⇒
-//                                         显著提示「建议 --update」，亦不红。
+//                                         （exit 1）；ΝΩ-39 起确定性计数类指标
+//                                         ±15% 亦硬（缺省；DSH_BENCH_GATE_COUNT_HARD=0
+//                                         恢复旧「仅告警」口径）—— W5 级基准计数
+//                                         是确定性的，漂移只可能是口径变化，不该静默。
+//                                         时间类 duration_ms 波动大 ⇒ 永远 ±50% 仅告警。
+//                                         环境不匹配（node/平台不同）⇒ 显著提示
+//                                         「建议 --update」，亦不红。
 //   node scripts/bench_gate.mjs --list     列历史基线（含归档区）。
 //   node scripts/bench_gate.mjs --reset    显式重置：最近基线移入 archive/ 归档，
 //                                         重采新基线。
+//
+// ΝΩ-39 glob 白名单扩容：原 test/w5*.bench.ts → 全部确定性离线基准
+//   （+ablation/calibration/jointCalibration/paramAblation/organAblation/fovea.ab，
+//   见 BENCH_WHITELIST）。排除并注释：
+//   · realMachine*.bench.ts / largeScaleWin.bench.ts —— 真机类（Linux Xvfb+xdotool
+//     或 D-5 物理服务 tcp :8421 真鼠标），非确定性、需外部物理链路；
+//   · autonomy.closedloop.bench.ts —— 确定性但当前 B3 红（基线必须全绿才可信）；
+//   · jointCalibration 的「真机复测」子测（Xvfb 依赖，自跳过 ⇒ TAP 记 SKIP ⇒
+//     parseTap 按未通过计会卡死 --update）—— 经 --test-skip-pattern 整体剔除。
 //
 // 指标提取契约（不改 bench 本体，从其 TAP 输出的 console 注释行提取）：
 //   · 「key = 数字」对：key 以字母/中文/下划线开头（数字开头=公式残段，剔除）；
@@ -29,7 +40,10 @@
 //
 // 比较器核心（parseTap / extractMetrics / compareBenchmarks / envMatches /
 // deviation）为纯函数，由 test/w7gate.test.ts 全量回归保护；本文件其余部分是
-// CLI 胶水，不含判定逻辑。
+// CLI 胶水，不含判定逻辑。ΝΩ-39：计数类 ±15% 硬门开关（opts.countDriftHard）
+// 也在纯函数区 —— 纯函数缺省 false 保持历史口径（w7gate 门h 锁定的行为），
+// CLI 门经 DSH_BENCH_GATE_COUNT_HARD 缺省开（见 countDriftHardDefault）。
+// 通过率（计数类指标）的 Wilson 95% CI 取自 bench/sprtCore.mjs（纯 .mjs 互引）。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -42,20 +56,44 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { wilsonCI } from '../bench/sprtCore.mjs';
 
 // ── 常量 ──
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const BASELINE_DIR = path.join(ROOT, 'bench', 'baselines');
 const ARCHIVE_DIR = path.join(BASELINE_DIR, 'archive');
+// ΝΩ-39 白名单：全部确定性离线基准（导出供 bench/verify.selftest.mjs 断言构成）。
+// 排除项及理由见文件头注释（realMachine*/largeScale* 真机类、autonomy.closedloop 现红）。
+export const BENCH_WHITELIST = [
+  'test/w5*.bench.ts',            // 原白名单：W5-6 效能基准（宏/级联/台账/结算/ROI）
+  'test/ablation.bench.ts',       // 机构级消融：确定性 stub 世界（零随机）
+  'test/calibration.bench.ts',    // 参数校准：一阶敏感性 + 契约 + L3 分离带
+  'test/jointCalibration.bench.ts', // 联合标定：坐标下降扫值（Test4 真机复测经下行 skip-pattern 剔除）
+  'test/paramAblation.bench.ts',  // 参数级消融：8 承重参数逐一拔掉
+  'test/organAblation.bench.ts',  // 器官审判日：确定性 LCG 种子
+  'test/fovea.ab.bench.ts',       // Γ2 token 审计：合成屏 A/B（离线确定性）
+];
 const BENCH_ARGS = [
   '--experimental-strip-types',
   '--test',
+  // 显式钉死 TAP 报告器:node 22 管道输出默认 tap,而 node 23+ 即使管道也用 spec
+  // (✔ 记号)—— parseTap 解析得 0 个测试即此故。钉死口径跨 node 版本稳定。
+  '--test-reporter',
+  'tap',
   '--import',
   './test/register.mjs',
-  'test/w5*.bench.ts',
+  // jointCalibration「真机复测」子测需要 Xvfb :77，本机不可达时自跳过 ⇒ TAP 记
+  // SKIP ⇒ parseTap 按未通过计（w7gate 门b 锁定）⇒ --update 永远拒建基线。
+  // --test-skip-pattern 把它从运行计划整体剔除（TAP 完全不出场，探针已验证）。
+  '--test-skip-pattern',
+  '真机复测',
+  ...BENCH_WHITELIST,
 ];
+export { BENCH_ARGS }; // 导出供 bench/verify.selftest.mjs 断言白名单/剔除模式构成
 const SCHEMA = 'bench-baseline/1';
 const DEFAULT_OPTS = { warnThreshold: 0.15, durationThreshold: 0.5 };
+// ΝΩ-39：计数类硬门环境开关 —— 未设/空 ⇒ true（缺省硬）；显式 0/false/no/off ⇒ false（保旧告警）
+const COUNT_HARD_ENV = 'DSH_BENCH_GATE_COUNT_HARD';
 
 // ═══════════════ 纯函数核心（单测覆盖区） ═══════════════
 
@@ -197,14 +235,18 @@ export function deviation(base, cur) {
 
 /**
  * 基线 vs 现跑比对（纯函数，口径分级）。
- * 硬门（exit 1 仅由此触发）：基线通过→现失败；基线测试失踪；现跑出现基线没有的失败。
- * 软门（仅告警）：计数类指标 |偏离|>warnThreshold(±15%)；时间类 duration_ms
- * |偏离|>durationThreshold(±50%) 且标注 volatile（「仅告警」）；指标消失/基线为 0
- * 的绝对偏离。返回 { hardRed, hardFindings, warnFindings, infoFindings }。
+ * 硬门（exit 1 仅由此触发）：基线通过→现失败；基线测试失踪；现跑出现基线没有的失败；
+ *   ΝΩ-39 起 opts.countDriftHard=true 时，确定性计数类指标 |偏离|>warnThreshold(±15%)
+ *   亦入硬门（CLI 门缺省开，DSH_BENCH_GATE_COUNT_HARD=0 保旧；纯函数缺省 false ——
+ *   test/w7gate.test.ts 门h 锁定历史口径，升硬逻辑在 CLI 策略层接线）。
+ * 软门（仅告警）：countDriftHard=false 时的计数类偏离；指标消失/基线为 0 的绝对偏离；
+ *   时间类 duration_ms |偏离|>durationThreshold(±50%) 且标注 volatile（「仅告警」，
+ *   永不判红）。返回 { hardRed, hardFindings, warnFindings, infoFindings }。
  */
 export function compareBenchmarks(baseline, current, opts = {}) {
   const warnThreshold = opts.warnThreshold ?? DEFAULT_OPTS.warnThreshold;
   const durationThreshold = opts.durationThreshold ?? DEFAULT_OPTS.durationThreshold;
+  const countDriftHard = opts.countDriftHard ?? false;
   const hardFindings = [];
   const warnFindings = [];
   const infoFindings = [];
@@ -245,11 +287,14 @@ export function compareBenchmarks(baseline, current, opts = {}) {
           warnFindings.push({ kind: 'metric-drift-abs', test: c.name, key: k, base: bv.value, cur: cv.value, unit: bv.unit, detail: '基线为 0 的绝对偏离' });
         }
       } else if (Math.abs(dev) > warnThreshold) {
-        warnFindings.push({
+        const finding = {
           kind: 'metric-drift', test: c.name, key: k, base: bv.value, cur: cv.value,
           dev, unit: bv.unit, volatile: false,
-          detail: `偏离 ${(dev * 100).toFixed(1)}% 超阈值 ±${(warnThreshold * 100).toFixed(0)}%（方向未定，人工复核）`,
-        });
+          detail: countDriftHard
+            ? `偏离 ${(dev * 100).toFixed(1)}% 超阈值 ±${(warnThreshold * 100).toFixed(0)}%（计数类硬门：确定性计数漂移即红，多为口径/逻辑变化）`
+            : `偏离 ${(dev * 100).toFixed(1)}% 超阈值 ±${(warnThreshold * 100).toFixed(0)}%（方向未定，人工复核）`,
+        };
+        (countDriftHard ? hardFindings : warnFindings).push(finding);
       }
     }
     if (typeof b.durationMs === 'number' && typeof c.durationMs === 'number' && b.durationMs > 0) {
@@ -275,6 +320,13 @@ export function envMatches(baseEnv, curEnv) {
 }
 
 // ═══════════════ CLI 胶水 ═══════════════
+
+/** ΝΩ-39：计数类硬门缺省值 —— 未设/空 ⇒ 硬门（新缺省）；显式 0/false/no/off ⇒ 保旧告警 */
+function countDriftHardDefault() {
+  const v = process.env[COUNT_HARD_ENV];
+  if (v === undefined || v.trim() === '') return true;
+  return !/^(0|false|no|off)$/i.test(v.trim());
+}
 
 function currentEnv() {
   return {
@@ -317,7 +369,11 @@ function toBaselineRecord(parsed, env) {
     schema: SCHEMA,
     createdAt: new Date().toISOString(),
     environment: env,
-    summary: { tests: parsed.tests.length, pass, fail, durationMs: parsed.summary.durationMs },
+    summary: {
+      tests: parsed.tests.length, pass, fail, durationMs: parsed.summary.durationMs,
+      // ΝΩ-39：通过率（计数类指标）的 Wilson 95% CI 入档（加性字段，旧基线缺席不碍比对）
+      passRateCI: parsed.tests.length > 0 ? wilsonCI(pass, parsed.tests.length) : null,
+    },
     tests: parsed.tests.map((t) => ({
       name: t.name,
       ok: t.ok,
@@ -346,7 +402,10 @@ function latestBaseline() {
 function printRunSummary(label, parsed) {
   const pass = parsed.tests.filter((t) => t.ok).length;
   const metricCount = parsed.tests.reduce((n, t) => n + Object.keys(t.metrics ?? {}).length, 0);
-  console.log(`${label}: 测试 ${parsed.tests.length}（通过 ${pass}/失败 ${parsed.tests.length - pass}），提取指标 ${metricCount} 项，总时长 ${parsed.summary.durationMs ?? '?'}ms`);
+  // ΝΩ-39：通过率（计数类指标）附 Wilson 95% CI —— 小样本不塌缩到 [0,0]/[1,1]
+  const ci = parsed.tests.length > 0 ? wilsonCI(pass, parsed.tests.length) : null;
+  const ciTag = ci ? `，通过率 ${pass}/${parsed.tests.length} 的 Wilson 95% CI [${ci.low}, ${ci.high}]` : '';
+  console.log(`${label}: 测试 ${parsed.tests.length}（通过 ${pass}/失败 ${parsed.tests.length - pass}）${ciTag}，提取指标 ${metricCount} 项，总时长 ${parsed.summary.durationMs ?? '?'}ms`);
 }
 
 function cmdUpdate() {
@@ -390,7 +449,9 @@ function cmdCheck() {
   const current = runBenches();
   printRunSummary('基准现跑', current);
 
-  const r = compareBenchmarks(baseline, current);
+  // ΝΩ-39：确定性计数类 ±15% 硬门（缺省开；DSH_BENCH_GATE_COUNT_HARD=0 保旧告警口径）
+  const countHard = countDriftHardDefault();
+  const r = compareBenchmarks(baseline, current, { countDriftHard: countHard });
   for (const t of current.tests) {
     const b = baseline.tests.find((x) => x.name === t.name);
     const mk = Object.keys(t.metrics ?? {}).length;
@@ -411,12 +472,12 @@ function cmdCheck() {
   }
   for (const f of r.hardFindings) console.error(`  [硬门·红] ${f.kind}: ${f.test}  ${f.detail}`);
 
-  console.log(`门判决: 硬门 ${r.hardFindings.length} 红 / 告警 ${r.warnFindings.length} 条 / 信息 ${r.infoFindings.length} 条`);
+  console.log(`门判决: 硬门 ${r.hardFindings.length} 红 / 告警 ${r.warnFindings.length} 条 / 信息 ${r.infoFindings.length} 条（计数类 ±${(DEFAULT_OPTS.warnThreshold * 100).toFixed(0)}%: ${countHard ? `硬门（缺省;${COUNT_HARD_ENV}=0 恢复旧告警口径）` : `旧口径·仅告警（${COUNT_HARD_ENV}=0 生效中）`}；时间类 ±${(DEFAULT_OPTS.durationThreshold * 100).toFixed(0)}% 恒仅告警）`);
   if (r.hardRed) {
-    console.error('性能回归门: 红（存在 pass/fail 级回归）');
+    console.error('性能回归门: 红（pass/fail 级回归' + (countHard ? ' 或确定性计数漂移超阈' : '') + '）');
     return 1;
   }
-  console.log('性能回归门: 绿（硬门无红；告警不判红）');
+  console.log('性能回归门: 绿（硬门无红；时长类告警不判红）');
   return 0;
 }
 

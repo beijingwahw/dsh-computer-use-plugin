@@ -51,6 +51,16 @@ class ScreenshotConfig:
     shm_prefix: str = "dsh-shot-"
     mmap_dir: str = str(Path.home() / ".dsh" / "shots")
     jpeg_quality: int = 85  # 0-100，仅 jpeg 生效
+    # ΑΩ-R26：mmap-file 磁盘配额（MB）。仅约束 mmap-file 传输（POSIX shm 无磁盘
+    # 占用）；0 = 关闭配额。注册新 handle 时检查 + 定期盘点，超过则兜底回收。
+    mmap_quota_mb: int = 512
+    # ΝΩ-51：捕获后端 —— gdi（缺省，兼容铁律：默认路径行为零变化）| dxgi
+    # （Desktop Duplication，ctypes 零新依赖；缺席/失败由 screen.py 诚实降级
+    # gdi 并 note 申报）。dxgi_acquire_timeout_ms：AcquireNextFrame 首参，
+    # 0 = 不等待（静屏复用上一帧 —— 对截图语义即当前屏幕），首抓自带兜底
+    # 重试（见 dxgi_capture.py grab）。
+    backend: Literal["gdi", "dxgi"] = "gdi"
+    dxgi_acquire_timeout_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -109,6 +119,46 @@ class AndroidConfig:
 
 
 @dataclass(frozen=True)
+class ExecutorConfig:
+    """ΑΩ-R25 专属执行器隔离 —— 按控制器分池的有界 ThreadPoolExecutor 容量。
+
+    取值论证（完整版见 executors.py 模块头注）：
+      - ``input_workers=2``：物理动作被 ``_io_lock`` 串行化，第 2 worker 只为
+        探针/尺寸读取不排在长 typewrite 后；更多 = 乱序注入风险。
+      - ``screen_workers=4``：PIL 编码/显著度是 CPU-bound（单次 100-500ms），
+        4 覆盖同场竞争又不超订典型 4-8 核宿主。
+      - ``device_workers=6``：adb（15s 超时）/串口/cv2 首帧等长阻塞 I/O，
+        阻塞线程不占 CPU —— 容忍多路同时挂起互不排队。
+      - ``tree_workers=2``：OCR/VLM 重 CPU+内存，>2 并发互相拖慢（引擎内锁
+        串行化），2 即饱和。
+    """
+
+    input_workers: int = 2
+    screen_workers: int = 4
+    device_workers: int = 6
+    tree_workers: int = 2
+
+
+@dataclass(frozen=True)
+class RawInputConfig:
+    """ΝΩ-53：Raw Input 事件驱动输入镜像（默认关闭 —— 零回归铁律）。
+
+    - ``enabled``：``DSH_PHYSICAL_RAW_INPUT=1`` 显式开启。关闭时
+      rawinput 模块对 cursor/routes 完全透明（回退既有 Win32 轮询路径）。
+    - ``stale_after_s``：镜像陈旧度门 —— ``updated_at`` 距今超过即判陈旧，
+      调用方回退 Win32 调用并诚实注记（SetCursorPos 类程序性移动不产生
+      Raw Input 事件，陈旧门是诚实设计的一部分）。
+    - ``ring_capacity``：输入事件环容量（/v1/input_events 审计面）。
+    - ``event_window_s``：/v1/input_events 只读回看窗口（最近 N 秒）。
+    """
+
+    enabled: bool = False
+    stale_after_s: float = 2.0
+    ring_capacity: int = 128
+    event_window_s: float = 1.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """应用配置根。所有字段的唯一事实源。"""
 
@@ -119,6 +169,10 @@ class AppConfig:
     funnel: FunnelConfig = field(default_factory=FunnelConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     android: AndroidConfig = field(default_factory=AndroidConfig)
+    # ΑΩ-R25：专属执行器容量（缺省见 ExecutorConfig —— 惰性建池的兜底同值）
+    executors: ExecutorConfig = field(default_factory=ExecutorConfig)
+    # ΝΩ-53：Raw Input 输入镜像（默认关闭 —— enabled=False 时全链路零变化）
+    raw_input: RawInputConfig = field(default_factory=RawInputConfig)
 
 
 def _env(name: str, default: str) -> str:
@@ -193,11 +247,20 @@ def load_config_from_env() -> AppConfig:
     shot_transport_raw = _env("DSH_PHYSICAL_SHOT_TRANSPORT", "shm" if sys.platform != "win32" else "mmap-file").lower()
     if shot_transport_raw not in {"shm", "mmap-file", "base64"}:
         raise ValueError(f"DSH_PHYSICAL_SHOT_TRANSPORT invalid: {shot_transport_raw!r}")
+    # ΝΩ-51：捕获后端分流项（缺省 gdi —— 默认路径零变化）
+    shot_backend_raw = _env("DSH_PHYSICAL_SHOT_BACKEND", "gdi").lower()
+    if shot_backend_raw not in {"gdi", "dxgi"}:
+        raise ValueError(f"DSH_PHYSICAL_SHOT_BACKEND must be 'gdi' or 'dxgi', got {shot_backend_raw!r}")
     screenshot = ScreenshotConfig(
         transport=shot_transport_raw,  # type: ignore[arg-type]
         shm_prefix=_env("DSH_PHYSICAL_SHM_PREFIX", "dsh-shot-"),
         mmap_dir=_env("DSH_PHYSICAL_MMAP_DIR", str(Path.home() / ".dsh" / "shots")),
         jpeg_quality=max(0, min(100, _env_int("DSH_PHYSICAL_JPEG_QUALITY", 85))),
+        # ΑΩ-R26：负值在此拒绝（clamp 到 0 会静默关掉配额 —— 配置面不许撒谎）
+        mmap_quota_mb=_env_int("DSH_PHYSICAL_MMAP_QUOTA_MB", 512),
+        # ΝΩ-51：backend 显式开启才走 DXGI DDA；负超时拒绝（clamp 会撒谎）
+        backend=shot_backend_raw,  # type: ignore[arg-type]
+        dxgi_acquire_timeout_ms=max(0, _env_int("DSH_PHYSICAL_DXGI_TIMEOUT_MS", 0)),
     )
 
     # ── actions ──
@@ -262,6 +325,22 @@ def load_config_from_env() -> AppConfig:
         resolution_cache_s=_env_float("DSH_PHYSICAL_ANDROID_RESOLUTION_TTL_S", 30.0),
     )
 
+    # ── executors（ΑΩ-R25 专属执行器隔离：四池容量，max(1,·) 防零/负值）──
+    executors_cfg = ExecutorConfig(
+        input_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_INPUT_WORKERS", 2)),
+        screen_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_SCREEN_WORKERS", 4)),
+        device_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_DEVICE_WORKERS", 6)),
+        tree_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_TREE_WORKERS", 2)),
+    )
+
+    # ── raw input（ΝΩ-53：事件驱动输入镜像，默认关闭零回归；环容量 max(1,·)）──
+    raw_input_cfg = RawInputConfig(
+        enabled=_env_bool("DSH_PHYSICAL_RAW_INPUT", False),
+        stale_after_s=_env_float("DSH_PHYSICAL_RAW_INPUT_STALE_S", 2.0),
+        ring_capacity=max(1, _env_int("DSH_PHYSICAL_RAW_INPUT_RING_CAPACITY", 128)),
+        event_window_s=_env_float("DSH_PHYSICAL_RAW_INPUT_EVENT_WINDOW_S", 1.0),
+    )
+
     return AppConfig(
         server=server,
         auth=auth,
@@ -270,4 +349,6 @@ def load_config_from_env() -> AppConfig:
         funnel=funnel,
         window=window,
         android=android,
+        executors=executors_cfg,
+        raw_input=raw_input_cfg,
     )

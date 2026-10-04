@@ -1,4 +1,4 @@
-// src/observabilityTools.ts
+// src/tools/observabilityTools.ts（ΑΩ-R29 头注修正：原误记 src/observabilityTools.ts）
 // 第七轮创新的工具面：把「系统的自我认知」暴露给模型与用户。
 //   get_metrics     —— 运行指标 + 模型自省洞见（noop 率高的工具直接点名）
 //   verify_journal  —— 哈希链审计：证明行动日志未被篡改（或定位第一个断点）

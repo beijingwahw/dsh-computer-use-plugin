@@ -225,6 +225,21 @@ export class SandboxLog {
     const leaves = this.entries.map(e => e.hash).filter((h): h is string => typeof h === 'string');
     return mmrInclusionProof(leaves, index);
   }
+
+  /**
+   * ΑΩ-R42（公证旁链重算比对）：重算前 prefix 条的链尖 —— 从链基起重走链哈希
+   * （只读纯计算，零状态变更；notary 章③对锚上 auxChains 三元组做「重算比对」的
+   * 原语面）。诚实边界：prefix 越界（账本回滚/清空到宣誓水位之下）或容量驱逐已
+   * 前滚链基（chainBase ≠ GENESIS —— 历史序号与存活窗口失去映射）⇒ null 不可判，
+   * 消费方注记 n/a，绝不虚算。
+   */
+  prefixTip(prefix: number): string | null {
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > this.entries.length) return null;
+    if (this.chainBase !== GENESIS) return null;
+    let prev = this.chainBase;
+    for (let i = 0; i < prefix; i++) prev = chainHash(prev, this.entries[i]);
+    return prev;
+  }
 }
 
 /** 模块级单例（对齐 journal 的导出方言；生命周期随 ctx.effect 清理复位） */

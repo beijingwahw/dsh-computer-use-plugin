@@ -5,6 +5,8 @@
 // 保持导入面不变（epochPi/R 公证测试零改动）。
 import { createHash } from 'crypto';
 import type { JournalEntry } from '../journal';
+// ΑΩ-R5：TSA 签名判决类型（rfc3161.ts 单一事实源 —— 纯类型导入，零运行时耦合）
+import type { SignatureVerdict } from './rfc3161';
 
 // ─── 锚记录（可序列化数据面 —— 跨进程/跨会话可独立复核） ───
 
@@ -17,6 +19,15 @@ export interface AnchorTimestamp {
   token?: string;
   /** 回执核验标志：imprint+nonce 均已对上（仅 rfc3161 源为 true；绝不虚标） */
   imprintVerified?: boolean;
+  /**
+   * ΑΩ-R5：领取时的 TSA 签名离线判决（随锚入册 —— anchorHash 哈希域覆盖，防篡改
+   * 同律）。true=内嵌签名者密钥对 TSTInfo 的签名验过且成立；false=验过而败（伪造/
+   * 损坏 —— 第三方背书未证）；'unsupported-alg'/'unparseable'=诚实边界（没验成）；
+   * 'unpinned-key'（ΝΩ-21）=签名数学成立但签名者 SPKI 指纹不在 DSH_TSA_PIN_SHA256
+   * pin 表（信任锚拒绝 —— 只在 pin 部署在场时出现）。
+   * 仅 rfc3161 源在场；旧锚缺席该键 ⇒ 复核面如实报 null（不追溯、不误判）。
+   */
+  signatureVerified?: SignatureVerdict;
   /** 请求 nonce（base64，CSPRNG 16 字节、正号位已保证） */
   nonce: string;
   /** 降级注记（如「rfc3161 失败原因 —— 本地回退，非第三方背书」；诚实留痕） */
@@ -65,6 +76,41 @@ export interface ReplayTrajectoryWitness {
   steps: ReplayStepWitness[];
 }
 
+// ─── 旁链快照（ΑΩ-R42 · 双账覆盖） ───
+//
+// 台账背景：AnchorRecord 只宣誓 journal（行动账本），而 knowledge 学习史写的是
+// sandboxLog（另一条独立哈希链）—— 两本账的公证覆盖面不重叠。细化 = 锚定时顺带
+// 收集**在场旁链**的三元组快照：主账宣誓面零变化，旁链以「锚定时刻长这个样子」
+// 的旁证身份随锚入册（anchorHash 哈希域 + TSA 摘要域双覆盖 —— D-G5 witness 同律）。
+//
+// ΝΩ-21（驱逐盲区清偿）：登记第二条旁链 journalDisk —— journal 磁盘 JSONL 的
+// 整体指纹。攻击面：锚记录只含内存窗口的 seq/chainTip，容量驱逐前滚链基后
+// 章②③ 对历史前缀诚实 n/a，攻击者灌满 journal 触发驱逐再在窗口内重写条目时，
+// 内存取证面无证可举。journalDisk 把「锚定时刻磁盘文件长这个样子」（前缀行数 +
+// 行字节整体 sha256）钉进锚哈希域与 TSA 摘要域 —— 磁盘史被重写 ⇒ 复核注记
+// disk-chain-drift（注记级不翻章，与 sandboxLog 同律：锚定 ≠ 内容为真）。
+
+/** 一条在场旁链的快照三元组（随锚宣誓 —— 双账覆盖的最小证词面） */
+export interface AuxChainSnapshot {
+  /**
+   * 旁链名。'sandboxLog' = knowledge 学习史链（seq = 条数，chainTip = 链尖）；
+   * 'journalDisk'（ΝΩ-21）= journal 磁盘 JSONL 整体指纹（seq = 完整行数，
+   * chainTip = 前缀行字节的 sha256 hex —— append-only 语义下的前缀重算锚）。
+   * 后续旁链在 notary 的收集登记处追加。
+   */
+  chainName: string;
+  /**
+   * 锚定时刻旁链进度：sandboxLog ⇒ 存活窗口条数（与主账 seq 同律）；
+   * journalDisk ⇒ 磁盘文件完整行数（不含断尾半行）。
+   */
+  seq: number;
+  /**
+   * 顺序/连续性指纹：sandboxLog ⇒ 哈希链尖；journalDisk ⇒ 前 seq 行字节整体
+   * sha256（hex）—— 复核端对磁盘文件前 seq 行重算比对。
+   */
+  chainTip: string;
+}
+
 /** 一枚行为公证锚（字段集即宣誓域 —— hash 覆盖除自身外的全部字段） */
 export interface AnchorRecord {
   seq: number;
@@ -75,6 +121,13 @@ export interface AnchorRecord {
   prevAnchorHash: string | null;
   /** 可选过程证据载荷（D-G5 回放见证；canonical 过滤 undefined ⇒ 缺席时哈希域不含该键，旧锚逐字节不变） */
   witness?: ReplayTrajectoryWitness;
+  /**
+   * ΑΩ-R42：在场旁链快照（当前唯一 = sandboxLog 学习史链）。在场 ⇒ 入哈希域
+   * （anchorHash 覆盖 —— 防篡改同律）与 TSA 摘要域；缺席（沙箱未启用/空链）⇒
+   * 键不落（诚实，不伪造 {seq:0,tip:GENESIS} 的空链 —— canonical 过滤 undefined
+   * ⇒ 旧锚逐字节不变，恢复/复核面旧锚 ⇒ n/a）。
+   */
+  auxChains?: AuxChainSnapshot[];
   hash: string;
 }
 
@@ -99,7 +152,25 @@ export interface NotaryReport {
   lastAnchor: {
     seq: number; chainTip: string; mmrRoot: string | null; source: 'rfc3161' | 'local';
     anchoredAt: number; imprintVerified: boolean | null; hash: string; prevAnchorHash: string | null;
+    /** ΑΩ-R5：末锚的 TSA 签名判决（随锚在册的领取时结论；旧锚/local ⇒ null 诚实标注） */
+    signatureVerified: SignatureVerdict | null;
+    /** ΑΩ-R42：末锚的旁链快照投影（在场 ⇒ 如实呈现供下游独立复核；旧锚/沙箱缺席 ⇒ null 诚实标注） */
+    auxChains: AuxChainSnapshot[] | null;
+    /**
+     * ΝΩ-21：末锚 token 的 TSA 权威时刻 genTime（epoch ms，离线提取自留存物证）。
+     * rfc3161 源且可解 ⇒ 数值；local 源 / 旧锚 / genTime 畸形不可解 ⇒ null 诚实标注。
+     * 与 anchoredAt（本地钟）的偏差执法在章③注记（genTime-skew）—— 此处透传字段
+     * 供下游独立复核。
+     */
+    genTime: number | null;
   } | null;
+  /**
+   * ΝΩ-21（NO-3 自适应锚频注记）：journal 自上锚的增量观测（entriesSinceLastAnchor
+   * = 当前条数 − 末锚 seq；threshold = ADAPTIVE_ANCHOR_THRESHOLD 缺省 50；due =
+   * shouldAnchor(增量)）。无锚 ⇒ null。注记级提示 —— 超阈时章③ detail 追加补锚
+   * 提示（quality_checkup notarize 输出面即可见），判据面不动。
+   */
+  anchorCadence?: { entriesSinceLastAnchor: number; threshold: number; due: boolean } | null;
 }
 
 // ─── 密码学原语复刻（journal.ts 模块私有 —— 复刻非复制实现，先例：sandbox/log.ts） ───

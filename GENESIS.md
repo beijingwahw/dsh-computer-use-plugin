@@ -1,6 +1,6 @@
 # 创世总账（GENESIS LEDGER）
 
-七击全景：O 清账 → P 灭虫 → Q/R/S/T/U 六击铸器官（30 件 + 5 认证）→ V 审判日 → W 隔离与真机审判 → X 笔迹纪元 → Ω 云脑皮层（GLM-5.3-Flash 十器官）→ Φ 自主智能环（识别·判断·执行·进化四环）→ Ψ 万脑归一（13 平台统一视觉皮层）→ Δ 全库跃迁（审计驱动 52 项）→ Σ 全军升维（七件能力跃迁）→ Θ 内核进化（约 50 内核普查、18 键接线）→ Ξ 内核进化全域潮（55 键、生产闭环、10 代收敛 0.1%）→ Λ 开箱即亮（本地接管/向导弹页/热切换）→ 世界性创新纪元潮（P1 地基速修 + Ρ 双钥公证 · Γ 注视经济 · Υ 认知睡眠 · Η 认识论闭环 · Κ 惊异课程 · Π 行为公证 · Μ 万脑联邦 · 三潮续笔：Ι 自我模型 · Τ 干预即教育 · Χ 重放证词 · Γ2 注视经济 inset · P2a/P2b 加固 · 四潮续笔：Ε 预言引擎 · Β 反驳法院 · Ν 探索经济学 · Μ2 拜占庭聚合 · Ζ 持久化标定 · PyS 真值跨线）→ W1 执行与感知韧性（九器官 + W2-0 集成接线：执行层四连改 · 带外确认码 · 免看门控 · 噪声诊所 · EXP4 · 根因归因 · 稀疏 SoM · Zoom 复核 · 视觉经济）→ W2 离线韧性与成本自律（九器官 + W3-0 集成接线：离线批准队列 · fail-closed 审计+新鲜度探针 · bench 可信度 · 租约黑板+实证仲裁 · 恢复疗效 · 记忆操作老虎机 · 金丝雀试演 · 成本级联路由）→ W3 活意图与自纠偏（九器官 + W4-0 集成接线：逆转托管 · 参数化技能 · 增量编码 · DAG 流水线 · 活意图漂移 · 岔路卡 · 探索前沿 · 过程评分）→ W4 第四批器官潮（九器官 + W5-0 集成接线收官：集成接线 · 宏重放 · 策略联邦 · 可逆性体系 · PCG 训练营 · 移动 Surface · 零 API 设备面 · 步数拍卖 · 声学通道）→ W5 第五批收官潮（七器官：集成接线收官 · Python 注册落盘 · 梦回放 · 跨机编排 · SoM 调用面 · steer 闭环 · 效能基准七过秤）→ W6 债清偿浪潮（W6-R 修复批：安全 fail-closed · 协议补齐 · 审计扩容 · 大文件治理，另含深化/缝隙/持久化三包）→ W7 终局验证浪潮（创世审计器立宪 · 七册终验）→ W8 世界创新修复潮（2 批 18 修复代理 + 2 收尾复核：世界创新债清偿 · 巨文件拆分 · 接线收口）→ W9 终账纪元（收口中 · 占位）。
+七击全景：O 清账 → P 灭虫 → Q/R/S/T/U 六击铸器官（30 件 + 5 认证）→ V 审判日 → W 隔离与真机审判 → X 笔迹纪元 → Ω 云脑皮层（GLM-5.3-Flash 十器官）→ Φ 自主智能环（识别·判断·执行·进化四环）→ Ψ 万脑归一（13 平台统一视觉皮层）→ Δ 全库跃迁（审计驱动 52 项）→ Σ 全军升维（七件能力跃迁）→ Θ 内核进化（约 50 内核普查、18 键接线）→ Ξ 内核进化全域潮（55 键、生产闭环、10 代收敛 0.1%）→ Λ 开箱即亮（本地接管/向导弹页/热切换）→ 世界性创新纪元潮（P1 地基速修 + Ρ 双钥公证 · Γ 注视经济 · Υ 认知睡眠 · Η 认识论闭环 · Κ 惊异课程 · Π 行为公证 · Μ 万脑联邦 · 三潮续笔：Ι 自我模型 · Τ 干预即教育 · Χ 重放证词 · Γ2 注视经济 inset · P2a/P2b 加固 · 四潮续笔：Ε 预言引擎 · Β 反驳法院 · Ν 探索经济学 · Μ2 拜占庭聚合 · Ζ 持久化标定 · PyS 真值跨线）→ W1 执行与感知韧性（九器官 + W2-0 集成接线：执行层四连改 · 带外确认码 · 免看门控 · 噪声诊所 · EXP4 · 根因归因 · 稀疏 SoM · Zoom 复核 · 视觉经济）→ W2 离线韧性与成本自律（九器官 + W3-0 集成接线：离线批准队列 · fail-closed 审计+新鲜度探针 · bench 可信度 · 租约黑板+实证仲裁 · 恢复疗效 · 记忆操作老虎机 · 金丝雀试演 · 成本级联路由）→ W3 活意图与自纠偏（九器官 + W4-0 集成接线：逆转托管 · 参数化技能 · 增量编码 · DAG 流水线 · 活意图漂移 · 岔路卡 · 探索前沿 · 过程评分）→ W4 第四批器官潮（九器官 + W5-0 集成接线收官：集成接线 · 宏重放 · 策略联邦 · 可逆性体系 · PCG 训练营 · 移动 Surface · 零 API 设备面 · 步数拍卖 · 声学通道）→ W5 第五批收官潮（七器官：集成接线收官 · Python 注册落盘 · 梦回放 · 跨机编排 · SoM 调用面 · steer 闭环 · 效能基准七过秤）→ W6 债清偿浪潮（W6-R 修复批：安全 fail-closed · 协议补齐 · 审计扩容 · 大文件治理，另含深化/缝隙/持久化三包）→ W7 终局验证浪潮（创世审计器立宪 · 七册终验）→ W8 世界创新修复潮（2 批 18 修复代理 + 2 收尾复核：世界创新债清偿 · 巨文件拆分 · 接线收口）→ W9 终账纪元（终数已收口：取舍终谳 · 部署落锤 · 真机九条实证 · 2503/0 收官）→ ΑΩ 隐患清账战役（46 项隐患 · 5 批次 · 44 编号工单 R1-R46：全库隐患总清账，测试 2503→2613 / 0 失败零回归收官）→ ΝΩ 前沿升级战役（体检驱动 · 54 项工单 ΝΩ-1..54 · 6 批次：安全正确性/决策感知/信任隐私/知识沙箱/质量架构/前沿升级，测试 2613→2963、python 96→152，cycle_lint 立宪 5 value 环在案待拆）。
 每件一行：器官 / 数学根基 / 执法册 / 审判数字（V-W-X 实测）。
 
 ## 证明与审计
@@ -653,3 +653,83 @@ w9criteria/w9deploy/w9supply 三册 + 数十 src 文件在途），每窗失败 
 换脸，涉红文件单独复跑全绿（physicalExecution.d7HostPort 9/0 / epochSigma.resume
 7/0 / w9criteria 10/0 / epochDelta 8/0）——红均归因并行在途施工瞬时态（W2-W5 各潮
 「并行批次在途文件瞬时红不由本批背书」先例同律），文档面零扰动。
+
+## ΑΩ 隐患清账战役（Alpha-Omega · 46 项隐患 · 5 批次 · 44 编号工单 R1-R46 · 零回归收官）
+
+W9 终账收口后，对全库隐患的最后一轮总清账：46 项隐患按 5 个批次（每批 ≤9 项）
+并行修复，44 个编号工单（编号域 R1-R46，其中 R45 为战役结案文档工单）逐批通过
+零回归闸门——每批收稿即全量回归，0 失败才放行下一批；TS 全量测试 **2503 → 2613
+用例 / 0 失败 / 5 skipped**（净增 110 = 新执法册四册 23 例 + 既有各测试册扩展 87 例；
+skip 为 adapter 预起服务与 /dev/shm Linux-only 环境守卫，与 W8-C2 基线同款）。
+代码标记 ΑΩ-Rn 全库在案（src / python_service / scripts / bench 四十余处可 grep 取证）。
+
+| 批 | 战果（工单号 → 一行一件） | 执法锚点 |
+| --- | --- | --- |
+| 第 1 批（R1-R9） | R1 audio.py WASAPI py3.14 实坏修复：comtypes 出参约定回归面整体拆除，raw-vtable(ctypes) 路径移植（本机 Python 3.14.6 真硬件冒烟通过——**DEBTS D-E2 闭环**）｜R2 成本级联缺省永不点亮（动态因子接线）｜R3 UDS dispatcher 半兑现（undici 直用 + 连接池化）｜R4 守卫探针审计 WAL（GUARD_PROBE marker 经 journal 入哈希链；探针 fail-open 立法——增强层故障不下沉为可用性故障）｜R5 TSA 时间戳签名离线验签（RSA/ECDSA 证书链数学）｜R6 联邦 Sybil 试用期（初见源 trust 封顶 0.35 × 3 次干净合并缓升）｜R7 onboarding 密钥出 URL｜R8 visionGuessed 判据收紧｜R9 连接存档密钥静态加密选项（AES-256-GCM + scrypt，零依赖 node:crypto；DSH_VLM_STORE_PASSPHRASE 在场即启用、缺席明文现状逐字节不变） | test/aor5.tsaSignature.test.ts（10/0）；python_service/dsh_physical/audio.py:529/:830/:878；src/federation/index.ts:26；src/guards/probeAudit.ts；src/vlm/connection.ts:227 |
+| 第 2 批（R10-R18） | R10 方言单源：src/dialects/ 四件（tokenizer / random / hashing / index）——分词、随机、哈希方言全库唯一权威源｜R11 clickMouse 20 阶段拆分｜R12 runtime 处理器化 + inspect/drag 实现｜R13 driveLoop 16 相位拆分｜R14 gym 判据/rng 单源｜R15 重试单源 fetchWithRetry｜R16 extractResultValue 单源｜R17 PilotStore 轮转封顶 500｜R18 预言量化屏型 + keyed pending | test/r14.gymDialect.test.ts（5/0）；src/dialects/ |
+| 第 3 批（R19-R27） | R19 沙箱 schema 校验（actionSchema）+ 宿主执行器端口（enableHostReplayExecution 开关，缺省关）+ fpSimilarity 位宽鲁棒｜R20 肌肉记忆库统一｜R21 知识性能五合一（聚类分桶 / BM25 增量索引 / 主题索引 / 读路径纯化 / ID 防撞）｜R22 探索账本驱逐 O(log n)｜R23 铸栈读盘缓存｜R24 popupGuard 会话隔离｜R25 Python 四专属线程池｜R26 shm 配额 + nonce 时间 GC｜R27 物理层杂项（screenSize 活化 / 端口策略单源） | src/sandbox/actionSchema.ts；python_service/dsh_physical/executors.py；python_service/tests/（8 件 unittest 72 例） |
+| 第 4 批（R28-R36） | R28 审计名单声明式单源 + 装配期完备性执法｜R29 工具输出方言普查执法（typeText / dragMouse 收编工厂）｜R30 bench 环境配置化（DSH_BENCH_* 环境变量族）｜R31 traineddata 去重｜R32 Python unittest 套件（72 例）｜R33 dist 冒烟（280 模块）｜R34 注释漂移清理｜R35 vlm 六项杂修｜R36 能力面透明化（仪表盘 OFF/DEFAULT 诚实账——缺省关的能力不再被展示为在册） | test/r29.dialectCensus.test.ts（4/0）；bench/config.mjs；scripts/smoke_dist.mjs |
+| 第 5 批（R37-R46） | R37 UIA 深度遍历（真机实测 59 元素 / 深度 8 / 0.31s）｜R38 金丝雀 type 探针副作用词表闸｜R39 内核真标签（labelSource: records\|reconstructed——训练数据来源可溯源）｜R40 梦回放预算自适应（EMA 估计器 + 短梦优先）｜R41 联邦掺入 origin 溯源｜R42 公证双账锚定（auxChains——旁链快照随第三方回执入摘要域，双账一致性可验）｜R43 宪法 backgroundRisk 审计标注（终版立法：保守顶格保持、可用性让位于保守——有意决策，**DEBTS D-D13 定谳在册**）｜R44 铸栈入参最小变异面｜R46 smoke_imports 假绿修复（285 模块真导入——旧实现未导入即报绿） | test/r18.prophecy.test.ts（4/0）；python_service/dsh_physical/ui_tree.py:154；src/notary/index.ts:110/:117；src/autonomy/autonomyConstitution.ts:67 |
+
+审判口径：新执法册四册 23/0（aor5.tsaSignature 10 / r14.gymDialect 5 / r18.prophecy
+4 / r29.dialectCensus 4——ΑΩ-R45 收官实跑取数，TAP 计数）；新增源件：src/dialects/
+四件、src/guards/probeAudit.ts、src/sandbox/actionSchema.ts、python_service/
+dsh_physical/executors.py、python_service/tests/ 八件（72 例）、bench/config.mjs、
+scripts/smoke_dist.mjs、test/reports/README.md。收官全量 2613 用例 / 0 失败 /
+5 skipped（W9 终值 2503 → 2613，+110 全部为执法面增量）。
+DEBTS 台账变化：D-E2（audio comtypes py3.14）ΑΩ-R1 实证闭环（本机 Python 3.14.6
+真硬件冒烟）；新登记 D-D13（R43 终版立法——有意决策入设计决策类，非未闭债）；
+其余未闭债不变（真机物理边界与主人亲裁项，唯余 D-A2/A3/A6/A7/B1/G4/D-C4/D-G6/
+D-F4 余量）。本段按 W6-W9 同律以浪潮章节格式登记、不入 genesis_audit 纪元宇宙
+（审计器头注「w7+ 不属本审计宇宙」律 + w7audit 执法册 deepEqual 锁定 W1-W5——
+扩宇宙须先修执法册）；genesis_audit --check 收官复跑退出码 0（虚报 0；DEBTS 台账
+枚举违例 0 / 分节条数偏差 0 / 主分类口径对账全净——ΑΩ-R45 统计段补正的兑现）。
+
+## ΝΩ 前沿升级战役（Neo-Omega · 体检驱动的前沿升级 · 54 项工单 ΝΩ-1..54 · 6 批次）
+
+ΑΩ 清账之后，把全库体检报告逐条升级为前沿能力：54 项工单分 6 批并行施工
+（批 1-5 各 9 项 + 批 6 八项 + ΝΩ-54 结案文档本册），每批收稿即全量零回归
+闸门。代码标记 ΝΩ-n 全库在册——收稿时点 grep 取证：src/test/python_service/
+scripts/bench/.github 五域 45+8 项全部落地（批 6 于本册收稿窗口内由并行施工
+补齐最后三件：48/51/52，落地质检逐件验读）。测试演进：TS 全量 2613 → **2963**
+（收稿三窗实跑 2938 / 2927 / 2963——前两窗批 6 施工在途计数上落，收官窗批 6
+测试面齐备为终值，诚实边界见审判段）；python 96 → 152（pytest --collect-only 实数）。
+
+| 批 | 战果（工单号 → 一行一件） | 执法锚点 |
+| --- | --- | --- |
+| 第 1 批（ΝΩ-1..9 安全正确性） | ΝΩ-1 沙箱执行器接入宿主安全链五门+单步派发审计存证+指纹位宽域 [32,256] 单源（摄取侧与 fpSimilarity 协同，**D-D15 定谳**）｜ΝΩ-2 守卫链三修（审计 WAL 移序/rootCause 异步/探针 ioMutex 互斥）｜ΝΩ-3 planner 流看门狗+双通道投递互斥｜ΝΩ-4 onboarding 跨站三重防护｜ΝΩ-5 审批三通道对齐（clickElement 收口/replayOne 结算/run_skill 令牌透传）｜ΝΩ-6 内核 Beta 回归守卫+安全参数池｜ΝΩ-7 CUSUM 双侧序贯漂移熔断+冷静期半开（既有臂只增不减）｜ΝΩ-8 AbortSignal 贯穿执行链（消灭超时后幽灵动作落地）｜ΝΩ-9 Python 速修六处（入口/音频竞态/帧环锁/window TTL/nonce 堆/泄漏） | test/w8.abortSignal.test.ts（12/0）；test/no3fixes.test.ts（11/0）；src/guards/circuitBreakerGuard.ts；src/sandbox/events.ts:116-126 |
+| 第 2 批（ΝΩ-10..18 决策感知） | ΝΩ-10 PolicyDecision.candidates+type/drag 产生通道+三级退避+infoGain 新鲜度+效用权重入册（内核 55→58 键）｜ΝΩ-11 岔路账多候选+HCA 折扣归因+恢复方言+预言 no-impact 闸+惊异夹帽 12｜ΝΩ-12 探索 UCB 利用项｜ΝΩ-13 inspect 回流+抽查去重+焦点回填｜ΝΩ-14 感知 VLM 门控（屏未变零拨号）｜ΝΩ-15 世界模型在线聚类+合并+软量化｜ΝΩ-16 决策站级联仲裁（反射先行 LLM 断后）｜ΝΩ-17 grounding maxTokens 自适应+截断修复+分辨率归一+NMS containment+OCR 行聚类｜ΝΩ-18 级联弃权+语义谓词+限流接线+400 回退+熔断半权 | src/autonomy/policyEngine.ts；src/kernel/productionSpecs.ts（58 键）；test/reflexiveDecision.test.ts |
+| 第 3 批（ΝΩ-19..27 信任隐私） | ΝΩ-19 联邦 Ed25519 逐源签名+指纹试用期（聚合端原样中继不签证，各客户端逐源验签剔除）｜ΝΩ-20 RDP 预算会计（Σε≤10）+n 加噪+掺入抖动｜ΝΩ-21 公证磁盘指纹锚+genTime+删单证书回退+TSA pin+自适应锚频｜ΝΩ-22 持久化增量四件（防抖/行式 WAL/分段缓存/mtime）｜ΝΩ-23 riskGate Aho-Corasick 词边界立法（归一化带位置映射+拉丁硬边界+免边界族双轨制，**D-D14 定谳**）｜ΝΩ-24 纯函数六件（canonical 环/环形数组/worker 键控/hexToBits/维度守卫/自 diff 缓存）｜ΝΩ-25 PS 批处理+错误结构化+端口并行｜ΝΩ-26 编排 L1 缓存/脏区跳过/L3 帧共享/预算扣减/reconcile 内联｜ΝΩ-27 物理 UDS TTL+错误细分+/v1/shutdown drain | test/riskGate.test.ts（10/0）；test/now25.systemPerf.test.ts（19/0）；test/w8.no26.test.ts（7/0）；test/physicalExecution.{router,serviceManager}.test.ts（8+6/0）；src/riskGate.ts；src/federation/index.ts:26 |
+| 第 4 批（ΝΩ-28..36 知识沙箱） | ΝΩ-28 M5 双接线+归因对照+驱逐分×置信+语义去重+fsync+metrics 校验｜ΝΩ-29 中英 375 对词表桥（cosine 0 死角恢复——'整理'↔'filter' 字符级 n-gram 零共享的结构性失明）｜ΝΩ-30 沙箱 z-order/scroll 方向/tab 指针/name64/词表扩展/深键序｜ΝΩ-31 工具面八件（NaN/枚举/校验/闭环/门控/文案/复用/形状）｜ΝΩ-32 帧票据（5 捕获→3）｜ΝΩ-33 GP-UCB 安全阈值学习｜ΝΩ-34 睡眠幕序维护优先+梦策略指纹+perWeight+分桶｜ΝΩ-35 睡眠/知识杂项｜ΝΩ-36 Python numpy 向量化（salience -38%/对齐 31×/PNG optimize）+五点入池+JSON 日志+/v1/stats+HID 自愈+UVC 超时+端口重掷+VAD 指纹+目录复用 | test/no29.bilingual.test.ts（9/0）；test/no31fixes.test.ts（7/0）；src/dialects/bilingual.ts（BILINGUAL_PAIRS=375 实数） |
+| 第 5 批（ΝΩ-37..45 质量架构） | ΝΩ-37 CI 大接电：五闸+双 OS 矩阵+缓存+audit+artifact｜ΝΩ-38 动态端口+永真转 skip+轮询化+fixture 卫生｜ΝΩ-39 MDER+Beta 后验+Wilson+SPRT 可配+bench_gate 扩容硬门｜ΝΩ-40 AST 变异器 MVP（批内实测变异分自检 91.3% vs 无测试 0%；「写回-测试-字节级还原」机制自证册显式独占跑 1/1）｜ΝΩ-41 Tarjan cycle_lint 立宪（收稿实跑 287 文件/1438 边/14 非平凡 SCC——**5 value 环登记 D-F5 新债**、9 type-only 环 warning）+BC-5 克隆律+六处 fnv1a/mulberry32 单源｜ΝΩ-42 配置死键删除+154 键文档生成+config-vitality 规则｜ΝΩ-43 dist SBOM 清单 287 模块 sha256（build_manifest 实跑 4373 KiB/digest 475f2b8fbea7 在案）｜ΝΩ-44 三厂约束解码（json_schema/tool_use/responseSchema opt-in）｜ΝΩ-45 journal 组提交（WAL 同步不变——**D-D16 定谳**）+rotation+启动三腿并行 | test/no41.dialectClones.test.ts（9/0）；test/configDocs.test.ts（2/0）；test/mutationSelfcheck.test.ts（显式 1/1）；scripts/cycle_lint.mjs；scripts/build_manifest.mjs；.github/workflows/ci.yml |
+| 第 6 批（ΝΩ-46..53 前沿升级 · 收稿窗口内并行落地） | ΝΩ-46 世界模型只读端口进反事实（WorldModelReadPort 鸭子型——autonomy 零 import knowledge，click 候选 progress×转移置信因子）｜ΝΩ-47 合议庭点亮（RefuteFace.quorum 多数票+庭员 census 透明+置信带双阈值——弱 upheld<0.55 降级 uncertain 不背书；ensemble.elements fuseMode loglinear 有界累积 1/√家数）｜ΝΩ-48 注视经济进 grounding（foveaCenter 可选参显式开凹窗+同屏 grounding 会话缓存 dhash+LRU(64)+TTL 30s——'grounding-cache-hit' 注记）｜ΝΩ-49 测试提速共享基建（test/lib/serviceHarness——服务预热/端口分配单源，先例 gen_config_docs.d.mts 旁座声明）｜ΝΩ-50 Linux L1（UIA/AT-SPI 深度遍历同律单源常量 _TREE_MAX_DEPTH=12/_TREE_MAX_CHILDREN=64，Windows 行为零回归）｜ΝΩ-51 DXGI 可选捕获后端（backend: gdi 缺省零变化/dxgi opt-in，ctypes 零新依赖，缺席失败诚实降级 gdi 并 note 申报）｜ΝΩ-52 scrcpy 控制通道复用（tap/drag/scroll/key 有活跃流走 ControlWriter <10ms 无子进程税；降级链 adb input 原路径逐字节不变）｜ΝΩ-53 RawInput 事件驱动输入镜像（RegisterRawInputDevices+RIDEV_INPUTSINK 隐藏窗口线程，光标零往返快照读面；DSH_PHYSICAL_RAW_INPUT=1 显式开启，缺省关零可见） | test/vlm.providers.ensemble.test.ts（19/0）；test/epochBeta.refute.test.ts（17/0）；test/autonomy.counterfactual.test.ts（24/0）；test/vlm.arbitration.test.ts（10/0）；test/w4wire.test.ts（10/0）；test/physicalExecution.d7HostPort.test.ts（12/0）；python_service/dsh_physical/{rawinput.py,scrcpyStream.py} |
+
+审判口径（ΝΩ-54 收官实跑，node v24.19.0 / Windows，2026-10-04，收稿三窗）：
+- 新执法册十一册逐册单跑 TAP 取数合计 100/0：no3fixes 11 / no29.bilingual 9 /
+  no31fixes 7 / no41.dialectClones 9 / now25.systemPerf 19 / configDocs 2 /
+  w8.abortSignal 12 / w8.no26 7 / riskGate 10 / physicalExecution.router 8 /
+  physicalExecution.serviceManager 6；mutationSelfcheck 1 例缺省 skip（变异器
+  临时改写 src 禁与并行测试同跑——显式独占跑 1/1）。批 6 执法随既有册扩展
+  （ensemble 19 / epochBeta.refute 17 / autonomy.counterfactual 24 /
+  vlm.arbitration 10 / physicalExecution.d7HostPort 12 等单跑全绿）。
+- 全量三窗实跑：首窗 2938 / 2916 过 / 2 fail / 20 skip；次窗 2927 / 2901 过 /
+  2 fail / 24 skip（批 6 施工在途，计数与 skip 逐窗上落）；**收官窗 2963 /
+  2952 过 / 1 fail / 10 skip——终值口径**。fail 逐件归因：① w9real D-A5
+  三窗皆红 = 确定性**环境暴露**（node v24.19.0/Windows libuv teardown race——
+  客户端 barrier 往返成功[RESULT ok:true/ackOk:true]后 process.exit 与异步句柄
+  关闭竞态 ⇒ 0xC0000409；git archive HEAD 纯净树同款复现 ⇒ 非 ΝΩ 回归，
+  node v22.x 历史收官 0 fail 记录在册；**DEBTS D-E3 新登记**）——收官窗唯一
+  fail 即此；② 时序偶发仅见于前两窗（首窗 w8.no26 TTL 窗口过期、次窗
+  w7fullon W7-D3 补偿真跑 161s——单独复跑各 7/0、10/0 全绿且收官窗双绿，
+  归因并行施工 CPU 争载，W9-5「瞬时红换脸」先例同律）。除 D-E3 单点外
+  全量 0 失败。
+- 数字实测面：python 96→152（pytest 实收集）；SBOM 287 模块（build_manifest
+  实跑）；cycle_lint 287 文件/1438 相对边/14 非平凡 SCC（5 value 环 exit 1
+  立法执法——D-F5 在案）；内核注册表 58 键；词表 375 对；配置文档 154 键。
+- genesis_audit --check 收官复跑退出码 0（虚报 0）。本段按 W6-ΑΩ 同律以浪潮
+  章节格式登记、不入审计器纪元宇宙（审计器头注「w7+ 不属本审计宇宙」律 +
+  w7audit 执法册 deepEqual 锁定 W1-W5——扩宇宙须先修执法册）。DEBTS 台账
+  49→55：新立有意决策四条（D-D14 riskGate 词边界双轨制 / D-D15 沙箱五门与
+  位宽域 / D-D16 journal 组提交崩溃窗口 / D-D17 optionalDependencies 迁移
+  搁置——sec.runtime-deps 否决在案）+ D-F5（5 value 依赖环新债，cycle_lint
+  执法在案待拆）+ D-E3（w9real node v24 环境暴露）。

@@ -4,6 +4,14 @@
 // 精华保留：几何中心点击 —— 不信任元素边缘，永远点最稳的质心。
 // B-4：返回值统一走 toolResult 工厂（反幻觉锚点全覆盖）。
 //
+// ΑΩ-R29 老工具方言整治审计：主路径（SUCCESS/FAILED）已走 toolOk/toolErr 工厂
+// （B-4 收编在案）；四处 ACTION_REQUIRED 安双方言**不收编** —— 均无顶层 action
+// 键且 reason 落位 state_anchor 中部（toolActionRequired 会注入 action 并把
+// reason 前置合并，键序漂移）—— clickMouse ΑΩ-R11 同律定谳的方言族；
+// epochR.notarization / w2audit / p2b-fixes 按键钉死
+// （state_anchor.reason / freshness_probe / notarization / approval_gate），
+// 零回归优先，维持 JSON.stringify 现状。
+//
 // 纪元 Ρ（双钥公证锁·收编入闸）：click_element 不再是安全洼地。
 // 审计背景：本工具曾直调 system.clickMouse，完全绕过 actionGate/审批/验证/
 // 交互性全链 —— 元素名带「删除/发送」或落点屏读危险文字时无需任何令牌即派发。
@@ -22,6 +30,12 @@
 // 旧方言）；验证生效 ⇒ consume 焚毁；验证未生效 ⇒ attemptFailed 续期供
 // 同一授权内重试；派发异常 ⇒ attemptFailed 释放预留（B-3 异常重试语义）。
 // 无令牌路径零变化（快照/预留/验收全部只挂在 dangerous && approval_token 上）。
+//
+// ΝΩ-5（W6R 收口对齐）：clickMouse 的两个安全收口移植到 ID 寻址通道 ——
+//   · 新鲜度探针缺席/失败 ⇒ 拒绝派发（fail-closed，旧 degraded 放行废除；
+//     逃生门 allowUnverifiedDangerous=true 恢复旧方言）；
+//   · verifyActions=false 单独关闭 ⇒ dangerous 令牌动作派发前拒绝（旧
+//     「派发即消费」只在 dry-run / 双钥匙逃生门下保持）。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { system } from '../system.js';
 import { extractInteractiveElements } from '../uiExtractor.js';
@@ -196,7 +210,12 @@ export function createClickElementTool(config) {
                 // ── W2-2（S3）：派发前接地新鲜度探针（approval.beginAttempt 之前）──
                 // 危险元素点击的落点继承自 take_screenshot 缓存时刻 —— ID 寻址通道的
                 // 接地时距比坐标通道更长。漂移 ⇒ 阻断并要求重新截图定位（结构化结果，
-                // 令牌未烧）；端口缺席/失败 ⇒ degraded 放行（fail-open，论证见探针法条）。
+                // 令牌未烧）。
+                // ΝΩ-5（W6R 收口移植 · clickMouse.ts freshnessStage 同律）：探针缺席/
+                // 失败 ⇒ 拒绝派发（fail-closed）—— 旧「degraded 放行」把叠加防御的故障
+                // 变成不可逆动作面的默认态。逃生门 allowUnverifiedDangerous=true 恢复
+                // 降级放行（降级不静默：degraded 判决随锚点观测）；drifted 是阳性危险
+                // 发现，不受逃生门豁免。非令牌动作不进本块（旧行为不变）。
                 let freshnessStamp;
                 if (dangerous && approval_token && !config.dryRun) {
                     const fresh = await probeGroundingFreshness();
@@ -223,6 +242,65 @@ export function createClickElementTool(config) {
                                 'token is still valid (blocked before dispatch — no attempt was spent).',
                         }, null, 2);
                     }
+                    // ΝΩ-5（W6R fail-closed）：探针缺席/失败 ⇒ 拒绝派发（令牌未烧 —— 阻断
+                    // 在预留之前）。与 clickMouse.ts 同律：本探针保护的是「需要审批令牌的
+                    // 动作」，证据缺席不等于证据无害。
+                    if (fresh.verdict === 'degraded' && config.allowUnverifiedDangerous !== true) {
+                        // 审计留痕：新鲜度拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
+                        void journal.appendMarker({
+                            kind: 'GUARD_BLOCKED',
+                            guard: 'freshness-probe',
+                            reason: `probe-unavailable: ${fresh.note ?? 'unknown'}`,
+                        }).catch(() => { });
+                        return JSON.stringify({
+                            status: 'ACTION_REQUIRED',
+                            state_anchor: {
+                                element_id: target.id,
+                                target: effTargetName,
+                                freshness_probe: fresh,
+                                reason: 'freshness-probe-unavailable',
+                                note: 'This irreversible (approval-token) element click MUST be freshness-checked before ' +
+                                    'dispatch, but the grounding-freshness probe is absent or failed ' +
+                                    `(${fresh.note ?? 'unknown cause'}) — dispatch is refused (fail-closed), NOT silently degraded.`,
+                            },
+                            next_step: 'FRESHNESS PROBE UNAVAILABLE — the pre-dispatch grounding check could not run. ' +
+                                'Ways out: (1) RETRY after taking a fresh screenshot (take_screenshot establishes the ' +
+                                'grounding fingerprint the probe compares against); (2) ensure the physical service is ' +
+                                'alive and the probe port is wired (production wires it by default; offline/dry-run ' +
+                                'environments do not); (3) deployment-level explicit escape hatch: set ' +
+                                'allowUnverifiedDangerous=true (accepts unverified dangerous dispatch). ' +
+                                'The approval token is still valid (blocked before dispatch — no attempt was spent).',
+                        }, null, 2);
+                    }
+                }
+                // ── ΝΩ-5（W6R 验证旁路收口移植 · clickMouse verifyBypassStage 同律）──
+                // verifyActions=false 单独关闭 ⇒ dangerous 令牌动作在派发前拒绝：旧
+                // 「派发即消费（unverified-dispatch-consumed）」让一个 Token 经济开关
+                // 静默旁路整个验收式消费体系。dry-run 豁免（无物理世界可验，令牌消费仅
+                // 是模拟账面）；逃生门须两把钥匙齐备（verifyActions=false 且
+                // allowUnverifiedDangerous=true）才回到旧方言。非 dangerous 动作维持
+                // verifyActions 原语义。令牌未烧（阻断在预留之前，物理零派发）。
+                if (dangerous && approval_token && !config.dryRun
+                    && config.verifyActions !== true && config.allowUnverifiedDangerous !== true) {
+                    return JSON.stringify({
+                        status: 'ACTION_REQUIRED',
+                        state_anchor: {
+                            element_id: target.id,
+                            target: effTargetName,
+                            approval_gate: config.enableApprovalGate ? 'described' : 'gate-disabled',
+                            reason: 'effect-verification-required',
+                            note: 'Effect verification is the acceptance basis for approval-token (irreversible) ' +
+                                'actions: the token is only consumed on a VERIFIED world effect. verifyActions=false ' +
+                                'alone can no longer bypass that (the legacy bypass silently consumed the token on ' +
+                                'dispatch, defeating the whole acceptance system).',
+                        },
+                        next_step: 'EFFECT VERIFICATION REQUIRED for this approval-token action, but verifyActions=false. ' +
+                            'Ways out: (1) re-enable verifyActions=true (recommended — dangerous actions then verify ' +
+                            'before/after and the token is consumed only on a verified effect); (2) deployment-level ' +
+                            'explicit escape hatch: ALSO set allowUnverifiedDangerous=true (two explicit keys — accepts ' +
+                            'legacy unverified-dispatch-consumed dialect for dangerous actions). ' +
+                            'No physical dispatch happened and the approval token is still valid.',
+                    }, null, 2);
                 }
                 // 派发预留：与 system.clickMouse 之间零 await（并发双花在落到物理
                 // 世界之前即被拒）；预算耗尽在派发前焚毁。
@@ -246,10 +324,12 @@ export function createClickElementTool(config) {
                     attemptReserved = true;
                 }
                 await system.clickMouse(Math.round(effCenterX), Math.round(effCenterY), 'left');
-                // 世界验收：验证关闭（effect=null）⇒ 无从验收，退回派发即消费（保守
-                // 旧方言）；验证生效 ⇒ consume 焚毁；未生效 ⇒ attemptFailed 续期，
+                // 世界验收：验证生效 ⇒ consume 焚毁；未生效 ⇒ attemptFailed 续期，
                 // 同一授权内重试不再打扰用户（clickElement 无 expected_text/effect
                 // 参数，不存在 intent-betrayed/semantic-mismatch 臂 —— 双分支即全谱）。
+                // ΝΩ-5：验证关闭（effect=null ⇒ 派发即消费）只在 dry-run 或逃生门
+                // （verifyActions=false 且 allowUnverifiedDangerous=true）下可达 ——
+                // 派发前拒绝块已在闸上收口（见上方 verifyBypass 块）。
                 let effect = null;
                 if (before) {
                     effect = await elementVerify.settleAndVerify(before, {

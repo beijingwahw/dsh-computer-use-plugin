@@ -28,6 +28,10 @@ export const CLUSTER_SIMILARITY = 0.45;
 export const CONSENSUS_BONUS = 0.1;
 /** 皮层化衰减：情景让位语义，留痕不销毁（knowledge.test 钉住 0.4×0.5=0.2） */
 export const CORTICALIZE_DECAY = 0.5;
+/** 语义去重锚阈值（ΝΩ-28 任务5）：consolidate 蒸馏前查同主题既有语义记忆，
+ *  cosine ≥ 0.8 ⇒ 命中走强化路径不新建。0.8 高于聚类引力 0.45 —— 去重判据
+ *  必须比聚簇判据更严（宁可漏合并，不可错合并两条异义语义记忆）。 */
+export const SEMANTIC_DEDUP_COSINE = 0.8;
 /** 置信度半衰期基线（E-1 间隔重复：未复证条目的 30 天缺省）。数值是部署域假设
  *  （包络内时间不流逝，不可证伪）；衰减形状（过滤 + 排序让位）由
  *  knowledge.test 免疫 #1 时间旅行守护 —— 它只测未复证条目，基线形状零回归。 */

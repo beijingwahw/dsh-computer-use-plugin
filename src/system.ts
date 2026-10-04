@@ -159,6 +159,28 @@ export function _setOpenUrlSpawnForTest(fn: SpawnLike | null): void {
 }
 
 
+// ─── ΝΩ-25：switchWindowByTitle 的后端缺席判定（结构化优先）───
+// 旧实现用正则匹配错误消息文本（/spawn_failed|ECONNREFUSED/…）—— 消息是给
+// 人读的方言，措辞变更即静默改道。physicalBackend 的错误出口（ΝΩ-25）已把
+// Result 失败臂的 kind 透传到 error.kind；本层改读结构化通道，消息正则降为
+// 最后兜底（仅服务于无 kind 的外来 Error）。
+/** 缺席类 kind：后端不在场/已死/起不来 —— 委托通道应接管 */
+const ABSENCE_KINDS: ReadonlySet<string> = new Set([
+  'window_unavailable',                                                    // 窗口后端缺席（pygetwindow 不可用）
+  'transport_error',                                                       // ECONNREFUSED/连接断开 —— 服务已死
+  'client_timeout',                                                        // 探活/请求超时
+  'spawn_failed', 'startup_timeout', 'crashed', 'port_squatted',           // ensureBackend 启动链失败（serviceManager 方言）
+]);
+/** 兜底正则：仅无 kind 通道的外来 Error（与旧判定的消息方言一致 —— 零回归） */
+const ABSENCE_MSG_FALLBACK = /window_unavailable|spawn_failed|startup_timeout|adapter unavailable|ECONNREFUSED/;
+
+/** 结构化优先的缺席判定：有 kind ⇒ 只认 kind（消息文本不再参与路由） */
+function backendAbsence(e: unknown): boolean {
+  const kind = (e as { kind?: unknown } | null | undefined)?.kind;
+  if (typeof kind === 'string' && kind !== '') return ABSENCE_KINDS.has(kind);
+  return ABSENCE_MSG_FALLBACK.test(String((e as { message?: unknown })?.message ?? ''));
+}
+
 export const system = {
   /** 应用插件配置；D-5 路径下仅 dryRun 生效（服务端无鼠标速度概念） */
   async configure(config: Config): Promise<void> {
@@ -375,7 +397,7 @@ export const system = {
     // 回执（focus_handoff 取证因此永远缺席）、无本地化别名、失败时不给可用
     // 窗口清单。原生路径（pygetwindow）三样俱全。委托保留给"无 python 后端"
     // 的环境 —— 那才是 D-2 设计它的场景。
-    const ABSENCE = /window_unavailable|spawn_failed|startup_timeout|adapter unavailable|ECONNREFUSED/;
+    // ΝΩ-25：缺席判定改 error.kind 优先（backendAbsence），消息正则仅兜底。
     if (!forceLegacy()) {
       try {
         const r = await backend.switchWindow(keyword);
@@ -385,7 +407,7 @@ export const system = {
       } catch (e: any) {
         // 后端缺席（无 python 服务/窗口后端不可用）→ 委托接管；
         // element_not_found 是真实未命中 → 如实上抛（错误里带可用窗口清单）。
-        if (!ABSENCE.test(String(e?.message ?? ''))) throw e;
+        if (!backendAbsence(e)) throw e;
       }
     }
     if (windowDelegate) {

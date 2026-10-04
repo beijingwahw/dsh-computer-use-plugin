@@ -28,12 +28,19 @@ import { createExecWorldProbe, type ExecWorldProbe } from '../physicalExecution/
 import { createExecFocusSource, focusTracker } from '../focusTracker';
 import * as backend from '../physicalBackend';
 import { dhash as dhashOfBuf } from '../perceptualHash';
+// ΑΩ-R12（drag 执行面接线）：根层 system.dragMouse 的适配物料 —— 接线层允许
+// import system（autonomy 器官本体不碰，经 RuntimeDeps.drag 注入破环）。
+import { system } from '../system';
+import { errText } from './runtime.utils';
 // W4-0（B/C 接线）：第三批器官的栈内注入物料 —— 岔路账单例 + 岔路卡铸造
 //（W3-6，纯内存簿记）与探索前沿账本（W3-7，独立持久化）。均为下游纯模块，
 // 类型/值导入零回路（branchCards → counterfactual/diagnosis，exploration →
 // elementTracker/failureMemory/riskGate 只读）。
 import { branchLedger as branchLedgerSingleton, generateBranchCard } from '../branchCards';
 import { ExplorationLedger } from './exploration';
+// ΝΩ-46（model-based 反事实接线）：Φ-9 评分内核的世界模型只读面注入面 ——
+// counterfactual 的模块默认持有者（结构端口 WorldModelReadPort 见其注释）。
+import { wireCounterfactualWorldModel, type WorldModelReadPort } from './counterfactual';
 // W8-C1（惊异喂养生接线 · D-G2 清偿）：进化引擎（惊异消费面）—— 栈内 prophecy
 // 失手记录的喂养目标。EvolutionEngine 自 './evolutionEngine' 再分发（本桶已
 // export *，此处值引入供模块级单例铸造）。
@@ -165,16 +172,27 @@ function resetFocusForRun(): void {
 // ─── W4-0（C 接线）：探索前沿账本（W3-7 R2）的栈内铸造 ───
 
 /**
- * W4-0（C）：进程级共享探索账本（一进程一账 —— buildAutonomyStack 每次铸栈
- * 都会调 beginSession 归零 run 级状态：建议预算/交替律；细胞账随 persistPath
- * 'restore' 跨 run/跨会话延续，无路径 ⇒ 'reset' 纯内存）。goal 绑定 ''
- *（铸栈时 goal 尚未出生 —— advise 的 ctx.goal 优先于账本 goal，恢复态问路的
- * 目标语境由闭环逐次供给；持久化档的 goal 亦恒 ''，跨会话恢复自洽）。
+ * W4-0（C）：进程级共享探索账本（一进程一账 —— 每次铸栈都归零 run 级状态：
+ * 建议预算/交替律）。goal 绑定 ''（铸栈时 goal 尚未出生 —— advise 的 ctx.goal
+ * 优先于账本 goal，恢复态问路的目标语境由闭环逐次供给；持久化档的 goal 亦恒
+ * ''，跨会话恢复自洽）。
+ * ΑΩ-R23（去重复全档读盘）：恢复改为「每持久化路径每进程恰一次」—— 缓存键
+ * 含 persistPath；首铸（或换路重铸）显式 beginSession('restore') 读盘一次
+ * （该 API 的本义即会话起点的恢复），后续同路径铸栈 attach 共享实例，只走
+ * beginSession('reset') 归零 run 级状态（纯内存零 IO —— beginSession('restore'）
+ * 不再被逐栈滥用为读档器）。路径变化 ⇒ 键失效重铸重读；进程退出即弃（本桶与
+ * 宿主均无探索账本卸载钩子 —— 账本生命周期与进程同尽，persist 节流落盘语义
+ * 不变）。首铸恢复失败只缓存负面结果（空账实例照常共享），防御恢复语义不变：
+ * 绝不抛、垃圾格弃置、后续铸栈不重读坏档。
  */
 let w4SharedExploration: ExplorationLedger | null = null;
 let w4SharedExplorationKey = '';
 
-/** W4-0（C）：取（或铸）共享探索账本并归零 run 级状态；绝不抛（内部自带契约） */
+/**
+ * W4-0（C）/ ΑΩ-R23：取（或铸）共享探索账本并归零 run 级状态；绝不抛（内部
+ * 自带契约）。同路径缓存命中 ⇒ attach 共享实例零读盘；缺席/换路 ⇒ 首铸恰一次
+ * 显式恢复（全档同步读盘至多一次）。
+ */
 function w4ExplorationFor(persistPath: unknown): ExplorationLedger {
   const p = typeof persistPath === 'string' && persistPath !== '' ? persistPath : '';
   if (w4SharedExploration === null || w4SharedExplorationKey !== p) {
@@ -182,9 +200,13 @@ function w4ExplorationFor(persistPath: unknown): ExplorationLedger {
       enabled: true,
       ...(p !== '' ? { persistPath: p } : {}),
     });
+    // ΑΩ-R23：首铸/换路重铸恰一次显式恢复 —— 后续同路径铸栈不再触盘
+    w4SharedExploration.beginSession(p !== '' ? 'restore' : 'reset');
     w4SharedExplorationKey = p;
+  } else {
+    // ΑΩ-R23：同路径复铸 ⇒ attach 共享实例，仅归零 run 级态（纯内存零 IO）
+    w4SharedExploration.beginSession('reset');
   }
-  w4SharedExploration.beginSession(p !== '' ? 'restore' : 'reset');
   return w4SharedExploration;
 }
 
@@ -202,6 +224,44 @@ function w4ExplorationFor(persistPath: unknown): ExplorationLedger {
  */
 const surpriseEvolution = new EvolutionEngine();
 export { surpriseEvolution };
+
+// ─── ΝΩ-46（model-based 反事实）：Φ-9 评分内核的世界模型只读面接线 ───
+
+/**
+ * ΝΩ-46：prophecyWorldModel.predict 的 Result 方言 → WorldModelReadPort 的
+ * {top} 方言适配（纯读适配，绝不抛）：无证据 / 坏形状 / 模型抛错 ⇒ {top:null}
+ * （诚实无知，绝不把「没见过」伪装成任何置信）。世界模型用 prophecy 同源单例
+ * prophecyWorldModel（prophecy/index.ts 铸造、进程内跨 run 存活——读的正是
+ * prophecy 结算回灌 observe 学到的 (量化屏型 × 动作键) 真实转移分布，同表同格）。
+ * 概率读数缺席按中性 0.5（与 prophecy 惊异定价的回退同律——不自夸也不自贬）。
+ */
+function counterfactualPredictFace(
+  fromType: string,
+  actionKey: string,
+): { top: { typeId: string; prob: number } | null } {
+  try {
+    const r = prophecyWorldModel.predict(fromType, actionKey);
+    if (!r || (r as { ok?: unknown }).ok !== true) return { top: null };
+    const pred = (r as { value?: unknown }).value as
+      | { nextTypes?: Array<{ typeId?: unknown; prob?: unknown }> }
+      | null
+      | undefined;
+    const first = pred && Array.isArray(pred.nextTypes) ? pred.nextTypes[0] : undefined;
+    if (!first || typeof first.typeId !== 'string' || first.typeId === '') return { top: null };
+    const prob =
+      typeof first.prob === 'number' && Number.isFinite(first.prob)
+        ? Math.min(1, Math.max(0, first.prob))
+        : 0.5;
+    return { top: { typeId: first.typeId, prob } };
+  } catch {
+    return { top: null }; // 读模型故障 = 无知识（诚实吞掉，绝不炸评分）
+  }
+}
+
+/**
+ * ΝΩ-46：世界模型只读面（单例适配——与 prophecyWorldModel 同源）。
+ */
+const counterfactualWorldModelPort: WorldModelReadPort = { predict: counterfactualPredictFace };
 
 /**
  * 宿主血脉接线：以插件 Config 铸造自主闭环栈（perceive / policy / constitution）。
@@ -232,39 +292,93 @@ export { surpriseEvolution };
  *    配置随栈入环（免看门控 C1）。任一开关 false 或调用方已显式注入 ⇒ 对应
  *    注入位缺席，行为与接线前逐字节一致。
  *
- * 快照槽：deps.lastSnapshotRef 缺席时就地补挂在传入的 deps 对象上 —— 调用方
- * 随后以同一 deps（或其展开）铸 createExecute({...deps, spec})，感知与执行
- * 即共享 before 帧，执行后验证零额外补拍。now/sleep 透传（注入时钟贯穿全环）。
+ * 快照槽与补挂回传（ΑΩ-R44 定谳）：deps 的缺席注入位（lastSnapshotRef/
+ * incrementalObserver/drag/probe/focus/w1）先补挂进入口的浅拷贝副本（栈内
+ * 消费面只读副本，函数体对原对象零散写），出口恰把「本次补挂的缺席位」回写
+ * 进原 deps —— 生产血脉（tools/autonomousRun.ts 铸栈后紧接
+ * createExecute({...deps, spec}) 消费回传：感知/执行共享 before 帧 + 执行层
+ * 四端口随行）与接线测试（w2wire 直调 deps.drag、w5wire/w7fullon 读
+ * deps.incrementalObserver 的感知写回）依赖该回传，删除即生产回归。调用方
+ * 已注入字段零覆盖（只填缺席位）。now/sleep 透传（注入时钟贯穿全环）。
  * GoalStateMachine 由调用方铸造（每轮目标各异，栈不越权代铸）。
  */
 export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): AutonomyStack {
-  // 快照槽就地补挂（同一对象感知/执行共享 —— 见 JSDoc）
-  if (!deps.lastSnapshotRef) deps.lastSnapshotRef = { current: null };
+  // ΑΩ-R44（入参纯化 · 定谳保留最小变异面）：入口对 deps 做恰一层的防御式浅拷贝
+  //（resolved）—— 后续全部补挂只落在副本，栈内一切消费面（createPerceive 与
+  // client/now/sleep/capture/branchLedger 读取）一律走副本，函数体内对调用方
+  // 原对象零散写。浅拷贝边界的理由：本函数补挂的字段全部是顶层键，一层即足以
+  // 隔离全部变异；深拷贝则会破坏单例/槽位共享语义 —— lastSnapshotRef 与
+  // incrementalObserver 是感知/执行（及调用方读数面）共享的同一只槽，
+  // probe/focus 是跨栈存活的端口引用，capture/now 等嵌套依赖同理必须保持
+  // 引用相等（零拷贝语义）。
+  const resolved: RuntimeDeps = { ...deps };
+  // ΑΩ-R44：补挂记账 —— 只登记「本次确实补上场的缺席位」，出口一次回写（见
+  // 下方回写块）；调用方已注入的字段从不进清单 ⇒ 回写零覆盖。
+  const attachedKeys = new Set<keyof RuntimeDeps>();
+  const fill = <K extends keyof RuntimeDeps>(key: K, value: RuntimeDeps[K]): void => {
+    if (resolved[key]) return; // 只填缺席位 —— 调用方显式注入优先（零覆盖铁律）
+    resolved[key] = value;
+    attachedKeys.add(key);
+  };
+
+  // 快照槽补挂（同一只槽感知/执行共享 —— 见 JSDoc）
+  fill('lastSnapshotRef', { current: null });
 
   // W5-0（A 接线 · W3-3/W4-1 增量账本消费链）：总闸 incrementalEncodingEnabled()
   // （kernelRegistry 键 visualDiff.incremental，index.ts 铸入、缺省 0=关）为真 ⇒
-  // 就地补挂增量观察槽进 deps —— createPerceive 每帧把 ScreenStateLedger 判决与
-  // deliverIncremental 投递产物写入此槽（runtime.ts 的注入缝；该文件禁改，缝在此
-  // 接）。调用方（宿主编码层/工具面）经 deps.incrementalObserver.current 读
-  // 「这一帧该作为关键帧/补丁/滚动条带投递给模型」的事实源。总闸关 ⇒ 槽缺席，
-  // perceive 零写入（感知行为与接线前逐字节一致——零回归红律）；只填缺席位，
-  // 测试显式注入的观察槽优先。
-  if (!deps.incrementalObserver && incrementalEncodingEnabled()) {
-    deps.incrementalObserver = { current: null };
+  // 补挂增量观察槽进副本（ΑΩ-R44 后出口回写原 deps）—— createPerceive 每帧把
+  // ScreenStateLedger 判决与 deliverIncremental 投递产物写入此槽（runtime.ts 的
+  // 注入缝；该文件禁改，缝在此接）。调用方（宿主编码层/工具面）经
+  // deps.incrementalObserver.current 读「这一帧该作为关键帧/补丁/滚动条带投递
+  // 给模型」的事实源。总闸关 ⇒ 槽缺席，perceive 零写入（感知行为与接线前逐字节
+  // 一致——零回归红律）；只填缺席位，测试显式注入的观察槽优先。
+  if (incrementalEncodingEnabled()) {
+    fill('incrementalObserver', { current: null });
   }
 
-  // W2-0（B）：W1 执行层四连改接线 —— 就地补挂进 deps（调用方随后以同一 deps 铸
-  // createExecute({...deps, spec})，probe/focus/w1 三注入位即随行生效；与
-  // lastSnapshotRef 同一就地补挂模式）。只填缺席位 —— 测试显式注入的假件优先。
+  // ΑΩ-R12（drag 执行面接线）：拖拽端口 —— 根层 system.dragMouse 的四拍时序
+  //（移→按→移→放）适配为 RuntimeDeps.drag 的像素四元组方言；任何失败收敛
+  // {ok:false, error}（绝不抛 —— 运行层铁律由端口收口，execute 侧收敛 error
+  // 结局）。只填缺席位 —— 测试显式注入的假件优先；不注入且无端口的离线调用
+  // 保持 execute 的防御式降级路径（no_effect + 诚实注记）。
+  fill('drag', async (startX, startY, endX, endY) => {
+    try {
+      await system.dragMouse({ x: startX, y: startY }, { x: endX, y: endY });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: errText(err) };
+    }
+  });
+
+  // W2-0（B）：W1 执行层四连改接线 —— 补挂进副本（ΑΩ-R44 后出口随 attachedKeys
+  // 回写原 deps；调用方随后以同一 deps 铸 createExecute({...deps, spec})，
+  // probe/focus/w1 三注入位即随行生效；与 lastSnapshotRef 同一补挂回传模式）。
+  // 只填缺席位 —— 测试显式注入的假件优先。
   // activation：config.autonomyW1Exec 缺省 true（Schema 默认语义）；探针懒点亮
-  // （物理服务已存活才生效，绝不主动 spawn），焦点源带 origin 标签（工具层无标签
+  //（物理服务已存活才生效，绝不主动 spawn），焦点源带 origin 标签（工具层无标签
   // 记录绝不触发执行层短路 —— focusTracker 三重资格闸同律）。
   if (config?.autonomyW1Exec !== false) {
     resetFocusForRun(); // W2-0（B）：任务边界焦点清账（跨 run 短路污染的隔离律）
-    if (!deps.probe) deps.probe = createLazyExecProbe();
-    if (!deps.focus) deps.focus = createExecFocusSource();
+    fill('probe', createLazyExecProbe());
+    fill('focus', createExecFocusSource());
     const tuning = w1TuningFromConfig(config);
-    if (!deps.w1 && Object.keys(tuning).length > 0) deps.w1 = tuning;
+    if (Object.keys(tuning).length > 0) fill('w1', tuning);
+  }
+
+  // ΑΩ-R44（最小变异面 · 出口一次回写）：恰把本次补挂的缺席位写回调用方原对象。
+  // 定谳依据（调用方审计 —— 回写不可删除，删除即生产回归）：
+  //  · 生产血脉 tools/autonomousRun.ts 的 runPilotLoop 以「本函数返回后紧接
+  //    createExecute({ ...deps, spec })」消费补挂回传（感知/执行共享 before 帧
+  //    + probe/focus/w1/drag 随行入执行面）；
+  //  · 接线测试直读补挂后的原 deps（w2wire 直调 deps.drag、w5wire/w7fullon 读
+  //    deps.incrementalObserver 的感知写回、autonomy.integration 读
+  //    deps.lastSnapshotRef 的感知写回）。
+  // 变异面由 attachedKeys 记账钉死：至多 lastSnapshotRef/incrementalObserver/
+  // drag/probe/focus/w1 六键，且均为零覆盖的缺席位补挂 —— 除此清单外原对象
+  // 分毫不动。
+  for (const key of attachedKeys) {
+    // 同形 Record 断言：key 与值同源于 resolved（联合索引直赋会被 TS 拒收）
+    (deps as Record<keyof RuntimeDeps, unknown>)[key] = (resolved as Record<keyof RuntimeDeps, unknown>)[key];
   }
 
   // W2-0（B）：免看门控（C1）接线 —— 本地帧哈希端口（capture→dhash 轻实现）。
@@ -275,7 +389,7 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
   // autoPilot 门控整体降级（与接线前逐字节同路径）。
   const w1FrameHash: AutonomyDeps['frameHash'] =
     config?.autonomyW1FrameGate !== false
-      ? createLocalFrameHash(deps.capture ?? ((): Promise<Buffer> => backend.captureCleanPng()))
+      ? createLocalFrameHash(resolved.capture ?? ((): Promise<Buffer> => backend.captureCleanPng()))
       : undefined;
 
   const tierCsv = typeof config?.autonomyAllowTiers === 'string' ? config.autonomyAllowTiers : '';
@@ -289,10 +403,24 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
       ? Math.floor(config.autonomyMaxSteps)
       : undefined;
 
+  // ΝΩ-46（model-based 反事实接线）：世界模型只读面注入 Φ-9 评分内核（模块默认
+  // 持有者——决策面调用点 breakTieBand/岔路账不携带 worldModel 字段，经此兜底
+  // 吃到模型）。立法边界：prophecy 铁律「绝不影响动作选择」禁的是**回写与动作
+  // 选择耦合的审计回路**（mint→settle→observe 回灌的学习闭环不得反向牵动当步
+  // 裁决）；此处是**决策面独立读模型**——评分按（量化屏型 × 4×4 动作格）向
+  // prophecyWorldModel 单例 predict 一次（只读，绝不 mint/observe/settle），
+  // prophecy 的账本与挂起预言分毫不因本接线而动。开关同门 enableProphecy：
+  // false ⇒ 不注入且清除旧接线（最新铸栈胜出——闭环逐字节旧路径，零回归红律）；
+  // 实验室 gym 不经本函数铸栈 ⇒ 永不注入（确定性不变）。
+  wireCounterfactualWorldModel(
+    config?.enableProphecy !== false ? counterfactualWorldModelPort : null,
+  );
+
   return {
-    perceive: createPerceive(deps),
+    // ΑΩ-R44：栈内消费面一律走入口浅拷贝副本 resolved（补挂/透传同源）
+    perceive: createPerceive(resolved),
     policy: new PolicyEngine({
-      ...(deps.client ? { client: deps.client } : {}),
+      ...(resolved.client ? { client: resolved.client } : {}),
       useVlmWhenUncertain: config?.autonomyVlmWhenUncertain !== false,
     }),
     constitution: new AutonomyConstitution({
@@ -310,7 +438,7 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
           epistemicGate: {
             vlmAvailable: (): boolean => {
               try {
-                if (deps.client) return (deps.client as { configured?: boolean }).configured !== false;
+                if (resolved.client) return (resolved.client as { configured?: boolean }).configured !== false;
                 return isGlmConfigured();
               } catch {
                 return false;
@@ -355,13 +483,13 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
       ? {
           prophecy: new ProphecyEngine({
             worldModel: prophecyWorldModel,
-            ...(deps.now ? { now: deps.now } : {}),
+            ...(resolved.now ? { now: resolved.now } : {}),
             surpriseFeed: surpriseEvolution,
           }),
         }
       : {}),
-    ...(deps.now ? { now: deps.now } : {}),
-    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    ...(resolved.now ? { now: resolved.now } : {}),
+    ...(resolved.sleep ? { sleep: resolved.sleep } : {}),
     // W2-0（B）：免看门控的闭环消费面 —— frameHash 端口与门控配置随栈入环
     //（runAutonomousLoop 消费 AutonomyDeps.frameHash/perceptionGate）；配置脏值
     // 由 autoPilot 的 gateNumIn 就地收敛（此处只透传，不重复收口）。
@@ -391,8 +519,9 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
     // 只填缺席位）。纯旁路簿记：每步决策后 record（rankTopK 与 scoreOptions 同源
     // 内核）、goal failed/aborted 时 generateCard；PilotResult 既有字段分毫不动，
     // 缺省注入即安全（无 config 门 —— 簿记面零行为差）。deps 是 RuntimeDeps ——
-    // branchLedger 是 AutonomyDeps 的字段（闭环消费面），此处按其部分面收窄读取。
-    ...((deps as RuntimeDeps & Partial<AutonomyDeps>).branchLedger
+    // branchLedger 是 AutonomyDeps 的字段（闭环消费面），此处按其部分面收窄读取
+    //（ΑΩ-R44：读副本 resolved —— 与栈内其余消费面同源）。
+    ...((resolved as RuntimeDeps & Partial<AutonomyDeps>).branchLedger
       ? {}
       : {
           branchLedger: {

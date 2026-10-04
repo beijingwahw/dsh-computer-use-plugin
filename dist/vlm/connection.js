@@ -27,9 +27,21 @@
 // 模块（config 面等未来含密写点同律复用）；本模块保留自身三个测试缝（fs 面 /
 // 平台判定 / icacls 通道），经 permsDeps() 适配器注入共享模块 —— 行为逐字节
 // 不变，test/vlm.connection.perms.test.ts 十例原样全绿即零漂移证据。
+//
+// ΑΩ-R9（密钥静态加密·可选）：环境变量 DSH_VLM_STORE_PASSPHRASE 在场时，落档
+// 的 apiKey 字段以 AES-256-GCM 加密（scrypt 派生密钥 + 随机 salt/iv + 版本化
+// 魔数 "DSHENC1:" 信封，盐/iv/认证标签随密文同存）；口令缺席 ⇒ 保持明文现状，
+// 但档内元数据 encryption 如实申报 'none'（诚实申报，不虚报），加密时申报
+// 'aes-256-gcm'。读档先探魔数：密文 ⇒ 解密（口令缺席 / 错口令 / 密文损坏 ⇒
+// load 回 null 并经可选 detail 参数归因 —— 与「坏档视为无档」同语义，绝不抛、
+// 绝不把密文当明文吐出）；旧明文档无论口令在场与否照常读（向后兼容）。加密
+// 失败 ⇒ save 拒绝落盘（{ ok:false } —— 口令在场时绝不静默降级明文）。明文与
+// 解密结果仅在内存瞬时存在，绝不回写。原子写与权限收紧纪律（W6R-C2/W8-A2）
+// 原样保持。
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync, } from 'node:crypto';
 import { currentWindowsUser, defaultFilePermsDeps, tightenExistingFilePerms as tightenExistingFilePermsShared, tightenFilePerms as tightenFilePermsShared, } from '../filePerms.js';
 // 共享模块再出口：既有消费面（测试 / 兄弟模块）从本模块取件不破（纯转发，无副本）
 export { buildIcaclsArgs } from '../filePerms.js';
@@ -138,6 +150,129 @@ function redactKeyFrom(text, key) {
         return text;
     }
 }
+/** 密文信封魔数（版本化）：格式 DSHENC1:<salt-b64>:<iv-b64>:<tag-b64>:<cipher-b64>，盐/iv/标签随密文同存 */
+const ENC_MAGIC = 'DSHENC1:';
+/** 信封载荷段数（salt / iv / tag / cipher —— 结构损坏判界） */
+const ENC_PAYLOAD_SEGMENTS = 4;
+/** scrypt 盐长（随机，随密文同存 —— 每次加密现取，同明文两次落盘信封必不同） */
+const ENC_SALT_BYTES = 16;
+/** GCM 标准 96-bit nonce 长 */
+const ENC_IV_BYTES = 12;
+/** GCM 认证标签长（getAuthTag 缺省 16 字节） */
+const ENC_TAG_BYTES = 16;
+/** AES-256 密钥长 */
+const ENC_KEY_BYTES = 32;
+/** scrypt 代价参数（N=16384/r=8/p=1，约 16MiB 内存 —— 口令穷举的成本闸） */
+const ENC_SCRYPT_COST = { N: 16384, r: 8, p: 1 };
+/**
+ * 加密口令（env DSH_VLM_STORE_PASSPHRASE，每次现取 —— env 变化即生效，与
+ * defaultConnectionPath 同律）：纯空白串视为缺席 —— 不可用的口令 = 没有口令，
+ * 绝不拿空白口令虚造一层「已加密」的假安全。绝不抛。
+ */
+function storePassphrase() {
+    try {
+        const v = process.env.DSH_VLM_STORE_PASSPHRASE;
+        return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
+ * 明文 ⇒ 密文信封（绝不抛）：scrypt(passphrase, salt) 派生 AES-256 密钥，
+ * GCM 加密（随机 iv），盐/iv/标签/密文四段 base64 同存于信封。任何失败 ⇒
+ * null —— 由调用方拒绝落盘（口令在场时绝不静默降级明文）。
+ */
+function encryptApiKey(plain, passphrase) {
+    try {
+        const salt = randomBytes(ENC_SALT_BYTES);
+        const iv = randomBytes(ENC_IV_BYTES);
+        const key = scryptSync(passphrase, salt, ENC_KEY_BYTES, ENC_SCRYPT_COST);
+        const cipher = createCipheriv('aes-256-gcm', key, iv);
+        const body = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+        const tag = cipher.getAuthTag();
+        return [
+            ENC_MAGIC + salt.toString('base64'),
+            iv.toString('base64'),
+            tag.toString('base64'),
+            body.toString('base64'),
+        ].join(':');
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * 密文信封 ⇒ 明文（绝不抛）：魔数 / 段数 / 各段长度先验，scrypt 派生密钥后
+ * GCM 解密并验签。结构损坏 ⇒ ok:false（结构归因）；GCM 校验失败（错口令或
+ * 密文被篡改，final() 抛）⇒ ok:false（统一归因到口令/损坏 —— 两者在 GCM 下
+ * 不可区分，归因措辞如实并列）。
+ */
+function decryptApiKey(envelope, passphrase) {
+    try {
+        if (!envelope.startsWith(ENC_MAGIC)) {
+            return { ok: false, reason: '密文信封无 DSHENC1: 版本魔数' };
+        }
+        const segs = envelope.slice(ENC_MAGIC.length).split(':');
+        if (segs.length !== ENC_PAYLOAD_SEGMENTS) {
+            return { ok: false, reason: `密文信封结构损坏（期望 ${ENC_PAYLOAD_SEGMENTS} 段载荷，实得 ${segs.length}）` };
+        }
+        const salt = Buffer.from(segs[0], 'base64');
+        const iv = Buffer.from(segs[1], 'base64');
+        const tag = Buffer.from(segs[2], 'base64');
+        const body = Buffer.from(segs[3], 'base64');
+        if (salt.length !== ENC_SALT_BYTES || iv.length !== ENC_IV_BYTES || tag.length !== ENC_TAG_BYTES) {
+            return { ok: false, reason: '密文信封长度异常（salt/iv/tag 与 DSHENC1 规格不符）' };
+        }
+        const key = scryptSync(passphrase, salt, ENC_KEY_BYTES, ENC_SCRYPT_COST);
+        const decipher = createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(tag);
+        const plain = Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8');
+        return { ok: true, plain };
+    }
+    catch {
+        return { ok: false, reason: '解密失败：口令错误或密文已损坏（AES-256-GCM 认证不过）' };
+    }
+}
+/** detail 填报尽力而为（绝不抛）：档案申报的加密形态原样回报（越界值不设 —— 不替档案圆谎） */
+function noteEncryption(detail, declared) {
+    try {
+        if (detail === undefined)
+            return;
+        if (declared === 'none' || declared === 'aes-256-gcm')
+            detail.encryption = declared;
+    }
+    catch { /* 填报绝不炸 */ }
+}
+/** detail 填报失败归因（绝不抛；已有归因不覆盖 —— 首因保留） */
+function noteError(detail, message) {
+    try {
+        if (detail !== undefined && detail.error === undefined)
+            detail.error = message.slice(0, 300);
+    }
+    catch { /* 填报绝不炸 */ }
+}
+/**
+ * 落盘序列化（ΑΩ-R9）：口令在场且有非空 apiKey ⇒ apiKey 换密文信封、元数据
+ * 申报 'aes-256-gcm'；否则明文现状 + 申报 'none'（无密可加密时不虚报加密）。
+ * 加密失败 ⇒ 抛（由 save 的 catch 收敛为 { ok:false } —— 口令在场时绝不静默
+ * 降级明文落盘，也不写 'null' 毁掉旧档）。
+ */
+function serializeForDisk(conn) {
+    // 防御面（旧行为同款：JSON.stringify(conn ?? null) ?? 'null'）
+    const c = conn ?? null;
+    if (c === null || typeof c !== 'object')
+        return 'null';
+    const passphrase = storePassphrase();
+    if (passphrase !== undefined && typeof c.apiKey === 'string' && c.apiKey !== '') {
+        const envelope = encryptApiKey(c.apiKey, passphrase);
+        if (envelope === null) {
+            throw new Error('apiKey 加密失败：DSH_VLM_STORE_PASSPHRASE 在场，拒绝明文降级落盘');
+        }
+        return JSON.stringify({ ...c, apiKey: envelope, encryption: 'aes-256-gcm' });
+    }
+    return JSON.stringify({ ...c, encryption: 'none' });
+}
 // ─── ConnectionStore：档位的读 / 写 / 清 ───
 /**
  * 连接档案仓 —— 一个文件一个当前连接。
@@ -162,17 +297,41 @@ export class ConnectionStore {
      * 无档，调用方走首配向导）；否则返回字段级归一后的连接。读档成功后顺手收紧
      * 宽松旧档（W6R-C2：POSIX stat 查 group/other 位、Windows 幂等 icacls ——
      * 尽力而为，失败绝不阻断读档）。
+     * ΑΩ-R9：读档先探魔数 —— apiKey 为 "DSHENC1:" 密文信封 ⇒ 先解密再消毒
+     * （口令缺席 / 错口令 / 密文损坏 ⇒ null，与「坏档视为无档」同语义，绝不把
+     * 密文当明文吐出；归因经可选 detail 参数给出）。旧明文档无论口令在场与否
+     * 照常读（向后兼容）。解密结果仅在内存瞬时存在，绝不回写。
      */
-    load() {
+    load(detail) {
         try {
             if (!fsFace.existsSync(this.filePath))
                 return null;
-            const parsed = sanitizeConnection(JSON.parse(fsFace.readFileSync(this.filePath, 'utf8')));
+            const raw = JSON.parse(fsFace.readFileSync(this.filePath, 'utf8'));
+            if (raw === null || typeof raw !== 'object')
+                return null;
+            const r = raw;
+            noteEncryption(detail, r.encryption); // 档案自己的申报原样回报（ΑΩ-R9）
+            const storedKey = typeof r.apiKey === 'string' ? r.apiKey : undefined;
+            if (storedKey !== undefined && storedKey.startsWith(ENC_MAGIC)) {
+                const passphrase = storePassphrase();
+                if (passphrase === undefined) {
+                    noteError(detail, '档案 apiKey 为 AES-256-GCM 密文，但 DSH_VLM_STORE_PASSPHRASE 缺席 —— 无法解密');
+                    return null;
+                }
+                const d = decryptApiKey(storedKey, passphrase);
+                if (!d.ok) {
+                    noteError(detail, d.reason);
+                    return null;
+                }
+                r.apiKey = d.plain; // 明文仅在内存瞬时存在（用完即弃，绝不回写）
+            }
+            const parsed = sanitizeConnection(r);
             if (parsed !== null)
                 tightenExistingFilePermsShared(this.filePath, permsDeps());
             return parsed;
         }
-        catch {
+        catch (e) {
+            noteError(detail, `读档失败：${errText(e)}`);
             return null;
         }
     }
@@ -184,13 +343,16 @@ export class ConnectionStore {
      * 收紧失败 ⇒ { ok:true, perms:'insecure-perms' } 诚实降级（档照写、功能不损）；
      * 写入故障 ⇒ { ok:false, error }（error 面经 redactKeyFrom 脱敏，明文 key 绝不
      * 进错误文本）且尽力清掉 tmp 残留。绝不抛异常。
+     * ΑΩ-R9：落盘内容经 serializeForDisk —— 口令在场 ⇒ apiKey 密文信封 + 元数据
+     * 'aes-256-gcm'；缺席 ⇒ 明文现状 + 'none'（诚实申报）；加密失败 ⇒ { ok:false }
+     * 拒绝落盘（绝不静默降级明文）。
      */
     save(conn) {
         const tmp = this.filePath + '.tmp';
         try {
             fsFace.mkdirSync(dirname(this.filePath), { recursive: true });
             // 创建即收紧：mode 0o600（POSIX 生效；Windows 忽略 mode —— 靠下方 icacls）
-            fsFace.writeFileSync(tmp, JSON.stringify(conn ?? null) ?? 'null', { encoding: 'utf8', mode: 0o600 });
+            fsFace.writeFileSync(tmp, serializeForDisk(conn), { encoding: 'utf8', mode: 0o600 });
             try {
                 fsFace.chmodSync(tmp, 0o600); // 极端 umask 补刀（尽力）
             }

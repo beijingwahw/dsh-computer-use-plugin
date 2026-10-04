@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ from .auth import (
 )
 from .config import AppConfig, load_config_from_env
 from .errors import ErrorKind, failure, success, unhandled_exception_middleware
+from . import executors as executors_module  # ΑΩ-R25 专属执行器生命周期
 from .hid import HidController, load_hid_config_from_env
 from .input import InputController
 from .screen import ScreenCapture
@@ -47,6 +49,44 @@ from .android import AndroidController
 # ─── 全局单例（被 create_app / shutdown 共享）───
 
 _app_state: dict = {}
+
+# ─── ΝΩ-36：JSON-lines 结构化日志（手写 ~25 行，零三方依赖）───
+# 字段名对齐 OTel 语义约定的短名形态（http.method/http.route/http.status ≡
+# http.request.method / http.route / http.response.status_code 族）—— 采集端
+# 无需 OTel SDK 即可按约定消费。输出面 = stderr 单行（与启动期 print 同一
+# 通道，uvicorn 的 stderr 捕获面不变）。
+
+_SERVICE_NAME = "dsh-physical"
+
+
+def request_log_record(
+    method: str, route: str, status: int, duration_ms: int, request_id: str,
+) -> dict:
+    """ΝΩ-36：HTTP 请求日志的字段组（纯函数 —— 单测锚点）。
+
+    ``request.id`` = X-Request-Id 回显（token 认证下为强制头；缺头/免认证
+    面诚实空串）。``ts`` = RFC3339 UTC 毫秒。
+    """
+    now = time.time()
+    return {
+        "ts": f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(now))}"
+              f".{int(now * 1000) % 1000:03d}Z",
+        "service": _SERVICE_NAME,
+        "http.method": method,
+        "http.route": route,
+        "http.status": int(status),
+        "duration_ms": int(duration_ms),
+        "request.id": request_id,
+    }
+
+
+def log_json(record: dict) -> None:
+    """ΝΩ-36：单行 JSON 写 stderr。防御式绝不抛（日志失败不得击穿请求）。"""
+    try:
+        sys.stderr.write(json.dumps(record, separators=(",", ":"), default=str) + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 —— 日志面铁律：绝不抛
+        pass
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -106,6 +146,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 )
 
             _app_state["chmod_task"] = asyncio.create_task(_chmod_when_bound())
+        # ΑΩ-R25 专属执行器隔离：启动期按 config 建四池（input/screen/device/
+        # tree，容量论证见 executors.py 头注）。eager 建池使容量错误（env 配置
+        # 非法值在 load 层已被拒）在启动日志现形，而非首请求时才暴露。
+        pool_sizes = executors_module.startup(config.executors)
+        print(
+            "[dsh-physical] dedicated executor pools started (ΑΩ-R25): "
+            f"{pool_sizes}",
+            file=sys.stderr,
+        )
         _app_state.update({
             "config": config,
             "key": key,
@@ -147,6 +196,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 audio_module.get_shared_monitor().stop()
             except Exception:  # noqa: BLE001
                 pass
+            # ΑΩ-R25 专属执行器收口：必须放在上述控制器 close 之后 —— uvc/hid
+            # 的 close 仍要向 device 池提交串口/句柄收口任务；此后
+            # shutdown(wait=False)+cancel_futures：在飞动作不等待（adb 15s
+            # 超时不得拖住下线）、排队未启动任务取消。atexit 兜底见
+            # executors.py（lifespan 未走到的异常退出路径）。
+            try:
+                executors_module.shutdown_all()
+            except Exception:  # noqa: BLE001 —— 关闭路径不得掩盖其他清理
+                pass
             shm_module.cleanup_all()
             _app_state.clear()
 
@@ -168,12 +226,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         started = time.perf_counter()
         response = await call_next(request)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        # 简单 stderr 日志（生产可换结构化日志）
-        print(
-            f"[dsh-physical] {request.method} {request.url.path} "
-            f"-> {response.status_code} ({elapsed_ms}ms)",
-            file=sys.stderr,
-        )
+        # ΝΩ-36：print → JSON-lines 结构化日志（ts/service/http.method/
+        # http.route/http.status/duration_ms/request.id 回显）
+        log_json(request_log_record(
+            request.method, request.url.path, response.status_code, elapsed_ms,
+            request.headers.get("X-Request-Id", ""),
+        ))
         return response
 
     # ─── 中间件：认证（三层纵深）───
@@ -284,6 +342,30 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         return await call_next(request)
 
+    # ─── 中间件：drain 拒新（ΝΩ-27 优雅关停）───
+    # 注册序在 auth 之后 ⇒ 执行序比 auth 更外（unhandled → drain → auth →
+    # logging）：draining 期的新请求在鉴权之前即被 503+failure 信封拒绝
+    # （不消耗 nonce、不进日志中间件、不占在飞）。/v1/shutdown 自身放行
+    # （幂等）。在飞计数（enter/leave）供 drain_and_exit 排空等待。
+    @app.middleware("http")
+    async def drain_middleware(request: Request, call_next):
+        if routes.drain_should_reject(request.url.path):
+            return JSONResponse(
+                status_code=503,
+                content=failure(
+                    ErrorKind.INTERNAL_ERROR,
+                    "service draining for shutdown: new requests rejected; "
+                    "in-flight completes within "
+                    f"{routes.SHUTDOWN_DRAIN_MAX_WAIT_S:.0f}s",
+                    latency_ms=0,
+                ),
+            )
+        routes.drain_enter()
+        try:
+            return await call_next(request)
+        finally:
+            routes.drain_leave()
+
     # ─── 中间件：兜底（最后注册 = 最外层；连 auth/logging 的异常也兜住）───
     @app.middleware("http")
     async def _unhandled(request: Request, call_next):
@@ -351,7 +433,7 @@ def run() -> None:
         # ``_chmod_when_bound`` 任务负责（uvicorn bind 后文件才出现；
         # 注意：app 已传 ``lifespan=`` ⇒ FastAPI 不再派发 on_event 处理器，
         # 此处不能再挂 startup 钩子）。
-        uvicorn.run(
+        uv_config = uvicorn.Config(
             app,
             http=_peercred_http,  # type: ignore[arg-type]
             uds=config.server.uds_path,
@@ -367,10 +449,27 @@ def run() -> None:
         else:
             host = config.server.tcp_host
 
-        uvicorn.run(
+        uv_config = uvicorn.Config(
             app,
             host=host,
             port=config.server.tcp_port,
             log_level="info",
             workers=1,
         )
+
+    # ΝΩ-27：程序化装配 Server（uvicorn.run 内部即 Config+Server+run()，
+    # workers=1 单进程形态下行为等价）—— /v1/shutdown 的退出钩子需要翻转
+    # Server.should_exit（优雅：停收新连接、等存量）或 force_exit（排空上限
+    # 已到：立即断）。翻转后 lifespan finally 链（shm 清理/UVC/HID/执行器池
+    # 收口）随 uvicorn 关停执行，进程自退 —— 不再依赖平台上并不可靠的
+    # SIGTERM（Windows 上即 TerminateProcess 硬杀，3s 优雅窗形同虚设）。
+    server = uvicorn.Server(uv_config)
+
+    def _request_exit(force: bool) -> None:
+        if force:
+            server.force_exit = True
+        else:
+            server.should_exit = True
+
+    routes.register_shutdown_hook(_request_exit)
+    server.run()

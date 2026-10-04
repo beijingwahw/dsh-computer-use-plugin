@@ -22,11 +22,14 @@ import {
 } from '../src/diagnosis.ts';
 import { failureMemory } from '../src/failureMemory.ts';
 import { telemetry } from '../src/telemetry.ts';
+import { journal } from '../src/journal.ts'; // ΑΩ-R4：GUARD_PROBE 探针审计执法面
 import type { Config } from '../src/config.ts';
 import {
   registerRootCauseGuard,
   recentRootCauseReports,
   resetRootCauseGuard,
+  rootCauseProbesSettled, // ΝΩ-2：fire-and-forget 结算的确定性等待面
+  productionRootCausePorts, // ΝΩ-2：物理探针互斥缝的受试面
 } from '../src/guards/rootCauseGuard.ts';
 
 // ─── 测试基建：假帧 / 假光标 / 假 diff / 假 ctx ───
@@ -110,6 +113,7 @@ beforeEach(() => {
   failureMemory.reset();
   resetRootCauseGuard();
   telemetry.reset();
+  journal.reset(); // ΑΩ-R4：探针审计链测试隔离
 });
 
 // ─── 1. 纯函数：三类根因的鉴别路径与证据链 ───
@@ -422,6 +426,7 @@ test('G-1: 失败分支触发归因 ⇒ 结果原样透传 + 病因入库 + 遥�
   registerRootCauseGuard(ctx, CFG, ports);
 
   const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+  await rootCauseProbesSettled(); // ΝΩ-2：探针 fire-and-forget —— 观察面结算后断言
   // 结果不改写：经 hooks 链原样透传（观察者纪律 —— 守卫的返回 = 平台 next 的返回）
   assert.deepEqual(out, FAILED_RESULT);
 
@@ -454,6 +459,7 @@ test('G-3: 探针全缺席 ⇒ unknown 兜底不写库（兜底不冒充知识�
   const ctx = fakeCtx();
   registerRootCauseGuard(ctx, CFG, {});
   const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+  await rootCauseProbesSettled(); // ΝΩ-2
   assert.deepEqual(out, FAILED_RESULT, '降级不拦截、不改写');
   const reports = recentRootCauseReports();
   assert.equal(reports[0].rootCause, 'unknown');
@@ -484,6 +490,7 @@ test('G-5: blind-spot 全链（失败 + ibeam 假光标）⇒ 病因 blind-spot-
   });
   registerRootCauseGuard(ctx, CFG, ports);
   await drivePost(ctx, exec('click_mouse', { x: 0.5, y: 0.6 }), FAILED_RESULT);
+  await rootCauseProbesSettled(); // ΝΩ-2
   assert.equal(recentRootCauseReports()[0].rootCause, 'blind-spot-text');
   assert.equal(failureMemory.matchByRootCause('blind-spot-text').length, 1);
   const rec = failureMemory.matchByRootCause('blind-spot-text')[0];
@@ -496,5 +503,216 @@ test('G-6: 报告环有界（8 条环形淘汰）', async () => {
   for (let i = 0; i < 10; i++) {
     await drivePost(ctx, exec('click_mouse', { x: 0.1 * (i % 9 + 1), y: 0.2 }), FAILED_RESULT);
   }
+  await rootCauseProbesSettled(); // ΝΩ-2
   assert.equal(recentRootCauseReports().length, 8);
+});
+
+// ─── 6. ΑΩ-R4：物理探针派发入防篡改审计链（GUARD_PROBE）───
+
+test('ΑΩ-R4: 悬停/采帧探针派发 ⇒ GUARD_PROBE 入链（守卫名+区域+三态；链不断）', async () => {
+  const ctx = fakeCtx();
+  const ports = fakePorts({
+    diff: { changed_fraction_pct: 0, identical: true },
+    cursor: { cursorKind: 'ibeam', verdict: 'text' },
+  });
+  registerRootCauseGuard(ctx, CFG, ports);
+  const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+  await rootCauseProbesSettled(); // ΝΩ-2
+  assert.deepEqual(out, FAILED_RESULT, '审计包装不改写结果（观察者纪律）');
+
+  const rows = journal.list(false).filter(e => e.tool === 'GUARD_PROBE');
+  const hover = rows.filter(e => e.args.probe === 'hover-cursor');
+  assert.equal(hover.length, 1);
+  assert.equal(hover[0].args.guard, 'rootcause', '守卫名随行');
+  assert.equal(hover[0].args.result, 'ok', '光标观察在手 ⇒ ok');
+  assert.ok(hover[0].args.point && hover[0].args.point.x === 0.4 && hover[0].args.point.y === 0.4, '脱敏参数：只记区域坐标');
+  const caps = rows.filter(e => e.args.probe === 'capture-frame');
+  assert.equal(caps.length, 1, '瀑布②：一次失败后帧（ibeam 首中即断，冻结探针不消费）');
+  assert.equal(caps[0].args.result, 'ok');
+  assert.equal(journal.verify().ok, true, '标记入哈希链，verify 不断链');
+  // 白名单隔离（与 AGENT_NOTE/AUDIT_PRE 同律）：GUARD_PROBE 不进动作重放视图
+  assert.equal(journal.list(true).some(e => e.tool === 'GUARD_PROBE'), false);
+});
+
+test('ΑΩ-R4: 采帧通道缺席（零孵化拒派的诚实缺席）⇒ result=failed 如实入链', async () => {
+  const ctx = fakeCtx();
+  const ports: RootCauseProbePorts = {
+    getBeforeFrame: async () => frame('aaa'),
+    captureFrame: async () => null, // 生产端口零孵化纪律的镜像：服务不在场 ⇒ null
+    freezeSampleGapMs: 0,
+  };
+  registerRootCauseGuard(ctx, CFG, ports);
+  await drivePost(ctx, exec('type_text', { text: 'x' }), FAILED_RESULT);
+  await rootCauseProbesSettled(); // ΝΩ-2
+  const caps = journal.list(false).filter(e => e.tool === 'GUARD_PROBE' && e.args.probe === 'capture-frame');
+  assert.ok(caps.length >= 1, '失败后帧 + 冻结探针帧的每次派发均入链');
+  assert.ok(caps.every(e => e.args.result === 'failed'), '观察缺席 ⇒ failed 三态如实');
+  assert.ok(!caps.some(e => 'text' in e.args), '脱敏纪律：无文本载荷');
+});
+
+test('ΑΩ-R4: 审计失败 ⇒ fail-open —— 悬停/采帧照跑 + audit_failed 打点 + 结果透传', async () => {
+  const ctx = fakeCtx();
+  const ports = fakePorts({
+    diff: { changed_fraction_pct: 0, identical: true },
+    cursor: { cursorKind: 'ibeam', verdict: 'text' },
+  });
+  registerRootCauseGuard(ctx, CFG, ports);
+  // 注入审计通道故障：appendMarker 一律抛（模拟磁盘满/路径权限等提交失败）
+  (journal as any).appendMarker = async () => { throw new Error('audit-channel-boom'); };
+  try {
+    const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+    await rootCauseProbesSettled(); // ΝΩ-2
+    assert.deepEqual(out, FAILED_RESULT, '结果原样透传');
+    assert.equal(ports.calls.capture, 1, '采帧探针照常执行（fail-open）');
+    assert.equal(ports.calls.probe, 1, '悬停探针照常执行');
+    assert.equal(recentRootCauseReports()[0].rootCause, 'blind-spot-text', '归因结论不受审计故障影响');
+    assert.equal(journal.list(false).filter(e => e.tool === 'GUARD_PROBE').length, 0, '失败审计零残留');
+    assert.ok(
+      telemetry.snapshot().counters.some(c => c.counter === 'rootcause:probe-audit-failed' && c.hits >= 1),
+      'audit_failed 遥测打点在册（缺席可见）',
+    );
+  } finally {
+    delete (journal as any).appendMarker; // 恢复原型方法（测试隔离）
+  }
+});
+
+test('ΑΩ-R4: 恶意注入件（属性读取即抛）⇒ 审计包装让位，既有降级语义零变化', async () => {
+  const ctx = fakeCtx();
+  const hostile: any = { freezeSampleGapMs: 0 };
+  Object.defineProperty(hostile, 'captureFrame', { get() { throw new Error('boom'); } });
+  registerRootCauseGuard(ctx, CFG, hostile);
+  const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+  await rootCauseProbesSettled(); // ΝΩ-2
+  assert.deepEqual(out, FAILED_RESULT);
+  const reports = recentRootCauseReports();
+  assert.equal(reports.length, 1, '归因兜底报告照常产出（包装失败不吞守卫 —— fail-open）');
+  assert.equal(reports[0].rootCause, 'unknown');
+  assert.equal(journal.list(false).filter(e => e.tool === 'GUARD_PROBE').length, 0, '未派发成功 ⇒ 零审计行');
+});
+
+// ─── ΝΩ-2：探针 fire-and-forget（post 链即时返回）+ 物理探针互斥 ───
+
+test('ΝΩ-2: 探针慢 ⇒ post 链立即返回（fire-and-forget）；观察面最终仍结算', async () => {
+  const ctx = fakeCtx();
+  // 假慢端口：每个物理通道延迟 60ms（冻结探针帧间隔同设 60 —— 真实计时器语义）
+  const calls = { capture: 0 };
+  const slowPorts: RootCauseProbePorts = {
+    getBeforeFrame: async () => frame('aaa'),
+    captureFrame: async () => {
+      calls.capture++;
+      await new Promise<void>(r => setTimeout(r, 60));
+      return frame(calls.capture === 1 ? 'bbb' : 'bbb', `f${calls.capture}`);
+    },
+    diffFrames: async () => ({ changed_fraction_pct: 3.5, identical: false }),
+    probePoint: async () => null,
+    freezeSampleGapMs: 60,
+  };
+  registerRootCauseGuard(ctx, CFG, slowPorts);
+
+  const t0 = Date.now();
+  const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+  const postReturnMs = Date.now() - t0;
+  // 铁律：post 链不等探针 —— 慢探针（≥120ms 的通道延迟）下 25ms 内回传
+  assert.ok(postReturnMs < 25, `post 链立即返回（实际 ${postReturnMs}ms）`);
+  assert.deepEqual(out, FAILED_RESULT, '结果原样透传（先行，不等归因）');
+  assert.equal(recentRootCauseReports().length, 0, '观察面尚未结算（探针在后台）');
+
+  await rootCauseProbesSettled(); // 观察面最终结算
+  const reports = recentRootCauseReports();
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].rootCause, 'over-strict-verification', '首中即断：diff 显著变化');
+  assert.ok(telemetry.snapshot().counters.some(c => c.counter === 'rootcause:over-strict-verification' && c.hits === 1), '遥测计数在册');
+  assert.equal(failureMemory.matchByRootCause('over-strict-verification').length, 1, '病因入库');
+  assert.ok(calls.capture >= 1, '探针真实执行过（慢而未跳过）');
+});
+
+test('ΝΩ-2: 后台结算异常 ⇒ 吞掉 + probe-settle-failed 打点（绝不悬挂/unhandled）', async () => {
+  const ctx = fakeCtx();
+  const ports = fakePorts({ diff: { changed_fraction_pct: 2.8, identical: false } });
+  registerRootCauseGuard(ctx, CFG, ports);
+  // 注入结算面故障：归因遥测计数通道抛（观察面 2 写入失败的后台路径）
+  const orig = telemetry.note;
+  (telemetry as any).note = (c: string, v: boolean) => {
+    if (c === 'rootcause:over-strict-verification') throw new Error('note-boom');
+    return orig.call(telemetry, c, v);
+  };
+  try {
+    const out = await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+    assert.deepEqual(out, FAILED_RESULT, '主流程零感知');
+    await rootCauseProbesSettled(); // 结算承诺兑现（吞异常，不悬挂不炸进程）
+    assert.ok(
+      telemetry.snapshot().counters.some(c => c.counter === 'rootcause:probe-settle-failed' && c.misses >= 1),
+      'settle 失败打点在册（缺席可见）',
+    );
+  } finally {
+    (telemetry as any).note = orig; // 恢复（测试隔离）
+  }
+});
+
+test('ΝΩ-2: reset 后迟来结算不写观察面（代际闸 —— 跨代污染防护）', async () => {
+  const ctx = fakeCtx();
+  const slowPorts: RootCauseProbePorts = {
+    getBeforeFrame: async () => frame('aaa'),
+    captureFrame: async () => {
+      await new Promise<void>(r => setTimeout(r, 80));
+      return frame('bbb');
+    },
+    diffFrames: async () => ({ changed_fraction_pct: 3.5, identical: false }),
+    freezeSampleGapMs: 0,
+  };
+  registerRootCauseGuard(ctx, CFG, slowPorts);
+  await drivePost(ctx, exec('click_mouse', { x: 0.4, y: 0.4 }), FAILED_RESULT);
+  resetRootCauseGuard(); // 探针仍在途时归零（插件卸载/测试隔离视角）
+  await new Promise<void>(r => setTimeout(r, 150)); // 等迟来结算跨过代际闸
+  assert.equal(recentRootCauseReports().length, 0, '上一代探针的迟来报告不复活观察面');
+});
+
+test('ΝΩ-2: 生产探针端口经 ioMutex 串行化 —— 物理通道各过互斥缝，纯计算通道不入队', async () => {
+  // 假互斥缝：计数 + 峰值并发（不实现排队 —— 排队语义由真件时序测试执法）
+  let enters = 0;
+  let active = 0;
+  let maxActive = 0;
+  const io = {
+    serialize: async <T,>(fn: () => Promise<T>): Promise<T> => {
+      enters++; active++; maxActive = Math.max(maxActive, active);
+      try { return await fn(); } finally { active--; }
+    },
+  };
+  const cfg = { enableInteractivityProbe: true } as unknown as Config;
+  const ports = productionRootCausePorts(cfg, io);
+  // 后端缺席（零孵化）：物理通道拒绝派发，但**派发体**已入缝（门控在临界区内）
+  assert.equal(await ports.captureFrame!(), null);
+  assert.equal(await ports.probePoint!({ x: 0.5, y: 0.5 }), null);
+  assert.equal(enters, 2, 'captureFrame + probePoint 各过一次互斥缝');
+  assert.equal(maxActive, 1, '顺序调用下峰值并发 = 1');
+  // 纯计算/会话记忆通道不是物理派发，不经互斥缝（diffFrames 喂伪像素会被
+  // sharp 拒 —— 该拒收与互斥无关，断言面是缝计数零变化）
+  await ports.getBeforeFrame!();
+  try {
+    await ports.diffFrames!(
+      { dhash: 'aaa', buffer: Buffer.from('x') },
+      { dhash: 'bbb', buffer: Buffer.from('y') },
+    );
+  } catch { /* 伪像素被真差分引擎拒绝 —— 预期内 */ }
+  assert.equal(enters, 2, 'getBeforeFrame/diffFrames 零入队');
+});
+
+test('ΝΩ-2: 生产探针与并发动作串行化 —— 真件时序（探针排在在途用户 IO 之后）', async () => {
+  const { serialize } = await import('../src/ioMutex.ts');
+  const cfg = { enableInteractivityProbe: false } as unknown as Config;
+  const ports = productionRootCausePorts(cfg); // 缺省缝 = 真 ioMutex.serialize
+  // 用户动作先占队列 40ms（与探针同一 D-1 躯体队列）
+  let userDoneAt = 0;
+  const userAction = serialize(async () => {
+    await new Promise<void>(r => setTimeout(r, 40));
+    userDoneAt = Date.now();
+  });
+  await new Promise<void>(r => setTimeout(r, 5)); // 让用户动作先入队开跑
+  const t0 = Date.now();
+  const v = await ports.captureFrame!(); // 后台采帧排队等待
+  const probeDoneAt = Date.now();
+  await userAction;
+  assert.equal(v, null, '零孵化纪律不变：后端缺席 ⇒ 诚实缺席（等待不孵服务）');
+  assert.ok(userDoneAt > 0 && probeDoneAt >= userDoneAt,
+    `探针在用户 IO 落定后才出队（probe=${probeDoneAt - t0}ms ≥ user hold 40ms）`);
 });

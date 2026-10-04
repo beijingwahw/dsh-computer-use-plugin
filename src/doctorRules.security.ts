@@ -184,30 +184,34 @@ export const DOCTOR_RULES_SECURITY: DoctorRule[] = [
     },
   },
   {
-    // W6R 审计 WAL 下限守护：MUTATING_TOOLS 是先行审计（W2-2 fail-closed 提交）
-    // 的名单面，W6R-A9 补齐后为 18 件（物理动作/绕过宿主管线/文件系统写入三族）。
+    // W6R 审计 WAL 下限守护：变更类名单是先行审计（W2-2 fail-closed 提交）的
+    // 名单面，W6R-A9 补齐后为 18 件（物理动作/绕过宿主管线/文件系统写入三族）。
     // 名单回缩 ⇒ 被删工具静默绕过派发前审计 —— 下限守护防「误删回缩」。
+    // ΑΩ-R28 锚点同步：名单已自 guards/auditGuard.ts 迁至工具装配唯一事实源
+    // tools/index.ts（MUTATING_TOOL_NAMES 单源导出，auditGuard 只读引入）——
+    // 检测语义（宣言消失 ⇒ 报警；条目数 < 下限 ⇒ 报警）逐字保持，只换锚点
+    //（W8-B3 拆分同步同法）。
     id: 'sec.audit-wal-floor', category: 'security', severity: 'major', laws: ['honest-degradation'],
-    baseWeight: 1.5, tags: ['security'], description: 'W6R 审计 WAL 下限：auditGuard 的 MUTATING_TOOLS 名单长度须达下限（W6R-A9 补齐后的 18 件 —— 防误删回缩绕过先行审计）',
+    baseWeight: 1.5, tags: ['security'], description: 'W6R 审计 WAL 下限：tools/index.ts 的 MUTATING_TOOL_NAMES 名单长度须达下限（W6R-A9 补齐后的 18 件 —— 防误删回缩绕过先行审计）',
     async scan(ctx) {
-      const f = ctx.sources.find(s => s.path.endsWith('guards/auditGuard.ts'));
+      const f = ctx.sources.find(s => s.path.endsWith('tools/index.ts'));
       if (!f) return [];
       const text = f.content;
-      const start = text.indexOf('MUTATING_TOOLS');
+      const start = text.indexOf('MUTATING_TOOL_NAMES');
       const declLine = Math.max(1, lines(text.slice(0, start)).length);
       if (start < 0) {
-        return [finding(this, 'structural', f.path, 1, 'MUTATING_TOOLS',
-          'the MUTATING_TOOLS declaration is gone from auditGuard.ts — pre-dispatch audit WAL may no longer gate any tool',
-          'Restore the mutating-tool set (see the W6R-A9 families annotation in auditGuard.ts).')];
+        return [finding(this, 'structural', f.path, 1, 'MUTATING_TOOL_NAMES',
+          'the MUTATING_TOOL_NAMES declaration is gone from tools/index.ts — pre-dispatch audit WAL may no longer gate any tool',
+          'Restore the mutating-tool set (see the W6R-A9 families annotation in src/tools/index.ts).')];
       }
       const end = text.indexOf('])', start);
       const block = text.slice(start, end < 0 ? undefined : end);
       const count = [...block.matchAll(/'([A-Za-z0-9_]+)'/g)].length;
       const FLOOR = 18; // W6R-A9 补齐后的名单下限（具名常量 —— 防规则自身触雷 magic-number）
       if (count >= FLOOR) return [];
-      return [finding(this, 'structural', f.path, declLine, `MUTATING_TOOLS = new Set([ … ${count} entries ])`,
+      return [finding(this, 'structural', f.path, declLine, `MUTATING_TOOL_NAMES = new Set([ … ${count} entries ])`,
         `pre-dispatch audit WAL covers only ${count} mutating tools — below the W6R-A9 floor of ${FLOOR}; any dropped tool dispatches without an audit trail`,
-        `Re-add the dropped mutating tools — physical action family, host-pipeline-bypassing batches, and filesystem-write family (W6R-A9 annotation in auditGuard.ts).`)];
+        `Re-add the dropped mutating tools — physical action family, host-pipeline-bypassing batches, and filesystem-write family (W6R-A9 annotation in src/tools/index.ts).`)];
     },
   },
 ];

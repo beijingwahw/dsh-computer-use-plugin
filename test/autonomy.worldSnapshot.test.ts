@@ -2,6 +2,8 @@
 // 纪元 Φ（Φ-2 自主识别中枢）：执法册 —— 双源融合数值（借 vlm/arbitration 真实现造已知输入）/
 // interactive 三态 / 零源降级清单 / snapshotChanged 五案（null/同指/距 3/距 4/数量突变）/
 // findInSnapshot 双向子串+排序+limit / 边界与纯度。纯离线，零网络零 sharp。
+// ΝΩ-14 追册：role 回填防御（arbitrationRoleAt 次序错乱执法）/ notes 注记面 /
+// 感知变化门控（createPerceive 屏未变 ⇒ groundVlm 零拨 + 'vlm-reused-unchanged'）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -291,4 +293,178 @@ test('Φ-2-8: 边界与纯度 —— 脏输入不抛异常、空检索安全、�
   assert.ok(!/\brequire\s*\(/.test(src), '零 require')
   assert.ok(!/export\s+default/.test(src), '禁止 default export')
   assert.ok(!/\bfrom\s+['"]sharp['"]|node:(http|https|net|tls|dgram)|\bfetch\s*\(/.test(src), '零图像/网络依赖')
+})
+
+// ─── ΝΩ-14-a role 回填防御（次序错乱仲裁输出的执法） ───
+
+test('ΝΩ-14-a: arbitrationRoleAt —— 契约位照旧回填；错配位（vlm 区混入 local 源）防御回退 unknown；脏输入不抛', async () => {
+  const { arbitrationRoleAt } = await import('../src/autonomy/worldSnapshot.ts')
+  const vlm = [ge('e1', '登录', 'button', [0, 0, 50, 20], 0.9), ge('e2', '设置', 'link', [0, 30, 50, 50], 0.8)]
+  // 契约位：前 vlmList.length 位 source ∈ {vlm, fusion} ⇒ 照旧按位置回填 vlm 角色
+  assert.equal(arbitrationRoleAt(vlm, 0, 'vlm'), 'button')
+  assert.equal(arbitrationRoleAt(vlm, 1, 'fusion'), 'link')
+  // 错配位（次序错乱的仲裁输出）：vlm 序位置冒出 local 源 ⇒ 不按位置错配回填
+  assert.equal(arbitrationRoleAt(vlm, 0, 'local'), 'unknown', '位置 0 属 vlm 序但 source=local ⇒ unknown')
+  assert.equal(arbitrationRoleAt(vlm, 1, 'local'), 'unknown', '位置 1 属 vlm 序但 source=local ⇒ unknown')
+  // 殿后区（i ≥ vlm 序长）：契约位（local）与错配位（vlm/fusion 源越界压尾）同律 unknown
+  assert.equal(arbitrationRoleAt(vlm, 2, 'local'), 'unknown')
+  assert.equal(arbitrationRoleAt(vlm, 2, 'vlm'), 'unknown')
+  // 越界 / 非整数 / 脏 vlm 表：全部安全收敛，绝不抛
+  assert.equal(arbitrationRoleAt(vlm, -1, 'vlm'), 'unknown')
+  assert.equal(arbitrationRoleAt(vlm, 99, 'fusion'), 'unknown')
+  assert.equal(arbitrationRoleAt(vlm, 1.5, 'fusion'), 'unknown')
+  assert.equal(arbitrationRoleAt([], 0, 'vlm'), 'unknown')
+  assert.doesNotThrow(() => arbitrationRoleAt(null as unknown as Parameters<typeof arbitrationRoleAt>[0], 0, 'vlm'))
+  assert.equal(arbitrationRoleAt(null as unknown as Parameters<typeof arbitrationRoleAt>[0], 0, 'vlm'), 'unknown')
+  // 角色卫兵仍由 roleOr 执法：空串/非串角色 ⇒ unknown
+  assert.equal(arbitrationRoleAt([ge('e9', '无角', '', [0, 0, 1, 1], 0.5)], 0, 'vlm'), 'unknown')
+  assert.equal(
+    arbitrationRoleAt([{ ...ge('e8', 'x', 'button', [0, 0, 1, 1], 0.5), role: 42 as unknown as string }], 0, 'vlm'),
+    'unknown',
+    '非串角色 ⇒ unknown',
+  )
+})
+
+// ─── ΝΩ-14-b notes 注记面 ───
+
+test('ΝΩ-14-b: notes 注记 —— 去空串/弃非串透传、缺省 []、不污染 degraded（复用是节流不是降级）', async () => {
+  const { composeSnapshot } = await import('../src/autonomy/worldSnapshot.ts')
+  const withNotes = composeSnapshot({
+    width: 1,
+    height: 1,
+    dhash: 'ab',
+    ocrText: 'x',
+    vlmElements: [ge('e1', 'x', 'icon', [0, 0, 5, 5], 0.5)],
+    notes: ['vlm-reused-unchanged', '', 42 as unknown as string],
+    now: 1,
+  })
+  assert.deepEqual(withNotes.notes, ['vlm-reused-unchanged'], '注记去空串/弃非串')
+  assert.deepEqual(withNotes.degraded, [], '申报不占 degraded —— 证据缺席语义零污染')
+  assert.deepEqual(composeSnapshot({ width: 1, height: 1, dhash: 'ab', ocrText: 'x', now: 2 }).notes, [], '缺省空注记')
+  assert.deepEqual(composeSnapshot({ width: 1, height: 1, dhash: 'ab', ocrText: 'x', notes: [] as string[], now: 3 }).notes, [], '空数组注记 ⇒ []')
+  assert.deepEqual(composeSnapshot({ width: 1, height: 1, dhash: 'ab', ocrText: 'x', notes: ['  '] as string[], now: 4 }).notes, ['  '], '与 popups 同律：只去空串、不去空白（机器生成 token，不做 trim 猜测）')
+})
+
+// ─── ΝΩ-14-c/d/e/f 感知变化门控（createPerceive：屏未变 ⇒ groundVlm 零拨） ───
+
+/** GLM 环境隔离（与 sceneSemantics.test Φ-6-2 同律）：清键 + 清单例 ⇒ 场景语义读屏零网络降级 */
+async function withOfflineGlm<T>(fn: () => Promise<T>): Promise<T> {
+  const { resetGlmClient } = await import('../src/vlm/glmClient.ts')
+  const keys = ['GLM_API_KEY', 'ZHIPUAI_API_KEY', 'ZAI_API_KEY'] as const
+  const saved = keys.map(k => [k, process.env[k]] as const)
+  try {
+    for (const k of keys) delete process.env[k]
+    resetGlmClient()
+    return await fn()
+  } finally {
+    for (const [k, v] of saved) { if (v !== undefined) process.env[k] = v }
+    resetGlmClient()
+  }
+}
+
+test('ΝΩ-14-c: 屏未变 ⇒ 第二帧 groundVlm 零拨 + vlm-reused-unchanged 注记；OCR 照跑、元素账一致', async () => {
+  await withOfflineGlm(async () => {
+    const { createPerceive } = await import('../src/autonomy/runtime.perceive.ts')
+    const ground = [ge('g1', '登录', 'button', [0, 0, 100, 40], 0.9), ge('g2', '帮助', 'link', [0, 60, 100, 90], 0.7)]
+    let groundCalls = 0
+    let ocrCalls = 0
+    let t = 1000
+    const perceive = createPerceive({
+      capture: async () => Buffer.from('frame-static'),
+      imageSize: async () => ({ width: 800, height: 600 }),
+      dhashOf: async () => 'ab'.repeat(16),
+      readWords: async () => { ocrCalls++; return [le('登录', [0, 0, 100, 40], 0.8)] },
+      groundVlm: async () => { groundCalls++; return ground.map(g => ({ ...g })) },
+      now: () => t,
+    })
+    const snap1 = await perceive()
+    assert.equal(groundCalls, 1, '首轮 prev 不可得 ⇒ 照旧全价接地')
+    assert.deepEqual(snap1.notes, [], '首轮无复用 ⇒ 无注记')
+    t = 2500
+    const snap2 = await perceive()
+    assert.equal(groundCalls, 1, '屏未变（同指纹同元素数）⇒ 复用上帧 vlm 元素，groundVlm 零拨')
+    assert.equal(ocrCalls, 2, 'OCR 便宜本地 ⇒ 每帧照跑')
+    assert.deepEqual(snap2.notes, ['vlm-reused-unchanged'], '门控决策诚实申报')
+    assert.deepEqual(snap2.elements, snap1.elements, '复用帧元素账与上帧一致')
+    assert.deepEqual(snap2.degraded, snap1.degraded, '降级清单不因复用而变')
+    // 第三帧连写：门控状态跨帧持续（上帧仍是复用帧的 before）
+    const snap3 = await perceive()
+    assert.equal(groundCalls, 1, '连续静屏 ⇒ 持续零拨')
+    assert.ok(snap3.notes?.includes('vlm-reused-unchanged'))
+  })
+})
+
+test('ΝΩ-14-d: 屏变（dhash 距离 4 > 容差 3）⇒ 照旧重拨 groundVlm、新元素入账、无复用注记', async () => {
+  await withOfflineGlm(async () => {
+    const { createPerceive } = await import('../src/autonomy/runtime.perceive.ts')
+    let flip = 0
+    let groundCalls = 0
+    const frames = [
+      [ge('g1', '登录', 'button', [0, 0, 100, 40], 0.9)],
+      [ge('g9', '购物车', 'button', [10, 10, 120, 60], 0.85)],
+    ]
+    const perceive = createPerceive({
+      capture: async () => Buffer.from('frame-move'),
+      imageSize: async () => ({ width: 800, height: 600 }),
+      dhashOf: async () => (flip++ === 0 ? '0'.repeat(16) : 'f' + '0'.repeat(15)), // 汉明距离 4
+      readWords: async () => [],
+      groundVlm: async () => { groundCalls++; return frames[Math.min(groundCalls - 1, frames.length - 1)].map(g => ({ ...g })) },
+      now: () => 1000,
+    })
+    await perceive()
+    const snap2 = await perceive()
+    assert.equal(groundCalls, 2, '屏变 ⇒ 照旧全价重拨')
+    assert.deepEqual(snap2.notes, [], '无复用 ⇒ 无注记')
+    assert.deepEqual(snap2.elements.map(e => e.label), ['购物车'], '新帧元素来自新接地（非上帧复用）')
+  })
+})
+
+test('ΝΩ-14-e: 上帧 groundVlm 空 ⇒ 无产物可复用，屏未变也照旧全价重拨（不给降级帧续命）', async () => {
+  await withOfflineGlm(async () => {
+    const { createPerceive } = await import('../src/autonomy/runtime.perceive.ts')
+    let groundCalls = 0
+    const perceive = createPerceive({
+      capture: async () => Buffer.from('frame-empty'),
+      imageSize: async () => ({ width: 800, height: 600 }),
+      dhashOf: async () => 'cd'.repeat(16),
+      readWords: async () => [],
+      groundVlm: async () => { groundCalls++; return groundCalls === 1 ? [] : [ge('g1', '登录', 'button', [0, 0, 100, 40], 0.9)] },
+      now: () => 1000,
+    })
+    const snap1 = await perceive()
+    assert.ok(snap1.degraded.includes('elements'), '首帧零元素 ⇒ 诚实记降级')
+    const snap2 = await perceive()
+    assert.equal(groundCalls, 2, '上帧 VLM 空 ⇒ 门控缺席，屏未变也重拨')
+    assert.deepEqual(snap2.notes, [], '无复用注记')
+    assert.equal(snap2.elements.length, 1, '次帧恢复全价感知')
+  })
+})
+
+test('ΝΩ-14-f: 同指纹但 OCR 元素数突变（>30%）⇒ 结构闸开 ⇒ 重拨（双闸后闸执法）', async () => {
+  await withOfflineGlm(async () => {
+    const { createPerceive } = await import('../src/autonomy/runtime.perceive.ts')
+    let frame = 0
+    let groundCalls = 0
+    const ground = [ge('g1', '登录', 'button', [0, 0, 100, 40], 0.9), ge('g2', '帮助', 'link', [0, 60, 100, 90], 0.7)]
+    const perceive = createPerceive({
+      capture: async () => Buffer.from('frame-burst'),
+      imageSize: async () => ({ width: 800, height: 600 }),
+      dhashOf: async () => 'ef'.repeat(16), // 指纹恒定 ⇒ 像素闸关
+      readWords: async () => {
+        if (frame++ === 0) return [le('登录', [0, 0, 100, 40], 0.8)] // 2 元素（1 融合 + 1 vlm 单源）
+        return [
+          le('登录', [0, 0, 100, 40], 0.8), // 与 g1 融合
+          ...Array.from({ length: 9 }, (_, i) => le(`项${i}`, [200, i * 20, 260, i * 20 + 15], 0.8)), // 9 个远端本地单源
+        ] // 2 + 9 = 11 元素：|11-2|×10=90 > 3×11=33 ⇒ 结构性变化
+      },
+      groundVlm: async () => { groundCalls++; return ground.map(g => ({ ...g })) },
+      now: () => 1000,
+    })
+    const snap1 = await perceive()
+    assert.equal(snap1.elements.length, 2, '首帧：1 融合 + 1 vlm 单源')
+    const snap2 = await perceive()
+    assert.equal(groundCalls, 2, '指纹未变但元素数突变 ⇒ 门开重拨')
+    assert.deepEqual(snap2.notes, [], '无复用注记')
+    assert.equal(snap2.elements.length, 11, '新帧全元素入账（2 vlm 序 + 9 本地殿后）')
+  })
 })

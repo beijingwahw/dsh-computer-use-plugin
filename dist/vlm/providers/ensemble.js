@@ -98,7 +98,11 @@ function clusterBySimilarity(texts, threshold = CLUSTER_THRESHOLD) {
         .map(g => g.sort((a, b) => a - b))
         .sort((a, b) => b.length - a.length || a[0] - b[0]);
 }
-// ─── 云脑合议庭 ───
+/** 预算闸数值整形：非有限/非正/非整数 ⇒ undefined（缺席 = 不设限） */
+function sanitizeLimit(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 && Math.floor(n) === n ? n : undefined;
+}
 /**
  * 云脑合议庭 —— ensemble quorum 的执行面。
  *
@@ -108,8 +112,19 @@ function clusterBySimilarity(texts, threshold = CLUSTER_THRESHOLD) {
  */
 export class EnsembleCourt {
     roster;
-    /** @param providers 庭员名单（index 0 = 座长席；垃圾与重复条目安静剔除） */
-    constructor(providers) {
+    /** ΑΩ-R35：成本闸 —— 并行席上限与庭级拨号预算（缺省双双缺席 = 全量并问） */
+    maxParallel;
+    maxSessionCalls;
+    /** ΑΩ-R35：庭生命周期已拨号次数（预算闸的记账面） */
+    sessionCalls = 0;
+    /** ΝΩ-47：askElements 折叠置信模式（脏值安静归 'classic'） */
+    fuseMode;
+    /**
+     * @param providers 庭员名单（index 0 = 座长席；垃圾与重复条目安静剔除）
+     * @param options ΑΩ-R35 成本闸（maxParallel / maxSessionCalls）+ ΝΩ-47 fuseMode
+     *   （脏值均安静忽略）
+     */
+    constructor(providers, options) {
         const roster = [];
         const seen = new Set();
         const source = Array.isArray(providers) ? providers : [];
@@ -125,6 +140,11 @@ export class EnsembleCourt {
             catch { /* 垃圾条目静默剔除 */ }
         }
         this.roster = roster;
+        // ΑΩ-R35：成本闸选项整形（脏值安静缺席，绝不抛）
+        this.maxParallel = sanitizeLimit(options?.maxParallel);
+        this.maxSessionCalls = sanitizeLimit(options?.maxSessionCalls);
+        // ΝΩ-47：融合模式整形（仅 'loglinear' 字面量生效，其余安静归缺省）
+        this.fuseMode = options?.fuseMode === 'loglinear' ? 'loglinear' : 'classic';
     }
     /** 庭员数（垃圾/重复条目已剔除后） */
     get size() {
@@ -147,6 +167,11 @@ export class EnsembleCourt {
      * useJson 路径走 chatJson（延迟由本庭实测记账 —— chatJson 结果不含 latencyMs），
      * 成功时解析值随行返回；chat 路径优先采信结果自带的 latencyMs。
      * 返回序 = 座次序；本方法自身也绝不抛（理论兜底条目记 'ensemble' 归因）。
+     * ΑΩ-R35（成本闸）：拨号前过闸 —— 单问并行席（maxParallel）或庭级拨号预算
+     *（maxSessionCalls）任一耗尽 ⇒ 该成员零拨号、普查记 skipped-due-budget 条目
+     *（诚实透传，绝不静默丢席）；缺省无闸 = 全量并问（既往行为逐字节不变）。
+     * 闸门在座次序上顺序判定（async 体至首个 await 前同步执行）⇒ 占席者确定
+     * 且可审计（座次序在前者先占）。
      */
     async askAll(req, useJson, system, prompt) {
         const chatReq = {
@@ -158,12 +183,23 @@ export class EnsembleCourt {
             jsonMode: useJson || req?.jsonMode === true,
             timeoutMs: req?.timeoutMs,
         };
+        let dialedThisQuestion = 0; // ΑΩ-R35：单问并行席计数（座次序占席）
         const jobs = this.roster.map(async (p) => {
             const t0 = Date.now();
             try {
                 if (p.configured !== true) {
                     return { result: { id: p.id, ok: false, text: '', latencyMs: 0, error: `${p.id} not configured` } };
                 }
+                // ΑΩ-R35：成本闸 —— 未配置席不占预算；超席/预算尽 ⇒ 零拨号诚实记账
+                if ((this.maxParallel !== undefined && dialedThisQuestion >= this.maxParallel)
+                    || (this.maxSessionCalls !== undefined && this.sessionCalls >= this.maxSessionCalls)) {
+                    const why = this.maxSessionCalls !== undefined && this.sessionCalls >= this.maxSessionCalls
+                        ? `session call budget exhausted (${this.sessionCalls}/${this.maxSessionCalls})`
+                        : `maxParallel ${this.maxParallel} reached`;
+                    return { result: { id: p.id, ok: false, text: '', latencyMs: 0, error: `${p.id} skipped due to budget: ${why}` } };
+                }
+                dialedThisQuestion++;
+                this.sessionCalls++;
                 if (useJson) {
                     const r = await p.chatJson(chatReq);
                     const latencyMs = Date.now() - t0;
@@ -354,7 +390,13 @@ export class EnsembleCourt {
                 return { elements: [], fusedFrom: 0 };
             let acc = collections[0];
             for (let i = 1; i < collections.length; i++) {
-                acc = fusePair(acc, collections[i]);
+                // ΝΩ-47：累进折叠携已折家数（acc 已含 i 家 + 右席 1 家 = i+1）——
+                // classic 模式下 foldedFamilies 被忽略（零行为变化）；loglinear 模式
+                // 下作加成衰减因子 bonus/√(i+1)（有界累积，见 arbitration.ts 论证）。
+                acc = fusePair(acc, collections[i], {
+                    fuseMode: this.fuseMode,
+                    foldedFamilies: i + 1,
+                });
             }
             return { elements: acc, fusedFrom: collections.length };
         }
@@ -423,7 +465,13 @@ export function createEnsembleCourt(opts) {
                 continue; // 无钥且非本机免钥 —— 不占席
             providers.push(castProvider(r.preset, r.apiKey, r.baseUrl, r.model, o.fetchImpl));
         }
-        return new EnsembleCourt(providers);
+        // ΑΩ-R35：成本闸透传（脏值由庭构造期整形为缺席 —— 不抛铁律）；
+        // ΝΩ-47：融合模式透传（脏值安静归 'classic'）。
+        return new EnsembleCourt(providers, {
+            ...(o.maxParallel !== undefined ? { maxParallel: o.maxParallel } : {}),
+            ...(o.maxSessionCalls !== undefined ? { maxSessionCalls: o.maxSessionCalls } : {}),
+            ...(o.fuseMode !== undefined ? { fuseMode: o.fuseMode } : {}),
+        });
     }
     catch {
         // 铸造面意外故障 —— 空庭兜底（绝不抛）

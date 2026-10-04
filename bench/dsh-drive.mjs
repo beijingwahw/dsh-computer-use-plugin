@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// DSH 测试驱动：通过 127.0.0.1:3080 的 /api/<method> RPC 通道驱动 DSH 会话。
+// DSH 测试驱动：通过 DSH 服务的 /api/<method> RPC 通道驱动会话。
+// ΑΩ-R30:端点改读 bench/config.mjs —— DSH_BENCH_ENDPOINT 覆盖(缺省 http://127.0.0.1:3080)。
 // 用法:
 //   node dsh-drive.mjs new <name>                 创建会话
 //   node dsh-drive.mjs send <sessionId> <text>    发送任务并等待完成
@@ -8,7 +9,9 @@
 //   node dsh-drive.mjs running <sessionId>        查询运行状态
 //   node dsh-drive.mjs cancel <sessionId>         取消当前轮
 
-const BASE = 'http://127.0.0.1:3080/api/';
+import { config } from './config.mjs';
+
+const BASE = config.apiBase; // ΑΩ-R30:原硬编码 'http://127.0.0.1:3080/api/' 外提至配置
 
 async function rpc(method, payload) {
   const r = await fetch(BASE + method, {

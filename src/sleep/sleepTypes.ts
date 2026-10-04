@@ -158,12 +158,15 @@ export interface SleepDeps {
    */
   memoryOpsConverger?: () => MemoryOpsConvergenceReport;
   /**
-   * W5-2（M4 优先经验反事实梦回放）：第①幕复合幕的梦面 —— 高优先失败轨迹在
-   * PCG 同构世界重放。集成契约：组合根投 `dream: { failures: () =>
-   * failureMemory.dump().records, evolution: <生产 EXP4 面>, spectrum:
-   * surpriseSpectrum(生产 worldModel) }`；测试投假件。缺席 ⇒ 零行为变化
-   * （六幕零漂移）；在场但无失败轨迹 ⇒ 诚实跳过并注记。evolution 面只读消费
-   * greedyArm/armProbabilities（重放不采样铁律），双写走 ingest 带 bandit 标注。
+   * W5-2（M4 优先经验反事实梦回放 → ΝΩ-34 移序）：梦面 —— 高优先失败轨迹在
+   * PCG 同构世界重放；由 audit 之后 report 之前的**迟到梦幕**演出（维护四幕先
+   * 吃预算 —— 移序立法；counts/detail 账面归属第①幕回放条目）。集成契约：
+   * 组合根投 `dream: { failures: () => failureMemory.dump().records, evolution:
+   * <生产 EXP4 面>, spectrum: surpriseSpectrum(生产 worldModel) }`；测试投假件。
+   * 缺席 ⇒ 零行为变化（六幕零漂移）；在场但无失败轨迹 ⇒ 诚实跳过并注记。
+   * evolution 面只读消费 greedyArm/armProbabilities（重放不采样铁律），双写走
+   * ingest 带 bandit 标注；ΝΩ-34：可选 heuristics 读数作梦水位线的策略指纹
+   *（缺席回落 kernel generation 计数 —— 策略显著进化 ⇒ 同失败集允许重梦）。
    */
   dream?: SleepDreamDeps;
   log?: (msg: string) => void;

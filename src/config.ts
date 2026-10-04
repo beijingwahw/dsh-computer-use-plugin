@@ -147,8 +147,6 @@ export interface Config {
   intentVerify: boolean;
   /** C-1 物理规则启用清单（逗号分隔）；空 = 全部启用 */
   physicsRules: string;
-  /** C-2 语义技能匹配：向量化嵌入零样本泛化（零依赖，纯 CPU 微秒级） */
-  enableSemanticMatch: boolean;
   /** C-2 DNA 重组：match_skill 未命中时自动尝试基因拼接合成新技能 */
   enableRecombination: boolean;
   /** C-4 认知焦点：显著度驱动驱逐 + 核心目标钉扎（关 = 纯 FIFO 回归） */
@@ -175,8 +173,6 @@ export interface Config {
   // ─── 第四维（D-2）：环境重塑 —— 改变世界的权力与复原世界的义务对称 ───
   /** 启用环境重塑（shape_environment 工具：capabilities/apply/restore/undo_log） */
   enableEnvironmentShaper: boolean;
-  /** 工作台预设链（如 'raise,maximize'）；空 = 无前置整理 */
-  shaperPresets: string;
   /** 卸载/任务终结时自动 restoreAll（造物主的第一美德是复原） */
   shaperAutoRestore: boolean;
   /** 系统级动作闸门（set_contrast 等高影响操作默认禁用） */
@@ -444,7 +440,6 @@ export const Config: Schema<Config> = Schema.object({
   // ─── 认知升维（C-1~C-5） ───
   intentVerify: Schema.boolean().default(true).description('Intent-aware verification: actions may carry expected_effect; a physics rule engine then seeks evidence (no expectation = zero behavior change)'),
   physicsRules: Schema.string().default('').description('Comma-separated physics-rule kinds to enable (toggle_on,toggle_off,menu_expand,menu_collapse,scroll_content_up,scroll_content_down,input_focus); empty = all'),
-  enableSemanticMatch: Schema.boolean().default(true).description('Semantic skill matching via zero-dependency subword-hash embeddings (zero-shot generalization)'),
   enableRecombination: Schema.boolean().default(true).description('Skill DNA recombination: synthesize new skills from gene segments when match_skill finds nothing'),
   salienceFocus: Schema.boolean().default(true).description('Cognitive-focus engine: salience-driven eviction + task-goal pinning (off = plain FIFO)'),
   pinBudget: Schema.number().default(1).description('Max pinned screenshots (prevents pin-everything from breaking the dual budget)'),
@@ -459,7 +454,6 @@ export const Config: Schema<Config> = Schema.object({
   agentRoundSteps: Schema.number().default(10).description('Per-agent action-step budget reminder line (surface via swarm_dispatch status)'),
   // ─── 第四维（D-2） ───
   enableEnvironmentShaper: Schema.boolean().default(true).description('Environment shaping: reshape the workspace (raise/maximize/move/zoom) with a LIFO undo log; zero behavior when capability set is empty'),
-  shaperPresets: Schema.string().default('').description('Workspace preset chain applied via shape_environment, e.g. "raise,maximize"; empty = none'),
   shaperAutoRestore: Schema.boolean().default(true).description('Auto restoreAll on unload — the power to change the world comes with the duty to restore it'),
   shaperAllowSystemWide: Schema.boolean().default(false).description('Gate for system-wide changes (set_contrast); disabled by default'),
   // ─── 第四维（D-3） ───

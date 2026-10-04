@@ -10,11 +10,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { GlmClient, GlmVisionRequest } from '../src/vlm/glmClient.ts';
+import { kernelRegistry } from '../src/kernel/registry.ts';
 
 const {
   groundElements,
   resetVerifyGateBudget,
   _overrideZoomSharpResolver_forTest,
+  _resetGroundingCache_forTest,
 } = await import('../src/vlm/grounding.ts');
 const { default: sharp } = await import('sharp');
 
@@ -435,4 +437,43 @@ test('W1-8k2: label 为兜底串「未知元素」⇒ 无文字身份，诚实 t
   assert.equal(r.elements[0]!.confidence, 0.5, '不奖不惩');
   assert.deepEqual(r.elements[0]!.bbox, { x0: 80, y0: 60, x1: 120, y1: 90 });
   assert.equal(port.calls.length, 2, '复核 grounding + OCR 各一次（文字裁决需 OCR 在场）');
+});
+
+// ─── ΝΩ-48（同屏语义缓存 × 复核闸）：记账型结果不入缓存 ───
+
+test('ΝΩ-48: 复核事件型结果不入同屏缓存 —— 同屏同问重复调用照常走全管线、预算照常累计', async () => {
+  // 复核事件（真实下发了 Zoom 复核/消耗了任务预算/可能就地改写元素）的结果带
+  // 会话状态：回放既不重扣预算也不重跑复核 = 账实不符 ⇒ 豁免入缓存。这同时
+  // 保住 W3-B②/W8-B2 家族的「预算跨调用累计」契约（逐字节零回归）。
+  // 注：缓存内核键就地铸入（生产由宿主 src/index.ts 注册开启，缺省未注册 = 关）。
+  kernelRegistry.register({
+    key: 'grounding.semanticCache', organ: 'perception',
+    defaultValue: 1, min: 0, max: 1, note: 'ΝΩ-48 测试注册（生产缺省未注册 = 关）',
+  });
+  try {
+    resetVerifyGateBudget();
+    _resetGroundingCache_forTest();
+    const buf = await makePng(SCREEN_W, SCREEN_H);
+    const main = fakeClient(() => ({
+      ok: true, raw: '',
+      value: { elements: [el('甲', [20, 20, 80, 70], 0.4)] }, // conf 0.4 ⇒ 必触发复核
+    }));
+    const port = fakeVerifyPort(
+      () => ({ ok: false, error: 'down', raw: '' }),
+      () => ocrWords([]),
+    );
+    const opts = { client: main.client, verifyClient: port.client } as const;
+    const r1 = await groundElements(buf, opts); // 预算 1
+    assert.equal(r1.note, undefined);
+    assert.equal(r1.verifyGate!.budgetUsed, 1);
+    // 同屏 + 同 question（都未传）+ 同脑：若事件型结果被缓存，此处将回放 budget 1
+    const r2 = await groundElements(buf, opts);
+    assert.equal(r2.note, undefined, '复核事件型结果不入缓存 ⇒ 无命中注记');
+    assert.equal(r2.verifyGate!.budgetUsed, 2, '预算照常跨调用累计（历史语义零回归）');
+    assert.equal(main.requests.length, 2, '每次都真实走全管线（主定位不被缓存劫持）');
+    assert.equal(port.calls.length, 2, '复核流量照常下发');
+  } finally {
+    kernelRegistry.reset(); // 测试隔离：注册表复位（生产缺省 = 未注册 = 关）
+    _resetGroundingCache_forTest();
+  }
 });

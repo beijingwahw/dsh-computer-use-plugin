@@ -188,6 +188,43 @@ export class VlmRateLimiter {
     this.stamps.push(t);
     return { allowed: true, retryAfterMs: 0 };
   }
+
+  /**
+   * ΝΩ-18（限流器接线）：服务端 429 回填 —— 把一次服务端限流终败记作本地已用
+   * 配额（服务端已用事实证明本方超速，本地桶据此收紧：回填后下一次 tryAcquire
+   * 被拒并给出诚实 retryAfterMs，而非再烧一次真实 429 往返），并返回回填后到
+   * 最近可获批边界的毫秒数（提示面：错误 note 消费；桶未满 ⇒ 0）。入账戳 = t
+   * （当次调用时刻 —— 与 tryAcquire 获批同形），绝不抛异常。
+   */
+  recordServer429(now?: number): number {
+    const t = Number.isFinite(now) ? (now as number) : Date.now();
+    this.stamps.push(t);
+    // 回填后的等待提示（与 tryAcquire 同式的双桶边界推演，不二次入账）
+    let minuteCount = 0, hourCount = 0;
+    let minuteOldest = Infinity, hourOldest = Infinity;
+    const kept: number[] = [];
+    for (const s of this.stamps) {
+      if (!(s > t - HOUR_MS)) continue;
+      kept.push(s);
+      hourCount++;
+      if (s < hourOldest) hourOldest = s;
+      if (s > t - MINUTE_MS) {
+        minuteCount++;
+        if (s < minuteOldest) minuteOldest = s;
+      }
+    }
+    this.stamps = kept;
+    let wait = 0;
+    if (minuteCount >= this.maxPerMinute) {
+      const boundary = Number.isFinite(minuteOldest) ? minuteOldest + MINUTE_MS : t + MINUTE_MS;
+      wait = Math.max(wait, boundary - t);
+    }
+    if (hourCount >= this.maxPerHour) {
+      const boundary = Number.isFinite(hourOldest) ? hourOldest + HOUR_MS : t + HOUR_MS;
+      wait = Math.max(wait, boundary - t);
+    }
+    return wait;
+  }
 }
 
 // ─── 熔断：连续失败计数 + 冷却期 ───
@@ -238,8 +275,30 @@ export class VlmApiBreaker {
   /** 一次失败：连败 +1，越阈 ⇒ open；open 态失败 ⇒ 冷却期重燃（自此刻重新起算） */
   onFailure(now?: number): void {
     const t = Number.isFinite(now) ? (now as number) : Date.now();
+    this.fail(t, 1);
+  }
+
+  /**
+   * ΝΩ-18（熔断剥壳半权）：结构化路径 JSON 剥壳失败 —— 记 **0.5 权**失败。
+   *
+   * 半权 vs 不计的取舍论证（工单要求二选一并论证）：选**半权**。
+   *   - 不计（剥壳失败完全不动熔断器）会让「持续坏 JSON 的脑」在结构化路径永远
+   *     不被熔断：每次都真实拨号花费 token 后才发现不可用，chatJson 调用方持续
+   *     拿失败，熔断器对这类服务质量劣化完全失明；
+   *   - 计全权又会把「传输面健康、只是 JSON 不规」的脑与网络病脑同速熔断 ——
+   *     误熔断好脑（chat() 明明还能用，池却把它整行跳过）。
+   *   - 半权 = 阈值 N 的脑需要 2N 次剥壳失败才 open（且任何一次真成功清零）：
+   *     质量劣化要持续两倍久才触发熔断，方向与幅度都温和 —— 两个诚实之间的折中。
+   */
+  onExtractionFailure(now?: number): void {
+    const t = Number.isFinite(now) ? (now as number) : Date.now();
+    this.fail(t, 0.5);
+  }
+
+  /** 加权失败入账（failureKind 区分面：传输/协议失败 = 全权 1；剥壳失败 = 半权 0.5） */
+  private fail(t: number, weight: number): void {
     this.refresh(t);
-    this.consecutive++;
+    this.consecutive += weight;
     if (this.consecutive >= this.failureThreshold) this.openedAt = t;
   }
 

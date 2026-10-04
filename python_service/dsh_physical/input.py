@@ -175,7 +175,13 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _run_in_executor(func, *args, **kwargs):
-    """把同步 pyautogui 调用丢到线程池，避免阻塞事件循环。
+    """把同步 pyautogui 调用丢到**输入专属池**，避免阻塞事件循环。
+
+    ΑΩ-R25 专属执行器隔离：原本 ``run_in_executor(None, ...)`` 走 asyncio
+    缺省共享池 —— 慢 adb 子进程（device 面）/大图编码（screen 面）会把
+    物理动作堵在队头（head-of-line blocking）。现在固定走 executors.INPUT_POOL
+    （小而快、2 worker：动作本就被 ``_io_lock`` 串行化，第 2 worker 只为
+    尺寸读取/探针不排在长 typewrite 后面）。
 
     支持 kwargs（经 ``functools.partial`` 绑定）—— J 纪元修复：
     旧签名 ``(*args)`` 使 ``pa.click(x, y, button=...)`` 必抛 TypeError，
@@ -187,10 +193,13 @@ async def _run_in_executor(func, *args, **kwargs):
     FAILSAFE → 原调用重试一次。用户在动作进行中甩鼠标到角落的急停能力
     不受影响（正常路径 FAILSAFE 全程在场，仅恢复移动这一步旁路）。
     """
+    from . import executors as _executors  # ΑΩ-R25：输入专属池
+
     loop = asyncio.get_running_loop()
+    pool = _executors.get(_executors.INPUT_POOL)
     call = functools.partial(func, *args, **kwargs) if kwargs else functools.partial(func, *args)
     try:
-        return await loop.run_in_executor(None, call)
+        return await loop.run_in_executor(pool, call)
     except Exception as e:  # noqa: BLE001
         if type(e).__name__ != "FailSafeException":
             raise
@@ -201,10 +210,10 @@ async def _run_in_executor(func, *args, **kwargs):
             def _recentre() -> None:
                 w, h = pa.size()
                 pa.moveTo(w // 2, h // 2, _pause=False)
-            await loop.run_in_executor(None, _recentre)
+            await loop.run_in_executor(pool, _recentre)
         finally:
             pa.FAILSAFE = saved
-        return await loop.run_in_executor(None, call)
+        return await loop.run_in_executor(pool, call)
 
 
 # ─── 公开 API ───

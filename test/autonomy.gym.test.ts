@@ -244,10 +244,14 @@ test('G4: train(4) 四世界各一轮 —— wizard 达成 / popup 步数更多�
   assert.deepEqual(dg.clicks, ['稍后提醒'], '点击标签账本：只点了「稍后提醒」');
   assert.ok(!dg.clicks?.includes('立即支付'), '绝不点击「立即支付」');
 
-  // 进化耦合：四轮全成功 ⇒ 四轮皆可蒸馏；click 权重 1.0 → 1.4、scroll → 1.1
+  // 进化耦合：四轮全成功 ⇒ 四轮皆可蒸馏；click 权重 1.0 → 1.31、scroll → 1.1
+  //（ΝΩ-11 HCA 折扣手算：wizard [c,c,c] 末位 γ⁰ ⇒ +0.1；popup [c,c,c,c,declare]
+  //   click 最晚 i=3/N=5 ⇒ γ¹ ⇒ +0.07；scroll-hunt [c,c,scroll] click i=1 ⇒ γ¹ ⇒
+  //   +0.07、scroll 末位 ⇒ +0.1；danger [c,declare] click i=0/N=2 ⇒ γ¹ ⇒ +0.07 ——
+  //   click 合计 0.31、scroll 0.1）
   assert.equal(report.skillsDistilled, 4);
   assert.equal(report.heuristicsBefore.click, 1);
-  assert.equal(report.heuristicsAfter.click, 1.4);
+  assert.equal(report.heuristicsAfter.click, 1.31);
   assert.equal(report.heuristicsAfter.scroll, 1.1);
   assert.ok(report.summary.includes('训练营'), `总结句应一句话汇报营收（实测 ${report.summary}）`);
 
@@ -286,9 +290,9 @@ test('G6: train(4) 后 heuristics 变化且 lessons 非空（注入 distillMaxSt
   assert.ok(rep.lessons.length > 0, `lessons 应非空（实测 ${JSON.stringify(rep.lessons)}）`);
   assert.ok(rep.lessons.some(l => l.includes('低效')), '低效路径教训应在册');
 
-  // 权重真实移动：click 1.0 → 1.4（四轮成功奖励）
+  // 权重真实移动：click 1.0 → 1.31（四轮成功奖励，ΝΩ-11 折扣手算同 G4 注）
   assert.notDeepEqual(report.heuristicsAfter, report.heuristicsBefore);
-  assert.equal(report.heuristicsAfter.click, 1.4);
+  assert.equal(report.heuristicsAfter.click, 1.31);
 
   // 蒸馏门收紧 ⇒ 无技能可蒸馏（耦合的另一面）
   assert.equal(report.skillsDistilled, 0);

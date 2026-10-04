@@ -498,3 +498,133 @@ test('Δ-4: 脏请求（images 缺失/非数组）doesNotReject —— 收敛为
   // 脏请求在消息构造面即失败 ⇒ 零网络
   assert.equal(calls.length, 0, '构造面故障绝不发出请求');
 });
+
+// ─── ΝΩ-44（结构化输出约束解码）：responseSchema + OpenAPI 子集转换 ───
+
+/** ΝΩ-44 测试共用原始 schema —— 混入 Gemini 不认识的键（应丢弃）与脏成员 */
+const NO44_RAW: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['click', 'type'], minLength: 1 },
+    score: { type: 'number', minimum: 0 },
+    tags: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['action', 42],
+  additionalProperties: false,
+  $schema: 'http://json-schema.org/draft-07/schema#',
+};
+
+test('ΝΩ-44: 开 —— jsonSchema ⇒ responseSchema + responseMimeType；子集转换（大写 type/白名单键/递归/脏 required 收窄）', async () => {
+  const { fetchImpl, calls } = recorder(() => geminiOk('{"action":"click"}'));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_RAW }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' });
+  assert.equal(calls.length, 1);
+  const gc = bodyOf(calls[0]!).generationConfig;
+  assert.equal(gc.responseMimeType, 'application/json');
+  assert.deepEqual(gc.responseSchema, {
+    type: 'OBJECT',
+    properties: {
+      action: { type: 'STRING', enum: ['click', 'type'] },
+      score: { type: 'NUMBER' },
+      tags: { type: 'ARRAY', items: { type: 'STRING' } },
+    },
+    required: ['action'],
+  }, '白名单外键（minLength/minimum/additionalProperties/$schema）丢弃，type 大写化，required 非串成员剔除');
+  assert.equal(bodyOf(calls[0]!).contents[0].parts[1].text, '描述这张截图', 'schema 模式不改 prompt 原文');
+});
+
+test('ΝΩ-44: 开 —— jsonMode 缺席但 jsonSchema 在场 ⇒ 仍启用 schema 模式（gemini 语义：在场即开）', async () => {
+  const { fetchImpl, calls } = recorder(() => geminiOk('{"action":"click"}'));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  const r = await p.chat(req({ jsonSchema: { type: 'object', properties: { action: { type: 'string' } } } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' }, 'json 提取门槛放行 schemaIntent');
+  const gc = bodyOf(calls[0]!).generationConfig;
+  assert.equal(gc.responseMimeType, 'application/json');
+  assert.deepEqual(gc.responseSchema, { type: 'OBJECT', properties: { action: { type: 'STRING' } } });
+});
+
+test('ΝΩ-44: 开（chatJson 贯通）—— chatJson + jsonSchema ⇒ responseSchema 载荷 + 提取成功', async () => {
+  const { fetchImpl, calls } = recorder(() => geminiOk('```json\n{"action":"type"}\n```'));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  const j = await p.chatJson(req({ jsonSchema: { type: 'object', properties: { action: { type: 'string' } } } }));
+  assert.equal(j.ok, true);
+  assert.deepEqual(j.value, { action: 'type' });
+  assert.equal(bodyOf(calls[0]!).generationConfig.responseSchema.type, 'OBJECT');
+});
+
+test('ΝΩ-44: 关 —— jsonSchema 缺席 + jsonMode ⇒ 仅 responseMimeType（无 responseSchema 键，旧形状）', async () => {
+  const { fetchImpl, calls } = recorder(() => geminiOk('{}'));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  await p.chat(req({ jsonMode: true }));
+  const gc = bodyOf(calls[0]!).generationConfig;
+  assert.equal(gc.responseMimeType, 'application/json');
+  assert.equal('responseSchema' in gc, false);
+  assert.equal(calls.length, 1);
+});
+
+test('ΝΩ-44: 关 —— 两者皆缺 ⇒ generationConfig 键序恰 [maxOutputTokens, temperature]（逐字节旧形状）', async () => {
+  const { fetchImpl, calls } = recorder(() => geminiOk('ok'));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  await p.chat(req());
+  const body = bodyOf(calls[0]!);
+  assert.deepEqual(Object.keys(body), ['contents', 'generationConfig']);
+  assert.deepEqual(Object.keys(body.generationConfig), ['maxOutputTokens', 'temperature']);
+  assert.deepEqual(body.contents[0].parts[1], { text: '描述这张截图' });
+});
+
+test('ΝΩ-44: 降级链 —— responseSchema 400 ⇒ 剥 schema/mime、提示词后缀重发恰一次后成功', async () => {
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"error":{"code":400,"message":"Invalid value at generationConfig.responseSchema","status":"INVALID_ARGUMENT"}}'),
+    () => geminiOk('{"action":"click"}'),
+  );
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: { type: 'object', properties: { action: { type: 'string' } } } }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' });
+  assert.equal(calls.length, 2, '恰一次回退重发');
+  assert.equal(bodyOf(calls[0]!).generationConfig.responseSchema.type, 'OBJECT');
+  const second = bodyOf(calls[1]!);
+  const gc2 = second.generationConfig;
+  assert.equal('responseSchema' in gc2, false);
+  assert.equal('responseMimeType' in gc2, false, '提示词后缀模式剥全部原生 json 字段');
+  assert.deepEqual(Object.keys(gc2), ['maxOutputTokens', 'temperature']);
+  assert.match(second.contents[0].parts[1].text, /只输出严格 JSON/, '回退态补提示词后缀');
+});
+
+test('ΝΩ-44: 降级链终败 ⇒ 注记入 error（含被丢弃键名 + ΝΩ-44 标记）+ meter 恰一条', async () => {
+  const meters: ProviderMeterRecord[] = [];
+  const { fetchImpl, calls } = queue(() => httpStatus(400, '{"error":{"code":400,"message":"responseSchema invalid","status":"INVALID_ARGUMENT"}}'));
+  const p = createGeminiProvider(cfg({ fetchImpl, meter: rec => meters.push(rec) }));
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_RAW }));
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /ΝΩ-44/);
+  assert.match(r.error!, /responseSchema rejected/);
+  assert.match(r.error!, /additionalProperties/, '被丢弃键名入注记');
+  assert.match(r.error!, /\$schema/);
+  assert.equal(calls.length, 2, '恰一次回退，无循环');
+  assert.equal(meters.length, 1, '两次拨号仍恰一条遥测');
+});
+
+test('ΝΩ-44: schema 脏值不可表达 ⇒ 预检回退提示词后缀模式（零 responseSchema 拨号即带后缀）', async () => {
+  const { fetchImpl, calls } = recorder(() => geminiOk('{"action":"click"}'));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  const r = await p.chat(req({ jsonSchema: 42 as unknown as Record<string, unknown> }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' }, '后缀模式仍由剥壳链提取');
+  const body = bodyOf(calls[0]!);
+  assert.equal('responseSchema' in body.generationConfig, false);
+  assert.equal('responseMimeType' in body.generationConfig, false, 'jsonMode 缺席 ⇒ 连 mime 也不带（纯提示词模式）');
+  assert.match(body.contents[0].parts[1].text, /只输出严格 JSON/);
+});
+
+test('ΝΩ-44: 关 —— jsonSchema 缺席的 400 ⇒ 不回退（旧 400 律逐字节保持）', async () => {
+  const { fetchImpl, calls } = queue(() => httpStatus(400));
+  const p = createGeminiProvider(cfg({ fetchImpl }));
+  const r = await p.chat(req({ jsonMode: true }));
+  assert.equal(r.ok, false);
+  assert.equal(calls.length, 1, '无 jsonSchema ⇒ 零回退');
+  assert.doesNotMatch(r.error!, /ΝΩ-44/);
+});

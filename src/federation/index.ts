@@ -23,9 +23,17 @@
 // W6-4（持久化缝包）：信任账可落盘 —— 原子写（tmp + fsync + rename，checkpoint
 // 同律）+ 防御恢复（垃圾值归先验）+ 突变计数节流；缺省不武装（纯内存，与旧行为
 // 逐字节一致），dump 面 = federationTrustReport，restore 面 = restoreFederationTrust。
+// ΑΩ-R6（试用期缓升）：初见源 trust 封顶 PROBATION_TRUST_CAP（0.35），累计
+// PROBATION_CLEAN_MERGES（3）次干净合并解除；试用期内检疫票 ⇒ 回退重启；
+// 'local' 源豁免。试用期原始计数（merges/cleanMerges/dirty）随档落盘（trust 仍
+// 派生）；配额链路经闸③ quota=floor(cap×trust) 自然折减，三道闸语义零变化。
 // W6R-A5（聚合端共享密钥认证）：上行 HMAC-SHA256 请求签名 + 时间戳防重放（Cap
 // Token 同风格）—— DSH_FEDERATION_TOKEN 在场时 federationSync 自动附签名头，
 // 服务端（scripts/federation-server.mjs）同 env 强制验签（缺省 open 零配置）。
+// ΝΩ-19（联邦逐源签名）：DSH_FED_SIGNING_KEY（Ed25519 pkcs8/base64 或 seed）在场
+// ⇒ 上行摘要附 {pubkey,sig}、下行逐源验签（假源剔除 + unverifiableSources 计数，
+// 绝不混入中位数）+ 止血限额/同毫秒批量护栏 + 信任账键扩为 endpoint#指纹（ΑΩ-R6
+// 试用期平移到正确主体粒度；未配置密钥 ⇒ 未签名旧路径逐字节 —— 零回归律）。
 // 全模块随机源/时钟/网络/账本皆可注入，resetFederationRuntime 供测试隔离。
 
 import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
@@ -71,8 +79,12 @@ export {
 export {
   FEDERATION_AUTH_ENV, FEDERATION_AUTH_TIMESTAMP_HEADER, FEDERATION_AUTH_SIGNATURE_HEADER,
   FEDERATION_AUTH_SKEW_MS, federationAuthHeaders,
+  FEDERATION_SIGNING_KEY_ENV, federationSigningIdentity, signEvidenceDigest,
+  verifyEvidenceDigestSignature, canonicalFederationJson, federationSigningKeyHint,
+  logFederationSigningKeyHint,
   type FederationFetch, type FederationSyncOptions, type FederationSyncResult,
   type FederationSyncStatus, lastFederationSync, federationSync,
+  type SignedEvidenceDigest, type FederationSigningIdentity, type FederationSignatureVerdict,
 } from './sync';
 export {
   type FederationLedgerTarget, type ApplyFederatedEvidenceOptions,
@@ -80,6 +92,8 @@ export {
 } from './apply';
 export {
   type FederationTrustRecord, TRUST_STORE_VERSION, DEFAULT_TRUST_FLUSH_EVERY,
+  PROBATION_TRUST_CAP, PROBATION_CLEAN_MERGES, TRUST_PROBATION_EXEMPT_SOURCE,
+  FEDERATION_FINGERPRINT_KEY_SEP, federationFingerprintSourceId,
   recordFederationTrust, federationTrustOf, federationTrustReport,
   type FederationTrustStore, createFederationTrustFileStore,
   type FederationTrustStoreDoc, serializeFederationTrust,

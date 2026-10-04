@@ -104,7 +104,7 @@ export interface ProbeEconomics {
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-/** OS 换光标所需的最小沉降时间（WM_SETCURCUR 即时生效，60ms 足够裕量） */
+/** OS 换光标所需的最小沉降时间（WM_SETCURSOR 即时生效，60ms 足够裕量。ΑΩ-R34：修正拼写 —— Win32 消息实名 WM_SETCURSOR，旧注释误作 WM_SETCURCUR） */
 const CURSOR_SETTLE_MS = 60;
 
 /** 决定性光标形态：读到即判，无需等待重绘通道 */

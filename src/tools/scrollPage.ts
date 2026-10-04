@@ -26,6 +26,10 @@ import { toolOk, toolErr } from '../toolResult';
  *  分辨率与噪声的平衡） */
 export const COLUMN_STRIP_COUNT = 32;
 
+/** ΝΩ-31：单次滚动行数上限 —— 与沙箱 actionSchema 的 ACTION_LIMITS.maxScrollAmount
+ *  同值（10_000）。工具面与沙箱面共用同一把尺子，不各自立法。 */
+export const MAX_SCROLL_AMOUNT = 10_000;
+
 /**
  * W7-0：帧 → 列亮度序列（backend 无 frameColmeans 的就地补全 —— frameStats
  * 垂直条带自算，导出供测试离线断言）。任一条带均值缺席/脏形状/端口抛错 ⇒
@@ -107,6 +111,25 @@ export function createScrollPageTool(config: Config) {
         );
       }
       const dir = dirMap[direction];
+
+      // ΝΩ-31（amount 校验）：NaN/Infinity/负数旧路径直通 system.scroll —— 负数
+      // 反向滚（方向被 amount 符号劫持）、NaN 物理层未定义行为。对齐沙箱
+      // actionSchema 的更严口径：有限正数 + 上限（同 MAX_SCROLL_AMOUNT）。
+      if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+        return toolErr(
+          'Scroll validation failed.',
+          `Invalid amount ${JSON.stringify(args.amount ?? null)}: must be a finite positive number (scroll lines).`,
+          'Retry with a positive amount (e.g., 3-10 lines). Direction is chosen by the "direction" argument — ' +
+          'a negative amount does NOT scroll backwards.',
+        );
+      }
+      if (amount > MAX_SCROLL_AMOUNT) {
+        return toolErr(
+          'Scroll validation failed.',
+          `Amount ${amount} exceeds the limit ${MAX_SCROLL_AMOUNT}.`,
+          'Retry in batches with a smaller amount; the page scrolls incrementally.',
+        );
+      }
 
       try {
         // 闭环：滚动前帧（入环）→ 滚动 → 稳定 → 滚动后帧（入环）→ 互相关

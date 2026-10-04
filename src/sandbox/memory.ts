@@ -14,13 +14,40 @@ import {
   type SandboxAction,
 } from './types';
 
+/**
+ * ΝΩ-30：递归规范化序列化 —— 深排序 + 环检测。旧实现的 replacer 数组只排
+ * 顶层键：嵌套对象的键序不同即误判新技能（{point:{x,y}} vs {point:{y,x}} 同
+ * 步异签），且白名单外的嵌套键被整层丢弃（drag_mouse 嵌套点参数坍缩同签 ——
+ * 不同参数被当同一技能去重强化）。递归排序保证键序无关性；WeakSet 出口即删
+ * （journal.canonical 同律）：共享子对象是合法 DAG 载荷，只有真环降级哨兵 ——
+ * 环形 args 不再击穿签名（运行层铁律：一切方法永不抛错）。
+ */
+function canonicalArgs(v: unknown, seen: WeakSet<object>): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
+  if (seen.has(v as object)) return '"<cycle>"';
+  seen.add(v as object);
+  try {
+    if (Array.isArray(v)) {
+      return `[${v.map(item => canonicalArgs(item, seen)).join(',')}]`;
+    }
+    const rec = v as Record<string, unknown>;
+    return `{${Object.keys(rec).sort()
+      .map(k => `${JSON.stringify(k)}:${canonicalArgs(rec[k], seen)}`)
+      .join(',')}}`;
+  } finally {
+    seen.delete(v as object);
+  }
+}
+
 /** 步骤签名：同签名 = 同动作序列（去重强化的判定基准，对齐技能库去重哲学） */
 export function stepSignature(steps: ReadonlyArray<SandboxAction>): string {
   // args 缺席（外部文件脏步 —— load() 校验明确放行 args===undefined）⇒ 稳定字面
   // 'undefined' 入签：若在此抛 Object.keys(undefined)，load() 会在 entries.set 之后、
   // bySignature.set 之前中断 —— 库内留下未索引条目（去重缺口 = 同签名重复入库）。
+  // 平铺 args 的签名字面与旧实现逐字节一致（深排序只在嵌套对象上产生差异 ——
+  // 那正是被修复的误判面）。
   return steps.map(s =>
-    `${s.kind}:${s.args ? JSON.stringify(s.args, Object.keys(s.args).sort()) : 'undefined'}`).join('|');
+    `${s.kind}:${s.args ? canonicalArgs(s.args, new WeakSet()) : 'undefined'}`).join('|');
 }
 
 /** 深冻：ReadonlyArray 类型层的运行时对偶（restore 后必须重跑） */
@@ -218,3 +245,13 @@ export class MuscleMemoryStore {
     return this.entries.size;
   }
 }
+
+/**
+ * ΑΩ-R20：引擎侧唯一 MuscleMemoryStore 共享实例（存储职责归一）。
+ * 排练门禁（macroRehearsal 的 MacroRehearsalGate 构造缺省解析到此）与引擎
+ * 记账共用同一账本 ——「排练通过」的登记与宿主重放计数同源互见、跨会话存活，
+ * 不再并存第二份会话级内存账。持久化生命周期沿用本类现状：接线方持同一实例
+ * configure(持久路径) 后 load/save 即生效；未配置路径时与会话级实例行为
+ * 逐字节一致（save 无路径 = 旁路 true，load 无路径 = 0 —— 防御式缺席）。
+ */
+export const sharedMuscleMemoryStore = new MuscleMemoryStore();

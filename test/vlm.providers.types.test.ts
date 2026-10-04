@@ -70,11 +70,12 @@ const OPTS_TIMEOUT = 500; // 测试统一短超时（假 fetch 立即返回，�
 
 // ─── Ψ-1a 导出面契约 ───
 
-test('Ψ-1: 导出面契约 —— 七个具名函数、无 default、类型经 import type 可引用', () => {
+test('Ψ-1: 导出面契约 —— 具名函数+共享常量、无 default、类型经 import type 可引用', () => {
   assert.deepEqual(
     Object.keys(vpt).sort(),
     // W8-A6（D-G3）：新增 maskBaseUrl —— baseUrl 暴露面的端点脱敏（host 保留、路径/查询打码）
-    ['buildDataUrl', 'extractProviderJson', 'fetchWithRetry', 'isLocalBaseUrl', 'jitterDelayMs', 'maskBaseUrl', 'sanitizeError'],
+    // ΝΩ 收官：再导出 HTTP_STATUS_BAD_REQUEST —— 三厂 400 降级回退链的共享信号位（magic-number 清偿）
+    ['HTTP_STATUS_BAD_REQUEST', 'buildDataUrl', 'extractProviderJson', 'fetchWithRetry', 'isLocalBaseUrl', 'jitterDelayMs', 'maskBaseUrl', 'sanitizeError'],
   );
   assert.equal((vpt as { default?: unknown }).default, undefined);
 });
@@ -313,4 +314,51 @@ test('Ψ-1: fetchWithRetry —— 首发 200 直达；doFetch 缺失安静失败
   assert.equal(bad.ok, false);
   assert.equal(bad.attempts, 0);
   assert.match(bad.error!, /not available/);
+});
+
+// ─── ΑΩ-R15（重试律单一立法）：failureKind 机器可读分类契约 ───
+// glmClient 原生路径按本分类映射自家 glm 错误串（替代文案嗅探）—— 分类是契约，文案不是。
+
+test('ΑΩ-R15: fetchWithRetry —— failureKind 分类：http/network/aborted，成功缺省', async () => {
+  const timeoutErr = Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
+
+  // 成功 ⇒ 无 failureKind
+  const okR = await vpt.fetchWithRetry({
+    doFetch: recorder(() => new Response('ok', { status: 200 })).fetchImpl,
+    url: 'http://local.test/v1', init: {}, maxRetries: 2, timeoutMs: OPTS_TIMEOUT,
+  });
+  assert.equal(okR.ok, true);
+  assert.equal(okR.failureKind, undefined, '成功不携带失败分类');
+
+  // HTTP 终败（4xx 立败 / 5xx 耗尽）⇒ 'http'
+  for (const status of [400, 503]) {
+    const r = await vpt.fetchWithRetry({
+      doFetch: queue(() => httpStatus(status)).fetchImpl,
+      url: 'http://local.test/v1', init: {}, maxRetries: 2, timeoutMs: OPTS_TIMEOUT,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.failureKind, 'http', `HTTP ${status} 终败分类为 http`);
+  }
+
+  // 超时 ⇒ 'aborted'（不重试）
+  const aborted = await vpt.fetchWithRetry({
+    doFetch: recorder(() => Promise.reject(timeoutErr)).fetchImpl,
+    url: 'http://local.test/v1', init: {}, maxRetries: 5, timeoutMs: OPTS_TIMEOUT,
+  });
+  assert.equal(aborted.ok, false);
+  assert.equal(aborted.failureKind, 'aborted');
+
+  // 网络异常耗尽 ⇒ 'network'；doFetch 缺失（传输不可用）⇒ 'network'
+  const net = await vpt.fetchWithRetry({
+    doFetch: recorder(() => Promise.reject(new TypeError('fetch failed'))).fetchImpl,
+    url: 'http://local.test/v1', init: {}, maxRetries: 1, timeoutMs: OPTS_TIMEOUT,
+  });
+  assert.equal(net.ok, false);
+  assert.equal(net.failureKind, 'network');
+  const noFetch = await vpt.fetchWithRetry({
+    doFetch: undefined as unknown as typeof fetch, url: 'http://local.test/v1', init: {},
+    maxRetries: 1, timeoutMs: OPTS_TIMEOUT,
+  });
+  assert.equal(noFetch.ok, false);
+  assert.equal(noFetch.failureKind, 'network', 'doFetch 缺失归传输不可用');
 });

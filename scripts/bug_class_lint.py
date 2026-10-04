@@ -16,6 +16,13 @@
   BC-3 时钟单调假设  JS 侧用裸 Date.now() 当唯一 id/排序键（同毫秒碰撞 +
                      回拨倒序）。起源：O-#22 contextManager。检测：裸
                      `Date.now()` 直接赋值给 *Id/序键变量。
+  BC-4 构造器参数属性 TS transform 语法（Node strip-only 拒载）。起源：Q-3 /
+                     S-2 两度踩响。检测：constructor 形参含访问修饰符前缀。
+  BC-5 函数体克隆    同一函数体在 src 内 ≥2 处逐字复刻且 ≥10 行（type-1
+                     clone）⇒ 漂移风险（一处修 bug 他处复发）。起源：ΝΩ-41
+                     方言克隆律 —— mulberry32/FNV-1a 六处副本。检测：注释
+                     剥离 + 空白归一的 tokenize 指纹分组；行注释含
+                     `exempt` 豁免（知情的残余克隆 —— 见豁免处的理由注）。
 用法：python scripts/bug_class_lint.py [--strict]（--strict：任何命中 exit 1）
 """
 from __future__ import annotations
@@ -139,11 +146,153 @@ def check_ctor_param_properties() -> None:
                     break
 
 
+# ─── BC-5：函数体克隆（type-1 clone —— tokenize 归一化指纹分组）───
+
+BC5_MIN_LINES = 10  # 函数体跨行数下界（小工具函数的形似不算克隆债）
+BC5_EXEMPT = re.compile(r"//\s*.*\bexempt\b|/\*\s*.*\bexempt\b", re.I)
+
+
+def _strip_for_bc5(text: str) -> tuple[str, str]:
+    """双层剥离（保长保行号）：
+    fp_text    —— 注释抹空、字符串保形（指纹层：克隆判定要吃字符串差异）；
+    struct_text—— 注释与字符串内容全抹空（结构层：括号/花括号配平不被字符串
+                 内的 '{'/'}'/引号毒化 —— `${…}` 插值按代码保留以保模板平衡）。"""
+    fp = list(text)
+    st = list(text)
+    i, n, mode = 0, len(text), "code"
+    stack: list[str] = []  # 模板字面量内 ${ … } 的嵌套
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if mode == "code":
+            if c == "/" and nxt == "/":
+                mode = "line"
+                fp[i] = fp[i + 1] = st[i] = st[i + 1] = " "
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                mode = "block"
+                fp[i] = fp[i + 1] = st[i] = st[i + 1] = " "
+                i += 2
+                continue
+            if c == "}" and stack:
+                mode = stack.pop()
+                st[i] = " "  # ${ 的闭界：结构层不计
+                i += 1
+                continue
+            if c == "'":
+                mode = "sq"
+                st[i] = " "
+            elif c == '"':
+                mode = "dq"
+                st[i] = " "
+            elif c == "`":
+                mode = "tmpl"
+                st[i] = " "
+            i += 1
+            continue
+        if mode == "line":
+            if c == "\n":
+                mode = "code"
+            else:
+                fp[i] = st[i] = " "
+            i += 1
+            continue
+        if mode == "block":
+            if c == "*" and nxt == "/":
+                fp[i] = fp[i + 1] = st[i] = st[i + 1] = " "
+                mode = "code"
+                i += 2
+                continue
+            if c != "\n":
+                fp[i] = st[i] = " "
+            i += 1
+            continue
+        # 字符串态（sq/dq/tmpl）：指纹层保形，结构层抹空；跳转义与闭界
+        if c == "\\":
+            st[i] = " "
+            i += 2
+            continue
+        st[i] = " "
+        if (mode == "sq" and c == "'") or (mode == "dq" and c == '"'):
+            mode = "code"
+        elif mode == "tmpl":
+            if c == "`" and not stack:
+                mode = "code"
+            elif c == "$" and nxt == "{":
+                stack.append("tmpl")
+                mode = "code"
+                st[i] = st[i + 1] = " "  # '${' 开界：结构层不计
+                i += 2
+                continue
+        i += 1
+    return "".join(fp), "".join(st)
+
+
+def _match_brace(text: str, i: int) -> int:
+    """text[i] == '{' 起的配平闭界位置（闭界右侧），字符串/注释已在上游抹空。"""
+    depth = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return i
+
+
+FUNC_RE = re.compile(r"\b(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)\s*\(")
+
+
+def check_function_clones() -> None:
+    """检测：src/**/*.ts 的 function 声明体 →（注释抹空 + 字符串保形 + 空白归一）
+    指纹 → 同指纹 ≥2 处且函数体 ≥10 行 ⇒ 报；函数声明区（含前两行注解）含
+    `exempt` 行注释 ⇒ 豁免（知情的残余克隆）。"""
+    groups: dict[str, list[tuple[str, int, str]]] = {}
+    for p in (REPO / "src").rglob("*.ts"):
+        raw = p.read_text(encoding="utf8", errors="replace")
+        fp_text, struct = _strip_for_bc5(raw)
+        for m in FUNC_RE.finditer(struct):
+            # 参数表 + 返回类型（在结构层跳到函数体开界 '{' —— 字符串内括号不毒化）
+            j = m.end()
+            depth = 1  # match 已吃掉参数表的开括号
+            while j < len(struct):
+                if struct[j] == "(":
+                    depth += 1
+                elif struct[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            k = struct.find("{", j)
+            if k < 0:
+                continue
+            end = _match_brace(struct, k)
+            body = fp_text[k + 1:end - 1]
+            if body.count("\n") + 1 < BC5_MIN_LINES:
+                continue
+            # 豁免面：函数体原文 + 声明上方两行（JSDoc 豁免注记的落点）
+            raw_slice = raw[m.start():end]
+            head = raw[:m.start()].splitlines()[-2:]
+            if BC5_EXEMPT.search(raw_slice) or (head and BC5_EXEMPT.search("\n".join(head))):
+                continue
+            fingerprint = " ".join(body.split())
+            groups.setdefault(fingerprint, []).append((str(p.relative_to(REPO)), raw[: m.start()].count("\n") + 1, m.group(1)))
+    for members in groups.values():
+        if len(members) >= 2:
+            where = "、".join(f"{f}:{ln}({name})" for f, ln, name in members)
+            report("BC-5", where,
+                   f"函数体克隆 ×{len(members)}（≥{BC5_MIN_LINES} 行逐字复刻）—— 单源化或加 exempt 行注释申报知情")
+
+
 def main() -> int:
     check_ps_quotes()
     check_closure_reassignment()
     check_clock_ids()
     check_ctor_param_properties()
+    check_function_clones()
     if violations:
         print(f"✖ 虫型检测命中 {len(violations)} 处：")
         for v in violations:
@@ -151,7 +300,7 @@ def main() -> int:
         if "--strict" in sys.argv:
             return 1
         return 0
-    print("✔ Bug 类注册表（BC-1/BC-2/BC-3/BC-4）全库零命中")
+    print("✔ Bug 类注册表（BC-1/BC-2/BC-3/BC-4/BC-5）全库零命中")
     return 0
 
 

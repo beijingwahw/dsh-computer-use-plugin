@@ -3,12 +3,12 @@
 // 端共享密钥认证（HMAC 请求签名 + 防重放）+ Μ-e 同步 federationSync（网络纪律的
 // 落点：fire-and-forget POST / 鲁棒臂本地聚合 / 状态记忆）。逐字节搬运（零逻辑
 // 变更）；index.ts 原位再导出 —— 导入面不变（消费方零改动）。
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac, createPrivateKey, createPublicKey, sign as ed25519Sign, verify as ed25519Verify, } from 'node:crypto';
 import { evidenceLedger } from '../kernel/registry.js';
 import { robustMergeDigests, applyQuarantineToTrust } from './aggregate.js';
 import { DIGEST_VERSION, FEDERATION_TIMEOUT_MS, mintEvidenceDigest, } from './digest.js';
 import { applyFederatedEvidence } from './apply.js';
-import { recordFederationTrust } from './trust.js';
+import { federationFingerprintSourceId, recordFederationTrust } from './trust.js';
 // ─── W6R-A5（聚合端共享密钥认证）：上行 HMAC 请求签名 ───
 //
 // 缝隙（D-C2 配套）：参考聚合端（scripts/federation-server.mjs）明文无认证 ——
@@ -64,6 +64,236 @@ function resolveFederationAuthToken(explicit) {
     }
     catch {
         return '';
+    }
+}
+// ─── ΝΩ-19（联邦逐源签名）：Ed25519 客户端签名 + 指纹粒度信任 ───
+//
+// 缝隙（本工单立意）：robust 臂把响应 payload.digests 逐件收为 remote-0..N 源时
+// 没有任何**逐源身份认证** —— 恶意聚合端可回传 5 份自造摘要 + 本机 = 6 源，假源
+// 5/6 > 50% 恰好击穿逐格中位数的崩溃点；ΑΩ-R6 试用期又只压 endpoint 单账 ——
+// Sybil 在 digest 层免费开号。修复三面 + 一对止血护栏：
+//   · 上行：DSH_FED_SIGNING_KEY 在场 ⇒ 每份摘要附 {pubkey, sig}（Ed25519 签名域
+//     = 摘要核心四域 v/mintedAt/epsilon/keys 的 canonical 字节 —— pubkey/sig 自身
+//     不入域：签名不能签自己）；私钥绝不进载荷/日志/错误面（密钥卫生同 authToken）。
+//   · 下行：逐源 Ed25519 验签，验不过按缺席剔除并计数 unverifiableSources（绝不
+//     混入中位数）。无签名的旧格式源诚实降级为 unverifiable：无身份的源在中位数
+//     攻击面下不值得信任（迁移期部署需聚合端与客户端同步升级 —— 聚合端只中继不
+//     剥签名域，见 scripts/federation-server.mjs；这是显式设计取舍，不是疏漏）。
+//   · 账本：检疫票/试用期记到 `endpoint#指纹` 账（federationFingerprintSourceId）
+//     —— ΑΩ-R6 平移到正确主体粒度：真实客户端的毒摘要把票记到该客户端自己的
+//     账上，端点不再为伪造的"集体"背锅；裸 endpoint 键（旧档/掺入侧累计账）照常
+//     共存（键是自由字符串，持久化 schema 不动 —— 旧档零迁移）。
+//   · 止血护栏（签名链路内的额外防线，非根治 —— 根治在验签：伪造者必须持有每个
+//     假源的 Ed25519 私钥）：①响应源数上限「本地已知客户端数×2+4」—— 一阶
+//     Sybil 洪泛的成本面；②mintedAt 同毫秒批量特征整组剔除 —— 同一毫秒铸造的
+//     多份"独立源"是批量假摘要的一阶特征。
+//   · 零回归律：未配置密钥（env 与注入皆空/非法）⇒ 上行不签、下行不验、账键不动
+//     —— 与旧路径逐字节一致（Μ2-5/Μ-4/Μ-8 的既有断言原样保绿）；非法密钥 = 诚实
+//     关闭整条链路并一次性警示（绝不半开：上行签、下行不验的半开态比关闭更危险）。
+/** 客户端签名密钥环境变量名（pkcs8/base64、32 字节 seed 的 base64 或 PEM —— 协议契约字面量） */
+export const FEDERATION_SIGNING_KEY_ENV = 'DSH_FED_SIGNING_KEY';
+/** Ed25519 32 字节 seed 的 PKCS8 DER 包装前缀（固定字面量 —— Ed25519 的 DER 形是确定性的） */
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+const ED25519_SEED_BYTES = 32; // Ed25519 私钥 seed 长度（RFC 8032 固定值，非阈值）
+/**
+ * ΝΩ-19：稳定 canonical 序列化（notary/primitives.ts canonical 的本地同律镜像：
+ * 键字典序 + undefined 过滤 —— 联邦不跨器官 import，mulberry32 同律的零依赖纪律）。
+ * 签名域字节唯一性的根基：同一摘要无论经谁的 JSON 序列化（键序任意）往返，canonical
+ * 字节恒同 —— 验签不因传输层键序漂移而误红。纯函数（循环引用会抛 —— 调用方全兜）。
+ */
+export function canonicalFederationJson(value) {
+    if (value === null || typeof value !== 'object')
+        return JSON.stringify(value) ?? 'null';
+    if (Array.isArray(value))
+        return '[' + value.map(canonicalFederationJson).join(',') + ']';
+    const rec = value;
+    return ('{' +
+        Object.keys(rec)
+            .sort()
+            .filter(k => rec[k] !== undefined)
+            .map(k => JSON.stringify(k) + ':' + canonicalFederationJson(rec[k]))
+            .join(',') +
+        '}');
+}
+/**
+ * 摘要签名域字节 = 核心四域（v/mintedAt/epsilon/keys）的 canonical 序列化（ΝΩ-19：
+ * pubkey/sig 不入域）。形状非法（含陷阱属性）⇒ null（绝不抛 —— 坏输入没有签名资格）。
+ */
+function digestSigningDomainBytes(d) {
+    try {
+        if (!d || typeof d !== 'object')
+            return null;
+        const e = d;
+        if (typeof e.v !== 'number' || typeof e.mintedAt !== 'number' ||
+            typeof e.epsilon !== 'number' || !Array.isArray(e.keys)) {
+            return null;
+        }
+        return Buffer.from(canonicalFederationJson({ v: e.v, mintedAt: e.mintedAt, epsilon: e.epsilon, keys: e.keys }), 'utf8');
+    }
+    catch {
+        return null;
+    }
+}
+/** Ed25519 私钥解析（seed / pkcs8-base64 / PEM 三形态；非 Ed25519 或垃圾 ⇒ null，绝不抛） */
+function parseEd25519PrivateKey(material) {
+    try {
+        const trimmed = material.trim();
+        if (trimmed === '')
+            return null;
+        if (trimmed.startsWith('-----'))
+            return createPrivateKey({ key: trimmed, format: 'pem' });
+        const der = Buffer.from(trimmed, 'base64');
+        if (der.length === ED25519_SEED_BYTES) { // ΝΩ 收官（magic-number 清偿）：Ed25519 原生 seed 恰 32 字节
+            // 32 字节 seed ⇒ 固定 PKCS8 前缀包装成 DER 私钥（Ed25519 的 OID 唯一）
+            return createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_SEED_PREFIX, der]), format: 'der', type: 'pkcs8' });
+        }
+        return createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+    }
+    catch {
+        return null;
+    }
+}
+/** 签名密钥解析缓存（键 = 密钥原文 —— 逐次 sync 免重解析；resetLastSync 复位） */
+let signingKeyCache = null;
+/** 解析签名密钥（缓存制；material 空/非法/非 Ed25519 ⇒ null，绝不抛） */
+function resolveFederationSigningKey(material) {
+    if (material === '')
+        return null;
+    if (signingKeyCache !== null && signingKeyCache.material === material)
+        return signingKeyCache.resolved;
+    let resolved = null;
+    const priv = parseEd25519PrivateKey(material);
+    if (priv !== null && priv.asymmetricKeyType === 'ed25519') {
+        try {
+            const spki = createPublicKey(priv).export({ format: 'der', type: 'spki' });
+            resolved = {
+                identity: {
+                    fingerprint: createHash('sha256').update(spki).digest('hex').slice(0, 16),
+                    publicKey: spki.toString('base64'),
+                },
+                privateKey: priv,
+            };
+        }
+        catch {
+            resolved = null;
+        }
+    }
+    signingKeyCache = { material, resolved };
+    return resolved;
+}
+/** 解析签名密钥原料：显式注入优先（'' = 显式禁用）；缺省读 env（未配置 ⇒ 空 = 旧路径） */
+function resolveFederationSigningKeyMaterial(explicit) {
+    if (typeof explicit === 'string')
+        return explicit;
+    if (explicit === null)
+        return '';
+    try {
+        const v = process.env[FEDERATION_SIGNING_KEY_ENV];
+        return typeof v === 'string' ? v : '';
+    }
+    catch {
+        return '';
+    }
+}
+/**
+ * 客户端签名身份（绝不抛）：密钥合法 ⇒ { 指纹, 公钥 }；未配置/非法 ⇒ null。
+ * 导出为公开面 —— 测试与运维诊断共用同一实现（指纹口径的唯一 TS 权威源）。
+ */
+export function federationSigningIdentity(signingKey) {
+    try {
+        const resolved = resolveFederationSigningKey(resolveFederationSigningKeyMaterial(signingKey));
+        return resolved === null ? null : { ...resolved.identity };
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * 摘要签名（ΝΩ-19 上行面，绝不抛）：密钥在场 ⇒ 摘要附 {pubkey, sig}；密钥缺席/
+ * 域形状非法/签名故障 ⇒ null（调用方诚实降级发未签件 —— 服务端照收，本地不炸，
+ * 绝不带可伪造的弱签名上路）。
+ */
+export function signEvidenceDigest(digest, signingKey) {
+    try {
+        const resolved = resolveFederationSigningKey(resolveFederationSigningKeyMaterial(signingKey));
+        if (resolved === null)
+            return null;
+        const domain = digestSigningDomainBytes(digest);
+        if (domain === null)
+            return null;
+        const sig = ed25519Sign(null, domain, resolved.privateKey).toString('base64');
+        return { ...digest, pubkey: resolved.identity.publicKey, sig };
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * 逐源验签（ΝΩ-19 下行面，纯函数、绝不抛、含陷阱属性隔离）：pubkey+sig 在场且
+ * Ed25519 验签成立 ⇒ ok + 指纹。无签名（旧格式源）⇒ missing-signature —— 诚实
+ * 降级为 unverifiable：无身份的源在中位数攻击面下不值得信任（迁移期需聚合端与
+ * 客户端同步升级，见节首注记）；坏公钥/坏签名/畸形 ⇒ 对应归因。指纹对 SPKI DER
+ * 字节取 sha256 前 16 hex（与客户端侧同口径 —— 双面同律由测试把守）。
+ */
+export function verifyEvidenceDigestSignature(entry) {
+    try {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            return { ok: false, fingerprint: null, reason: 'malformed' };
+        }
+        const e = entry;
+        if (typeof e.pubkey !== 'string' || e.pubkey === '' || typeof e.sig !== 'string' || e.sig === '') {
+            return { ok: false, fingerprint: null, reason: 'missing-signature' }; // 无签名旧格式：无身份 ⇒ 不可信
+        }
+        const spki = Buffer.from(e.pubkey, 'base64');
+        const pub = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+        if (pub.asymmetricKeyType !== 'ed25519')
+            return { ok: false, fingerprint: null, reason: 'bad-key' };
+        const domain = digestSigningDomainBytes(entry);
+        if (domain === null)
+            return { ok: false, fingerprint: null, reason: 'malformed' };
+        const sigOk = ed25519Verify(null, domain, pub, Buffer.from(e.sig, 'base64'));
+        if (!sigOk)
+            return { ok: false, fingerprint: null, reason: 'bad-signature' };
+        return { ok: true, fingerprint: createHash('sha256').update(spki).digest('hex').slice(0, 16) };
+    }
+    catch {
+        return { ok: false, fingerprint: null, reason: 'malformed' };
+    }
+}
+/**
+ * 一次性密钥生成命令（运维辅助 —— 无 key 时控制台提示用；纯函数零状态）。
+ * 提示面：logFederationSigningKeyHint（每进程至多一次）。
+ */
+export function federationSigningKeyHint() {
+    return `node -e "console.log('export ${FEDERATION_SIGNING_KEY_ENV}=' + require('node:crypto').randomBytes(32).toString('base64'))"`;
+}
+/** 无 key 一次性提示旗（每进程至多一次） */
+let signingHintLogged = false;
+/** 无 key 提示（每进程至多一次；绝不抛）：同侪已升级而本机未配钥的迁移期哨兵 */
+export function logFederationSigningKeyHint() {
+    try {
+        if (signingHintLogged)
+            return;
+        signingHintLogged = true;
+        console.info(`[dsh-federation] ${FEDERATION_SIGNING_KEY_ENV} 未配置：联邦逐源签名链路关闭（ΝΩ-19）。一次性生成：${federationSigningKeyHint()}`);
+    }
+    catch {
+        /* 绝不抛 */
+    }
+}
+/** 非法密钥一次性警示旗（诚实可见，不静默猜） */
+let badSigningKeyWarned = false;
+/** 已知客户端指纹名册（止血限额①的基数 —— 只学经验签+护栏存活的指纹；resetLastSync 复位） */
+const knownClientFingerprints = new Set();
+/** 远端件是否携带签名域（迁移期哨兵的判据 —— 只看面不验签，零开销） */
+function digestCarriesSignature(entry) {
+    try {
+        return (!!entry && typeof entry === 'object' && !Array.isArray(entry) &&
+            typeof entry.pubkey === 'string' &&
+            entry.pubkey !== '');
+    }
+    catch {
+        return false;
     }
 }
 let lastSync = null;
@@ -194,7 +424,25 @@ export function federationSync(opts = {}) {
         return result;
     }
     result.network = 'fired';
-    const body = JSON.stringify(digest); // 上行载荷只有摘要（密钥卫生：无凭据无文本无截图）
+    // ΝΩ-19：客户端签名密钥解析（显式注入优先 / 缺省 env；空或非法 ⇒ null = 未签名
+    // 旧路径逐字节）。非法密钥一次性控制台警示（诚实可见，不静默猜）。
+    const signingMaterial = resolveFederationSigningKeyMaterial(opts.signingKey);
+    const signing = signingMaterial === '' ? null : resolveFederationSigningKey(signingMaterial);
+    if (signingMaterial !== '' && signing === null) {
+        try {
+            if (!badSigningKeyWarned) {
+                badSigningKeyWarned = true;
+                console.warn(`[dsh-federation] ${FEDERATION_SIGNING_KEY_ENV} 无法解析为 Ed25519 私钥（pkcs8/base64、32 字节 seed 的 base64 或 PEM）：逐源签名链路诚实关闭，走未签名旧路径（ΝΩ-19）`);
+            }
+        }
+        catch {
+            /* 日志面故障不挡同步 */
+        }
+    }
+    // ΝΩ-19：上行签名 —— 密钥在场 ⇒ 每份摘要附 {pubkey, sig}（私钥绝不进载荷）；
+    // 签名故障 ⇒ 诚实降级发未签件（绝不抛、不带弱签名上路）
+    const signedUplink = signing === null ? null : signEvidenceDigest(digest, signingMaterial);
+    const body = JSON.stringify(signedUplink ?? digest); // 上行载荷只有摘要（密钥卫生：无凭据无文本无截图；pubkey/sig 是摘要自带域）
     // W6R-A5：共享密钥在场 ⇒ 附 HMAC 签名头（token 绝不进载荷 —— 只发派生签名）
     const authHeaders = federationAuthHeaders(body, resolveFederationAuthToken(opts.authToken), nowMs);
     result.settled = (async () => {
@@ -220,7 +468,16 @@ export function federationSync(opts = {}) {
                 if (remotes.length === 0) {
                     lastSync = { at: nowMs, network: 'fired', applied: 0, note: '响应不含可用的多源摘要（鲁棒臂只收 digests 原始数组）：只上传未掺入' };
                 }
-                else {
+                else if (signing === null) {
+                    // ΝΩ-19：未配置签名密钥 ⇒ 旧路径逐字节（remote-N 标签 + 端点集体账）。
+                    // 迁移期哨兵：同侪已升级（响应带签名域）而本机未配钥 ⇒ 一次性提示生成命令
+                    try {
+                        if (remotes.some(digestCarriesSignature))
+                            logFederationSigningKeyHint();
+                    }
+                    catch {
+                        /* 提示面故障不挡同步 */
+                    }
                     // 本机摘要作为第一源参与聚合（中位数对本机+诚实同侪有结构性保护 —— 毒未过半即被隔离）
                     const rr = robustMergeDigests([digest, ...remotes], {
                         sourceIds: ['local', ...remotes.map((_, idx) => `remote-${idx}`)],
@@ -259,6 +516,141 @@ export function federationSync(opts = {}) {
                         lastSync = { at: nowMs, network: 'fired', applied: 0, note: '鲁棒合并零有效源：只上传未掺入' };
                     }
                 }
+                else {
+                    // ── ΝΩ-19 签名链路：逐源验签 → 止血护栏 → 指纹粒度账 → 本地中位数聚合 ──
+                    const ownFp = signing.identity.fingerprint;
+                    const fpAccount = (fp) => federationFingerprintSourceId(endpoint, fp);
+                    // ①逐源验签：验不过（含无签名旧格式）按缺席剔除并计数 —— 假源绝不混入中位数
+                    const kept = [];
+                    const keptFps = [];
+                    let unverifiableSources = 0;
+                    for (const d of remotes) {
+                        const verdict = verifyEvidenceDigestSignature(d);
+                        if (verdict.ok && typeof verdict.fingerprint === 'string' && verdict.fingerprint !== '') {
+                            kept.push(d);
+                            keptFps.push(verdict.fingerprint);
+                        }
+                        else {
+                            unverifiableSources += 1;
+                        }
+                    }
+                    // 止血①：响应源数上限 = 本地已知客户端数（含本机）×2+4 —— 超额源拒绝并计数
+                    let knownClients = knownClientFingerprints.size;
+                    if (!knownClientFingerprints.has(ownFp))
+                        knownClients += 1; // 本机也是已知客户端
+                    const maxRemotes = knownClients * 2 + 4;
+                    let excessiveSources = 0;
+                    if (kept.length > maxRemotes) {
+                        excessiveSources = kept.length - maxRemotes;
+                        kept.length = maxRemotes;
+                        keptFps.length = maxRemotes;
+                    }
+                    // 止血②：mintedAt 同毫秒批量特征 —— 同毫秒铸造的 ≥2 份"独立源"整组剔除并计数
+                    let batchedSources = 0;
+                    try {
+                        const tsCounts = new Map();
+                        for (const d of kept) {
+                            const t = d.mintedAt;
+                            if (typeof t === 'number' && Number.isFinite(t))
+                                tsCounts.set(t, (tsCounts.get(t) ?? 0) + 1);
+                        }
+                        const batchedTs = new Set();
+                        for (const [t, c] of tsCounts)
+                            if (c >= 2)
+                                batchedTs.add(t);
+                        if (batchedTs.size > 0) {
+                            const survivors = [];
+                            const survivorFps = [];
+                            kept.forEach((d, i) => {
+                                const t = d.mintedAt;
+                                if (typeof t === 'number' && batchedTs.has(t))
+                                    batchedSources += 1;
+                                else {
+                                    survivors.push(d);
+                                    survivorFps.push(keptFps[i]);
+                                }
+                            });
+                            kept.length = 0;
+                            kept.push(...survivors);
+                            keptFps.length = 0;
+                            keptFps.push(...survivorFps);
+                        }
+                    }
+                    catch {
+                        /* 统计面故障 ⇒ 该护栏跳过（绝不炸宿主） */
+                    }
+                    if (kept.length === 0) {
+                        // 全剔除 ⇒ 只上传未掺入：恶意端点不得经由"本地摘要回环掺入"给端点账赚干净轮
+                        lastSync = {
+                            at: nowMs,
+                            network: 'fired',
+                            applied: 0,
+                            note: `响应源全部剔除（验签不过 ${unverifiableSources}、同毫秒批量 ${batchedSources}、超额 ${excessiveSources}）：只上传未掺入（ΝΩ-19）`,
+                        };
+                    }
+                    else {
+                        // 源标签 = endpoint#指纹（检疫票键与信任账键同源 —— 票落正确主体，端点不背锅）
+                        const rr = robustMergeDigests([digest, ...kept], {
+                            sourceIds: ['local', ...keptFps.map(fpAccount)],
+                        });
+                        // 检疫票 → 指纹账（先检疫后掺入的 wired 序同律；'local' 的票不喂账）
+                        const votesByFp = {};
+                        for (const [label, votes] of Object.entries(rr.quarantined)) {
+                            if (label !== 'local')
+                                votesByFp[label] = votes;
+                        }
+                        if (Object.keys(votesByFp).length > 0)
+                            applyQuarantineToTrust(votesByFp, recordFederationTrust);
+                        // 已知客户端名册：只学经验签+护栏存活的指纹（下一轮止血限额①的基数）
+                        for (const fp of keptFps) {
+                            try {
+                                knownClientFingerprints.add(fp);
+                            }
+                            catch {
+                                /* 绝不抛 */
+                            }
+                        }
+                        if (rr.merged !== null) {
+                            const report = applyFederatedEvidence(ledger, rr.merged, {
+                                maxRemoteShare: opts.maxRemoteShare,
+                                sourceId: typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : endpoint,
+                                now: () => nowMs,
+                            });
+                            result.applied = report;
+                            // R6 干净轮进度 → 指纹账：真实掺入的合并轮才计，且仅 0 票源（带票源已在
+                            // 上面立污点/回退 —— recordFederationTrust 的既有结算律，无需新法）
+                            if (report.ok) {
+                                for (const fp of keptFps) {
+                                    if ((rr.quarantined[fpAccount(fp)] ?? 0) === 0) {
+                                        recordFederationTrust(fpAccount(fp), { applied: 1 });
+                                    }
+                                }
+                            }
+                            result.robust = {
+                                method: rr.method,
+                                mergedFrom: rr.merged.mergedFrom,
+                                quarantined: rr.quarantined,
+                                excluded: rr.excluded,
+                                unverifiableSources,
+                                excessiveSources,
+                                batchedSources,
+                            };
+                            lastSync = {
+                                at: nowMs,
+                                network: 'fired',
+                                applied: report.applied,
+                                note: !report.ok
+                                    ? `鲁棒合并摘要掺入被拒：${report.notes[0] ?? '原因未注记'}`
+                                    : unverifiableSources + excessiveSources + batchedSources > 0
+                                        ? `ΝΩ-19 剔除：验签不过 ${unverifiableSources}、同毫秒批量 ${batchedSources}、超额 ${excessiveSources}`
+                                        : undefined,
+                            };
+                        }
+                        else {
+                            lastSync = { at: nowMs, network: 'fired', applied: 0, note: '鲁棒合并零有效源：只上传未掺入' };
+                        }
+                    }
+                }
             }
             else {
                 const candidate = extractDigest(payload);
@@ -294,4 +686,10 @@ export function federationSync(opts = {}) {
 // 本模块私有记忆，复位须经此门；与原文件内联语义逐字节一致）。
 export function resetLastSync() {
     lastSync = null;
+    // ΝΩ-19：同步侧模块记忆一并复位（签名密钥解析缓存 / 已知客户端名册 / 一次性
+    // 提示与警示旗）—— 测试隔离缝；生产代码无理由调用。
+    signingKeyCache = null;
+    knownClientFingerprints.clear();
+    signingHintLogged = false;
+    badSigningKeyWarned = false;
 }

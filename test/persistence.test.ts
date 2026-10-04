@@ -2,7 +2,7 @@
 // 反遗忘 + 认知仪表盘回归测试：经验能活过进程边界；账本忠实于历史。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryKnowledgeBase } from '../src/knowledge/knowledgeBase.ts';
@@ -156,6 +156,59 @@ test('仪表盘 #1 账本追加/读回/坏行宽容；聚合纯函数可复现',
     assert.equal(curve.firstHalf.successRate, 1);
     assert.equal(curve.secondHalf.successRate, 0);
     assert.equal(learningCurve([]), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── ΝΩ-28：原子写 fsync 补齐 + 仪表盘数值字段有限性执法 ───
+
+test('持久化 #6（ΝΩ-28）fsync 原子写：数据块先落盘后换名 —— 读回完整、无 tmp 残骸', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'nw28-fsync-'));
+  try {
+    const kb = new InMemoryKnowledgeBase();
+    const wm = new InMemoryWorldModel();
+    kb.insert({ category: 'workflow', content: 'durably saved', scenario: 's', confidence: 0.5, source: 'manual' });
+    wm.typeOf(SAVE_A);
+    assert.ok(new KnowledgePersistence(dir).save(kb, wm).ok);
+    // fsync 的可观测承诺：save 返回即完整 —— 两文件当场可解析、与导出快照同构
+    const rawKb = JSON.parse(readFileSync(join(dir, 'knowledge.json'), 'utf8'));
+    assert.equal(rawKb.version, 1);
+    assert.equal(rawKb.entries.length, 1);
+    assert.equal(rawKb.entries[0].content, 'durably saved');
+    assert.equal(JSON.parse(readFileSync(join(dir, 'world-model.json'), 'utf8')).version, 1);
+    // tmp 已被 rename 消费（fsync 后换名 —— 无残骸；rename 前落盘的 tmp 不留半档）
+    assert.ok(!existsSync(join(dir, 'knowledge.json.tmp')));
+    assert.ok(!existsSync(join(dir, 'world-model.json.tmp')));
+    // 原子性回归锚：换名后的档可无损水合
+    const kb2 = new InMemoryKnowledgeBase();
+    const wm2 = new InMemoryWorldModel();
+    assert.ok(new KnowledgePersistence(dir).load(kb2, wm2).ok);
+    assert.equal(kb2.snapshot().length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('仪表盘 #2（ΝΩ-28）数值字段有限性：缺字段/字符串值/Infinity 坏行归 corruptLines', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'nw28-metrics-'));
+  try {
+    const path = join(dir, 'metrics.jsonl');
+    const ledger = new MetricsLedger(path);
+    const base = { rounds: 2, executions: 1, durationMs: 100, l3Rounds: 1, knowledgeRounds: 2, knowledgeEntries: 3, worldTypes: 1, worldObservations: 2, consolidated: 0 };
+    assert.ok(ledger.record({ ts: 1000, intentId: 'good', verdict: 'completed', ...base }).ok);
+    // 半坏行 1：rounds 字段缺席（JSON.stringify 剥 undefined 键 —— 真实漏写形态）
+    appendFileSync(path, `${JSON.stringify({ ts: 2000, intentId: 'missing-rounds', verdict: 'failed', executions: 1, durationMs: 1, l3Rounds: 0, knowledgeRounds: 0, knowledgeEntries: 0, worldTypes: 0, worldObservations: 0, consolidated: 0 })}\n`, 'utf8');
+    // 半坏行 2：rounds 是字符串（"two"）—— 旧三键守卫会放行，summarizeRuns 求和成 NaN
+    appendFileSync(path, '{"ts":3000,"intentId":"str-rounds","verdict":"completed","rounds":"two","executions":1,"durationMs":1,"l3Rounds":0,"knowledgeRounds":0,"knowledgeEntries":0,"worldTypes":0,"worldObservations":0,"consolidated":0}\n', 'utf8');
+    // 半坏行 3：durationMs = 1e999（JSON.parse ⇒ Infinity —— 页缓存/上游漂移形态）
+    appendFileSync(path, '{"ts":4000,"intentId":"inf-duration","verdict":"completed","rounds":1,"executions":1,"durationMs":1e999,"l3Rounds":0,"knowledgeRounds":0,"knowledgeEntries":0,"worldTypes":0,"worldObservations":0,"consolidated":0}\n', 'utf8');
+    const { records, corruptLines } = ledger.readAll();
+    assert.equal(records.length, 1, '唯一全数值有限行入账');
+    assert.equal(records[0].intentId, 'good');
+    assert.equal(corruptLines, 3, '三个半坏行全归 corruptLines（不进 records —— NaN 不许上仪表盘）');
+    // 全数值有限行聚合不受坏行连坐
+    assert.equal(summarizeRuns(records).avgRounds, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

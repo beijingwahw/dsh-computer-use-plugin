@@ -7,13 +7,15 @@
 //        counters 出现 guard:<工具名>（放行路径不打点）
 //   Σ-7⑤ tools/index.ts 注册取证：新块在既有块之后、askScreen 挂载门原行未动、
 //        恒注册（空配置运行时也在册）
+//   Σ-7⑥（ΑΩ-R36）能力区：默认关闭功能面的透明账 —— 缺省 OFF (default) 计数
+//        与文案格式、config 视图点亮 ⇒ ON、运行时单例实测 ⇒ ON (runtime)
 // 全离线：telemetry/vlmMeter 直接灌数，伪 ctx 驱动守卫，零网络零截屏。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { telemetry } from '../src/telemetry.ts';
 import { vlmMeter } from '../src/vlm/metering.ts';
-import { resetGlmClient } from '../src/vlm/index.ts';
+import { resetGlmClient, configureVlm } from '../src/vlm/index.ts';
 import {
   createMetricsDashboardTool,
   noteAutonomyOutcome,
@@ -103,9 +105,10 @@ test('Σ-7①: 假遥测数据 ⇒ 四分区文本齐整（≤80 列）+ toolOk 
 
     // 锚点结构：section / sections / dashboard / health
     assert.equal(out.state_anchor.section, 'all', '缺省 section = all');
-    // Θ-4 追加 'kernel' 第五分区：all 的 sections 枚举全集随之扩一（原四区断言
-    // 由「在场」类断言（下行分区头循环）继续覆盖，此处全集枚举与实现同步更新）
-    assert.deepEqual(out.state_anchor.sections, ['tools', 'vlm', 'autonomy', 'guards', 'kernel']);
+    // Θ-4 追加 'kernel' 第五分区、ΑΩ-R36 追加 'capability' 第六分区：all 的
+    // sections 枚举全集随之扩一（原断言由「在场」类断言（下行分区头循环）继续
+    // 覆盖，此处全集枚举与实现同步更新 —— 与 Θ-4 扩区同律）
+    assert.deepEqual(out.state_anchor.sections, ['tools', 'vlm', 'autonomy', 'guards', 'kernel', 'capability']);
     const dash = String(out.state_anchor.dashboard);
     assert.ok(dash.includes('\n'), 'dashboard 为多行文本');
 
@@ -336,5 +339,142 @@ test('Σ-7⑤: tools/index.ts —— dashboard 新块在既有块之后，askScr
     readFileSync(new URL('../src/tools/metricsDashboard.ts', import.meta.url), 'utf8'),
     /name: 'metrics_dashboard'/,
     '仪表盘工具名不与 get_metrics 重名',
+  );
+});
+
+// ─── Σ-7⑥（ΑΩ-R36）能力区：默认关闭功能面的透明账 ───
+
+/** ΑΩ-R36：能力面 14 开关的点亮键全集（工单点名 12 项 + 自主环/故障切换池） */
+const CAPABILITY_KEYS = [
+  'enableSleepCycle', 'enableExploration', 'enableReversibilityLanes', 'enableStepAuction',
+  'curriculumEnabled', 'kernelEvolutionEnabled', 'federationEndpoint', 'autonomyEnabled',
+  'vlmProviderTiers', 'vlmFallbackProviders', 'enableApprovalGate', 'allowUnverifiedDangerous',
+  'enableUIMemory', 'enableSkillLibrary',
+] as const;
+
+/** 能力区行尾状态列 + 点亮键的合法格式（溯源标签三态） */
+const CAP_ROW_RE = /\s(ON \(default\)|OFF \(default\)|ON \(runtime\)|ON|OFF)\s+([a-zA-Z][A-Za-z]*)$/;
+
+test('Σ-7⑥: 能力区缺省账 —— OFF (default) 计数/文案格式 + 机读速览（诚实账立法）', async () => {
+  configureVlm(null); // 运行时单例归零（故障切换池/级联未铸 ⇒ 缺省账不受残迹污染）
+  try {
+    const out = await runTool(createMetricsDashboardTool(), { section: 'capability' });
+    assert.equal(out.status, 'SUCCESS', '只读探测绝不抛');
+    assert.equal(out.state_anchor.section, 'capability');
+    assert.deepEqual(out.state_anchor.sections, ['capability'], '单区只渲染能力区');
+    const dash = String(out.state_anchor.dashboard);
+    const lines = dash.split('\n');
+
+    // 分区头 + 口径行 + 三列表头
+    assert.ok(dash.includes('能力区'), '能力区分区头在场');
+    assert.match(
+      dash,
+      /口径: config 未接线 ⇒ 缺省按 D-B 立法；池\/级联为运行时单例实测/,
+      '未接线口径如实申报（不伪装实配）',
+    );
+    assert.match(dash, /能力\s+状态\s+点亮键/, '三列表头（能力/状态/点亮键）');
+
+    // 14 开关全覆盖：每键一行（状态标签合法 + 行尾即键名）+ 缩进一句话描述行
+    for (const key of CAPABILITY_KEYS) {
+      const row = lines.find(l => l.endsWith(key));
+      assert.ok(row, `点亮键行在场：${key}`);
+      const m = row.match(CAP_ROW_RE);
+      assert.ok(m, `${key} 行含合法状态标签：${row}`);
+      assert.equal(m![2], key, '状态标签之后即点亮键（可复制行动面）');
+      const desc = lines[lines.indexOf(row!) + 1];
+      assert.match(desc, /^  \S/, `${key} 描述行（两空格缩进一句话）`);
+    }
+
+    // 工单点名的缺省关开关逐条 OFF (default)（D-B 立法默认形态一眼可见）
+    for (const [name, key] of [
+      ['睡眠周期', 'enableSleepCycle'], ['探索前沿', 'enableExploration'],
+      ['可逆性分道', 'enableReversibilityLanes'], ['步数拍卖', 'enableStepAuction'],
+      ['惊异课程', 'curriculumEnabled'], ['内核进化', 'kernelEvolutionEnabled'],
+      ['万脑联邦', 'federationEndpoint'], ['自主环', 'autonomyEnabled'],
+      ['云脑级联', 'vlmProviderTiers'], ['故障切换池', 'vlmFallbackProviders'],
+    ] as const) {
+      assert.match(dash, new RegExp(`${name}\\s+OFF \\(default\\)\\s+${key}`), `${name} 缺省关如实标注`);
+    }
+
+    // 缺省开四条（反向误读同样透明 —— 审批闸门/金丝雀/UI 记忆/技能库缺省在场）
+    for (const [name, key] of [
+      ['审批闸门', 'enableApprovalGate'], ['金丝雀试演', 'allowUnverifiedDangerous'],
+      ['UI 记忆', 'enableUIMemory'], ['技能库', 'enableSkillLibrary'],
+    ] as const) {
+      assert.match(dash, new RegExp(`${name}\\s+ON \\(default\\)\\s+${key}`), `${name} 缺省开如实标注`);
+    }
+
+    // 页脚计数 + 机读速览（与文本同源同刻）
+    assert.match(dash, /OFF \(default\) 10\/14 ——/, '页脚缺省关计数（10/14）');
+    assert.deepEqual(
+      out.state_anchor.health.capability,
+      { total: 14, off_default: 10, on: 4 },
+      'health.capability 机读账',
+    );
+
+    // 80 列纪律（能力区同样受辖）
+    for (const line of lines) {
+      assert.ok(visualWidth(line) <= 80, `行宽 ${visualWidth(line)} > 80：${line}`);
+    }
+  } finally {
+    configureVlm(null);
+  }
+});
+
+test('Σ-7⑥: config 视图点亮 ⇒ 裸 ON 在场（溯源标签随实配剥落，未传键仍走缺省账）', async () => {
+  configureVlm(null);
+  try {
+    const tool = createMetricsDashboardTool({
+      enableSleepCycle: true,
+      federationEndpoint: 'https://fed.example/api',
+    });
+    const out = await runTool(tool, { section: 'capability' });
+    assert.equal(out.status, 'SUCCESS');
+    const dash = String(out.state_anchor.dashboard);
+    assert.match(dash, /口径: config 已接线（实配呈现）/, '口径切换为实配呈现');
+    assert.match(dash, /睡眠周期\s+ON\s+enableSleepCycle/, '布尔点亮 ⇒ 裸 ON（无 (default)）');
+    assert.match(dash, /万脑联邦\s+ON\s+federationEndpoint/, '非空端点点亮 ⇒ 裸 ON');
+    assert.match(
+      dash,
+      /可逆性分道\s+OFF \(default\)\s+enableReversibilityLanes/,
+      '未传键仍走缺省账（混合口径诚实）',
+    );
+    assert.match(dash, /OFF \(default\) 8\/14 ——/, '缺省关计数随实配收敛 10→8');
+    assert.deepEqual(
+      out.state_anchor.health.capability,
+      { total: 14, off_default: 8, on: 6 },
+      '机读账同刻收敛',
+    );
+  } finally {
+    configureVlm(null);
+  }
+});
+
+test('Σ-7⑥: 运行时单例实测 —— 铸池/级联 ⇒ ON (runtime)；拆卸 ⇒ 回落缺省账', async () => {
+  configureVlm(null);
+  try {
+    const before = await runTool(createMetricsDashboardTool(), { section: 'capability' });
+    assert.match(
+      String(before.state_anchor.dashboard),
+      /故障切换池\s+OFF \(default\)\s+vlmFallbackProviders/,
+      '前置：未铸池 ⇒ 缺省 OFF',
+    );
+
+    // 生产铸造路径（configureVlm —— 铸造面零网络，只是适配器落座）：
+    // 备选链非空 ⇒ 铸池；tier 表含 cheap 档 ⇒ 铸级联
+    configureVlm({ vlmFallbackProviders: 'anthropic', vlmProviderTiers: 'anthropic=cheap' });
+    const after = await runTool(createMetricsDashboardTool(), { section: 'capability' });
+    const dash = String(after.state_anchor.dashboard);
+    assert.match(dash, /故障切换池\s+ON \(runtime\)\s+vlmFallbackProviders/, '池单例在场 ⇒ 实测 ON');
+    assert.match(dash, /云脑级联\s+ON \(runtime\)\s+vlmProviderTiers/, '级联单例在场 ⇒ 实测 ON');
+    assert.equal(after.state_anchor.health.capability.on, 6, '机读账计入场实测点亮');
+  } finally {
+    configureVlm(null); // 拆卸（单例归零 —— 不残留给后续测试）
+  }
+  const reset = await runTool(createMetricsDashboardTool(), { section: 'capability' });
+  assert.match(
+    String(reset.state_anchor.dashboard),
+    /故障切换池\s+OFF \(default\)\s+vlmFallbackProviders/,
+    '拆卸后回落缺省账（探测只读、拆卸即还原）',
   );
 });

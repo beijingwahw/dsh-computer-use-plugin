@@ -129,11 +129,16 @@ export function createFindTextTool(config: Config) {
 
         // Z-1：几何先验分类 + 悬停物理实验。探针优先级：ambiguous（最需实验）
         // > content-like（本 bug 的危险形态）> control-like（先验已足）。
-        const shaped = hits.slice(0, 8).map(w => ({ word: w, shape: classifyWordShape(w) }));
+        // ΝΩ-31（多命中标注）：形状先验覆盖**全部**命中 —— 无探针也有形状证据
+        //（宽行=正文/紧凑=控件的几何判据不花预算）；探针候选池维持前 8 个命中
+        //（探针排序/截断语义不动 —— 零回归）。第 9+ 命中不再从清单消失，至少
+        // 携带 wordShape 几何标注。
+        const shaped = hits.map(w => ({ word: w, shape: classifyWordShape(w) }));
+        const probePool = shaped.slice(0, 8);
         const probeOrder = { 'ambiguous': 0, 'content-like': 1, 'control-like': 2 } as const;
         let probes = new Map<string, ProbeResult>();
         if (config.enableInteractivityProbe) {
-          const targets = [...shaped]
+          const targets = [...probePool]
             .sort((a, b) => probeOrder[a.shape] - probeOrder[b.shape])
             .slice(0, config.probeMaxTargets);
           const results = await probePoints(config, targets.map(t => ({
@@ -156,8 +161,12 @@ export function createFindTextTool(config: Config) {
                 : `via=hover(cursor=${p.evidence.cursor_kind}`
                   + (p.evidence.repaint_similarity != null ? `, repaint=${p.evidence.hover_repaint}` : '') + ')';
             tag += ` interactivity=${p.verdict} [${viaTag}, conf=${p.confidence.toFixed(2)}]`;
-          } else {
+          } else if (probePool.some(pp => pp.word === w)) {
             tag += ' interactivity=unprobed (budget; trust shape with caution)';
+          } else {
+            // ΝΩ-31：探针池外命中 —— 形状先验仍在（无探针也有几何证据），但
+            // 本轮调用不可能再升级为物理实验判决，如实标注
+            tag += ' interactivity=unprobed (beyond probe pool; shape prior only)';
           }
           return `- "${w.text}" center=(${w.center_normalized.x.toFixed(3)}, ${w.center_normalized.y.toFixed(3)}) confidence=${Math.round(w.confidence)} ${tag}`;
         });

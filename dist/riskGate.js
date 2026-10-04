@@ -85,87 +85,299 @@ const HOMOGLYPH_MAP = buildHomoglyphMap();
 // 长折叠链（m→rn→…）不能把归一化变成放大器；真实混淆链（全角→ASCII→折叠）
 // 两遍内收敛，3 遍是安全裕度。
 const NORMALIZE_MAX_PASSES = 3;
-function normalizeOnce(s) {
+function normalizeOnceMapped(s, prev) {
+    const lo = s.toLowerCase(); // 与旧实现完全一致的整串小写（Final_Sigma 等语境规则保持）
+    const loCps = [...lo];
+    // 对齐账：lo 的每个码点 ← s 的码点（经 prev 组合到原串坐标）。
+    // 一对多小写（İ→i+U+0307）按展开量对齐；语境分歧（Final_Sigma：词尾整串折叠
+    // 为 ς 而单码点折叠为 σ）按单码点消耗 —— 已知的语境分歧均为单码点。
+    const originOf = new Array(loCps.length);
+    let j = 0;
+    let cp = 0;
+    let u16 = 0; // s 的 UTF-16 游标（星面码点占 2 单位 —— 原串坐标必须按码元计）
+    for (const ch of s) {
+        const origin = prev !== null ? prev[cp] : u16;
+        const exp = [...ch.toLowerCase()];
+        let matched = j + exp.length <= loCps.length;
+        if (matched) {
+            for (let e = 0; e < exp.length; e++) {
+                if (loCps[j + e] !== exp[e]) {
+                    matched = false;
+                    break;
+                }
+            }
+        }
+        if (matched) {
+            for (let e = 0; e < exp.length; e++)
+                originOf[j + e] = origin;
+            j += exp.length;
+        }
+        else {
+            originOf[j] = origin; // 语境变体：单码点消耗
+            j += 1;
+        }
+        cp++;
+        u16 += ch.length;
+    }
     let out = '';
-    for (const ch of s.toLowerCase()) {
+    const map = [];
+    let lastOrigin = 0; // 未对齐残留（理论不可达）沿袭前一来源 —— 文本面不受影响
+    const lim = Math.min(j, loCps.length);
+    for (let k = 0; k < lim; k++) {
+        const ch = loCps[k];
+        const origin = originOf[k] !== undefined ? originOf[k] : lastOrigin;
+        lastOrigin = origin;
         if (LEET_MAP[ch] !== undefined) {
-            out += LEET_MAP[ch];
+            for (const dst of LEET_MAP[ch]) {
+                out += dst;
+                map.push(origin);
+            }
             continue;
         }
         if (HOMOGLYPH_MAP[ch] !== undefined) {
-            out += HOMOGLYPH_MAP[ch];
+            for (const dst of HOMOGLYPH_MAP[ch]) {
+                out += dst;
+                map.push(origin);
+            }
             continue;
         }
         if (/[\s\u200b\u200c\u200d\p{P}\p{S}]/u.test(ch))
             continue; // 空白/零宽/标点/符号全剥
         out += ch;
+        map.push(origin);
     }
-    return out;
+    return { text: out, map };
+}
+function normalizeMapped(s) {
+    let text = s;
+    let map = null;
+    for (let i = 0; i < NORMALIZE_MAX_PASSES; i++) {
+        const next = normalizeOnceMapped(text, map);
+        if (next.text === text)
+            return next; // 不动点：再归一不变 ⇒ 已是最终形态
+        text = next.text;
+        map = next.map;
+    }
+    return { text, map: map ?? [] }; // 越过迭代上限：按已收敛部分匹配（有界保守，不为恶意长链无限付费）
 }
 /** 风险域归一化（导出供同律消费者对齐；匹配语义只经 matches* 两函数） */
 export function normalizeForRisk(s) {
-    let prev = s;
-    for (let i = 0; i < NORMALIZE_MAX_PASSES; i++) {
-        const next = normalizeOnce(prev);
-        if (next === prev)
-            return next; // 不动点：再归一不变 ⇒ 已是最终形态
-        prev = next;
-    }
-    return prev; // 越过迭代上限：按已收敛部分匹配（有界保守，不为恶意长链无限付费）
+    return normalizeMapped(s).text;
 }
-// Δ 纪元（安全外围#2）：模式归一化记忆化 —— 旧实现每次 matches* 调用都重切
-// CSV 并逐 pattern 归一化（现在还是每 pattern 三遍迭代），而 csv 是每回合稳定
-// 的配置串。按「生效 csv 字符串」缓存归一化后的词表（上限 32 条，满时逐出最旧
-// —— Map 保序，首键即 LRU 牺牲者；词表配置的组合空间天然远小于 32）。
+// Δ 纪元（安全外围#2）：模式归一化记忆化 —— matches* 每次调用都重切 CSV 并逐
+// pattern 归一化，而 csv 是每回合稳定的配置串。按「生效 csv 字符串」缓存编译
+// 产物（上限 32 条，满时逐出最旧 —— Map 保序，首键即 LRU 牺牲者；词表配置的
+// 组合空间天然远小于 32）。ΝΩ-23 起缓存条目升级为编译集（词表 + 边界元数据 +
+// Aho-Corasick 自动机）：词表变更 = 新键 ⇒ 自动机重建，缓存键即热重建律。
 const PATTERN_CACHE_LIMIT = 32;
 const patternCache = new Map();
-/** 归一化词表（记忆化；键 = 生效 csv，即 csv || fallback） */
-function normalizedPatterns(csv, fallback) {
+/** 编译词表（记忆化；键 = 生效 csv，即 csv || fallback）—— 归一化词表 +
+ *  边界元数据 + 自动机三位一体，一次编译多回合复用 */
+function compiledPatternSet(csv, fallback) {
     const key = csv || fallback;
     const hit = patternCache.get(key);
     if (hit)
         return hit;
-    const pats = key
-        .split(',')
-        .map(s => s.trim().toLowerCase())
-        .filter(Boolean)
-        .map(normalizeForRisk) // 与 haystack 同律（含不动点迭代 —— 两侧停在同一形态）
+    const words = [];
+    const hardBoundary = [];
+    const wordCpLen = [];
+    for (const entry of key.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
+        const folded = normalizeForRisk(entry); // 与 haystack 同律（含不动点迭代 —— 两侧停在同一形态）
         // 归一化后为空的模式（纯标点/符号词，如 "***"）必须剔除：'' 是一切串的
         // 子串，留下它会令 matches* 对任意文本恒真 —— 风险门整体失效（全拦 = 失能）
-        .filter(p => p.length > 0);
+        if (folded.length === 0)
+            continue;
+        words.push(folded);
+        // 边界律按词条原形（trim+小写、未折叠）判定：纯拉丁字母单字且长度 ≤7 ⇒
+        // 硬边界。长度上限取 7（而非惯例的 6）是为收编 confirm（7 —— confirmation
+        // 误报源）；password(8)/checkout(8)/verificationcode(17) 等长词、含数字者
+        // （2fa）与含空格的复合词（api key —— 折叠域已是粘合词）免边界，中文词
+        // 无词边界概念 —— 三者维持逐字节现状，收窄面只有拉丁短词的粘词误报。
+        hardBoundary.push(HARD_BOUNDARY_WORD.test(entry) && entry.length <= HARD_BOUNDARY_MAX_LEN);
+        wordCpLen.push([...folded].length);
+    }
+    const set = { words, hardBoundary, wordCpLen, automaton: buildAhoCorasick(words) };
     if (patternCache.size >= PATTERN_CACHE_LIMIT) {
         const oldest = patternCache.keys().next().value;
         if (oldest !== undefined)
             patternCache.delete(oldest);
     }
-    patternCache.set(key, pats);
-    return pats;
+    patternCache.set(key, set);
+    return set;
 }
 /** 记忆化探针（测试/可观测性用：断言缓存命中、无需重复归一化） */
 export function riskPatternCacheSize() {
     return patternCache.size;
 }
-/** 文本是否命中任一风险词（混淆免疫：归一化后包含匹配） */
+// ─── ΝΩ-23（词法匹配升级·半二）：Aho-Corasick 自动机 + 词边界感知 ───
+//
+// 背景（系统性误报）：归一化剥标点后纯 includes 的匹配面把 typing 当 pin、
+// secretary 当 secret、confirmation 当 confirm、preset 当 reset —— 英文 UI 上
+// 敏感焦点误标 ⇒ type_text 被人机闸门误拦，用户感知「频繁要确认」。
+// 修法（前沿：多模式匹配自动机 + 边界元数据）：
+//   · 手写 Aho-Corasick（goto/fail/output 三表）：构建 O(总词长)、匹配
+//     O(文本长) —— 旧实现每回合 30+ 词 × O(n) 逐词 includes 降为单趟扫描；
+//   · 拉丁短词硬边界：命中区段经位置映射回到原文，前后相邻字符均非
+//     [A-Za-z0-9] 才算命中 —— 「pin-code」「enter pin」命中（连字符/空格/
+//     行首尾是边界），「pincode」「typing」不命中（粘连字母不是边界）；
+//   · 非拉丁/长词/含数字词条免边界（中文词表行为逐字节不变），方向单侧：
+//     只删粘词误报、绝不新增命中（收窄 = 宁误拦语义下唯一可接受的方向）。
+/** 硬边界词条的形状（纯 [a-z] 单字）与长度上限（confirm=7 —— 见 compiledPatternSet 注） */
+const HARD_BOUNDARY_WORD = /^[a-z]+$/;
+const HARD_BOUNDARY_MAX_LEN = 7;
+/** 手写 Aho-Corasick 构建：trie 插入 → BFS 失配链 → 输出表沿 BFS 序继承
+ *  （fail 指向更浅节点 ⇒ BFS 序保证先于本节点并入）。纯数据操作，不抛。 */
+function buildAhoCorasick(words) {
+    const gotoTab = [new Map()];
+    const out = [[]];
+    for (let w = 0; w < words.length; w++) {
+        let node = 0;
+        for (const ch of words[w]) {
+            let next = gotoTab[node].get(ch);
+            if (next === undefined) {
+                next = gotoTab.length;
+                gotoTab.push(new Map());
+                out.push([]);
+                gotoTab[node].set(ch, next);
+            }
+            node = next;
+        }
+        out[node].push(w);
+    }
+    const fail = new Array(gotoTab.length).fill(0);
+    const order = [];
+    for (const child of gotoTab[0].values())
+        order.push(child); // 根的子节点 fail=0（缺省）
+    for (let qi = 0; qi < order.length; qi++) {
+        const node = order[qi];
+        for (const [ch, child] of gotoTab[node]) {
+            let f = fail[node];
+            while (f !== 0 && !gotoTab[f].has(ch))
+                f = fail[f];
+            const via = gotoTab[f].get(ch);
+            fail[child] = via !== undefined && via !== child ? via : 0;
+            order.push(child);
+        }
+    }
+    for (let qi = 0; qi < order.length; qi++) {
+        const inherited = out[fail[order[qi]]];
+        if (inherited.length > 0)
+            out[order[qi]] = out[order[qi]].concat(inherited);
+    }
+    return { goto: gotoTab, fail, out };
+}
+/** 原文码点（按 UTF-16 索引取整码点；越界 = ''）——边界邻接字符的读取面 */
+function codePointAt16(s, i) {
+    if (i < 0 || i >= s.length)
+        return '';
+    const unit = s.charCodeAt(i);
+    // 命中低代理项 ⇒ 回退一步取完整星面码点（相邻字符是 𝐚 之类的场合）
+    if (unit >= 0xdc00 && unit <= 0xdfff && i > 0) {
+        const high = s.charCodeAt(i - 1);
+        if (high >= 0xd800 && high <= 0xdbff)
+            return s.slice(i - 1, i + 1);
+    }
+    const cp = s.codePointAt(i);
+    return cp === undefined ? '' : String.fromCodePoint(cp);
+}
+/** 邻接字符的码点 → UTF-16 长度（星面码点占 2） */
+function utf16LenOf(ch) {
+    return ch.length === 2 ? 2 : 1;
+}
+// 邻接字符按「折叠后首字符是否 [a-z0-9]」判定词内性：直接判原文码元会让全角
+// ｐ（U+FF50，不在 ASCII 类）被当成边界 —— 「ｐｒｅｓｅｔ」就会绕过 reset 的
+// 硬边界重新误报。折叢单字符后判定（ｐ→p 词内；'-'→'' 边界；密→密 边界），
+// 与归一化同律。记忆化：字符集天然有界，512 封顶逐最旧（防御式，不为脏输入付费）。
+const WORD_UNIT_MEMO_LIMIT = 512;
+const wordUnitMemo = new Map();
+function isWordUnitChar(ch) {
+    const hit = wordUnitMemo.get(ch);
+    if (hit !== undefined)
+        return hit;
+    const folded = normalizeForRisk(ch);
+    const word = folded.length > 0 && /[a-z0-9]/.test(folded[0]);
+    if (wordUnitMemo.size >= WORD_UNIT_MEMO_LIMIT) {
+        const oldest = wordUnitMemo.keys().next().value;
+        if (oldest !== undefined)
+            wordUnitMemo.delete(oldest);
+    }
+    wordUnitMemo.set(ch, word);
+    return word;
+}
+/** 硬边界判定：折叠域命中区段 [start,end)（码点坐标）映射回原文，前后邻接
+ *  字符均非词内字符（串首尾天然是边界）才算命中。判据取原文而非折叠域 ——
+ *  折叠已把「pin-code」压成「pincode」，边界信息只在原文。 */
+function boundaryClean(original, norm, start, end) {
+    const first = norm.map[start];
+    if (first !== undefined && first > 0) {
+        if (isWordUnitChar(codePointAt16(original, first - 1)))
+            return false;
+    }
+    const last = norm.map[end - 1];
+    if (last !== undefined) {
+        const tailChar = codePointAt16(original, last + utf16LenOf(codePointAt16(original, last)));
+        if (tailChar !== '' && isWordUnitChar(tailChar))
+            return false;
+    }
+    return true;
+}
+/** 单趟扫描（O(文本长)）：非边界词命中即真；边界词须过 boundaryClean ——
+ *  脏命中不终止扫描（同词后继出现处可能是干净边界）。 */
+function ahoScanHit(compiled, norm, original) {
+    const { words, hardBoundary, wordCpLen, automaton } = compiled;
+    const gotoTab = automaton.goto;
+    const fail = automaton.fail;
+    const out = automaton.out;
+    let node = 0;
+    let pos = 0; // 折叠域码点游标（与 norm.map 对齐）
+    for (const ch of norm.text) {
+        while (node !== 0 && !gotoTab[node].has(ch))
+            node = fail[node];
+        const stepped = gotoTab[node].get(ch);
+        node = stepped !== undefined ? stepped : 0;
+        const hits = out[node];
+        for (let h = 0; h < hits.length; h++) {
+            const w = hits[h];
+            if (!hardBoundary[w])
+                return true;
+            if (boundaryClean(original, norm, pos + 1 - wordCpLen[w], pos + 1))
+                return true;
+        }
+        pos++;
+    }
+    return false;
+}
+/** 匹配核心（matches* 共用）：自动机单趟 + 边界执法。铁律：绝不抛 —— 任何
+ *  内部意外降级为旧 includes 语义（全子串、无边界），降级方向保守不漏拦。 */
+function matchAnyPattern(text, csv, fallback) {
+    try {
+        const compiled = compiledPatternSet(csv, fallback);
+        if (compiled.words.length === 0)
+            return false;
+        return ahoScanHit(compiled, normalizeMapped(text), text);
+    }
+    catch {
+        const hay = normalizeForRisk(text);
+        const pats = (csv || fallback).split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+        for (let i = 0; i < pats.length; i++) {
+            const folded = normalizeForRisk(pats[i]);
+            if (folded.length > 0 && hay.includes(folded))
+                return true;
+        }
+        return false;
+    }
+}
+/** 文本是否命中任一风险词（混淆免疫：归一化后自动机匹配 + 拉丁短词硬边界） */
 export function matchesRiskPatterns(text, csv) {
     if (!text)
         return false;
-    const hay = normalizeForRisk(text);
-    const pats = normalizedPatterns(csv, DEFAULT_RISK_PATTERNS);
-    for (let i = 0; i < pats.length; i++)
-        if (hay.includes(pats[i]))
-            return true;
-    return false;
+    return matchAnyPattern(text, csv, DEFAULT_RISK_PATTERNS);
 }
-/** 文本是否命中任一不可逆操作词（需审批令牌；同律归一化） */
+/** 文本是否命中任一不可逆操作词（需审批令牌；同律归一化 + 词边界感知） */
 export function matchesDangerPatterns(text, csv) {
     if (!text)
         return false;
-    const hay = normalizeForRisk(text);
-    const pats = normalizedPatterns(csv, DEFAULT_DANGER_PATTERNS);
-    for (let i = 0; i < pats.length; i++)
-        if (hay.includes(pats[i]))
-            return true;
-    return false;
+    return matchAnyPattern(text, csv, DEFAULT_DANGER_PATTERNS);
 }
 /** 分级判定的等级序（校准升级的步进面：reversible < compensable < irreversible） */
 const LEVEL_ORDER = {

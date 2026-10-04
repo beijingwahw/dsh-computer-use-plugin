@@ -308,6 +308,75 @@ test('Ε-2: 闭环接线 —— 第一步命中第二步失手 ⇒ 账本两条�
   assert.deepEqual(st.topMisses, [{ screenType: 'BBB', actionKey: KEY, count: 1 }]);
 });
 
+// ─── Ε-2b ΝΩ-11：no-impact 闸（零视觉影响动作不铸） ───
+
+test('ΝΩ-11: no-impact 不铸 / 有影响照铸 —— inspect/declare 不 mint 不回灌自环；click 照旧铸与结算', async () => {
+  const wm = new InMemoryWorldModel();
+  // 预编一条真实转移：AAA --inspect--> AAA 不可存在（闸的意义）；AAA --click@00--> BBB 在册
+  assert.ok(wm.observe('AAA', 'click@00', 'BBB', true).ok);
+  const engine = new ProphecyEngine({ worldModel: wm, now: () => 5_000 });
+
+  /** 观察性动作（W1-3 classifyExpectedVisualEffect ⇒ 'no-impact'） */
+  const inspectAction: Act = {
+    kind: 'inspect',
+    rationale: '看清现场',
+    expectedEffect: '只看不改世界',
+    utility: 0.5,
+    riskTier: 'benign',
+  };
+  const declareAction: Act = {
+    kind: 'declare',
+    payload: { criterion: '窗口已整理' },
+    rationale: '宣称判据达成',
+    expectedEffect: '判据置 met',
+    utility: 0.5,
+    riskTier: 'benign',
+  };
+
+  // 剧本：inspect → click → declare → escalate；屏型序列 AAA → AAA → BBB → BBB
+  //（inspect 执行后屏不变 —— 自环见证，正是旧路径会回灌的污染源）
+  const decisions = [
+    dec(inspectAction),
+    dec(clickAction('按钮一')),
+    dec(declareAction),
+    dec(ESCALATE_ACTION),
+  ];
+  let decideCalls = 0;
+  let percepts = 0;
+  const goal = new GoalStateMachine({ goal: '整理窗口', successCriteria: ['窗口已整理'] });
+  const deps: AutonomyDeps = {
+    perceive: async () => {
+      percepts++;
+      return snap(['AAA', 'AAA', 'BBB', 'BBB'][Math.min(percepts - 1, 3)]);
+    },
+    policy: { decide: async () => decisions[Math.min(decideCalls++, 3)] },
+    execute: async () => ({ outcome: 'progress' }),
+    goal,
+    sleep: async () => {},
+    now: () => 5_000,
+    prophecy: engine,
+  };
+  const res = await runAutonomousLoop(deps);
+  assert.equal(res.steps, 4, '三执行步 + 一升级步');
+
+  // no-impact 不铸：inspect/declare 步零 prophecy 注记；账本只有 click 的一条
+  assert.ok(!String(res.trajectory[0].note ?? '').includes('prophecy:'), 'inspect（无影响）不铸 ⇒ 零注记');
+  assert.ok(!String(res.trajectory[2].note ?? '').includes('prophecy:'), 'declare（无影响）不铸 ⇒ 零注记');
+  const recs = engine.records();
+  assert.equal(recs.length, 1, '只有 click（may-change）铸了一条');
+  assert.equal(recs[0].actionKey, 'click@00', '铸造归属 click 步');
+  assert.equal(recs[0].screenType, 'AAA', 'click 在第二帧（AAA）上铸');
+  assert.equal(recs[0].actualType, 'BBB', '第三次感知（BBB）结算 click 的预言');
+  assert.match(String(res.trajectory[1].note ?? ''), /prophecy:(hit|miss|no-model)/, '有影响照铸 ⇒ click 步注记在场');
+
+  // 不回灌自环：inspect 的 (AAA→AAA) 平凡转移绝不入表（predict 首名不被「什么都不
+  // 发生」污染 —— 闸的立意）；click 的真实转移照旧 Dyna 回灌
+  const inspectCell = wm.predict('AAA', 'inspect');
+  assert.ok(inspectCell.ok && inspectCell.value === null, 'inspect 自环转移零证据（no-impact 闸前会被回灌）');
+  const clickCell = wm.predict('AAA', 'click@00');
+  assert.ok(clickCell.ok && clickCell.value !== null, 'click 真实转移照旧回灌学习');
+});
+
 // ─── Ε-3 错题本 ───
 
 test('Ε-3: 错题本 —— 多次失手后 TopK 失手 (屏型,动作) 正确、命中率正确（no-model 不掺水）；dump/restore 往返', () => {

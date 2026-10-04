@@ -22,7 +22,7 @@ import type {
   VisionChatResult,
   VisionProvider,
 } from './types';
-import { extractProviderJson, fetchWithRetry, sanitizeError } from './types';
+import { extractProviderJson, fetchWithRetry, HTTP_STATUS_BAD_REQUEST, sanitizeError } from './types';
 
 /** Anthropic 适配器装配配置 —— 在通用 ProviderOptions 上叠加 Anthropic 特有缺省 */
 export interface AnthropicProviderConfig extends ProviderOptions {
@@ -45,8 +45,11 @@ const DEFAULT_PROVIDER_ID = 'anthropic';
  * jsonMode 提示词追加行 —— Anthropic Messages API 无原生 response_format，
  * jsonMode=true 时在 prompt 尾部追加此行（空行 + 指令），以提示词约定
  * 代替协议字段；成功回复仍走 extractProviderJson 剥壳提取。
+ * ΑΩ-R35（中英双语）：追加行改为双语 —— 只认中文指令的英文语境模型（经
+ * Anthropic 端点接入的第三方网关脑）此前可能无视约定输出围栏/散文；双语后
+ * 任一语境的脑都能读懂「只输出严格 JSON」，剥壳提取的输入面随之收窄。
  */
-const JSON_MODE_SUFFIX = '\n\n只输出严格 JSON，不要围栏。';
+const JSON_MODE_SUFFIX = '\n\nOutput strict JSON only. 只输出严格 JSON，不要围栏。';
 
 /** 取非空串 —— 非字符串/空白归 ''（用于配置链逐级回退） */
 function nonEmptyStr(v: unknown): string {
@@ -85,6 +88,23 @@ function extractTextBlocks(payload: unknown): string | null {
     }
   }
   return text;
+}
+
+/**
+ * ΝΩ-44（结构化输出约束解码）：content 数组中首个 tool_use 块的 input 提取。
+ * tool_use 强 schema 模式下模型的结构化回复落在 content 里 {type:'tool_use',
+ * name:'emit', input:{...}} 块 —— input 已是解析好的对象（无需剥壳）；
+ * content 非数组 / 无 tool_use 块 / input 缺席 ⇒ undefined（调用方回退文本剥壳）。
+ * 绝不抛异常；input 原样透传（脏值由消费面 JSON 序列化兜底）。
+ */
+function extractToolUseInput(payload: unknown): unknown | undefined {
+  const content = (payload as { content?: unknown } | null)?.content;
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content) {
+    const p = part as { type?: unknown; input?: unknown } | null;
+    if (p && typeof p === 'object' && p.type === 'tool_use' && 'input' in p) return p.input;
+  }
+  return undefined;
 }
 
 /** Anthropic 错误体 message 提取 —— {type:'error',error:{message}} 优先取
@@ -173,7 +193,8 @@ export function createAnthropicProvider(config: AnthropicProviderConfig = {}): V
    * - body：{ model, max_tokens, system?, temperature?, messages:[{role:'user',
    *   content:[...images, {type:'text',text:prompt}]}] }（图像块在前、文本块殿后）
    * - jsonMode 语义（JSDoc 契约）：Anthropic 无原生 response_format —— true 时在
-   *   prompt 尾部追加一行 "\n\n只输出严格 JSON，不要围栏。"，成功后仍以
+   *   prompt 尾部追加一行 "\n\nOutput strict JSON only. 只输出严格 JSON，不要围栏。"
+   *   （ΑΩ-R35 中英双语），成功后仍以
    *   extractProviderJson 剥围栏/取平衡段提取；请求体绝不出现 response_format 字段
    * - 2xx ⇒ content 数组 type==='text' 块的 text 拼接；usage.input_tokens/
    *   output_tokens → promptTokens/completionTokens
@@ -222,11 +243,27 @@ export function createAnthropicProvider(config: AnthropicProviderConfig = {}): V
         ...(extraHeaders ?? {}),
       };
 
-      // Messages API 请求体：system 顶层字段；user content = 图像块序列 + 文本块殿后
-      const payload: Record<string, unknown> = {
+      // Messages API 请求体：system 顶层字段；user content = 图像块序列 + 文本块殿后。
+      // ΝΩ-44（结构化输出约束解码）：构造收进闭包 —— jsonSchema 在场 ⇒ 首发即
+      // tool_use 强 schema（tools:[{name:'emit', input_schema}] + tool_choice
+      // 强制，prompt 不加 JSON 约定行 —— 结构化纪律由 tool_choice 承担）；
+      // 缺席 ⇒ 旧负载逐字节保持（无 tools/tool_choice 键，suffix 仅随 jsonMode，
+      // 零回归铁律）。
+      const wantTools = req.jsonSchema !== undefined;
+      const buildBody = (toolMode: boolean, withSuffix: boolean): Record<string, unknown> => ({
         model,
         max_tokens: maxTokens,
         ...(req.system !== undefined && req.system !== '' ? { system: req.system } : {}),
+        ...(toolMode
+          ? {
+              tools: [{
+                name: 'emit',
+                description: 'Emit the structured response for this request.',
+                input_schema: req.jsonSchema,
+              }],
+              tool_choice: { type: 'tool', name: 'emit' },
+            }
+          : {}),
         temperature,
         messages: [{
           role: 'user',
@@ -241,23 +278,51 @@ export function createAnthropicProvider(config: AnthropicProviderConfig = {}): V
             })),
             {
               type: 'text',
-              text: req.jsonMode ? `${req.prompt}${JSON_MODE_SUFFIX}` : req.prompt,
+              text: withSuffix ? `${req.prompt}${JSON_MODE_SUFFIX}` : req.prompt,
             },
           ],
         }],
-      };
+      });
 
-      const fr = await fetchWithRetry({
+      let fr = await fetchWithRetry({
         doFetch,
         url: `${baseUrl}/v1/messages`,
-        init: { method: 'POST', headers, body: JSON.stringify(payload) },
+        init: {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(buildBody(wantTools, !wantTools && req.jsonMode === true)),
+        },
         maxRetries,
         timeoutMs,
       });
 
+      // ΝΩ-44 回退（tool_use 不被网关支持）：400 类配置性失败（429/5xx 已由
+      // fetchWithRetry 重试域处置，传输面失败换模式无义）⇒ 剥 tools/tool_choice、
+      // prompt 尾部补 JSON 约定行重发**恰一次**（提示词后缀模式 —— 约束解码
+      // 失败的诚实回退，运行层绝不抛）；重发再败按终败处置（wantTools 不变但
+      // 回退只挂在这一处顺序代码上，无循环）。degradeNote 为降级注记：仅
+      // jsonSchema 路径可非空，终败时并入 error 诚实归因（旧路径恒 undefined
+      // ⇒ 旧 error 串逐字节不变）。
+      let degradeNote: string | undefined;
+      if (wantTools && !fr.ok && fr.failureKind === 'http' && fr.status === HTTP_STATUS_BAD_REQUEST) {
+        degradeNote = 'structured tool_use rejected by gateway (HTTP 400) - fell back to prompt-suffix json mode';
+        fr = await fetchWithRetry({
+          doFetch,
+          url: `${baseUrl}/v1/messages`,
+          init: {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(buildBody(false, true)),
+          },
+          maxRetries,
+          timeoutMs,
+        });
+      }
+
       // 传输终败（网络错误/超时）—— fetchWithRetry 的 error 已含尝试次数归因
       if (!fr.ok && fr.status === undefined) {
-        return finish({ ok: false, text: '', error: sanitizeError(fr.error, providerId) });
+        const noted = degradeNote !== undefined ? `${fr.error} [ΝΩ-44: ${degradeNote}]` : fr.error;
+        return finish({ ok: false, text: '', error: sanitizeError(noted, providerId) });
       }
 
       // HTTP 终败（非 2xx）—— 错误体 error.message 优先，原文片段兜底
@@ -266,9 +331,12 @@ export function createAnthropicProvider(config: AnthropicProviderConfig = {}): V
         const snippet = (fr.body ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
         const detail = extractErrorMessage(fr.body) ?? snippet;
         const attemptNote = fr.attempts > 1 ? ` after ${fr.attempts} attempts` : '';
+        const noted = degradeNote !== undefined
+          ? `messages HTTP ${status}${attemptNote}: ${detail} [ΝΩ-44: ${degradeNote}]`
+          : `messages HTTP ${status}${attemptNote}: ${detail}`;
         return finish({
           ok: false, text: '',
-          error: sanitizeError(`messages HTTP ${status}${attemptNote}: ${detail}`, providerId),
+          error: sanitizeError(noted, providerId),
         });
       }
 
@@ -293,8 +361,22 @@ export function createAnthropicProvider(config: AnthropicProviderConfig = {}): V
       const usage = mapUsage((body as { usage?: unknown }).usage);
       const r: Omit<VisionChatResult, 'latencyMs' | 'model' | 'providerId'> = { ok: true, text };
       if (usage) r.usage = usage;
-      if (req.jsonMode) {
-        const j = extractProviderJson(text);
+      // ΝΩ-44（结构化输出约束解码）：tool_use 强 schema 成功 ⇒ 首个 tool_use 块
+      // 的 input（响应体里已是解析好的对象，无需剥壳）包装为文本结果
+      //（JSON.stringify —— extractProviderJson 剥壳链消费面无感），对象本体透传
+      // r.json（透传即核对律：不二道串解，脏值不可能 —— 来自 JSON.parse）。
+      // 模型违约未出 tool_use 块（网关放行但模型自由发挥）⇒ 落回文本剥壳旧路径
+      //（诚实回退，绝不抛）；json 提取门槛放行 wantTools（结构化意图在场即可，
+      // 旧路径 wantTools=false ⇒ 行为逐字节不变）。
+      if (wantTools) {
+        const toolInput = extractToolUseInput(body);
+        if (toolInput !== undefined) {
+          r.text = JSON.stringify(toolInput);
+          r.json = toolInput;
+        }
+      }
+      if (req.jsonMode && r.json === undefined) {
+        const j = extractProviderJson(r.text);
         if (j !== undefined) r.json = j;
       }
       return finish(r);

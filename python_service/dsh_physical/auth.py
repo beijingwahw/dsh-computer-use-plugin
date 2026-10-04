@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import hmac
 import json
 import os
@@ -284,23 +285,52 @@ def attest_pid(pid: int) -> bool:
 _used_nonces: dict[str, float] = {}
 """``nonce → 过期时间``。Token 已带 exp，nonce 仅防同一 token 在 TTL 内被多次复用。"""
 
+_nonce_heap: list[tuple[float, str]] = []
+"""ΝΩ-9：``(exp, nonce)`` 小顶堆 —— 过期清除与硬上限逐出的共享索引。惰性
+校验：堆项出堆时以 ``_used_nonces.get(nonce) == exp`` 为准，失配（条目已被
+清场/逐出，如测试 setUp 直接 ``_used_nonces.clear()``）即丢弃，堆中陈旧项
+无害。"""
+
+_NONCE_HARD_CAP = 4096
+"""ΑΩ-R26：总量硬上限（防爆）。正常流量的表大小 = TTL 窗口内的活跃请求数，
+远低于此；仅异常/攻击流量触顶，届时逐出**最早过期**项（ΝΩ-9：heap 根 ——
+旧实现按 dict 插入序逐"最旧"，长 TTL 项先死、短 TTL 项赖活，语义错位）。"""
+
+
+def _gc_nonces(now: float) -> None:
+    """ΝΩ-9：时间驱动 GC —— 小顶堆弹净全部已过期项。
+
+    每请求 O(k·log n)（k = 本次到期的条数，通常 0~数条），替换旧实现的
+    O(表大小) 全表扫描建 list（每请求都要白扫一遍未到期的大多数）。"""
+    while _nonce_heap and _nonce_heap[0][0] < now:
+        exp, k = heapq.heappop(_nonce_heap)
+        if _used_nonces.get(k) == exp:  # 惰性校验：失配 = 陈旧堆项，弃
+            _used_nonces.pop(k, None)
+
 
 def check_and_consume_nonce(nonce: str, exp: int) -> bool:
     """单次性 nonce 校验。
 
     - 同一 nonce 第二次出现 → 拒绝（防重放）
     - 过期 nonce 自动清理（避免内存膨胀）
+
+    ΑΩ-R26：时间驱动 GC —— 每次消费顺带清除过期项（旧实现 ``len > 1024``
+    才触发，1024 以内的过期 nonce 永驻）。单次代价有界于本次到期条数；
+    清后仍超硬上限（异常流量）→ 逐出最早过期项（heap 根），表大小恒有界。
     """
     now = time.time()
-    # 清理过期项（懒 GC，每次调用清一批）
-    if len(_used_nonces) > 1024:
-        for k in list(_used_nonces):
-            if _used_nonces[k] < now:
-                _used_nonces.pop(k, None)
+    _gc_nonces(now)
+    while len(_used_nonces) >= _NONCE_HARD_CAP:
+        if _nonce_heap:
+            _, evicted = heapq.heappop(_nonce_heap)  # 最早过期者（ΝΩ-9）
+            _used_nonces.pop(evicted, None)
+        else:  # 病态防御：堆被外部清空而表满 —— 退回插入序逐出（绝无死循环）
+            _used_nonces.pop(next(iter(_used_nonces)), None)
 
     if nonce in _used_nonces:
         return False
     _used_nonces[nonce] = exp
+    heapq.heappush(_nonce_heap, (float(exp), nonce))
     return True
 
 

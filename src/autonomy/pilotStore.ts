@@ -10,8 +10,24 @@
 //    铸态（跨进程续跑）；断尾行容忍（进程被杀的半行跳过，不炸重放）；
 //  · 任何磁盘写失败 ⇒ 永久降级纯内存并记 lastError（内存档仍在 —— 磁盘故障
 //    绝不炸自主环，只是失去跨进程续跑能力）。
+//  · ΑΩ-R17 档案有界律：库容上限（缺省 500，构造可调）—— 超限驱逐「最旧
+//    已完成」（进行中永不驱逐；全在进行中 ⇒ 诚实跳过等待完成），被驱逐 run
+//    的 resume_token 自然失效 —— 档案有界，老令牌过期是设计而非事故；
+//    JSONL 以追加为主，驱逐累计达阈值（⌊上限/10⌋ 且 ≥1）时 tmp+rename 原子
+//    重写压缩，重写后文件只含幸存档案快照行（type:'snapshot'，旧读方按垃圾
+//    行静默忽略 —— 与断尾容忍读兼容）；驱逐/压缩计数经 dump() 审计可见。
 // 铁律：公共方法绝不抛异常（内部异常吞掉并记 lastError）。
-import { appendFileSync, mkdirSync, readFileSync } from 'fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+} from 'fs';
 import { randomBytes } from 'crypto';
 import path from 'path';
 import type { GoalSpec } from './goalState';
@@ -52,6 +68,7 @@ export interface PilotRunRecord {
 
 /** JSONL 事件行（追加式；重放器按 type 分派铸态） */
 type PilotEvent =
+  | { type: 'snapshot'; record: PilotRunRecord } // ΑΩ-R17 压缩重写行：一行一档全量快照（旧读方按垃圾行静默忽略 —— 前向兼容）
   | { type: 'begin'; token: string; goal: PilotRunRecord['goal']; startedAt: number }
   | {
       type: 'step';
@@ -143,8 +160,90 @@ function statusForPhase(phase: string): PilotRunRecord['status'] {
   return 'running';
 }
 
+/**
+ * ΑΩ-R17 快照行防御式复活（压缩重写行的重放面）：逐字段净化，垃圾档 null 弃置
+ * —— 判据账非法时回退 initialCriteria（全 unverified 的保守可续跑态，诚实降级）。
+ */
+function reviveRecord(from: unknown): PilotRunRecord | null {
+  if (from === null || typeof from !== 'object') return null;
+  const r = from as Record<string, unknown>;
+  if (typeof r.token !== 'string' || r.token === '') return null;
+  const goal = serializeGoal(r.goal as Partial<GoalSpec>);
+  const startedAt =
+    typeof r.startedAt === 'number' && Number.isFinite(r.startedAt) ? r.startedAt : 0;
+  const updatedAt =
+    typeof r.updatedAt === 'number' && Number.isFinite(r.updatedAt) ? r.updatedAt : startedAt;
+  const status: PilotRunRecord['status'] =
+    r.status === 'done' || r.status === 'failed' || r.status === 'aborted' || r.status === 'running'
+      ? r.status
+      : 'running';
+  const trajectory: PilotRunRecord['trajectory'] = [];
+  if (Array.isArray(r.trajectory)) {
+    for (const item of r.trajectory) {
+      if (item === null || typeof item !== 'object') continue;
+      const s = item as Record<string, unknown>;
+      const entry: PilotRunRecord['trajectory'][number] = {
+        stepIndex:
+          typeof s.stepIndex === 'number' && Number.isFinite(s.stepIndex)
+            ? Math.floor(s.stepIndex)
+            : trajectory.length,
+        kind: typeof s.kind === 'string' && s.kind !== '' ? s.kind : 'unknown',
+        outcome: typeof s.outcome === 'string' && s.outcome !== '' ? s.outcome : 'unknown',
+        at: typeof s.at === 'number' && Number.isFinite(s.at) ? s.at : updatedAt,
+      };
+      if (typeof s.label === 'string' && s.label !== '') entry.label = s.label;
+      trajectory.push(entry);
+    }
+  }
+  const rec: PilotRunRecord = {
+    token: r.token,
+    goal,
+    startedAt,
+    updatedAt,
+    status,
+    phase: typeof r.phase === 'string' && r.phase !== '' ? r.phase : 'planning',
+    steps: trajectory.length,
+    trajectory,
+    criteriaStatus: sanitizeCriteria(r.criteriaStatus) ?? initialCriteria(goal),
+  };
+  if (typeof r.steps === 'number' && Number.isFinite(r.steps)) {
+    rec.steps = Math.max(rec.steps, Math.floor(r.steps));
+  }
+  if (typeof r.summary === 'string') rec.summary = r.summary;
+  return rec;
+}
+
 /** list() 返回条数上限（记账库不是档案库 —— 最近 50 次运行足矣） */
 const LIST_CAP = 50;
+
+/**
+ * ΑΩ-R17 档案库容量上限缺省值：长驻进程 + 高频 run 下档案只增不减 ⇒ 内存 Map
+ * 与 JSONL 双侧缓慢膨胀。500 档 × 每档数十步摘要 —— 有界且够回溯（list() 本就
+ * 只示最近 50）；超限驱逐政策见 PilotStore 类注释。
+ */
+export const PILOT_MAX_RUNS = 500;
+
+/** ΑΩ-R17 构造选项（全部可选；非法值静默回缺省） */
+export interface PilotStoreOptions {
+  /** 档案容量上限：超限驱逐「最旧已完成」（缺省 PILOT_MAX_RUNS） */
+  maxRuns?: number;
+}
+
+/** ΑΩ-R17 档案库审计快照（dump() 返回面 —— 驱逐留痕，运维取证） */
+export interface PilotStoreStats {
+  /** 在库档数（≤ maxRuns；全在进行中的诚实超限例外 —— 见驱逐政策） */
+  total: number;
+  /** 容量上限（构造可调；缺省 PILOT_MAX_RUNS） */
+  maxRuns: number;
+  /** 累计驱逐档数（终身审计账 —— reset 不清零：留痕是义务不是状态） */
+  evicted: number;
+  /** 累计压缩重写次数（tmp+rename 原子换档的次数） */
+  compactions: number;
+  /** 磁盘镜像是否仍在工作（降级后 false —— 纯内存） */
+  persistent: boolean;
+  /** 最近一次磁盘故障（null = 无故障） */
+  lastError: string | null;
+}
 
 /**
  * 自主环运行档案库（断点续跑的存储面）。
@@ -156,6 +255,19 @@ const LIST_CAP = 50;
  * 闭环在此之后才回填目标机，故第 N 步行携带的是「第 N-1 步证据后」的账面；
  * 终局 finish 携带最终全量账（若有传）。进程被杀（finish 未达）时，续跑回放
  * 至多缺失最后一StepRecord 的证据 —— 诚实降级，绝不谎报。
+ *
+ * ΑΩ-R17 档案有界律（驱逐政策 —— 诚实条款）：
+ *  · 在库档数超过 maxRuns（缺省 500，构造 opts.maxRuns 可调）时，驱逐「最旧
+ *    已完成」档（done/failed/aborted 按 startedAt 取最旧，token 字典序破平）；
+ *  · 进行中（running）档案永不驱逐 —— 活跃血脉/跨进程可续跑态优先于容量；
+ *    若超限时全在进行中 ⇒ 本次诚实跳过，待其 finish 后的下一个 begin/finish
+ *    补驱（在库数可能短暂超限 —— 有界以完成为界，绝不驱逐活跃档来凑数）；
+ *  · 被驱逐档的 resume_token 自然失效：档案有界，老令牌过期是设计而非事故
+ *    （autonomy_resume 对失效 token 走既有「No pilot run found」诚实拒绝）；
+ *  · 驱逐计数（dump().evicted）终身累计留痕，reset() 不清零。
+ * 落盘压缩：驱逐只动内存；盘上死行（被逐档的旧行）累计达阈值（⌊maxRuns/10⌋
+ * 且 ≥1）时 tmp+rename 原子重写 —— 重写后文件只含幸存档快照行，append 续脉
+ * 不断；重写失败同降级律（永久内存 + lastError 留痕）。
  */
 export class PilotStore {
   private readonly runs = new Map<string, PilotRunRecord>();
@@ -163,14 +275,31 @@ export class PilotStore {
   private diskEnabled: boolean;
   private dirEnsured = false;
   private _lastError: string | null = null;
+  /** ΑΩ-R17 容量上限（构造可调；缺省 PILOT_MAX_RUNS） */
+  private readonly maxRuns: number;
+  /** ΑΩ-R17 压缩阈值：盘上死行累计达此数才重写（防每次驱逐都全量重写的抖动） */
+  private readonly compactThreshold: number;
+  /** ΑΩ-R17 累计驱逐档数（终身审计账） */
+  private _evicted = 0;
+  /** ΑΩ-R17 累计压缩重写次数 */
+  private _compactions = 0;
+  /** ΑΩ-R17 待压缩的盘上死行数（驱逐 +1，重写清零） */
+  private dropsSinceCompact = 0;
 
   /**
    * @param filePath JSONL 落盘路径：空/缺席 ⇒ 纯内存；非空 ⇒ 构造即重放铸态，
    *                 此后 begin/recordStep/finish 追加事件行。
+   * @param opts     ΑΩ-R17 可选项：maxRuns 容量上限（非法值静默回缺省）。
    */
-  constructor(filePath?: string) {
+  constructor(filePath?: string, opts?: PilotStoreOptions) {
     this.filePath = typeof filePath === 'string' && filePath.trim() !== '' ? filePath : '';
     this.diskEnabled = this.filePath !== '';
+    const rawMax = opts?.maxRuns;
+    this.maxRuns =
+      typeof rawMax === 'number' && Number.isFinite(rawMax) && rawMax >= 1
+        ? Math.floor(rawMax)
+        : PILOT_MAX_RUNS;
+    this.compactThreshold = Math.max(1, Math.floor(this.maxRuns / 10));
     if (this.diskEnabled) this.replay();
   }
 
@@ -182,6 +311,23 @@ export class PilotStore {
   /** 磁盘镜像是否仍在工作（降级后 false —— 纯内存） */
   get persistent(): boolean {
     return this.diskEnabled;
+  }
+
+  /** ΑΩ-R17 累计驱逐档数（终身审计账 —— reset 不清零：留痕是义务不是状态） */
+  get evicted(): number {
+    return this._evicted;
+  }
+
+  /** ΑΩ-R17 审计快照：容量/驱逐/压缩/降级一图流（只读账 —— 驱逐政策可见性条款） */
+  dump(): PilotStoreStats {
+    return {
+      total: this.runs.size,
+      maxRuns: this.maxRuns,
+      evicted: this._evicted,
+      compactions: this._compactions,
+      persistent: this.diskEnabled,
+      lastError: this._lastError,
+    };
   }
 
   /**
@@ -211,6 +357,7 @@ export class PilotStore {
       };
       this.runs.set(token, record);
       this.appendEvent({ type: 'begin', token, goal: copyShallowGoal(goalSnap), startedAt: t });
+      this.enforceCapacity(); // ΑΩ-R17：超限驱逐最旧已完成（新档 running 永不在驱逐候选）
       return token;
     } catch (err) {
       this.noteError(err);
@@ -294,6 +441,7 @@ export class PilotStore {
         ...(cs ? { criteriaStatus: copyCriteria(cs) } : {}),
       };
       this.appendEvent(line);
+      this.enforceCapacity(); // ΑΩ-R17：补驱此前因「全在进行中」诚实跳过的驱逐
     } catch (err) {
       this.noteError(err);
     }
@@ -305,7 +453,11 @@ export class PilotStore {
     return rec ? copyRecord(rec) : null;
   }
 
-  /** 全部档案：startedAt 倒序（新者先），至多 50 条，深拷贝 */
+  /**
+   * 全部档案：startedAt 倒序（新者先），至多 50 条，深拷贝。
+   * ΑΩ-R17：被驱逐档案不在列（load 亦 null —— 老令牌过期是设计而非事故；
+   * 驱逐计数见 dump()）。
+   */
   list(): PilotRunRecord[] {
     try {
       return [...this.runs.values()]
@@ -321,11 +473,15 @@ export class PilotStore {
     }
   }
 
-  /** 清空内存铸态（磁盘档案不删 —— 文件清理属宿主运维职权，存储面绝不做破坏性动作） */
+  /**
+   * 清空内存铸态（磁盘档案不删 —— 文件清理属宿主运维职权，存储面绝不做破坏性动作）。
+   * ΑΩ-R17：驱逐/压缩计数为终身审计账，reset 不清零；待压缩死行计数随内存归零。
+   */
   reset(): void {
     this.runs.clear();
     this._lastError = null;
     this.dirEnsured = false;
+    this.dropsSinceCompact = 0;
   }
 
   // ─── 内部机制 ───
@@ -366,12 +522,20 @@ export class PilotStore {
       }
       this.applyEvent(ev);
     }
+    // ΑΩ-R17：重放可能超限（盘上死行未压缩 / 宿主调小 maxRuns）—— 重放毕即守恒
+    this.enforceCapacity();
   }
 
   /** 单事件铸态（垃圾事件静默忽略） */
   private applyEvent(ev: unknown): void {
     if (ev === null || typeof ev !== 'object') return;
     const e = ev as Record<string, unknown>;
+    if (e.type === 'snapshot') {
+      // ΑΩ-R17 压缩重写行：一行一档全量快照（reviveRecord 防御式净化）
+      const rec = reviveRecord(e.record);
+      if (rec) this.runs.set(rec.token, rec);
+      return;
+    }
     if (e.type === 'begin' && typeof e.token === 'string') {
       const startedAt =
         typeof e.startedAt === 'number' && Number.isFinite(e.startedAt) ? e.startedAt : 0;
@@ -438,6 +602,84 @@ export class PilotStore {
       // 降级律：磁盘故障 ⇒ 此后纯内存（内存档仍完整），错误留痕供运维取证
       this.diskEnabled = false;
       this._lastError = `append: ${errText(err)}`;
+    }
+  }
+
+  /**
+   * ΑΩ-R17 容量守卫：在库数超上限 ⇒ 逐档驱逐「最旧已完成」（进行中永不驱逐；
+   * 全在进行中 ⇒ 诚实跳过 —— 有界以完成为界）。驱逐只动内存 + 计数；盘上
+   * 死行累计达压缩阈值时原子重写。绝不抛异常。
+   */
+  private enforceCapacity(): void {
+    try {
+      while (this.runs.size > this.maxRuns) {
+        let victim: PilotRunRecord | undefined;
+        for (const rec of this.runs.values()) {
+          if (rec.status === 'running') continue; // 活跃血脉/跨进程可续跑态优先于容量
+          if (
+            !victim ||
+            rec.startedAt < victim.startedAt ||
+            (rec.startedAt === victim.startedAt && rec.token < victim.token)
+          ) {
+            victim = rec;
+          }
+        }
+        if (!victim) break; // 全在进行中：诚实跳过，待完成后的 begin/finish 补驱
+        this.runs.delete(victim.token);
+        this._evicted++;
+        this.dropsSinceCompact++;
+      }
+      if (this.dropsSinceCompact >= this.compactThreshold) this.compactFile();
+    } catch (err) {
+      this.noteError(err);
+    }
+  }
+
+  /**
+   * ΑΩ-R17 压缩重写：tmp + fsync + rename 原子换档（checkpoint.ts 同一原子写律）
+   * —— 重写后文件只含幸存档快照行（startedAt 升序），与断尾容忍读兼容（快照
+   * 行本身即完整行；旧读方对未知 type 按垃圾行静默忽略）。失败 ⇒ 同降级律：
+   * 永久纯内存 + lastError 留痕（内存档与驱逐政策不受影响）。
+   */
+  private compactFile(): void {
+    if (!this.diskEnabled || this.filePath === '') {
+      this.dropsSinceCompact = 0;
+      return;
+    }
+    const tmp = this.filePath + '.tmp';
+    try {
+      if (!this.dirEnsured) {
+        mkdirSync(path.dirname(this.filePath), { recursive: true });
+        this.dirEnsured = true;
+      }
+      const body = [...this.runs.values()]
+        .sort(
+          (a, b) =>
+            a.startedAt - b.startedAt || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0),
+        )
+        .map(rec => JSON.stringify({ type: 'snapshot', record: copyRecord(rec) } as PilotEvent))
+        .join('\n');
+      const text = body === '' ? '' : body + '\n';
+      // fsync 落盘后再换名：崩溃后要么完整旧档要么完整新档，绝无半档（页缓存不算落盘）
+      const fd = openSync(tmp, 'w');
+      try {
+        writeSync(fd, Buffer.from(text, 'utf8'));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, this.filePath);
+      this.dropsSinceCompact = 0;
+      this._compactions++;
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* tmp 可能未创建 */
+      }
+      // 降级律（与 appendEvent 同源）：任何磁盘写失败 ⇒ 永久纯内存并留痕
+      this.diskEnabled = false;
+      this._lastError = `compact: ${errText(err)}`;
     }
   }
 

@@ -276,6 +276,43 @@ test('Ω-1: 响应缺 choices/message.content ⇒ 诚实失败不抛', async () 
   assert.match(r.error!, /missing choices/);
 });
 
+// ─── ΑΩ-R15 行为等价锁：重试环收拢 fetchWithRetry 后的旧错误串/记账形状逐字节保持 ───
+
+test('ΑΩ-R15: 网络错误重试耗尽 ⇒ glm 前缀 + 尝试次数 + code 归因（与原手写环逐字节同形）', async () => {
+  const { fetchImpl, calls } = recorder(() =>
+    Promise.reject(new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } })));
+  const client = new glm.GlmClient({ apiKey: 'k', fetchImpl });
+  const r = await client.chat(req());
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'glm fetch failed after 3 attempts: ECONNRESET fetch failed');
+  assert.equal(calls.length, 3, 'maxRetries=2 ⇒ 至多 3 次');
+});
+
+test('ΑΩ-R15: 429 重试耗尽 ⇒ HTTP 前缀 + 尝试次数 + apiKey 回显剔除 + meter 恰一条', async () => {
+  const records: GlmMeterRecord[] = [];
+  const { fetchImpl, calls } = queue(() => httpStatus(429, 'rate limited for key k-secret-123'));
+  const client = new glm.GlmClient({ apiKey: 'k-secret-123', fetchImpl, meter: rec => records.push(rec) });
+  const r = await client.chat(req());
+  assert.equal(r.ok, false);
+  assert.equal(calls.length, 3, 'maxRetries=2 ⇒ 至多 3 次');
+  assert.match(r.error!, /^glm chat\/completions HTTP 429 after 3 attempts: /);
+  assert.ok(r.error!.includes('[REDACTED]'), 'apiKey 回显必须替换为占位符');
+  assert.ok(!r.error!.includes('k-secret-123'), 'apiKey 值不得残留在错误面');
+  assert.equal(records.length, 1, '重试不重复记账 —— 每调用恰一条');
+  assert.equal(records[0]!.ok, false);
+  assert.match(records[0]!.error!, /HTTP 429 after 3 attempts/);
+});
+
+test('ΑΩ-R15: 超时错误串逐字节锁定 —— glm request aborted（maxRetries 不消费）', async () => {
+  const timeoutErr = Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
+  const { fetchImpl, calls } = recorder(() => Promise.reject(timeoutErr));
+  const client = new glm.GlmClient({ apiKey: 'k', fetchImpl });
+  const r = await client.chat(req({ maxRetries: 5 }));
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'glm request aborted after 500ms');
+  assert.equal(calls.length, 1, '超时不进重试环');
+});
+
 // ─── Ω-1e meter 遥测 ───
 
 test('Ω-1: meter 恰好每次调用一条 —— 成功带 usage、失败带 error', async () => {
@@ -372,4 +409,103 @@ test('Ω-1: extractGlmJson —— 围栏/杂文/字符串内括号/无 JSON 的�
   // 脏值（null/undefined/非字符串）安静返回 undefined（原实现此处会抛 TypeError）
   assert.equal(glm.extractGlmJson(null as unknown as string), undefined, '脏值安静返回 undefined（不抛铁律）');
   assert.equal(glm.extractGlmJson(undefined as unknown as string), undefined);
+});
+
+// ─── ΝΩ-18（限流器接线）：chat/chatJson 前置 tryAcquire + 429 回填 ───
+
+test('ΝΩ-18: 限流前置 —— chat/chatJson 被拒 ⇒ ok:false 归因 rate-limited（不重试零网络）', async () => {
+  glm.attachVlmRateLimiter(new (await import('../src/vlm/metering.ts')).VlmRateLimiter({ maxPerMinute: 1 }));
+  try {
+    const { fetchImpl, calls } = recorder(() => chatOk('{"answer":1}'));
+    const client = new glm.GlmClient({ apiKey: 'k', fetchImpl });
+    // 首次：配额放行 ⇒ 主路径正常
+    const j1 = await client.chatJson<{ answer: number }>(req({ maxRetries: 0 }));
+    assert.equal(j1.ok, true);
+    assert.deepEqual(j1.value, { answer: 1 });
+    assert.equal(calls.length, 1, '首次放行恰一拨');
+    // 第二次：chatJson 前置拒绝（分钟桶 1/1）—— 零网络、error 归因 rate-limited
+    const j2 = await client.chatJson(req({ maxRetries: 0 }));
+    assert.equal(j2.ok, false);
+    assert.match(j2.error!, /^glm rate limited \(retry after \d+ms\)$/);
+    assert.equal(j2.raw, '');
+    assert.equal(calls.length, 1, '拒绝 ⇒ 零新 fetch（不重试不咨询池）');
+    // chat 同律（且一次 chatJson + 一次 chat 恰各扣一次配额，绝不双扣）
+    const r1 = await client.chat(req({ maxRetries: 0 }));
+    assert.equal(r1.ok, false);
+    assert.match(r1.error!, /^glm rate limited \(retry after \d+ms\)$/);
+    assert.equal(r1.note, 'rate-limited');
+    assert.equal(r1.text, '');
+    assert.equal(calls.length, 1);
+  } finally {
+    glm.attachVlmRateLimiter(null);
+  }
+});
+
+test('ΝΩ-18: 限流拒绝照报 meter 恰一条 + 敌意闸（tryAcquire 抛错）fail-open + 垃圾闸安静忽略', async () => {
+  const records: GlmMeterRecord[] = [];
+  glm.attachVlmRateLimiter(new (await import('../src/vlm/metering.ts')).VlmRateLimiter({ maxPerMinute: 0 }));
+  try {
+    const { fetchImpl, calls } = recorder(() => chatOk('x'));
+    const client = new glm.GlmClient({ apiKey: 'k', fetchImpl, meter: rec => records.push(rec) });
+    const r = await client.chat(req({ maxRetries: 0 }));
+    assert.equal(r.ok, false);
+    assert.match(r.error!, /rate limited/);
+    assert.equal(r.latencyMs, 0);
+    assert.equal(records.length, 1, '拒绝也是一次 chat 调用 —— 恰一条遥测');
+    assert.equal(records[0]!.ok, false);
+    assert.match(records[0]!.error!, /rate limited/);
+    assert.equal(calls.length, 0);
+  } finally {
+    glm.attachVlmRateLimiter(null);
+  }
+  // 敌意闸：tryAcquire 恒上抛 ⇒ 视为未接线放行（闸故障不阻断主路径）
+  glm.attachVlmRateLimiter({
+    tryAcquire: (): { allowed: boolean; retryAfterMs: number } => { throw new Error('闸内爆'); },
+  });
+  try {
+    const { fetchImpl, calls } = recorder(() => chatOk('fail-open'));
+    const client = new glm.GlmClient({ apiKey: 'k', fetchImpl });
+    const r = await client.chat(req({ maxRetries: 0 }));
+    assert.equal(r.ok, true);
+    assert.equal(r.text, 'fail-open');
+    assert.equal(calls.length, 1);
+  } finally {
+    glm.attachVlmRateLimiter(null);
+  }
+  // 垃圾闸（非对象/无 tryAcquire）⇒ 注入即安静归 null（不抛铁律 + 零行为变化）
+  glm.attachVlmRateLimiter({} as never);
+  const { fetchImpl: f3, calls: c3 } = recorder(() => chatOk('plain'));
+  const c3client = new glm.GlmClient({ apiKey: 'k', fetchImpl: f3 });
+  assert.equal((await c3client.chat(req({ maxRetries: 0 }))).ok, true);
+  assert.equal(c3.length, 1);
+  glm.attachVlmRateLimiter(null);
+});
+
+test('ΝΩ-18: 429 回填 —— 终败 429 记作本地配额 + retryAfterMs 提示进错误 note；下次前置拒绝', async () => {
+  glm.attachVlmRateLimiter(new (await import('../src/vlm/metering.ts')).VlmRateLimiter({ maxPerMinute: 1 }));
+  try {
+    const { fetchImpl, calls } = queue(() => httpStatus(429, '{"error":{"message":"rate limited"}}'));
+    const client = new glm.GlmClient({ apiKey: 'k', fetchImpl });
+    // 首次：配额放行（1 戳）⇒ 拨号 429 终败（maxRetries 0 防真退避等待）
+    const r = await client.chat(req({ maxRetries: 0 }));
+    assert.equal(r.ok, false);
+    assert.match(r.error!, /HTTP 429/);
+    assert.match(r.note!, /^rate-limited by server \(429\); retry after \d+ms$/, '等待提示进错误 note');
+    assert.equal(calls.length, 1);
+    // 回填收紧生效：429 戳入账（分钟桶 2/1）⇒ 下次调用前置拒绝，不再烧 429 往返
+    const r2 = await client.chat(req({ maxRetries: 0 }));
+    assert.equal(r2.ok, false);
+    assert.match(r2.error!, /rate limited \(retry after \d+ms\)/);
+    assert.equal(r2.note, 'rate-limited');
+    assert.equal(calls.length, 1, '回填后本地拒绝 ⇒ 零新 fetch');
+  } finally {
+    glm.attachVlmRateLimiter(null);
+  }
+  // 未接线限流闸的 429：note 缺席、错误串与既往逐字节一致（零回归红律）
+  const { fetchImpl: f2, calls: c2 } = queue(() => httpStatus(429, 'rate limited'));
+  const client2 = new glm.GlmClient({ apiKey: 'k', fetchImpl: f2 });
+  const r3 = await client2.chat(req({ maxRetries: 0 }));
+  assert.equal(r3.ok, false);
+  assert.equal(r3.note, undefined, '未接线 ⇒ 无回填无 note');
+  assert.equal(c2.length, 1);
 });

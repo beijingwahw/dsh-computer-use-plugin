@@ -154,6 +154,49 @@ test('Ω-5c: 排序稳定性 —— 按 center.y 再 center.x；同键词保持�
   assert.equal(r.text, 'top a b tie-z tie-y'); // text 与 words 同序空格连接
 });
 
+// ─── ΝΩ-17 行聚类阅读序（多栏/表格跨列穿插修复） ───
+
+test('ΝΩ-17: 行聚类阅读序 —— 双栏文本 y 微抖不再跨列穿插，行内 x 序恢复', async () => {
+  const { client } = fakeClient(() => ({
+    ok: true, raw: '',
+    value: wordsValue([
+      // 双栏两行；词级 bbox 高低不齐（右栏词 y 微高/微低几个像素）—— 旧 (y,x)
+      // 逐词排序会把行 2 的右栏词排到左栏词之前（行内 x 序被打乱）
+      { text: '右1', confidence: 0.9, bbox: [200, 44, 280, 64] },  // center y 54（+4 抖）
+      { text: '左1', confidence: 0.9, bbox: [10, 40, 90, 60] },    // center y 50
+      { text: '左2', confidence: 0.9, bbox: [10, 140, 90, 160] },  // center y 150
+      { text: '右2', confidence: 0.9, bbox: [200, 136, 280, 156] }, // center y 146（-4 抖）
+    ]),
+  }));
+  const r = await readTextViaVlm(await makePng(400, 300), { client });
+  assert.equal(r.ok, true);
+  // 中位字高 20 ⇒ 行容差 0.6×20=12：{左1(y50),右1(y54)} 同行、{右2(y146),左2(y150)}
+  // 同行；行内 x 升序、行间按锚 y —— 旧序会是 左1 右1 右2 左2（行 2 反转）
+  assert.deepEqual(r.words.map(w => w.text), ['左1', '右1', '左2', '右2']);
+  assert.equal(r.text, '左1 右1 左2 右2');
+});
+
+test('ΝΩ-17: 行聚类不吞相邻行 —— 1.2 倍行距的表格行各自成行，序仍自上而下', async () => {
+  const { client } = fakeClient(() => ({
+    ok: true, raw: '',
+    value: wordsValue([
+      { text: '表头A', confidence: 0.9, bbox: [10, 40, 90, 60] },    // center y 50
+      { text: '表头B', confidence: 0.9, bbox: [110, 40, 190, 60] },
+      { text: '行1A', confidence: 0.9, bbox: [10, 64, 90, 84] },     // center y 74（行距 24=1.2×字高）
+      { text: '行1B', confidence: 0.9, bbox: [110, 64, 190, 84] },
+      { text: '行2A', confidence: 0.9, bbox: [10, 88, 90, 108] },    // center y 98
+      { text: '行2B', confidence: 0.9, bbox: [110, 88, 190, 108] },
+    ]),
+  }));
+  const r = await readTextViaVlm(await makePng(400, 300), { client });
+  assert.equal(r.ok, true);
+  assert.deepEqual(
+    r.words.map(w => w.text),
+    ['表头A', '表头B', '行1A', '行1B', '行2A', '行2B'],
+    '三行各自成行（容差 12 < 行距 24），行内 x 序、行间 y 序',
+  );
+});
+
 // ─── Ω-5d findText 匹配律 ───
 
 test('Ω-5d: findText 匹配律 —— 大小写不敏感 + 空白差异容忍；命中返回中心；无命中 ok:true 空数组', async () => {
@@ -290,4 +333,66 @@ test('Ω-5f: 真 GlmClient（假 fetch）端到端 —— 围栏 JSON 解析成�
   assert.equal(f.ok, false);
   assert.equal(f.degraded, true);
   assert.match(f.error ?? '', /vlm ocr chat failed/);
+});
+
+// ─── ΝΩ-48（注视经济进 OCR）：foveaCenter 透传 ───
+
+/** LCG 噪声 PNG（高频细节 —— 注视位置在中央凹编码字节上可观测；w2wire W2-D① 同手法） */
+async function noisePng(width: number, height: number): Promise<Buffer> {
+  const raw = Buffer.alloc(width * height * 3);
+  let seed = 0x2f6e2b1;
+  for (let i = 0; i < raw.length; i += 3) {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    raw[i] = seed & 0xff; raw[i + 1] = (seed >>> 8) & 0xff; raw[i + 2] = (seed >>> 16) & 0xff;
+  }
+  return sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer();
+}
+
+test('ΝΩ-48: readTextViaVlm foveaCenter 透传 —— 中央凹编码生效（字节与 codec 参考路径一致、注视真实生效）、blur 坐标恒等反算', async () => {
+  const { encodeForVlmMeta } = await import('../src/vlm/codec.ts');
+  const png = await noisePng(400, 300);
+  const gaze = { x: 0.3, y: 0.6 };
+  const { client, calls } = fakeClient(() => ({
+    ok: true, raw: '',
+    value: wordsValue([{ text: 'Fovea', confidence: 0.9, bbox: [10, 20, 110, 60] }]),
+  }));
+  const r = await readTextViaVlm(png, { client, foveaCenter: gaze });
+  assert.equal(r.ok, true);
+  // 透传不走私：模型收到的图 = codec 参考路径（foveated:true + 同注视中心）
+  const ref = await encodeForVlmMeta(png, { foveated: true, foveaCenter: gaze });
+  assert.equal(ref.ok, true);
+  assert.equal(ref.value!.foveated, true);
+  assert.deepEqual(ref.value!.foveaCenter, gaze, '编码 meta 回声生效注视中心');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].images[0]!.base64, ref.value!.base64, 'vlmOcr 下发的图与参考路径逐字节一致');
+  // 注视真实生效：偏置注视 ≠ 几何中心注视的编码字节（高频图上必可观测）
+  const center = await encodeForVlmMeta(png, { foveated: true, foveaCenter: { x: 0.5, y: 0.5 } });
+  assert.notEqual(calls[0].images[0]!.base64, center.value!.base64);
+  // blur 模式坐标空间不变（as-is 编码恒等反算）：词坐标原样回源图系
+  assert.equal(r.coordinateSpace, 'original');
+  assert.deepEqual(r.words[0]!.bbox, { x0: 10, y0: 20, x1: 110, y1: 60 }, '中央凹不劫持坐标系');
+  assert.deepEqual(r.words[0]!.center, { x: 60, y: 40 });
+});
+
+test('ΝΩ-48: foveaCenter 缺席 ⇒ 均质编码逐字节不变；findTextViaVlm 透传面在场', async () => {
+  const { encodeForVlmMeta } = await import('../src/vlm/codec.ts');
+  // 缺席臂：与均质参考路径逐字节一致（零回归锚点）
+  const pngA = await noisePng(300, 200);
+  const a = fakeClient(() => ({ ok: true, raw: '', value: wordsValue([]) }));
+  await readTextViaVlm(pngA, { client: a.client });
+  const refA = await encodeForVlmMeta(pngA);
+  assert.equal(refA.value!.foveated, false);
+  assert.equal(a.calls[0].images[0]!.base64, refA.value!.base64, '缺席 ⇒ 旧路径字节不变');
+  // findTextViaVlm 的 foveaCenter 透传（runVlmOcr 共用主流程）
+  const gaze = { x: 0.7, y: 0.4 };
+  const b = fakeClient(() => ({
+    ok: true, raw: '',
+    value: wordsValue([{ text: 'Save', confidence: 0.9, bbox: [10, 10, 90, 40] }]),
+  }));
+  const f = await findTextViaVlm(pngA, 'save', { client: b.client, foveaCenter: gaze });
+  assert.equal(f.ok, true);
+  const refB = await encodeForVlmMeta(pngA, { foveated: true, foveaCenter: gaze });
+  assert.equal(refB.value!.foveated, true);
+  assert.equal(b.calls[0].images[0]!.base64, refB.value!.base64, '找字路径同样透传注视中心');
+  assert.deepEqual(f.matches[0]!.center, { x: 50, y: 25 }, '命中中心照常源图系');
 });

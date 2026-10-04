@@ -485,3 +485,138 @@ test('S-2: sleep 接线② —— memoryOpsConverger 并入晨报；缺席零行
   const distillWithout = withoutTpl.acts.find(a => a.name === 'distill');
   assert.deepEqual(distillWithout?.counts, { skills: 1 }, '旁挂面缺席 ⇒ counts 与旧形态逐键一致');
 });
+
+// ─── ΝΩ-22（热路径 IO 放大①）：skillLibrary 防抖落盘执法册 ───
+//
+//   a 防抖合并：recordOutcome 三连 ⇒ 恰开一个 50ms 合并窗、窗内零落盘、
+//     到点恰一次全库落盘且三笔回写全并入（假 timer 注入 —— 零真等）；
+//   b 紧急路径保留：显式 save() 立即冲刷并取消待决合并写；flush() 同步冲刷；
+//   c bindTemplate / learnFromDemonstration 失败与蒸馏路径并入合并窗。
+
+/** 假 timer 宿主：捕获回调手动触发（离线确定性 —— 零真等） */
+function fakeSaveTimers() {
+  let next = 0;
+  const queue = new Map<number, { fn: () => void; ms: number }>();
+  return {
+    host: {
+      setTimeout: (fn: () => void, ms: number) => { next += 1; queue.set(next, { fn, ms }); return next; },
+      clearTimeout: (h: unknown) => { queue.delete(h as number); },
+    },
+    queue,
+    fireAll: () => { for (const { fn } of [...queue.values()]) fn(); },
+  };
+}
+
+test('ΝΩ-22-a 防抖合并：recordOutcome 三连 ⇒ 一次落盘（50ms 合并窗，假 timer 零真等）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w3skill-nw22a-'));
+  try {
+    skillLibrary.configure(true, join(dir, 'skills.json'), 50);
+    skillLibrary.reset();
+    const fake = fakeSaveTimers();
+    skillLibrary.setSaveTimersForTest(fake.host);
+    const s = skillLibrary.induce('防抖工作流', [click(0.5, 0.5)]);
+    assert.ok(s);
+    const base = skillLibrary.saveStatsForTest();
+    assert.equal(base.writes, 1, 'induce 批量路径立即落盘（紧急语义保留）');
+    assert.equal(base.pending, false);
+    // 热路径三连回写：只开一个合并窗、窗内零落盘
+    skillLibrary.recordOutcome(s!.id, true);
+    skillLibrary.recordOutcome(s!.id, false);
+    skillLibrary.recordOutcome(s!.id, true);
+    const mid = skillLibrary.saveStatsForTest();
+    assert.equal(mid.writes, base.writes, '合并窗内零落盘');
+    assert.equal(mid.scheduled, base.scheduled + 1, '三连回写合并为一次调度');
+    assert.equal(mid.pending, true);
+    assert.equal(fake.queue.size, 1, '恰一个待触发定时器');
+    assert.equal([...fake.queue.values()][0]!.ms, 50, '合并窗宽度 50ms');
+    // 到点：恰一次全库落盘，三笔回写全部并入同一档
+    fake.fireAll();
+    const after = skillLibrary.saveStatsForTest();
+    assert.equal(after.writes, base.writes + 1, '窗口到点恰一次落盘');
+    assert.equal(after.pending, false);
+    const onDisk = JSON.parse(readFileSync(join(dir, 'skills.json'), 'utf8'));
+    assert.equal(onDisk.skills[0].attemptCount, 4, '初始 1 + 三笔回写');
+    assert.equal(onDisk.skills[0].successCount, 3, '成功 1 + 2');
+  } finally {
+    skillLibrary.setSaveTimersForTest(null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ΝΩ-22-b 紧急路径保留：显式 save() 立即冲刷并取消待决合并写；flush() 同步冲刷', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w3skill-nw22b-'));
+  try {
+    skillLibrary.configure(true, join(dir, 'skills.json'), 50);
+    skillLibrary.reset();
+    const fake = fakeSaveTimers();
+    skillLibrary.setSaveTimersForTest(fake.host);
+    const s = skillLibrary.induce('紧急冲刷工作流', [click(0.1, 0.2)]);
+    assert.ok(s);
+    const base = skillLibrary.saveStatsForTest();
+    // ① 显式 save()：立即冲刷 + 取消待决定时器
+    skillLibrary.recordOutcome(s!.id, true);
+    assert.equal(skillLibrary.saveStatsForTest().pending, true);
+    skillLibrary.save();
+    const afterSave = skillLibrary.saveStatsForTest();
+    assert.equal(afterSave.writes, base.writes + 1, '显式调用立即落盘');
+    assert.equal(afterSave.pending, false, '待决合并写被取消');
+    assert.equal(fake.queue.size, 0, '定时器已清理（残余回调不再触发二次落盘）');
+    // ② flush()：合并窗内同步冲刷（退出钩子/卸载路径的同步面）
+    skillLibrary.recordOutcome(s!.id, true);
+    assert.equal(skillLibrary.saveStatsForTest().pending, true);
+    skillLibrary.flush();
+    const afterFlush = skillLibrary.saveStatsForTest();
+    assert.equal(afterFlush.writes, base.writes + 2, 'flush 同步冲刷一次');
+    assert.equal(afterFlush.pending, false);
+    const onDisk = JSON.parse(readFileSync(join(dir, 'skills.json'), 'utf8'));
+    assert.equal(onDisk.skills[0].attemptCount, 3, '两笔回写均已在档');
+  } finally {
+    skillLibrary.setSaveTimersForTest(null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ΝΩ-22-c bindTemplate/learnFromDemonstration 热路径并入合并窗', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w3skill-nw22c-'));
+  try {
+    skillLibrary.configure(true, join(dir, 'skills.json'), 50);
+    skillLibrary.reset();
+    const fake = fakeSaveTimers();
+    skillLibrary.setSaveTimersForTest(fake.host);
+    skillLibrary.induce('登录门户', [click(0.5, 0.5), typeText('userA'), click(0.9, 0.1)]);
+    skillLibrary.induce('登录门户', [click(0.5, 0.5), typeText('userB'), click(0.9, 0.1)]);
+    const { created } = skillLibrary.distillTemplates();
+    assert.equal(created.length, 1);
+    const tplId = created[0].id;
+    const base = skillLibrary.saveStatsForTest();
+    // bindTemplate 失败路径（reader 抛错）：账本回写并入合并窗（不立即落盘）
+    const boom = skillLibrary.bindTemplate(tplId, () => { throw new Error('OCR 不可用'); });
+    assert.ok(!boom.ok && boom.reason === 'hole-read-failed');
+    const afterBind = skillLibrary.saveStatsForTest();
+    assert.equal(afterBind.writes, base.writes, '失败路径窗内零落盘');
+    assert.equal(afterBind.pending, true);
+    fake.fireAll();
+    assert.equal(skillLibrary.saveStatsForTest().writes, base.writes + 1, '到点一次落盘');
+    const hole = skillLibrary.getTemplate(tplId)?.steps[1].args.text;
+    assert.ok(hole && hole.kind === 'hole' && hole.bindAttempts === 1, '绑定账本并入同一档');
+    // learnFromDemonstration（负示范命中 ⇒ penalized）：同律并入合并窗
+    const mid = skillLibrary.saveStatsForTest();
+    const learn = skillLibrary.learnFromDemonstration({
+      kind: 'approval-denied',
+      tokenId: 'ab12cd34',
+      actionShape: { tool: 'click_mouse', x: 0.5, y: 0.5 },
+    });
+    assert.equal(learn.outcome, 'penalized', '签名通道命中技能');
+    assert.equal(skillLibrary.saveStatsForTest().writes, mid.writes, '示范蒸馏窗内零落盘');
+    assert.equal(skillLibrary.saveStatsForTest().pending, true);
+    fake.fireAll();
+    assert.equal(skillLibrary.saveStatsForTest().writes, mid.writes + 1, '到点一次落盘');
+    const onDisk = JSON.parse(readFileSync(join(dir, 'skills.json'), 'utf8'));
+    const penalized = onDisk.skills.find((x: any) => x.demoDenied > 0);
+    assert.ok(penalized, '否决注记已落盘');
+    assert.equal(penalized.demoBonus, -0.15);
+  } finally {
+    skillLibrary.setSaveTimersForTest(null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

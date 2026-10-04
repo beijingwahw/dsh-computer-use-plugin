@@ -4,12 +4,16 @@
 // encodeForVlmMeta 编码（region 像素裁剪/压缩，源图宽高随行）→ buildOcrPrompt 铁律提示词
 // （findQuery 聚焦）→ GlmClient.chatJson 结构化对话 → 逐词校验（trim / 夹取 / 4 元数组转
 // 对象 / 几何中心 / 阅读序）→ 纪元 Γ 坐标反算（词坐标：编码图系 → 源图系，裁剪窗先缩放
-// 后平移）→ coordinateSpace 诚实标注。
+// 后平移）→ coordinateSpace 诚实标注 → ΝΩ-17 行聚类阅读序（中位字高 y 容差聚行、
+// 行内 x 排序 —— 多栏/表格跨列穿插修复）。
 // 铁律：具名导出、零新增依赖、绝不抛异常 —— 一切失败以 { ok:false, degraded:true } 表达，
 // 调用方降级回本地 OCR 路径（云脑缺席不致命，宁可空不可错）。
 // W8-A6（VLM 架构债 · 依赖倒置最小形态）：云端依赖面自 GlmClient 具体类降为
 // StructuredVisionPort 窄端口（configured + chatJson）—— 多供应商（备选池/
 // 合议庭脑）可直入；GlmClient 结构天然满足（传入处零改动），运行时行为不变。
+// ΝΩ-48（注视经济进 OCR）：foveaCenter 可选参数（源图归一化 [0,1]²，在场即
+// 显式开中央凹编码并透传 codec —— 缺席逐字节旧路径）；坐标反算链自动消化
+// blur（几何不变）/ inset（分段反算）两模式，词坐标恒回源图系。
 import {
   getGlmClient, isGlmConfigured,
   type GlmImageInput,
@@ -34,7 +38,7 @@ export interface VlmWord {
 /** 云端 VLM OCR 结果 —— ok:false 时 text 恒 ''、words 恒 []（宁可空不可错） */
 export interface VlmOcrResult {
   ok: boolean;
-  /** 全部词按阅读序（y 再 x）以空格连接 */
+  /** 全部词按行聚类阅读序（ΝΩ-17：y 容差聚行、行内 x 升序、行间按 y）以空格连接 */
   text: string;
   words: VlmWord[];
   /** true = 云脑缺席/失败 —— 调用方应降级本地 OCR 路径 */
@@ -71,6 +75,15 @@ export interface VlmFindResult {
 
 /** 大小写/空白不敏感归一 —— 与 textReader.ts 的 normalize 同律（toLowerCase + 空白折叠） */
 const normalize = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * ΝΩ-17：行聚类 y 容差系数（× 中位字高）。0.6 论证：行内中心漂移（上下标/
+ * 降部/轻微倾斜/词级 bbox 高低不齐）通常 < 0.5 字高；相邻行中心距 ≥ 1.0 字高
+ * （正文行距 1.2-1.5em，紧凑表格行也 > 1.0）。容差取整字高会把 1.0-1.1 倍
+ * 行距的表格行并作一行（跨行穿插反而更糟）；0.6 居中 —— 容纳行内漂移且不
+ * 吞相邻行。中位数而非均值：标题大字/脚注小字的离群高度不劫持容差。
+ */
+const OCR_LINE_TOL_FACTOR = 0.6;
 
 /** 宽松转数 —— 数字字符串也收（模型方言防御）；非法/NaN 返回 null */
 function toFiniteNumber(v: unknown): number | null {
@@ -128,13 +141,55 @@ function sanitizeWords(rawWords: unknown[]): VlmWord[] {
   return words;
 }
 
+/**
+ * ΝΩ-17 纯函数：行聚类阅读序 —— 逐词 (y,x) 排序在多栏/表格上会跨列穿插：
+ * 行内词的 y 只要有几个像素抖动（词级 bbox 高低不齐是常态），右栏低抖词就会
+ * 排到左栏高抖词之前/之后，行内 x 序被打乱。修法：按 y 容差（中位字高×
+ * OCR_LINE_TOL_FACTOR）贪心聚类成行（行锚 = 行内中心 y 的滚动均值，容纳轻微
+ * 倾斜），行内按 x 升序、行间按锚 y 升序 —— 多栏/表格的行结构恢复（每行
+ * 左→右跨全栏，行序自上而下）。零异常；≤1 词或中位字高病值（≤0）时原序保底。
+ */
+function readingOrderWords(words: VlmWord[]): VlmWord[] {
+  if (words.length <= 1) return [...words];
+  const heights = words
+    .map(w => Math.max(0, w.bbox.y1 - w.bbox.y0))
+    .sort((a, b) => a - b);
+  const medianH = heights[Math.floor(heights.length / 2)] ?? 0;
+  if (!(medianH > 0)) return [...words];
+  const tol = medianH * OCR_LINE_TOL_FACTOR;
+  // 依 y 升序扫入（sanitizeWords 已给 (y,x) 稳定序，此处再排一次防御上游重排）
+  const byY = [...words].sort((a, b) => (a.center.y - b.center.y) || (a.center.x - b.center.x));
+  const lines: Array<{ sumY: number; items: VlmWord[] }> = [];
+  for (const w of byY) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(w.center.y - last.sumY / last.items.length) <= tol) {
+      last.sumY += w.center.y;
+      last.items.push(w);
+    } else {
+      lines.push({ sumY: w.center.y, items: [w] });
+    }
+  }
+  // 行间按锚 y（构造序天然升序，滚动锚微扰时防御性再排）；行内按 x（同键稳定）
+  lines.sort((a, b) => a.sumY / a.items.length - b.sumY / b.items.length);
+  const out: VlmWord[] = [];
+  for (const ln of lines) {
+    ln.items.sort((a, b) => (a.center.x - b.center.x) || (a.center.y - b.center.y));
+    out.push(...ln.items);
+  }
+  return out;
+}
+
 /** 内部共用选项 —— findQuery 仅 findTextViaVlm 下发（提示词聚焦查询词）。
- *  W8-A6：client 为 StructuredVisionPort 窄端口（原 GlmClient 具体类） */
+ *  W8-A6：client 为 StructuredVisionPort 窄端口（原 GlmClient 具体类）。
+ *  ΝΩ-48（注视经济进 OCR）：foveaCenter —— 源图归一化系 [0,1]² 注视中心
+ *  （与 encodeForVlm.foveaCenter / gazeRouter 输出同方言），在场即显式开
+ *  中央凹编码（与 grounding 同律；缺席逐字节旧路径）。 */
 interface VlmOcrOptions {
   region?: Bbox;
   lang?: string;
   findQuery?: string;
   client?: StructuredVisionPort;
+  foveaCenter?: { x: number; y: number };
 }
 
 /**
@@ -162,8 +217,18 @@ async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrRes
     }
 
     // 2) 编码（region 像素裁剪/压缩在此发生；纪元 Γ 元信息通道 —— 模型在
-    //    编码图上作答，sourceWidth/Height + cropRect 是反算回源图系的基准）
-    const enc = await encodeForVlmMeta(buffer, { region: opts.region });
+    //    编码图上作答，sourceWidth/Height + cropRect 是反算回源图系的基准）。
+    //    ΝΩ-48（注视经济）：foveaCenter 在场即显式开中央凹并透传注视中心
+    //    （blur/inset 由注册表 foveaMode 管辖；缺席不传 foveated/foveaCenter —
+    //    缺省路径逐字节不变）。坐标反算链自动消化两模式：blur 几何不变；inset
+    //    走 mapInsetToOriginal 分段反算（下方既有分支，insetExtract 随行注视
+    //    偏置精确反算）—— 词坐标恒回源图系，注视不劫持坐标系。
+    const enc = await encodeForVlmMeta(buffer, {
+      region: opts.region,
+      ...(opts.foveaCenter !== undefined
+        ? { foveated: true, foveaCenter: opts.foveaCenter }
+        : {}),
+    });
     if (!enc.ok || !enc.value) {
       return degrade(`vlm ocr encode failed: ${enc.error ?? 'unknown codec error'}`);
     }
@@ -221,6 +286,10 @@ async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrRes
         });
       }
     }
+    // ΝΩ-17：行聚类阅读序 —— 在**源图系**最终坐标上聚类（inset 分段缩放/裁剪
+    // 平移后的几何才是屏幕真实行结构；canMap 缺席时编码系同理），多栏/表格的
+    // 跨列穿插在此恢复
+    words = readingOrderWords(words);
     return {
       ok: true, text: words.map(w => w.text).join(' '), words,
       degraded: false, latencyMs: Date.now() - startedAt,
@@ -241,12 +310,19 @@ async function runVlmOcr(buffer: Buffer, opts: VlmOcrOptions): Promise<VlmOcrRes
  */
 export async function readTextViaVlm(
   buffer: Buffer,
-  opts?: { region?: Bbox; lang?: string; client?: StructuredVisionPort },
+  opts?: {
+    region?: Bbox;
+    lang?: string;
+    client?: StructuredVisionPort;
+    /** ΝΩ-48（注视经济）：注视中心（源图归一化 [0,1]²）—— 在场即中央凹编码 */
+    foveaCenter?: { x: number; y: number };
+  },
 ): Promise<VlmOcrResult> {
   return runVlmOcr(buffer, {
     region: opts?.region,
     lang: opts?.lang,
     client: opts?.client,
+    foveaCenter: opts?.foveaCenter,
   });
 }
 
@@ -258,11 +334,21 @@ export async function readTextViaVlm(
 export async function findTextViaVlm(
   buffer: Buffer,
   query: string,
-  opts?: { lang?: string; client?: StructuredVisionPort },
+  opts?: {
+    lang?: string;
+    client?: StructuredVisionPort;
+    /** ΝΩ-48（注视经济）：注视中心（源图归一化 [0,1]²）—— 在场即中央凹编码 */
+    foveaCenter?: { x: number; y: number };
+  },
 ): Promise<VlmFindResult> {
   const needle = normalize(typeof query === 'string' ? query : '');
   if (!needle) return { ok: true, matches: [], degraded: false };
-  const ocr = await runVlmOcr(buffer, { lang: opts?.lang, client: opts?.client, findQuery: query });
+  const ocr = await runVlmOcr(buffer, {
+    lang: opts?.lang,
+    client: opts?.client,
+    findQuery: query,
+    foveaCenter: opts?.foveaCenter,
+  });
   if (!ocr.ok) return { ok: false, matches: [], degraded: true, error: ocr.error };
   const matches: VlmTextMatch[] = ocr.words
     .filter(w => normalize(w.text).includes(needle))

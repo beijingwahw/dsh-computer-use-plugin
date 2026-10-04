@@ -4,7 +4,7 @@
 // 网格重试步进 / A2 ROI 三区判决合成 / ROI 内 OCR 词对照）。零异常、零副作用
 //（可离线单测的确定性事实源）；逐字节搬迁；runtime.ts 以再导出保持导入面不变
 //（judgeRoiOcr 原为模块私有 —— 仅供 runtime 家族兄弟文件复用，不进公共面）。
-import { hammingDistance, normalizeHash } from '../perceptualHash';
+import { hammingDistance, hexToBits, normalizeHash } from '../perceptualHash';
 import type { WorldSnapshot } from './worldSnapshot';
 import type { StepOutcome } from './policyEngine';
 import { W1_EXEC_TUNING, type W1ExecTuning } from './runtime.tuning';
@@ -24,8 +24,18 @@ export function w1HashDistance(a: unknown, b: unknown): number | null {
   const sb = typeof b === 'string' && b.trim() !== '' ? b : null;
   if (sa === null || sb === null) return null;
   try {
-    const ba = normalizeHash(sa);
-    const bb = normalizeHash(sb);
+    // ΝΩ-24 跟修：本判决面用"保长严格归一器"——合法 hex（任意长度，测试夹具的
+    // 短哈希同权）按 hex.length*4 保长归位；非法字符 ⇒ null 诚实缺席（绝不学
+    // normalizeHash 收敛全零哨兵——两枚零串距离 0 会把"无效证据"伪装成"相同"）；
+    // 归一后长度不齐 ⇒ null（不可比）。
+    const norm = (s: string): string | null => {
+      if (/^[01]+$/.test(s)) return s;
+      if (!/^[0-9a-fA-F]+$/.test(s)) return null;
+      return BigInt(`0x${s}`).toString(2).padStart(s.length * 4, '0');
+    };
+    const ba = norm(sa);
+    const bb = norm(sb);
+    if (ba === null || bb === null) return null;
     if (ba.length === 0 || ba.length !== bb.length) return null;
     return hammingDistance(ba, bb);
   } catch {

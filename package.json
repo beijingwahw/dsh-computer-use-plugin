@@ -5,7 +5,10 @@
   "description": "Vision-only desktop automation plugin for DeepSeek Harness (fusion refactor)",
   "main": "dist/index.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./dist/index.js"
   },
   "files": [
     "dist",
@@ -25,7 +28,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import ./test/register.mjs \"test/*.test.ts\"",
     "smoke": "node --import ./test/register.mjs scripts/smoke_imports.mjs",
+    "smoke:dist": "node scripts/smoke_dist.mjs",
     "verify": "python scripts/verify_fatal_fixes.py && python scripts/bug_class_lint.py --strict",
+    "test:coverage": "node --test --experimental-test-coverage \"test/*.test.ts\" --import ./test/register.mjs",
+    "manifest": "node scripts/build_manifest.mjs",
     "doctor": "node --disable-warning=ExperimentalWarning --import ./test/register.mjs src/doctorCli.ts",
     "bench": "node --test --import ./test/register.mjs \"test/*.bench.ts\""
   },

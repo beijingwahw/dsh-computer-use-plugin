@@ -151,7 +151,18 @@ test('Δ-6: journal.reset 归零 taskDescription + 目录保证一次化', async
     journal.configure(true, filePath, 100);
     await journal.append({ ts: 1, tool: 'click_mouse', args: {}, status: 'SUCCESS' });
     await journal.append({ ts: 2, tool: 'type_text', args: {}, status: 'SUCCESS' });
-    await new Promise(r => setTimeout(r, 100)); // 落盘走异步尾链，等一拍
+    // ΝΩ-38 真睡治理：append 返回先于磁盘尾链落定（enqueueDisk fire-and-forget）——
+    // 「等一拍 100ms」改为对可观察完成面（文件出现且恰两行）的有界轮询；超时放行，由下方断言诚实裁决。
+    const settled = (): boolean => {
+      if (!existsSync(filePath)) return false;
+      const ls = readFileSync(filePath, 'utf8').trim();
+      return ls.length > 0 && ls.split('\n').length >= 2;
+    };
+    const settleBy = Date.now() + 2_000;
+    while (!settled()) {
+      if (Date.now() > settleBy) break;
+      await new Promise(r => setTimeout(r, 5));
+    }
     assert.ok(existsSync(filePath), '嵌套目录首写自动建立');
     const lines = readFileSync(filePath, 'utf8').trim().split('\n');
     assert.equal(lines.length, 2, '两条 append 两行 JSONL（尾链保序）');
@@ -185,9 +196,11 @@ test('Δ-7: reportEffect 指纹退化 ⇒ effect_detected=null（无法判定）
   assert.equal(absent.unverifiable, 'absent');
   assert.equal(reportEffect(H2, '', 0.98).unverifiable, 'absent', 'after 缺席同律');
 
-  // ② zero：损坏 hex 经 hexToBits 回退全零 —— 两全零旧判 sim=1「同图」、
-  //    全零 vs 真指纹旧判 sim=0「剧变」，全是边界假信号
-  assert.equal(hexToBits('not-hex!'), '0'.repeat(64), '测试前提：损坏 hex → 全零回退');
+  // ② zero：损坏 hex 经 normalizeHash 收敛全零 —— 两全零旧判 sim=1「同图」、
+  //    全零 vs 真指纹旧判 sim=0「剧变」，全是边界假信号。
+  //    ΝΩ-24：hexToBits 加长度校验后非法返 null（上浮 unverifiable 同向），
+  //    全零哨兵的铸造点前移到 normalizeHash 的调用方防御（'zero' 臂契约不变）
+  assert.equal(hexToBits('not-hex!'), null, '测试前提：损坏 hex → null（ΝΩ-24 长度校验）');
   const zeroPair = reportEffect('not-hex!', 'not-hex!', 0.98);
   assert.equal(zeroPair.effect_detected, null, '两全零（损坏 hex 对）⇒ 无法判定（旧判 sim=1 同图）');
   assert.equal(zeroPair.unverifiable, 'zero');

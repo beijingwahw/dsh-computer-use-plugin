@@ -32,10 +32,13 @@ import asyncio
 import os
 import struct
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from .errors import ErrorKind, PhysicalError
+from .executors import DEVICE_POOL, get as get_pool  # ΑΩ-R25:串口 I/O 走设备专属池
 
 # ─── 配置(W4-6):环境变量方言与 config.py 同律(DSH_PHYSICAL_ 前缀)───
 
@@ -400,28 +403,62 @@ class SerialTransport(Protocol):
 # 常见 USB-串口桥 VID(CH340/CH9102 = 0x1A86;CP210x = 0x10C4;FT232 = 0x0403)
 _KNOWN_VIDS = {0x1A86, 0x10C4, 0x0403, 0x1B4F}
 
+# ΝΩ-36:串口扫描结果 TTL 缓存(热插拔自愈的防热循环 —— 自愈重开风暴下
+# 不得每次失败都全枚举 USB 总线)。模块级单例(进程内串口枚举共享)。
+_SCAN_TTL_S = 5.0
+_scan_cache: dict = {"at": 0.0, "ports": None}
+_scan_lock = threading.Lock()
 
-def scan_serial_ports() -> list[dict]:
-    """枚举已知 VID 的串口(CH9329 常挂 CH340/CP210x 桥;无 pyserial ⇒ 空)(W4-6)。"""
+
+def scan_serial_ports(ttl_s: float = _SCAN_TTL_S) -> list[dict]:
+    """枚举已知 VID 的串口(CH9329 常挂 CH340/CP210x 桥;无 pyserial ⇒ 空)。
+
+    ΝΩ-36:结果 TTL 缓存 —— 缓存窗内的重复扫描复用上次枚举(热循环护栏);
+    ``ttl_s<=0`` 直读(测试/强制刷新)。返回元素拷贝(调用方改不动缓存)。
+    """
+    now = time.monotonic()
+    if ttl_s > 0:
+        with _scan_lock:
+            cached = _scan_cache["ports"]
+            if cached is not None and now - _scan_cache["at"] < ttl_s:
+                return [dict(p) for p in cached]
     try:
         from serial.tools import list_ports
     except Exception:  # noqa: BLE001
         return []
-    return [
+    ports = [
         {"port": p.device, "vid": p.vid, "description": p.description or ""}
         for p in list_ports.comports()
         if p.vid in _KNOWN_VIDS
     ]
+    if ttl_s > 0:
+        with _scan_lock:
+            _scan_cache["at"] = now
+            _scan_cache["ports"] = [dict(p) for p in ports]
+    return ports
+
+
+def reset_scan_cache() -> None:
+    """ΝΩ-36:清扫描缓存(测试隔离用)。"""
+    with _scan_lock:
+        _scan_cache["at"] = 0.0
+        _scan_cache["ports"] = None
 
 
 class PySerialTransport:
-    """pyserial 串口(懒加载;缺席/打不开 ⇒ PhysicalError 诚实信封)(W4-6)。"""
+    """pyserial 串口(懒加载;缺席/打不开 ⇒ PhysicalError 诚实信封)(W4-6)。
+
+    ΝΩ-36 热插拔自愈:USB 重插/休眠复位后旧句柄死(write 抛 SerialException)
+    —— ``write`` 捕获后 close+置 None+(TTL 缓存)重扫重开**一次**,新句柄重写;
+    自愈或重写再失败才如实报错。旧实现死句柄永不重扫(设备面假死到重启)。
+    """
 
     def __init__(self, port: str = "", baud: int = 115_200, timeout: float = 0.2) -> None:
         self.port = port
         self.baud = baud
         self.timeout = timeout
         self._ser = None
+        self.self_heals = 0  # ΝΩ-36:自愈计数(describe 申报 —— 热插拔频度的可观测面)
 
     def open(self) -> None:
         if self._ser is not None:
@@ -435,7 +472,7 @@ class PySerialTransport:
             ) from e
         port = self.port
         if not port:
-            candidates = scan_serial_ports()
+            candidates = scan_serial_ports()  # ΝΩ-36:TTL 缓存(防热循环)
             if not candidates:
                 raise PhysicalError(
                     ErrorKind.INTERNAL_ERROR,
@@ -458,7 +495,21 @@ class PySerialTransport:
         return self._ser
 
     def write(self, data: bytes) -> None:
-        self._ensure().write(data)
+        ser = self._ensure()
+        try:
+            ser.write(data)
+        except Exception as e:  # noqa: BLE001 —— SerialException(OSError 族)为主:设备拔出/复位
+            self.self_heals += 1
+            self.close()  # 死句柄收口(置 None 先行,close 自身失败不阻断自愈)
+            try:
+                self.open()  # 显式 port ⇒ 原口重开;自动扫描 ⇒ TTL 缓存重扫(设备或已换口)
+            except PhysicalError as pe:
+                raise PhysicalError(
+                    ErrorKind.INTERNAL_ERROR,
+                    f"serial write failed ({type(e).__name__}: {e}) and one-shot "
+                    f"self-heal reopen failed: {pe.detail}",
+                ) from e
+            self._ensure().write(data)  # 新句柄重写一次;再失败如实向上(safe_call 信封)
 
     def read(self, size: int) -> bytes:
         return self._ensure().read(size) or b""
@@ -467,14 +518,20 @@ class PySerialTransport:
         self._ensure().flush()
 
     def close(self) -> None:
-        if self._ser is not None:
-            self._ser.close()
-            self._ser = None
+        # ΝΩ-36:置 None 先行 —— 死句柄的 close 可能自身抛错,不得阻断自愈/收口
+        ser = self._ser
+        self._ser = None
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def describe(self) -> dict:
         return {
             "backend": "pyserial", "port": self.port or "(auto-scan)",
             "baud": self.baud, "open": self._ser is not None,
+            "self_heals": self.self_heals,  # ΝΩ-36:热插拔自愈计数
         }
 
 
@@ -544,16 +601,22 @@ class HidController:
         return int(x * ABS_MAX), int(y * ABS_MAX)
 
     async def _send(self, frames: list[bytes], dry: bool) -> int:
-        """帧序列 → 串口(线程池 + 实例锁串行化;帧间 settle)(W4-6)。"""
+        """帧序列 → 串口(线程池 + 实例锁串行化;帧间 settle)(W4-6)。
+
+        ΑΩ-R25:串口 open/write/flush 是阻塞设备 I/O ⇒ device 专属池(与
+        adb/UVC 同池 —— 都容忍长阻塞;不再与输入注入/图像编码共缺省池)。
+        帧循环为顺序 await:每帧提交-完成-释放 worker,无同池嵌套提交。
+        """
         if dry or not frames:
             return 0
         loop = asyncio.get_running_loop()
+        pool = get_pool(DEVICE_POOL)
         async with self._get_lock():
             tr = self._transport
-            await loop.run_in_executor(None, tr.open)
+            await loop.run_in_executor(pool, tr.open)
             for f in frames:
-                await loop.run_in_executor(None, tr.write, f)
-                await loop.run_in_executor(None, tr.flush)
+                await loop.run_in_executor(pool, tr.write, f)
+                await loop.run_in_executor(pool, tr.flush)
                 self._frames_sent += 1
                 if self.cfg.key_interval_ms:
                     await asyncio.sleep(self.cfg.key_interval_ms / 1000)
@@ -687,7 +750,8 @@ class HidController:
         """读设备回执帧(CH9329 成功回执 = CMD|0x80 + status 0x00)(W4-6)。"""
         loop = asyncio.get_running_loop()
         try:
-            raw = await loop.run_in_executor(None, self._transport.read, 64)
+            # ΑΩ-R25:串口读(timeout 0.2s 起的阻塞 I/O)⇒ device 池
+            raw = await loop.run_in_executor(get_pool(DEVICE_POOL), self._transport.read, 64)
             if not raw:
                 return {"ack": None, "note": "no reply bytes (timeout)"}
             addr, cmd, data = parse_ch9329_frame(raw)
@@ -722,7 +786,7 @@ class HidController:
         运行层方法:失败不抛错之外的最佳努力由调用方兜底 try/except。
         """
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._transport.close)
+        await loop.run_in_executor(get_pool(DEVICE_POOL), self._transport.close)  # ΑΩ-R25:device 池
         return {"closed": True, "transport": self.transport_info()}
 
 
@@ -931,6 +995,123 @@ def _run_selftest() -> int:
         check("kb_frame rejects modifier in key slot", False)
     except ValueError:
         check("kb_frame rejects modifier in key slot", True)
+
+    # ── 11. ΝΩ-36 热插拔自愈 + 扫描 TTL(离线:fake serial 模块注入) ──
+    import types as _types
+
+    check("scan ttl default exposed", _SCAN_TTL_S > 0)
+
+    class _DeadOnceDevice:
+        """第一台设备 write 即死(SerialException)—— 模拟 USB 拔出。"""
+
+        def __init__(self) -> None:
+            self.written: list[bytes] = []
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            raise _fake_serial.SerialException("device unplugged (simulated)")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _GoodDevice:
+        def __init__(self) -> None:
+            self.written: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.written.append(bytes(data))
+
+        def close(self) -> None:
+            return None
+
+    _dead_dev = _DeadOnceDevice()
+    _good_dev = _GoodDevice()
+    _fake_serial = _types.ModuleType("serial")
+    _fake_serial.SerialException = type("SerialException", (OSError,), {})
+    _fake_serial.Serial = lambda port, baud, timeout=0.2: (
+        _dead_dev if port == "COM3" else _good_dev
+    )
+    _fake_tools = _types.ModuleType("serial.tools")
+    _fake_list_ports = _types.ModuleType("serial.tools.list_ports")
+
+    class _FakePort:
+        def __init__(self, device: str) -> None:
+            self.device = device
+            self.vid = 0x1A86
+            self.description = "fake CH340"
+
+    _enum_calls = {"n": 0}
+
+    def _fake_comports():
+        _enum_calls["n"] += 1
+        return [_FakePort("COM3"), _FakePort("COM9")]
+
+    _fake_list_ports.comports = _fake_comports
+    _fake_tools.list_ports = _fake_list_ports
+    _fake_serial.tools = _fake_tools
+    _saved_modules = {k: sys.modules.get(k) for k in
+                      ("serial", "serial.tools", "serial.tools.list_ports")}
+    sys.modules.update({
+        "serial": _fake_serial, "serial.tools": _fake_tools,
+        "serial.tools.list_ports": _fake_list_ports,
+    })
+    try:
+        reset_scan_cache()
+        # 扫描 TTL:窗内两次扫描只枚举一次
+        a = scan_serial_ports()
+        b = scan_serial_ports()
+        check("scan ttl caches within window",
+              a == b and _enum_calls["n"] == 1 and a[0]["port"] == "COM3")
+        check("scan ttl=0 bypasses cache",
+              len(scan_serial_ports(ttl_s=0.0)) == 2 and _enum_calls["n"] == 2)
+
+        # 自愈一次失败才报错:死口 COM3 重开仍死 ⇒ 重写再抛(raw SerialException
+        # 由 safe_call 信封化 —— transport 层不吞错)
+        tr = PySerialTransport(port="COM3")
+        tr.open()
+        check("transport opened dead device", tr._ser is _dead_dev)
+        try:
+            tr.write(b"\x57\xab")
+            check("self-heal one-shot then honest failure", False)
+        except (PhysicalError, OSError):
+            check("self-heal one-shot then honest failure", True)
+        check("self-heal counted once", tr.self_heals == 1 and _dead_dev.closed)
+        # 换到健康口:显式端口 COM9 ⇒ 无自愈直写
+        tr2 = PySerialTransport(port="COM9")
+        tr2.write(b"\x57\xab")
+        check("healthy port writes without heal",
+              _good_dev.written and tr2.self_heals == 0)
+        # 自愈成功路径:构造一台「死一次后复活」的设备
+        revived = _types.SimpleNamespace(closed=False)
+
+        class _RevivingDevice:
+            def __init__(self) -> None:
+                self.dead = True
+                self.written: list[bytes] = []
+
+            def write(self, data: bytes) -> None:
+                if self.dead:
+                    self.dead = False  # 拔插后旧句柄死;新句柄(重开)复活
+                    raise _fake_serial.SerialException("plugged out")
+                self.written.append(bytes(data))
+
+            def close(self) -> None:
+                revived.closed = True
+
+        _rev_dev = _RevivingDevice()
+        _fake_serial.Serial = lambda port, baud, timeout=0.2: _rev_dev
+        tr3 = PySerialTransport(port="COM3")
+        tr3.write(b"\x01\x02")
+        check("self-heal succeeds on device revival",
+              _rev_dev.written == [b"\x01\x02"] and tr3.self_heals == 1
+              and revived.closed)
+    finally:
+        for k, v in _saved_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        reset_scan_cache()
 
     print(f"\nhid selftest: {'OK' if not failures else 'FAILED: ' + '; '.join(failures)}")
     return 0 if not failures else 1

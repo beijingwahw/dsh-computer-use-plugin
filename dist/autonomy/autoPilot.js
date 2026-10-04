@@ -12,6 +12,10 @@ import { actionSignature } from './counterfactual.js';
 // W8-B4（判据证伪能力）：终局判据独立评估器官（否定判据 + fuzzy 容错 + OCR 缺席
 // 诚实降级 —— 三态判决纪律；⑧′ 处消费）。autonomy 包内模块，零回路。
 import { buildCriteriaPairs, evaluateCriteria } from './criteriaEval.js';
+// ΑΩ-R13（W6-1 债清偿 · 汉明方言归一）：W1-3 免看门控的 dHash 汉明距离从本文件
+// 私有表（原 gateHexHamming/GATE_NIBBLE_POPCOUNT）迁往跨器官方言单一事实源
+//（nibble popcount 查表 + null 不可比语义，逐字节同律）。
+import { hammingDistanceHex } from '../dialects/hashing.js';
 // 纪元 Ε：预言端口与注记/动作键方言（路径显式指到桶文件 —— 目录导入在 Node
 // strip 装载器是 ERR_UNSUPPORTED_DIR_IMPORT，纪元 Ι 同律）。
 import { prophecyActionKey, prophecyJournalTag, } from '../prophecy/index.js';
@@ -129,26 +133,9 @@ const GATE_WATCH_PROBE_HARD_CAP = 128;
 const GATE_SNAPSHOT_DEGRADED_MARKER = 'perception-gate-skipped';
 /** 门控跳过注入的轻量文本观察（规格原文；走 sceneLabel 通道 —— 该字段无判据匹配消费者，绝不污染 textDigest） */
 const GATE_OBSERVATION_TEXT = '免看门控：已执行，屏未变';
-/** 半字节 popcount 表（0..15 的置位数）：gateHexHamming 的查表核（与 worldSnapshot 私有实现同律，本文件自带避免跨器官耦合） */
-const GATE_NIBBLE_POPCOUNT = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
-/**
- * W1-3：十六进制 dHash 汉明距离（纯函数，绝不抛）。null = 不可比（长度不一/
- * 空串/非十六进制字符）—— 调用方按保守律把不可比当作「不可判 ⇒ 照旧感知」。
- */
-function gateHexHamming(a, b) {
-    if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || a.length !== b.length) {
-        return null;
-    }
-    let dist = 0;
-    for (let i = 0; i < a.length; i++) {
-        const x = Number.parseInt(a[i], 16);
-        const y = Number.parseInt(b[i], 16);
-        if (Number.isNaN(x) || Number.isNaN(y))
-            return null;
-        dist += GATE_NIBBLE_POPCOUNT[x ^ y];
-    }
-    return dist;
-}
+// ΑΩ-R13（W6-1 债清偿）：原私有 GATE_NIBBLE_POPCOUNT 表与 gateHexHamming 已迁往
+// ../dialects/hashing（hammingDistanceHex —— nibble popcount 查表 + null 不可比
+// 语义，逐字节同律），本文件不再持本地副本。
 /** W1-3：数值卫兵 —— 非有限数取 fallback，否则夹 [min,max]（门控配置的脏值收敛） */
 function gateNumIn(v, min, max, fallback) {
     if (typeof v !== 'number' || !Number.isFinite(v))
@@ -165,6 +152,29 @@ function extractEscalateReason(action) {
     const p = action && typeof action.payload === 'object' ? action.payload : null;
     const r = p ? p.reason : undefined;
     return typeof r === 'string' && r !== '' ? r : '?';
+}
+/**
+ * ΝΩ-11（岔路账接候选）：decision.candidates 的防御读取 —— ΝΩ-10 工单在
+ * PolicyDecision 上铸 candidates 字段（Top-K 候选），本侧按「字段在场则用、
+ * 缺席回 [action]」编码（两工单独立合流，谁先在场谁生效）：合法非空
+ * PolicyAction 数组 ⇒ 过滤出 kind 在场的动作原样入账（岔路卡多支候选，
+ * 不再退化为单支）；缺席/垃圾/全脏 ⇒ [action]（与旧路径逐字节同律——
+ * 零回归红律）。纯函数、绝不抛。
+ */
+function w4DecisionCandidates(decision, action) {
+    try {
+        const c = (decision && typeof decision === 'object'
+            ? decision.candidates
+            : undefined);
+        if (!Array.isArray(c) || c.length === 0)
+            return [action];
+        const valid = c.filter((a) => a !== null && typeof a === 'object' &&
+            typeof a.kind === 'string' && a.kind !== '');
+        return valid.length > 0 ? valid : [action];
+    }
+    catch {
+        return [action]; // 防御读取绝不抛（岔路账是旁路簿记）
+    }
 }
 /**
  * W1-3：动作的预期视觉效应三档标注（C1 规格第一项，纯函数、绝不抛）。
@@ -293,7 +303,10 @@ function syntheticDeclareAction(stage) {
  *  ⑤ 动作 kind='escalate' ⇒ 记 no_effect 升级步后 escalated 终局（不执行）；
  *  ⑥ 动作 kind='wait' ⇒ sleep(opts.settleMs ?? 300) 沉降后记 no_effect 步继续（不执行）；
  *  ⑥′ 预言铸造（纪元 Ε，仅 deps.prophecy 在场时执行）：execute 之前按（当前屏型
- *     指纹 × 动作键）铸预言 —— 盲屏（无 dhash）不铸；预言归属即将入账的这一步；
+ *     指纹 × 动作键）铸预言 —— 盲屏（无 dhash）不铸；ΝΩ-11：预期零视觉影响的
+ *     动作（W1-3 classifyExpectedVisualEffect 判 no-impact——inspect/declare/
+ *     ask_vlm/recall_skill 及参数无效不落地者）不铸（自环转移污染 predict 首名）；
+ *     预言归属即将入账的这一步；
  *  ⑦ execute(action) —— 异常或缺 outcome ⇒ error 步收敛；正常则 StepRecord 入轨迹
  *     （effectiveRiskTier = 宪法判决分层盖章，垃圾判决值视为缺席）；
  *  ⑧ criteriaEvidence 逐条 goal.recordCriterion（回填异常吞掉）；
@@ -303,6 +316,12 @@ function syntheticDeclareAction(stage) {
  *  ⑨ goal.tick() → goal.evaluate()：achieved/failed/aborted/blocked 任一终局相即熔断；
  *  ⑩ 每步入轨迹即触发 onStep（回调异常吞掉）。
  * 任何依赖异常都不炸环；所有时间取注入时钟。
+ * ΑΩ-R13（W6-1 债清偿）：循环律 ⓪-⑩ 已拆为环前具名相位函数族（fuseGuard /
+ * preVerdict / perceptionGate / perceiveAndSettle / steerDriftCheck / policyDecide /
+ * explorationIntercept / branchLedgerStep / epistemicGate / constitutionVerdict /
+ * escalateAndWait / prophecyMint / executeStep / criteriaRecord /
+ * negativeCriteriaReview / finalEvaluation），while 循环只剩相位编排；闭包状态
+ * 保留在 driveLoop 内，相位间数据经参数/载荷显式传递 —— 纯结构重构，行为逐字节不变。
  */
 async function driveLoop(deps, opts) {
     const now = deps.now ?? (() => Date.now());
@@ -480,7 +499,7 @@ async function driveLoop(deps, opts) {
             const baseline = lastDhash;
             if (typeof baseline !== 'string' || baseline === '')
                 return null;
-            const distance = gateHexHamming(baseline, fresh);
+            const distance = hammingDistanceHex(baseline, fresh); // ΑΩ-R13：方言迁移（原 gateHexHamming）
             if (distance === null)
                 return null;
             return distance <= w1GateTolerance;
@@ -611,38 +630,52 @@ async function driveLoop(deps, opts) {
         if (w4SteerSession !== null)
             w4ActiveSteer.session = w4SteerSession;
     }
-    while (true) {
-        // ① 步保险丝：到顶强制 aborted（优先于一切依赖调用，防依赖失控拖死环）
+    // ─── ΑΩ-R13（W6-1 债清偿）：环体相位函数族 —— 循环律 ⓪-⑩ 各段拆出的具名局部
+    // 函数（定义序即执行序）；闭包状态保留在 driveLoop 内就地读写，相位间数据经
+    // 参数与 PhaseOutcome 载荷显式传递，返回值只表控制流（true/'break' ⇒ 终局熔断、
+    // 'continue' ⇒ 本步作废推进下一轮）。行为与拆解前逐字节一致。 ───
+    /**
+     * ΑΩ-R13 相位 ①：步数保险丝 —— stepsTaken 到顶即强制 aborted 收场（优先于
+     * 一切依赖调用，防依赖失控拖死环）。true ⇒ 熔断收场。
+     */
+    const fuseGuard = () => {
         if (stepsTaken >= stepCap) {
             lastPhase = 'aborted';
             summaryCore = `步数保险丝熔断（上限 ${stepCap} 步）`;
-            break;
+            return true;
         }
-        // ①′ 环顶终局相位预判：每轮 perceive 前先问目标机（纪元 Δ 修律——
-        //    首次相位判定原本在 execute 之后，blocked-at-begin 仍会漏发一个真动作；
-        //    预置 blocker / 判据已全 met 的目标机在此零感知零判断零执行直接收场）
-        if (evaluateGoal())
-            break;
-        // ①″/② 感知 —— W1-3 免看门控先行，随后（未跳过时）重型感知（异常 ⇒ error
-        //     步收敛，不炸环）。门控安全红线（五重与门，缺一即照旧感知 —— 门控决策
-        //     必须保守，不确定时一律照旧感知）：
-        //     ① 总闸：perceptionGate.enabled === false ⇒ 完全关闭（测试用）；
-        //     ② 端口：deps.frameHash 缺席/非函数 ⇒ 门控整体降级（与接线前逐字节同路径）；
-        //     ③ 基线：首轮完整感知未发生或基线无 dhash 指纹 ⇒ 无可比对 ⇒ 照旧感知；
-        //     ④ 弹窗：最近完整感知快照 popups 非空（弹窗活跃标志在场）⇒ 禁止门控
-        //        —— 弹窗检测输入绝不可跳（宪法的危险词扫描、策略①级弹窗优先都以
-        //        完整感知为输入，跳过即致盲）；
-        //     ⑤ 语境：上步非「无影响 + 双层 benign」最窄类亦非 benign wait（error 步
-        //        世界状态未知 ⇒ null），或连续跳过已达上限（终局判据 OCR 的有界保鲜
-        //        —— 旧屏账不可无限透支）⇒ 照旧感知。
-        //     通过 ⇒ 「无影响」类单探比对、「wait」类循环值守（间隔 × 上限，探测次数
-        //     双重有界）比对 dHash 汉明距离；未变 ⇒ 合成轻量快照推进循环 —— 透传旧
-        //     元素/文本（屏未变 ⇒ 账仍真）、degraded 诚实记 'perception-gate-skipped'、
-        //     sceneLabel 注入轻量文本观察「已执行，屏未变」（该字段无判据匹配消费者，
-        //     绝不污染 textDigest —— 终局判据 OCR 红线）；变化 ⇒ 唤醒完整感知；任何
-        //     端口故障（抛异常/垃圾返回/指纹不可比）一律按「不可判 ⇒ 照旧感知」收敛。
-        //     预言结算只发生在真实感知路径（跳过 = 无新屏型证据，预言挂起等下一帧
-        //     —— 纯旁路语义不变）。
+        return false;
+    };
+    /**
+     * ΑΩ-R13 相位 ①′：环顶终局相位预判（纪元 Δ 修律）—— 每轮 perceive 前先问
+     * 目标机，已终局（预置 blocker ⇒ blocked、判据已全 met ⇒ achieved 等）即熔断
+     * 收场，零感知零判断零执行。true ⇒ 熔断收场。
+     */
+    const preVerdict = () => evaluateGoal();
+    /**
+     * ΑΩ-R13 相位 ①″：W1-3（C1 Act-Expectation 免看门控）—— ② 感知步之前的免看
+     * 裁决：最窄类（无影响 + 双层 benign / benign wait 值守）屏未变 ⇒ 返回合成轻量
+     * 快照跳过重型感知；null ⇒ 照旧感知。
+     */
+    const perceptionGate = async () => {
+        // 门控安全红线（五重与门，缺一即照旧感知 —— 门控决策必须保守，不确定时一律照旧感知）：
+        // ① 总闸：perceptionGate.enabled === false ⇒ 完全关闭（测试用）；
+        // ② 端口：deps.frameHash 缺席/非函数 ⇒ 门控整体降级（与接线前逐字节同路径）；
+        // ③ 基线：首轮完整感知未发生或基线无 dhash 指纹 ⇒ 无可比对 ⇒ 照旧感知；
+        // ④ 弹窗：最近完整感知快照 popups 非空（弹窗活跃标志在场）⇒ 禁止门控
+        //    —— 弹窗检测输入绝不可跳（宪法的危险词扫描、策略①级弹窗优先都以
+        //    完整感知为输入，跳过即致盲）；
+        // ⑤ 语境：上步非「无影响 + 双层 benign」最窄类亦非 benign wait（error 步
+        //    世界状态未知 ⇒ null），或连续跳过已达上限（终局判据 OCR 的有界保鲜
+        //    —— 旧屏账不可无限透支）⇒ 照旧感知。
+        // 通过 ⇒ 「无影响」类单探比对、「wait」类循环值守（间隔 × 上限，探测次数
+        // 双重有界）比对 dHash 汉明距离；未变 ⇒ 合成轻量快照推进循环 —— 透传旧
+        // 元素/文本（屏未变 ⇒ 账仍真）、degraded 诚实记 'perception-gate-skipped'、
+        // sceneLabel 注入轻量文本观察「已执行，屏未变」（该字段无判据匹配消费者，
+        // 绝不污染 textDigest —— 终局判据 OCR 红线）；变化 ⇒ 唤醒完整感知；任何
+        // 端口故障（抛异常/垃圾返回/指纹不可比）一律按「不可判 ⇒ 照旧感知」收敛。
+        // 预言结算只发生在真实感知路径（跳过 = 无新屏型证据，预言挂起等下一帧
+        // —— 纯旁路语义不变）。
         let snapshot = null;
         if (w1GateEnabled &&
             w1GateFrameHash !== null &&
@@ -706,66 +739,79 @@ async function driveLoop(deps, opts) {
                 }
             }
         }
-        if (snapshot === null) {
-            try {
-                snapshot = await deps.perceive();
-                // 纪元 Ε（预言结算）：动作后的第一次感知即「对账时刻」—— 新屏型指纹就是
-                // actualType（D-7 pendingTransition 同律）。取不到真实指纹 ⇒ 引擎内挂起
-                // （60s 后诚实作废，绝不伪造 actualType）；结算注记回写预言归属步的
-                // journal（一行，不扩字段结构）。旁路任何故障吞掉 —— 绝不炸环。
-                if (prophecy !== undefined) {
-                    try {
-                        const nextType = snapshot && typeof snapshot.dhash === 'string' && snapshot.dhash !== ''
-                            ? snapshot.dhash
-                            : null;
-                        const settled = prophecy.settle(nextType, prophecyStepIndex === null ? undefined : prophecyStepSuccess);
-                        if (settled !== null) {
-                            const rec = trajectory.length > 0 ? trajectory[trajectory.length - 1] : null;
-                            if (rec !== null && rec.stepIndex === prophecyStepIndex) {
-                                const tag = prophecyJournalTag(settled);
-                                rec.note = rec.note !== undefined ? `${rec.note}；${tag}` : tag;
-                            }
-                            prophecyStepIndex = null; // 结算即清（一次性 —— 错号注记只丢不补）
+        return snapshot;
+    };
+    /**
+     * ΑΩ-R13 相位 ②：重型感知 + 纪元 Ε 预言结算 —— deps.perceive 感知世界（异常 ⇒
+     * error 步收敛不炸环）；感知到达即结算上一动作的预言并刷新门控基线快照。
+     * 成功 ⇒ proceed（快照经载荷带出）；失败 ⇒ advanceGoal 定 break/continue。
+     */
+    const perceiveAndSettle = async () => {
+        try {
+            const snapshot = await deps.perceive();
+            // 纪元 Ε（预言结算）：动作后的第一次感知即「对账时刻」—— 新屏型指纹就是
+            // actualType（D-7 pendingTransition 同律）。取不到真实指纹 ⇒ 引擎内挂起
+            // （60s 后诚实作废，绝不伪造 actualType）；结算注记回写预言归属步的
+            // journal（一行，不扩字段结构）。旁路任何故障吞掉 —— 绝不炸环。
+            if (prophecy !== undefined) {
+                try {
+                    const nextType = snapshot && typeof snapshot.dhash === 'string' && snapshot.dhash !== ''
+                        ? snapshot.dhash
+                        : null;
+                    const settled = prophecy.settle(nextType, prophecyStepIndex === null ? undefined : prophecyStepSuccess);
+                    if (settled !== null) {
+                        const rec = trajectory.length > 0 ? trajectory[trajectory.length - 1] : null;
+                        if (rec !== null && rec.stepIndex === prophecyStepIndex) {
+                            const tag = prophecyJournalTag(settled);
+                            rec.note = rec.note !== undefined ? `${rec.note}；${tag}` : tag;
                         }
+                        prophecyStepIndex = null; // 结算即清（一次性 —— 错号注记只丢不补）
                     }
-                    catch { /* 预言结算故障吞掉 —— 旁路绝不炸环 */ }
                 }
-                lastDhash = snapshot && typeof snapshot.dhash === 'string' ? snapshot.dhash : null;
-                lastFullSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
-                gateConsecutiveSkips = 0; // 完整感知发生 ⇒ 连续跳过保鲜账清零
+                catch { /* 预言结算故障吞掉 —— 旁路绝不炸环 */ }
             }
-            catch (err) {
-                recordStep(syntheticDeclareAction('perceive'), 'error', null, `perceive: ${errText(err)}`);
-                if (advanceGoal())
-                    break;
-                continue;
-            }
+            lastDhash = snapshot && typeof snapshot.dhash === 'string' ? snapshot.dhash : null;
+            lastFullSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : null;
+            gateConsecutiveSkips = 0; // 完整感知发生 ⇒ 连续跳过保鲜账清零
+            return { flow: 'proceed', value: snapshot };
         }
-        // ③-pre W4-0（B 接线）：活意图漂移检查 —— 每步（stepIndex 周期通道 + 最近
-        //     校准熵的即时通道）经 steer 会话 maybeCheckAndAsk：出题 ⇒ steer-drift
-        //     升级提问（沿认识论闸门 ask_human 的升级拦截风格 —— 被拦动作不入轨迹
-        //     不执行不 tick，题面进总汇报供模型转述，应答经 steer_answer 单字符结算）。
-        //     未超阈 / 节流中 / 指纹缺席 / 会话故障 ⇒ null 原路径继续（零回归红律）。
-        if (w4SteerSession !== null) {
-            let w4Question = null;
-            try {
-                w4Question = w4SteerSession.maybeCheckAndAsk(stepsTaken, w4LastEntropy);
-            }
-            catch {
-                w4Question = null; // 会话故障吞掉 —— 漂移检查是旁路，绝不炸环
-            }
-            if (w4Question !== null) {
-                escalated = true;
-                escalateReason = 'steer-drift';
-                evaluateGoal();
-                summaryCore =
-                    `活意图漂移出题（drift ${w4Question.drift.score}，趋势 ${w4Question.drift.trend}）：` +
-                        `${w4Question.reason}。请向用户转述三选一（A 继续 / B 改判据：${w4Question.amendment.to} / ` +
-                        `C 终止）并等待单字符应答，经 steer_answer 结算`;
-                break;
-            }
+        catch (err) {
+            recordStep(syntheticDeclareAction('perceive'), 'error', null, `perceive: ${errText(err)}`);
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
-        // ③ 判断：组装上下文（history 累积 / 预算推算）→ policy.decide
+    };
+    /**
+     * ΑΩ-R13 相位 ③-pre：W4-0（B 接线）活意图漂移检查 —— 每步（stepIndex 周期
+     * 通道 + 最近校准熵即时通道）经 steer 会话 maybeCheckAndAsk：出题 ⇒ steer-drift
+     * 升级提问终局（沿 ask_human 拦截风格，被拦动作不入轨迹不执行不 tick）；
+     * 未超阈/节流中/会话故障 ⇒ false 原路径继续。
+     */
+    const steerDriftCheck = () => {
+        if (w4SteerSession === null)
+            return false;
+        let w4Question = null;
+        try {
+            w4Question = w4SteerSession.maybeCheckAndAsk(stepsTaken, w4LastEntropy);
+        }
+        catch {
+            w4Question = null; // 会话故障吞掉 —— 漂移检查是旁路，绝不炸环
+        }
+        if (w4Question === null)
+            return false;
+        escalated = true;
+        escalateReason = 'steer-drift';
+        evaluateGoal();
+        summaryCore =
+            `活意图漂移出题（drift ${w4Question.drift.score}，趋势 ${w4Question.drift.trend}）：` +
+                `${w4Question.reason}。请向用户转述三选一（A 继续 / B 改判据：${w4Question.amendment.to} / ` +
+                `C 终止）并等待单字符应答，经 steer_answer 结算`;
+        return true;
+    };
+    /**
+     * ΑΩ-R13 相位 ③：策略决策 —— 组装 PolicyContext（history 逐步累积、预算由
+     * spec 与已耗步/毫秒推算）→ policy.decide；异常或缺 action ⇒ error 步收敛。
+     */
+    const policyDecide = async (snapshot) => {
         let decision;
         try {
             const history = trajectory.map(rec => ({ action: rec.action, outcome: rec.outcome }));
@@ -783,23 +829,22 @@ async function driveLoop(deps, opts) {
         }
         catch (err) {
             recordStep(syntheticDeclareAction('policy'), 'error', lastDhash, `policy: ${errText(err)}`);
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
-        let action = decision && decision.action ? decision.action : null;
+        const action = decision && decision.action ? decision.action : null;
         if (!action) {
             recordStep(syntheticDeclareAction('policy'), 'error', lastDhash, 'policy: decide 返回缺少 action 的决定');
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
-        // ③″ W3-7 探索拦截（R2 探索前沿策略）：policy 给出 escalate（所有已知路
-        //     失败的恢复分支）且端口点亮时，问一次探索账本 —— 有建议 ⇒ 用探索
-        //     动作替换本步，替换动作照旧走 ③′ 认识论闸门与 ④ 宪法全流程（不越权：
-        //     探索建议一律 benign，仍受宪法与闸门裁决）；无建议（常态未达恢复态 /
-        //     预算红线 / 本 run 探索预算耗尽）/ 端口故障 ⇒ escalate 原路径逐字节
-        //     不变（零回归红律）。建议注记随 decision.note 入本步 journal。
+        return { flow: 'proceed', value: { decision, action } };
+    };
+    /**
+     * ΑΩ-R13 相位 ③″：W3-7（R2 探索前沿策略）探索拦截 —— decide 给出 escalate
+     * （所有已知路失败的恢复分支）且端口点亮时，问一次探索账本：有建议 ⇒ 用探索
+     * 动作替换本步（照旧走 ③′ 闸门与 ④ 宪法全流程，不越权）；无建议/常态/端口
+     * 故障 ⇒ escalate 原路径逐字节不变（建议注记随 decision.note 入本步 journal）。
+     */
+    const explorationIntercept = (decision, action, snapshot) => {
         if (action.kind === 'escalate' && w3ExploreAdvise !== null) {
             let advice = null;
             try {
@@ -824,114 +869,128 @@ async function driveLoop(deps, opts) {
                 w3ExploreSubs++;
             }
         }
-        // ③¼ W4-0（B 接线）：岔路账落账 —— 决策既定（探索替换后、闸门/宪法裁决前）
-        //     即按 W3-6 的评分内核（record 内部 rankTopK 与 scoreOptions 同源）记
-        //     Top-K 候选账。评分上下文与 policyEngine 并列破平同一方言（单一事实源）：
-        //     goalKeywords = extractGoalKeywords(spec)、triedActionKeys = 轨迹签名、
-        //     snapshot = 当步感知。纯旁路簿记 —— PilotResult 分毫不动；故障吞掉绝不炸环。
-        //     W5-5（缝2）：支点锚 journal 面 —— 注入端口的当前步账位置（journal 条数 +
-        //     链尖）随账落锚（端口缺席 ⇒ 键缺席，与 W4-0 逐字节同路）。
-        //     W5-5（缝3）：换支偏置 —— 步进面在场且预算内 ⇒ withSteerBias 铸 ctx
-        //     （改选偏置只改选择不改预测；超支/故障 ⇒ 无偏置原路继续）。
-        if (w4Branch !== null) {
-            try {
-                let w5RecordCtx = {
-                    goalKeywords: extractGoalKeywords(spec),
-                    snapshot: (snapshot ?? { takenAt: 0, width: 0, height: 0, dhash: null, elements: [], textDigest: '', popups: [], focusedRegion: null, sceneLabel: '', degraded: [] }),
-                    triedActionKeys: trajectory.map(r => actionSignature(r.action)),
-                };
-                if (w5Bias !== null) {
-                    try {
-                        const b = w5Bias.step();
-                        if (b !== null && typeof b === 'object' && Array.isArray(b.preferredActionKeys)) {
-                            const keys = b.preferredActionKeys.filter((k) => typeof k === 'string' && k !== '');
-                            if (keys.length > 0)
-                                w5RecordCtx = withSteerBias(w5RecordCtx, keys);
-                        }
-                    }
-                    catch {
-                        /* 偏置步进故障吞掉 —— 原路无偏置（绝不炸环） */
+        return { decision, action };
+    };
+    /**
+     * ΑΩ-R13 相位 ③¼：W4-0（B 接线）岔路账落账（W5-5 缝2/缝3）—— 决策既定
+     * （探索替换后、闸门/宪法裁决前）即按 W3-6 评分内核记 Top-K 候选账：支点锚
+     * （journalLength + chainTip）随账落锚、换支偏置经 withSteerBias 铸入评分
+     * 上下文（改选偏置只改选择不改预测）。ΝΩ-11：落账候选改取
+     * decision.candidates（ΝΩ-10 在场则多支入账，岔路卡不再退化为单支；缺席 ⇒
+     * [action] 旧路径）。纯旁路簿记，故障吞掉绝不炸环。
+     */
+    const branchLedgerStep = (decision, action, snapshot) => {
+        if (w4Branch === null)
+            return;
+        try {
+            let w5RecordCtx = {
+                goalKeywords: extractGoalKeywords(spec),
+                snapshot: (snapshot ?? { takenAt: 0, width: 0, height: 0, dhash: null, elements: [], textDigest: '', popups: [], focusedRegion: null, sceneLabel: '', degraded: [] }),
+                triedActionKeys: trajectory.map(r => actionSignature(r.action)),
+            };
+            if (w5Bias !== null) {
+                try {
+                    const b = w5Bias.step();
+                    if (b !== null && typeof b === 'object' && Array.isArray(b.preferredActionKeys)) {
+                        const keys = b.preferredActionKeys.filter((k) => typeof k === 'string' && k !== '');
+                        if (keys.length > 0)
+                            w5RecordCtx = withSteerBias(w5RecordCtx, keys);
                     }
                 }
-                w4Branch.record([action], w5RecordCtx, { stepIndex: stepsTaken, ...w5AnchorMeta() });
+                catch {
+                    /* 偏置步进故障吞掉 —— 原路无偏置（绝不炸环） */
+                }
             }
-            catch { /* 岔路账是旁路簿记 —— 故障绝不炸环 */ }
+            // ΝΩ-11：候选面 = decision.candidates ?? [action]（防御读取 —— 字段在场
+            // 则用、缺席回单支旧路径；探索替换不改候选账——账记的是决策时的备选面）
+            w4Branch.record(w4DecisionCandidates(decision, action), w5RecordCtx, { stepIndex: stepsTaken, ...w5AnchorMeta() });
         }
-        // ③′ 认识论闸门（纪元 Η-1）：Φ-7 adviseAction 四维裁决 —— 错误代价 × 校准置信 ×
-        //     云脑在否 × 预算余量。ask_human 且过红律 ⇒ escalated 终局（epistemic-gate）；
-        //     abort 且过红律 ⇒ aborted 终局；ask_vlm/proceed（及红律收窄降级者）⇒ 步注记
-        //     放行（不新增网络调用）。闸门自身异常吞掉 —— 绝不炸环。
-        //     纪元 Ι（经验置信换源）：deps.selfModel 在场且对当前动作返回非 null 建议时，
-        //     置信源从动作自报（payload.confidence ?? utility）换为经验胜任度后验
-        //     （实测校准置信，步注记/升级理由注明 source:'self-model' 与证据量）；
-        //     缺席/返回 null/建议非法 ⇒ 自报链原样 —— 纪元 Η 全部既有行为逐字节不变。
-        if (gate !== undefined) {
-            let report = null;
-            let rawConfidence = 0.5;
-            /** 纪元 Ι：经验置信的支撑证据量（null = 本步走自报链，注记零变化） */
-            let selfModelN = null;
-            try {
-                rawConfidence = epistemicConfidenceOf(action);
-                if (deps.selfModel && typeof deps.selfModel.adviseConfidence === 'function') {
-                    let advice = null;
-                    try {
-                        advice = deps.selfModel.adviseConfidence(action, lastDhash === null ? undefined : lastDhash);
-                    }
-                    catch {
-                        advice = null; // 模型故障吞掉 —— 绝不炸环，回落纪元 Η 自报链
-                    }
-                    if (advice !== null && advice !== undefined &&
-                        typeof advice.confidence === 'number' && Number.isFinite(advice.confidence)) {
-                        rawConfidence = Math.min(1, Math.max(0, advice.confidence));
-                        selfModelN =
-                            typeof advice.n === 'number' && Number.isFinite(advice.n) ? advice.n : null;
-                    }
+        catch { /* 岔路账是旁路簿记 —— 故障绝不炸环 */ }
+    };
+    /**
+     * ΑΩ-R13 相位 ③′：纪元 Η-1 认识论闸门（纪元 Ι 经验置信换源）—— Φ-7
+     * adviseAction 四维裁决（错误代价 × 校准置信 × 云脑在否 × 预算余量）：ask_human
+     * 且过红律 ⇒ epistemic-gate 升级终局；abort 且过红律 ⇒ aborted 收手终局；
+     * ask_vlm/proceed（及红律收窄降级者）⇒ 步注记放行；gate 缺席 ⇒ 原决策透传
+     * （整段零执行）。本相位永不 continue。
+     */
+    const epistemicGate = (decision, action) => {
+        if (gate === undefined)
+            return { flow: 'proceed', value: decision };
+        let report = null;
+        let rawConfidence = 0.5;
+        /** 纪元 Ι：经验置信的支撑证据量（null = 本步走自报链，注记零变化） */
+        let selfModelN = null;
+        try {
+            rawConfidence = epistemicConfidenceOf(action);
+            if (deps.selfModel && typeof deps.selfModel.adviseConfidence === 'function') {
+                let advice = null;
+                try {
+                    advice = deps.selfModel.adviseConfidence(action, lastDhash === null ? undefined : lastDhash);
                 }
-                report = adviseAction({
-                    confidence: rawConfidence,
-                    costOfError: epistemicCostOfError(action.riskTier),
-                    vlmAvailable: gateVlmAvailable(),
-                    budgetRemainingPct: gateBudgetPct(),
-                });
-            }
-            catch {
-                report = null; // 纯函数理论上不抛 —— 闸门自身异常也不炸环（按无裁决放行）
-            }
-            // W4-0（B）：校准熵随步刷新（steer 会话的即时检查通道 —— 下一步的
-            // maybeCheckAndAsk 消费；闸门缺席/报告缺席 ⇒ null 只走周期通道）
-            w4LastEntropy =
-                report !== null && typeof report.entropy === 'number' && Number.isFinite(report.entropy)
-                    ? report.entropy
-                    : null;
-            if (report !== null) {
-                const blocking = report.advise === 'ask_human' || report.advise === 'abort';
-                const redLineOk = (gateBlockTiers === null || gateBlockTiers.has(action.riskTier)) &&
-                    rawConfidence < gateBlockBelow;
-                // 纪元 Ι 溯源后缀：仅经验置信换源时附加（自报链逐字节旧格式 —— 零回归红律）
-                const smSuffix = selfModelN !== null
-                    ? `，source:'self-model'（经验置信 n=${Math.round(selfModelN * 1000) / 1000}）`
-                    : '';
-                if (blocking && redLineOk) {
-                    if (report.advise === 'ask_human') {
-                        // 认识论升级终局：镜像宪法否决式收场（被拦动作不入轨迹不执行不 tick）
-                        escalated = true;
-                        escalateReason = 'epistemic-gate';
-                        evaluateGoal();
-                        summaryCore = `认识论闸门升级（${report.reasons.join('；')}${smSuffix}）`;
-                        break;
-                    }
-                    // 认识论收手终局：镜像步保险丝式 aborted 收场（不升级 —— 收手不是移交）
-                    lastPhase = 'aborted';
-                    summaryCore = `认识论闸门收手（${report.reasons.join('；')}${smSuffix}）`;
-                    break;
+                catch {
+                    advice = null; // 模型故障吞掉 —— 绝不炸环，回落纪元 Η 自报链
                 }
-                // ask_vlm / proceed / 红律收窄降级 ⇒ 注记放行：该步 journal（note）留痕
-                const effText = Number.isFinite(report.confidence) ? report.confidence.toFixed(3) : '?';
-                const tag = `认识论闸门 ${report.advise}（有效置信 ${effText}${smSuffix}${blocking ? '，红律收窄放行' : ''}）`;
-                decision = { ...decision, note: decision.note !== undefined ? `${decision.note}；${tag}` : tag };
+                if (advice !== null && advice !== undefined &&
+                    typeof advice.confidence === 'number' && Number.isFinite(advice.confidence)) {
+                    rawConfidence = Math.min(1, Math.max(0, advice.confidence));
+                    selfModelN =
+                        typeof advice.n === 'number' && Number.isFinite(advice.n) ? advice.n : null;
+                }
             }
+            report = adviseAction({
+                confidence: rawConfidence,
+                costOfError: epistemicCostOfError(action.riskTier),
+                vlmAvailable: gateVlmAvailable(),
+                budgetRemainingPct: gateBudgetPct(),
+            });
         }
-        // ④ 宪法裁决（异常/空裁决 ⇒ error 步收敛）
+        catch {
+            report = null; // 纯函数理论上不抛 —— 闸门自身异常也不炸环（按无裁决放行）
+        }
+        // W4-0（B）：校准熵随步刷新（steer 会话的即时检查通道 —— 下一步的
+        // maybeCheckAndAsk 消费；闸门缺席/报告缺席 ⇒ null 只走周期通道）
+        w4LastEntropy =
+            report !== null && typeof report.entropy === 'number' && Number.isFinite(report.entropy)
+                ? report.entropy
+                : null;
+        if (report === null)
+            return { flow: 'proceed', value: decision };
+        const blocking = report.advise === 'ask_human' || report.advise === 'abort';
+        const redLineOk = (gateBlockTiers === null || gateBlockTiers.has(action.riskTier)) &&
+            rawConfidence < gateBlockBelow;
+        // 纪元 Ι 溯源后缀：仅经验置信换源时附加（自报链逐字节旧格式 —— 零回归红律）
+        const smSuffix = selfModelN !== null
+            ? `，source:'self-model'（经验置信 n=${Math.round(selfModelN * 1000) / 1000}）`
+            : '';
+        if (blocking && redLineOk) {
+            if (report.advise === 'ask_human') {
+                // 认识论升级终局：镜像宪法否决式收场（被拦动作不入轨迹不执行不 tick）
+                escalated = true;
+                escalateReason = 'epistemic-gate';
+                evaluateGoal();
+                summaryCore = `认识论闸门升级（${report.reasons.join('；')}${smSuffix}）`;
+                return { flow: 'break' };
+            }
+            // 认识论收手终局：镜像步保险丝式 aborted 收场（不升级 —— 收手不是移交）
+            lastPhase = 'aborted';
+            summaryCore = `认识论闸门收手（${report.reasons.join('；')}${smSuffix}）`;
+            return { flow: 'break' };
+        }
+        // ask_vlm / proceed / 红律收窄降级 ⇒ 注记放行：该步 journal（note）留痕
+        const effText = Number.isFinite(report.confidence) ? report.confidence.toFixed(3) : '?';
+        const tag = `认识论闸门 ${report.advise}（有效置信 ${effText}${smSuffix}${blocking ? '，红律收窄放行' : ''}）`;
+        return {
+            flow: 'proceed',
+            value: { ...decision, note: decision.note !== undefined ? `${decision.note}；${tag}` : tag },
+        };
+    };
+    /**
+     * ΑΩ-R13 相位 ④：宪法裁决 —— consecutiveNoEffect 现场账目 + constitution.check：
+     * 异常/空裁决 ⇒ error 步收敛；allowed=false ⇒ constitution-veto 否决终局；
+     * requiresApproval ⇒ approval-required 审批终局（被拦动作不入轨迹不执行不 tick）。
+     */
+    const constitutionVerdict = (action) => {
         let consecutiveNoEffect = 0;
         for (let i = trajectory.length - 1; i >= 0 && trajectory[i].outcome === 'no_effect'; i--) {
             consecutiveNoEffect++;
@@ -942,15 +1001,11 @@ async function driveLoop(deps, opts) {
         }
         catch (err) {
             recordStep(action, 'error', lastDhash, `constitution: ${errText(err)}`);
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
         if (!verdict) {
             recordStep(action, 'error', lastDhash, 'constitution: check 返回空裁决');
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
         if (verdict.allowed === false) {
             // 否决终局：终局相取目标机；被否决动作不算一步世界推进（不 tick 不入轨迹）
@@ -958,7 +1013,7 @@ async function driveLoop(deps, opts) {
             escalateReason = 'constitution-veto';
             evaluateGoal();
             summaryCore = `宪法否决：${verdict.reason}`;
-            break;
+            return { flow: 'break' };
         }
         if (verdict.requiresApproval === true) {
             // 审批终局：动作放行但必须人工确认 ⇒ 升级移交
@@ -966,8 +1021,16 @@ async function driveLoop(deps, opts) {
             escalateReason = 'approval-required';
             evaluateGoal();
             summaryCore = `动作需人工审批：${verdict.reason}`;
-            break;
+            return { flow: 'break' };
         }
+        return { flow: 'proceed', value: verdict };
+    };
+    /**
+     * ΑΩ-R13 相位 ⑤⑥：策略升级拦截与 wait 沉降 —— escalate ⇒ 记 no_effect 升级步
+     * 后 policy-escalate 终局（不执行）；wait ⇒ 注入式沉降后记 no_effect 步继续
+     * （不执行）；其余动作 ⇒ 'proceed' 交执行相位。
+     */
+    const escalateAndWait = async (action, decision) => {
         // ⑤ 策略主动升级 ⇒ 记 no_effect 升级步后终局（不执行）
         if (action.kind === 'escalate') {
             recordStep(action, 'no_effect', lastDhash, decision.note);
@@ -975,7 +1038,7 @@ async function driveLoop(deps, opts) {
             escalateReason = 'policy-escalate';
             evaluateGoal();
             summaryCore = `策略主动升级：${action.rationale}`;
-            break;
+            return 'break';
         }
         // ⑥ wait 动作 ⇒ 注入式沉降后继续（不执行，记 no_effect 步）
         if (action.kind === 'wait') {
@@ -984,39 +1047,58 @@ async function driveLoop(deps, opts) {
             }
             catch { /* 睡眠异常吞掉 */ }
             recordStep(action, 'no_effect', lastDhash, decision.note);
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? 'break' : 'continue';
         }
-        // ⑥′ 预言铸造（纪元 Ε，纯审计旁路）：动作落世界之前，世界模型按（当前屏型
-        //     指纹 × 动作键）铸一次预言（期望下一屏型 + 转移概率）。盲屏（无 dhash）
-        //     ⇒ 不铸 —— 看不见的世界不可预言；deps.prophecy 缺席 ⇒ 本段零执行
-        //     （逐字节旧路径）；铸造任何故障 ⇒ 吞掉（只丢预言绝不炸环）。
-        if (prophecy !== undefined && typeof lastDhash === 'string' && lastDhash !== '') {
-            try {
-                prophecy.mint(lastDhash, prophecyActionKey(action, snapshot?.width, snapshot?.height));
-                prophecyArmed = true;
-            }
-            catch { /* 铸造故障吞掉 —— 预言是旁路，绝不炸环 */ }
+        return 'proceed';
+    };
+    /**
+     * ΑΩ-R13 相位 ⑥′：纪元 Ε 预言铸造（纯审计旁路）—— 动作落世界之前按（当前
+     * 屏型指纹 × 动作键）铸一次预言；盲屏（无 dhash）不铸，铸造任何故障只丢
+     * 预言绝不炸环。
+     * ΝΩ-11（no-impact 闸）：零视觉影响动作（inspect/declare/ask_vlm/recall_skill
+     * 与参数无效不会落地的世界动作 —— W1-3 classifyExpectedVisualEffect 同律三档
+     * 标注）不铸：其结算见证恒为自环，observe 回灌会把 (屏型,动作)→同屏型 的
+     * 平凡转移灌进世界模型、挤占真实转移的证据位（predict 首名被「什么都不发
+     * 生」污染）。must/may-change（有影响）照铸——预言考试只考会动世界的手。
+     */
+    const prophecyMint = (action, snapshot) => {
+        if (prophecy === undefined)
+            return;
+        if (typeof lastDhash !== 'string' || lastDhash === '')
+            return;
+        if (classifyExpectedVisualEffect(action) === 'no-impact')
+            return;
+        try {
+            prophecy.mint(lastDhash, prophecyActionKey(action, snapshot?.width, snapshot?.height));
+            prophecyArmed = true;
         }
-        // ⑦ 执行（异常/缺 outcome ⇒ error 步收敛）
+        catch { /* 铸造故障吞掉 —— 预言是旁路，绝不炸环 */ }
+    };
+    /**
+     * ΑΩ-R13 相位 ⑦：执行 —— deps.execute 落动作并回报结局与判据证据（异常或缺
+     * outcome ⇒ error 步收敛，不炸环）；成功 ⇒ 执行回报经载荷带出。
+     */
+    const executeStep = async (action) => {
         let exec = null;
         try {
             exec = await deps.execute(action);
         }
         catch (err) {
             recordStep(action, 'error', lastDhash, `execute: ${errText(err)}`);
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
         if (!exec || !exec.outcome) {
             recordStep(action, 'error', lastDhash, 'execute: 返回值缺少 outcome');
-            if (advanceGoal())
-                break;
-            continue;
+            return advanceGoal() ? { flow: 'break' } : { flow: 'continue' };
         }
-        // ⑧ 验证：步入轨迹（宪法判决分层盖章）+ 判据证据逐条回填目标机（回填异常吞掉）
+        return { flow: 'proceed', value: exec };
+    };
+    /**
+     * ΑΩ-R13 相位 ⑧：判据回填 —— 步入轨迹（宪法判决分层盖章 effectiveRiskTier）
+     * + execute 回报的 criteriaEvidence 逐条 goal.recordCriterion（回填异常吞掉）。
+     * ⑩ 观察者通知在 recordStep 内单点挂载。
+     */
+    const criteriaRecord = (action, exec, decision, verdict) => {
         recordStep(action, exec.outcome, lastDhash, decision.note, validRiskTier(verdict.riskTier));
         if (Array.isArray(exec.criteriaEvidence)) {
             for (const evidence of exec.criteriaEvidence) {
@@ -1033,36 +1115,104 @@ async function driveLoop(deps, opts) {
                 criteriaStatus.set(evidence.index, evidence.status);
             }
         }
-        // ⑧′ W8-B4（判据证伪面）：以最近完整感知快照的 OCR 语料（textDigest —— 本轮
-        //     环顶感知的产物，即当前世界最新全文观察）对**否定判据**独立复核：
-        //     ① 否定判据（'mustNotAppear:' / '不得出现：' 前缀）命中禁词（精确 ∪
-        //        fuzzy ⌈m/6⌉ 容错）⇒ violated —— goalState 判定律第 1 条：任一
-        //        violated ⇒ failed 终局（证伪面本体）；
-        //     ② 语料在场且未命中禁词 ⇒ met（否定判据由此可凑齐全 met 终局）；
-        //     ③ OCR 语料缺席/不可读 ⇒ 零证据（否定判据绝不因「看不见」自动为真 ——
-        //        三态判决纪律：保持 unverified，靠步数保险丝收）。
-        //     极性分工（行为零变化红线）：肯定判据的 met 通道归 execute 侧判据抽查
-        //     （runtime 既定管辖，本环不越权 —— 短判据的 fuzzy 近邻误命中如「关门/
-        //     开门」距离 1 会翻转既有终局语义）；criteriaEval 器官层肯定面同样具备
-        //     fuzzy 容错（单测执法），供执行侧拆分落地后整体采用。
-        if (w8CriteriaPairs.length > 0) {
-            const w8Corpus = lastFullSnapshot !== null && typeof lastFullSnapshot === 'object' &&
-                typeof lastFullSnapshot.textDigest === 'string'
-                ? lastFullSnapshot.textDigest
-                : null;
-            const w8Eval = evaluateCriteria(w8CriteriaPairs, w8Corpus);
-            for (const evidence of w8Eval.evidence) {
-                if (evidence.polarity !== 'must-not-appear')
-                    continue; // 肯定面归 execute 通道
-                try {
-                    deps.goal.recordCriterion(evidence.index, evidence.status);
-                }
-                catch { /* 回填异常吞掉 */ }
-                criteriaStatus.set(evidence.index, evidence.status);
+    };
+    /**
+     * ΑΩ-R13 相位 ⑧′：W8-B4（判据证伪面）—— 以最近完整感知的 OCR 语料（textDigest，
+     * 本轮环顶感知的产物）对否定判据（mustNotAppear:/不得出现： 前缀）独立复核：
+     * 命中禁词（精确∪fuzzy）⇒ violated、语料在场未命中 ⇒ met、OCR 缺席 ⇒ 零证据
+     * （诚实降级，否定判据不自动为真）；肯定面归 execute 侧判据抽查通道。
+     */
+    const negativeCriteriaReview = () => {
+        if (w8CriteriaPairs.length === 0)
+            return;
+        const w8Corpus = lastFullSnapshot !== null && typeof lastFullSnapshot === 'object' &&
+            typeof lastFullSnapshot.textDigest === 'string'
+            ? lastFullSnapshot.textDigest
+            : null;
+        const w8Eval = evaluateCriteria(w8CriteriaPairs, w8Corpus);
+        for (const evidence of w8Eval.evidence) {
+            if (evidence.polarity !== 'must-not-appear')
+                continue; // 肯定面归 execute 通道
+            try {
+                deps.goal.recordCriterion(evidence.index, evidence.status);
             }
+            catch { /* 回填异常吞掉 */ }
+            criteriaStatus.set(evidence.index, evidence.status);
         }
-        // ⑨ 进化位：tick 后终局评估（achieved/failed/aborted/blocked 任一即熔断）
-        if (advanceGoal())
+    };
+    /**
+     * ΑΩ-R13 相位 ⑨：终局熔断 —— goal.tick 后终局评估（achieved/failed/aborted/
+     * blocked 任一终局相即熔断收场）。true ⇒ 熔断收场。
+     */
+    const finalEvaluation = () => advanceGoal();
+    // ΑΩ-R13（W6-1 债清偿）：环体相位编排 —— ⓪ 开环/相位函数族铸造在前，本循环
+    // 只按 ⓪-⑩ 顺序调度相位并处置控制流；各相位职责与工单号见其头注释。
+    while (true) {
+        // ① 步数保险丝：到顶强制 aborted（优先于一切依赖调用，防依赖失控拖死环）
+        if (fuseGuard())
+            break;
+        // ①′ 环顶终局相位预判：每轮 perceive 前先问目标机
+        if (preVerdict())
+            break;
+        // ①″ W1-3 免看门控先行，随后（未跳过时）② 重型感知 + 预言结算
+        let snapshot = await perceptionGate();
+        if (snapshot === null) {
+            const perceived = await perceiveAndSettle();
+            if (perceived.flow === 'break')
+                break;
+            if (perceived.flow === 'continue')
+                continue;
+            snapshot = perceived.value;
+        }
+        // ③-pre W4-0 活意图漂移检查：出题 ⇒ steer-drift 升级提问终局
+        if (steerDriftCheck())
+            break;
+        // ③ 判断：组装上下文（history 累积 / 预算推算）→ policy.decide
+        const decided = await policyDecide(snapshot);
+        if (decided.flow === 'break')
+            break;
+        if (decided.flow === 'continue')
+            continue;
+        let decision = decided.value.decision;
+        let action = decided.value.action;
+        // ③″ W3-7 探索拦截：escalate 且端口点亮 ⇒ 探索建议可替换本步
+        const intercepted = explorationIntercept(decision, action, snapshot);
+        decision = intercepted.decision;
+        action = intercepted.action;
+        // ③¼ W4-0/W5-5 岔路账落账（评分上下文铸偏置 + 支点锚；ΝΩ-11 候选面接 decision）
+        branchLedgerStep(decision, action, snapshot);
+        // ③′ 纪元 Η-1/Ι 认识论闸门：四维裁决（置信×代价×云脑×预算）
+        const gated = epistemicGate(decision, action);
+        if (gated.flow === 'break')
+            break;
+        decision = gated.value;
+        // ④ 宪法裁决（异常/空裁决 ⇒ error 步收敛）
+        const checked = constitutionVerdict(action);
+        if (checked.flow === 'break')
+            break;
+        if (checked.flow === 'continue')
+            continue;
+        const verdict = checked.value;
+        // ⑤⑥ escalate 升级终局 / wait 沉降继续（均不执行）
+        const settledFlow = await escalateAndWait(action, decision);
+        if (settledFlow === 'break')
+            break;
+        if (settledFlow === 'continue')
+            continue;
+        // ⑥′ 纪元 Ε 预言铸造（execute 之前，盲屏不铸）
+        prophecyMint(action, snapshot);
+        // ⑦ 执行（异常/缺 outcome ⇒ error 步收敛）
+        const executed = await executeStep(action);
+        if (executed.flow === 'break')
+            break;
+        if (executed.flow === 'continue')
+            continue;
+        // ⑧ 验证：步入轨迹（分层盖章）+ 判据证据逐条回填目标机
+        criteriaRecord(action, executed.value, decision, verdict);
+        // ⑧′ W8-B4 否定判据独立复核（OCR 语料三态判决）
+        negativeCriteriaReview();
+        // ⑨ 进化位：tick 后终局评估（终局相即熔断）
+        if (finalEvaluation())
             break;
     }
     if (!summaryCore)

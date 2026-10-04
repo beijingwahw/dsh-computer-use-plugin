@@ -153,10 +153,23 @@ test('Ψ-7: probeProvider 成功 —— 1x1 白图 JPEG +「回复 ok」+ maxTok
   assert.ok(url.length > 'data:image/jpeg;base64,'.length + 50, '图非空（真 1x1 白图）');
 });
 
-test('Ψ-7: probeProvider visionGuessed 负例 —— 回复含不支持文案 / 含 image 字样', async () => {
+test('Ψ-7: probeProvider visionGuessed 负例 —— 回复呈明确拒绝/不支持语义才判 false（ΑΩ-R8）', async () => {
   for (const text of [
+    // 英文拒绝话术
     'This model does not support image input',
+    'I cannot process image inputs',
+    'image inputs are not supported',
+    'This model does not support vision',
+    "I can't see any image",
+    'I am unable to view the attached image',
+    'This endpoint only supports text',
+    'unsupported content type: image/jpeg',
+    'Sorry, images are not allowed on this plan',
+    // 中文拒绝话术
     '抱歉，我无法处理 image。',
+    '当前模型不支持图像输入',
+    '我只能处理文本，无法查看图片',
+    // API 错误风（unsupport 词族）
     '当前模型 unsupported for vision requests',
   ]) {
     const { provider } = fakeProvider({
@@ -165,6 +178,27 @@ test('Ψ-7: probeProvider visionGuessed 负例 —— 回复含不支持文案 /
     const r = await probeProvider(provider);
     assert.equal(r.ok, true, text);
     assert.equal(r.visionGuessed, false, `应判非视觉：${text}`);
+  }
+});
+
+// ΑΩ-R8：正常视觉回复随手含 "image" 一词（旧判据 /image/i 的误杀面）⇒ 必判 true；
+// 边界取舍：拿不准 ⇒ true（保守信任视觉能力，误杀的代价高于漏判）。
+test('ΑΩ-R8: probeProvider visionGuessed 正例 —— 正常视觉描述（含 image 字样）不误杀', async () => {
+  for (const text of [
+    'The image shows a red button',
+    'The image is a plain white 1x1 square',
+    'ok',
+    'image', // 裸 "image" 一词不是拒绝语义
+    '这是一张 1x1 的纯白图片',
+    'I can see the image clearly', // 肯定句能力自述 —— ② 的反向铁证
+    "I don't see any text in the image", // 模糊观察句（非能力拒绝）⇒ 放行
+  ]) {
+    const { provider } = fakeProvider({
+      chat: async () => ({ ok: true, text, latencyMs: 1, model: 'm', providerId: 'fake' }),
+    });
+    const r = await probeProvider(provider);
+    assert.equal(r.ok, true, text);
+    assert.equal(r.visionGuessed, true, `应判视觉（不许误杀）：${text}`);
   }
 });
 

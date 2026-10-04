@@ -53,6 +53,30 @@ export function isIdempotentToggleLabel(label) {
         return false;
     return TOGGLE_LEXICON.test(t);
 }
+/**
+ * 疑似即时反应词表（ΑΩ-R38）：与 TOGGLE_LEXICON 同构的输入类探针先验闸词表。
+ * type-char 探针（单字符输入 + 退格）作用于真实焦点元素 —— 目标字符串证据
+ * （target_description ∪ expected_text，与第 3 步危险词判定同一 J-14 双通道）
+ * 命中本词表 ⇒ 该输入框疑似带 oninput 校验/自动补全/即时搜索/即时筛选：单字符
+ * 就可能触发网络请求等不可逆副作用，退格只能撤字符、撤不回已发出的请求 ⇒
+ * 「输入后立即退格 = 状态恒复原」的可逆性论证不成立，探针降级不可论证。
+ * 词表词汇来源（不发明新文案）：filter/筛选 借自本文件 TOGGLE_LEXICON（同域
+ * 即筛语义）；search 借自 skillLibrary.templates 的 HOLE_TEXT_KEY 词形；
+ * 搜索/autosuggest/自动补全/live/即时 为工单 ΑΩ-R38 指定词（探针通道的
+ * Z-1 判决是几何/结构证据 —— wordShape 纯几何、interactivityProbe 只有光标
+ * 形态与 UIA 控件类型细类，均无文本词表可借，字符串证据即通道已有证据）。
+ * 证据缺席 ⇒ false（保守按可论证，保持现状 —— 证据缺席不新增阻断，与旁路义务一致）。
+ */
+const INSTANT_REACTION_LEXICON = /search|搜索|autosuggest|自动补全|live|filter|筛选|即时/i;
+/** ΑΩ-R38：目标字符串是否带疑似即时反应信号（纯函数：非字符串/空串/超长 ⇒ false —— 无证据不新增阻断） */
+export function isInstantReactionLabel(label) {
+    if (typeof label !== 'string')
+        return false;
+    const t = label.trim();
+    if (t.length === 0 || t.length > 200)
+        return false;
+    return INSTANT_REACTION_LEXICON.test(t);
+}
 // ─── 纯函数：触发分类 ───
 /** 从工具参数提取字符串（类型收口：非字符串真值一律按缺席） */
 function strArg(v) {
@@ -72,7 +96,9 @@ function strArg(v) {
  *   6. adviseAction（confidence=args.confidence，缺省 0 —— 无自报置信认识论
  *      不会放行 high 档）未判 proceed ⇒ skip not-proceed；
  *   7. 探针计划：click 须有合法归一化坐标 + 幂等切换标签；type 恒有
- *      （单字符退格）。不可满足 ⇒ skip no-reversible-probe；
+ *      （单字符退格），但目标字符串证据命中疑似即时反应词表 ⇒ 降级不可论证
+ *      （ΑΩ-R38 副作用先验闸，与 click 的幂等词表闸同构）。不可满足 ⇒ skip
+ *      no-reversible-probe；
  *   8. predictedEffects 缺席 ⇒ skip prediction-unavailable（无比对基准）。
  * W8-B4：第 5/6/8 步的认识论面经端口注入（opts.epistemics 优先，缺省用装配
  * 注册位）；端口缺席 ⇒ 第 5 步前即诚实让位 'epistemics-unbound'（生产装配
@@ -183,6 +209,21 @@ export function classifyCanaryTrigger(tool, args, opts = {}) {
         probe = { kind: 'click-toggle', point: { x: x, y: y }, char: 'x' };
     }
     else {
+        // ΑΩ-R38（副作用先验闸）：type-char 探针作用于真实焦点元素 —— 对带 oninput
+        // 校验/自动补全/即时搜索的控件，输入单字符就可能触发网络请求等不可逆副作用，
+        // 退格撤不回。目标字符串证据（desc ∪ expected_text —— 与第 3 步危险词判定
+        // 同一 J-14 双通道，探针通道已有证据，不新增感知面）命中疑似即时反应词表
+        // ⇒ 「输入后立即退格 = 状态恒复原」的论证不成立，降级为不可论证（skip
+        // no-reversible-probe —— 跳过试演、旁路记账，canaryGuard 侧零改动）。
+        // 与 click 类的 TOGGLE_LEXICON 闸同构；证据缺席 ⇒ 保守按可论证（现状不变，
+        // 出厂阈下本步本就先被第 6 步 not-proceed 短路 —— 全链零回归保持）。
+        if (isInstantReactionLabel(desc) || isInstantReactionLabel(expectedText)) {
+            return {
+                kind: 'skip',
+                why: 'no-reversible-probe',
+                note: '输入目标带疑似即时反应信号（search/自动补全/即时筛选类）—— 单字符探针可能触发不可逆 oninput 副作用，论证不出可逆探针，诚实跳过（ΑΩ-R38）',
+            };
+        }
         probe = { kind: 'type-char', point: null, char: 'x' };
     }
     // 8. 反事实预测（只读消费经端口注入的预测面 —— W8-B4 破环后真身在 canaryGuard 侧

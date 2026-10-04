@@ -6,6 +6,10 @@
 import type { SomMarker, SomMarkerScore } from './som';
 import { classifyWordShape } from '../wordShape';
 import { cosine, embed } from '../semanticHash';
+// ΝΩ-41（方言克隆律）：本地 FNV-1a 复刻退役 —— 单源 src/dialects/random.ts
+// （「与 semanticHash 同族」自此同函数；染色键不变；金样
+// test/no41.dialectClones.test.ts）。
+import { fnv1a } from '../dialects/random';
 
 // ─── W1-7: 稀疏名额分配（纯函数，测试面）─────────────────────────
 
@@ -212,16 +216,6 @@ function hsvToHex(hDeg: number, s: number, v: number): string {
 export const SOM_COLOR_PALETTE: readonly string[] = Object.freeze(
   Array.from({ length: SOM_PALETTE_SIZE }, (_, i) => hsvToHex((i * 360) / SOM_PALETTE_SIZE, 0.85, 1)),
 );
-
-/** W1-7: 32 位 FNV-1a（与 semanticHash 同族；其未导出，本地五行复刻） */
-function fnv1a(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
 
 /** W1-7: 稳定染色 —— key 短哈希取调色板（同 key 恒同色，跨帧稳定，零随机） */
 export function stableColor(key: string): string {

@@ -136,8 +136,9 @@ export class ScreenshotHandle implements ScreenshotHandleLike {
     }
   }
 
-  // 注：未实现 [Symbol.asyncDispose] —— TS 5.0.4 不支持。
-  // 升级 TS 至 5.2+ 后可补充 asyncDispose 以支持 `using` 语法；显式 release() 已足够。
+  // 注：未实现 [Symbol.asyncDispose]，显式 release() 已足够。
+  //（ΑΩ-R34：旧注释称「TS 5.0.4 不支持」—— 现行工具链已装订 TS 5.9.3，版本
+  //  限制陈述过时；实现有意维持现状不动（零回归），补不补 asyncDispose 属行为面决定。）
 }
 
 /**
@@ -165,5 +166,6 @@ export class ScreenshotBatch {
     await Promise.allSettled(handles.map(h => h.release()));
   }
 
-  // 注：未实现 [Symbol.asyncDispose] —— 同 ScreenshotHandle，TS 5.0.4 限制。
+  // 注：未实现 [Symbol.asyncDispose] —— 同 ScreenshotHandle（ΑΩ-R34：旧「TS 5.0.4
+  // 限制」版本陈述过时，维持未实现是有意现状，非工具链限制）。
 }

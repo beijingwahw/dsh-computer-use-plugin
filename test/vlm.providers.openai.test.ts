@@ -369,6 +369,24 @@ test('Ψ-2: 换脑预设 —— idPreset/defaultBaseUrl/defaultModel（智谱例
 
 // ─── Ψ-2j chatJson ───
 
+// ─── ΑΩ-R35 类型严格化：provider 对象面恰好 = VisionProvider 接口 ───
+
+test('ΑΩ-R35: provider 对象面类型严格 —— 恰为 VisionProvider 接口键集，无接口外 providerId 逃逸', () => {
+  const p = make({ apiKey: 'k' });
+  // 此前返回对象携带接口外属性 providerId 并以 as VisionProvider 压制检查（类型
+  // 逃逸，值恒等于 id 纯冗余）—— 现在恰好接口面，结构化检查全量生效。
+  assert.equal('providerId' in p, false, '接口外属性 providerId 已清除（归因走结果面 VisionChatResult.providerId）');
+  assert.deepEqual(
+    Object.keys(p).sort(),
+    ['baseUrl', 'chat', 'chatJson', 'configured', 'id', 'model', 'protocol'],
+    '键集恰为 VisionProvider 声明面',
+  );
+  assert.equal(p.id, 'openai');
+  assert.equal(p.protocol, 'openai');
+  assert.equal(typeof p.chat, 'function');
+  assert.equal(typeof p.chatJson, 'function');
+});
+
 test('Ψ-2: chatJson —— 强制 jsonMode、提取 value、raw 恒为回复原文', async () => {
   const reply = '分析结果：```json\n{"target": "关闭", "labels": ["确", "定"]}\n``` 请据此执行。';
   const { fetchImpl, calls } = recorder(() => chatOk(reply));
@@ -422,4 +440,173 @@ test('Δ-4: 脏请求（images 缺失/非数组）doesNotReject —— 收敛为
   assert.ok(r2!.error!.length > 0);
   // 脏请求在消息构造面即失败 ⇒ 零网络
   assert.equal(calls.length, 0, '构造面故障绝不发出请求');
+});
+
+// ─── ΝΩ-18（response_format 400 回退）：json_object 模式 400 ⇒ 剥字段重发恰一次 ───
+
+test('ΝΩ-18: jsonMode 400 点名 response_format ⇒ 剥字段重发一次成功（prompt-only jsonMode + 剥壳兜底）', async () => {
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"error":{"message":"response_format is not supported"}}'),
+    () => chatOk('```json\n{"verdict":"confirmed","x":1}\n```'),
+  );
+  const p = make({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true }));
+  assert.equal(r.ok, true, '回退重发后成功');
+  assert.deepEqual(r.json, { verdict: 'confirmed', x: 1 }, 'prompt-only jsonMode 下剥壳提取兜底仍可用');
+  assert.equal(calls.length, 2, '首发 400 + 回退重发恰两次');
+  // 首发：response_format 在场（jsonMode 原行为）
+  assert.equal(bodyOf(calls[0]!).response_format.type, 'json_object');
+  // 重发：response_format 键压根不出现 + prompt 尾部补 JSON 铁律
+  assert.equal('response_format' in bodyOf(calls[1]!), false, '回退请求剥除 response_format');
+  assert.match(bodyOf(calls[1]!).messages[0].content[0].text, /描述这张截图/);
+  assert.match(bodyOf(calls[1]!).messages[0].content[0].text, /JSON only|valid JSON/, 'prompt 补 JSON 铁律');
+});
+
+test('ΝΩ-18: 回退重发也失败 ⇒ 终败（恰一次回退，无循环）；chatJson 同律贯通', async () => {
+  // 重发再 400（body 仍点名 response_format）⇒ 不再回退 —— strip 后请求已无该字段，
+  // 条件天然不成立；终败按 400 处置
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"error":{"message":"response_format json_object unknown"}}'),
+    () => httpStatus(400, '{"error":{"message":"response_format again"}}'),
+  );
+  const p = make({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true }));
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /400/);
+  assert.equal(calls.length, 2, '回退恰一次（第二次 400 不再剥发）');
+
+  // chatJson 路径同律：内部 chat 的 400 回退后 200 ⇒ 结构化值承接
+  const { fetchImpl: f2, calls: c2 } = queue(
+    () => httpStatus(400, 'Invalid parameter: response_format'),
+    () => chatOk('{"ok":true}'),
+  );
+  const p2 = make({ apiKey: 'k', fetchImpl: f2 });
+  const j = await p2.chatJson<{ ok: boolean }>(req());
+  assert.equal(j.ok, true);
+  assert.deepEqual(j.value, { ok: true });
+  assert.equal('response_format' in bodyOf(c2[1]!), false);
+  assert.equal(c2.length, 2);
+});
+
+test('ΝΩ-18: 400 但错误体不点名 response_format / 非 jsonMode ⇒ 不回退（原 400 律逐字节保持）', async () => {
+  // 400 无点名 + jsonMode —— 不回退（普通 400：请求另有其病）
+  const { fetchImpl, calls } = queue(() => httpStatus(400, '{"error":{"message":"bad request"}}'));
+  const p = make({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true }));
+  assert.equal(r.ok, false);
+  assert.equal(calls.length, 1, '不点名 ⇒ 零回退');
+  // 400 点名但非 jsonMode（response_format 根本没下发）⇒ 不回退
+  const { fetchImpl: f2, calls: c2 } = queue(() => httpStatus(400, '{"error":{"message":"response_format?"}}'));
+  const p2 = make({ apiKey: 'k', fetchImpl: f2 });
+  const r2 = await p2.chat(req());
+  assert.equal(r2.ok, false);
+  assert.equal(c2.length, 1, '非 jsonMode ⇒ 零回退');
+});
+
+// ─── ΝΩ-44（结构化输出约束解码）：jsonMode + jsonSchema ⇒ strict json_schema ───
+
+/** ΝΩ-44 测试共用 schema（含 openai 原样透传面：enum/description/required） */
+const NO44_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['click', 'type'] },
+    target: { type: 'string', description: '目标元素' },
+  },
+  required: ['action'],
+  additionalProperties: false,
+};
+
+test('ΝΩ-44: 开 —— jsonMode+jsonSchema ⇒ response_format json_schema（name=dsh_response/strict/schema 原样）', async () => {
+  const { fetchImpl, calls } = recorder(() => chatOk('{"action":"click"}'));
+  const p = make({ apiKey: 'sk-test', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' });
+  assert.equal(calls.length, 1, '成功即单拨号');
+  const rf = bodyOf(calls[0]!).response_format;
+  assert.equal(rf.type, 'json_schema');
+  assert.equal(rf.json_schema.name, 'dsh_response');
+  assert.equal(rf.json_schema.strict, true);
+  assert.deepEqual(rf.json_schema.schema, NO44_SCHEMA, 'schema 原样透传（openai 方言不收窄）');
+  assert.equal(bodyOf(calls[0]!).messages[0].content[0].text, '描述这张截图', 'prompt 不加约定行');
+});
+
+test('ΝΩ-44: 开（chatJson 贯通）—— chatJson + jsonSchema ⇒ strict json_schema + 提取成功', async () => {
+  const { fetchImpl, calls } = recorder(() => chatOk('{"action":"type"}'));
+  const p = make({ apiKey: 'k', fetchImpl });
+  const j = await p.chatJson(req({ jsonSchema: NO44_SCHEMA }));
+  assert.equal(j.ok, true);
+  assert.deepEqual(j.value, { action: 'type' });
+  assert.equal(bodyOf(calls[0]!).response_format.type, 'json_schema', 'chatJson 强制 jsonMode + schema 在场 ⇒ strict');
+});
+
+test('ΝΩ-44: 关 —— jsonSchema 在场但 jsonMode 缺席 ⇒ response_format 根本不出现（opt-in 双开关律）', async () => {
+  const { fetchImpl, calls } = recorder(() => chatOk('ok'));
+  const p = make({ apiKey: 'k', fetchImpl });
+  await p.chat(req({ jsonSchema: NO44_SCHEMA }));
+  assert.equal('response_format' in bodyOf(calls[0]!), false);
+});
+
+test('ΝΩ-44: 关 —— jsonSchema 缺席 + jsonMode ⇒ json_object 逐字节旧形状', async () => {
+  const { fetchImpl, calls } = recorder(() => chatOk('{}'));
+  const p = make({ apiKey: 'k', fetchImpl });
+  await p.chat(req({ jsonMode: true }));
+  assert.deepEqual(bodyOf(calls[0]!).response_format, { type: 'json_object' });
+  assert.equal(calls.length, 1);
+});
+
+test('ΝΩ-44: 降级链一级 —— 400 点名 json_schema ⇒ 降 json_object 重发恰一次后成功', async () => {
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"error":{"message":"response_format json_schema is not supported"}}'),
+    () => chatOk('{"action":"type"}'),
+  );
+  const p = make({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'type' });
+  assert.equal(calls.length, 2, '恰一次降级重发');
+  assert.equal(bodyOf(calls[0]!).response_format.type, 'json_schema');
+  assert.equal(bodyOf(calls[1]!).response_format.type, 'json_object');
+});
+
+test('ΝΩ-44: 降级链二级 —— json_schema 400 → json_object 400 点名 response_format → prompt-only 成功（三级链）', async () => {
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"error":{"message":"json_schema unsupported by gateway"}}'),
+    () => httpStatus(400, '{"error":{"message":"response_format not supported"}}'),
+    () => chatOk('```json\n{"action":"click"}\n```'),
+  );
+  const p = make({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' }, 'prompt-only 后由剥壳链兜底提取');
+  assert.equal(calls.length, 3, '恰两次降级重发，无循环');
+  assert.equal(bodyOf(calls[1]!).response_format.type, 'json_object');
+  const third = bodyOf(calls[2]!);
+  assert.equal('response_format' in third, false, 'prompt-only 剥除 response_format');
+  assert.match(third.messages[0].content[0].text, /single valid JSON value only/);
+});
+
+test('ΝΩ-44: 降级链终败 —— 两级降级全败 ⇒ 注记入 error（ΝΩ-44 标记）+ meter 恰一条', async () => {
+  const meters: ProviderMeterRecord[] = [];
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"error":{"message":"json_schema unsupported by gateway"}}'),
+    () => httpStatus(400, '{"error":{"message":"response_format not supported"}}'),
+  );
+  const p = make({ apiKey: 'k', fetchImpl, meter: rec => meters.push(rec) });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /ΝΩ-44/);
+  assert.match(r.error!, /downgraded to json_object/);
+  assert.match(r.error!, /downgraded to prompt-only/);
+  assert.equal(calls.length, 3);
+  assert.equal(meters.length, 1, '多次拨号仍恰一条遥测');
+});
+
+test('ΝΩ-44: 400 不点名 json_schema/response_format ⇒ 不降级（普通 400 律保持，error 无注记）', async () => {
+  const { fetchImpl, calls } = queue(() => httpStatus(400, '{"error":{"message":"bad model id"}}'));
+  const p = make({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, false);
+  assert.equal(calls.length, 1, '不点名 ⇒ 零降级');
+  assert.doesNotMatch(r.error!, /ΝΩ-44/);
 });

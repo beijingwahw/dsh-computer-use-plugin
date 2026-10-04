@@ -17,8 +17,8 @@
 | `suite-4c.json` | 终验：切窗取证（focus_handoff）+ 技能切片 + 未命中反馈，4/4 通过 |
 | `suite-w2.json` | W2-3 示范套件：任务带 `verify` 块（文件哈希/进程/窗口/注册表谓词） |
 | `verifyCore.mjs` | W2-3 E2 契约核查器核心：谓词 DSL + 可注入观察 world + 证据落盘 + doctor 规则候选草稿 |
-| `sprtCore.mjs` | W2-3 E3 统计核心：Wald SPRT（伯努利通过率）+ Wilson CI + 两比例 z 检验 + McNemar 精确 |
-| `verify.selftest.mjs` | W2-3 离线自检：`node bench/verify.selftest.mjs`，93 断言全过 exit 0（无网络/无 DSH） |
+| `sprtCore.mjs` | W2-3 E3 统计核心：Wald SPRT（伯努利通过率）+ Wilson CI + 两比例 z 检验 + McNemar 精确；ΝΩ-39 起+ normalInv（Acklam 分位）/ mder（双比例最小可检差异）/ Beta 共轭后验（logGamma + 正则化不完全 Beta，全手写零依赖） |
+| `verify.selftest.mjs` | W2-3 离线自检：`node bench/verify.selftest.mjs`，200 断言全过 exit 0（无网络/无 DSH；含 ΝΩ-39 的 MDER/Beta/覆写/n<20/glob 断言） |
 | `sync-and-restart.sh` | 构建产物 → DSH 双路径（store 物化源 + profile 加载点）同步 + 重启 + 指纹校验 |
 | `battery-suite4*.log` | 三轮电池的逐任务判定日志（PASS/FAIL + 工具轨迹摘要） |
 | `journal*.jsonl` | 插件行动日志（动作/效果/场景指纹）—— 真机战果的原始证据 |
@@ -49,12 +49,57 @@ H1: p≥0.80 为模块常量；边界公式与 `src/popupDetector.ts` 的 SprtPo
 `--compare <prev-report.json>` 输出跨版本通过率比例差检验（两比例合并 z 检验 p 值，
 配对任务集另附 McNemar 精确检验）。
 
+## ΝΩ-39：基准统计功效（跑之前先知道自己看不见什么）
+
+**MDER 功效前置** —— `sprtCore.mjs` 的 `mder(n1, n2, α=0.05, power=0.8)`：双比例
+最小可检差异（正态近似闭式，方差取最保守 p(1−p)=1/4，结果夹 [0,1]）。battery 在
+suite 装载 / `--list` / `--compare` 时打印「本 suite 尺寸 MDER=x.xx」：装载时按
+同尺寸对照（`mder(n,n)`），`--compare` 按实际两侧 n 重算。锚点值：26 vs 26 ⇒
+0.3885，26 vs 4 ⇒ 0.7523，100 vs 100 ⇒ 0.1981，n=3 vs 2 ⇒ 夹上限 1（只有
+全过/全表的差异可见）。任一侧 n<20（`MDER_MIN_N`）时 `--compare` 拒判
+verdictHint：样本不足，仅记录不判定 —— 不把功效不足当「无差异」的证据。
+
+**flaky 态 Beta 后验一行** —— 收口为 flaky 时附 `P(p>0.8|data)`：均匀先验
+Beta(1,1) ⇒ 后验 Beta(过+1, 败+1) 的上尾（`betaTailProb`，手写 logGamma +
+正则化不完全 Beta 连分式）。锚点：1 败 5 过 ⇒ Beta(6,2) 上尾 0.4233。
+deterministic-pass/fail 不附（零失败/比例塌缩时后验无信息量）。
+
+**suite 覆写 SPRT 假设域** —— suite json 支持新格式（数组旧格式不受影响）：
+
+```json
+{ "sprt": { "p0": 0.60, "p1": 0.90 }, "tasks": [ ... ] }
+```
+
+缺省保持 0.30/0.80。**建议值 0.60/0.90**（对高通过率电池更严苛的域）：H0 从
+p≤0.30 提到 p≤0.60 —— 中低通过率（0.3–0.6）的任务更快收口到 deterministic-fail
+而不是在无差别区烧尽复跑预算（真实率 0.5 时向 H0 的期望漂移约快 3.6 倍）；代价是
+把 0.6–0.7 通过率的边缘任务也推向 fail 侧，且 H1 侧收敛变慢（单过步长
+ln(0.9/0.6)≈0.405 vs ln(0.8/0.3)≈0.981）。按电池健康度选择，无普适最优。
+未登记键拒绝（resultContract 同律），非法域跑前 fail-fast。
+
+**Wilson CI 接入计数类指标** —— `--compare` 输出两侧通过率的 Wilson 95% CI；
+`scripts/bench_gate.mjs` 的基线与现跑摘要附通过率 Wilson 95% CI（小样本不塌缩）。
+
+**bench_gate glob 白名单扩容 + 计数硬门** —— `BENCH_WHITELIST` 从 `test/w5*.bench.ts`
+扩为全部确定性离线基准（+ablation / calibration / jointCalibration /
+paramAblation / organAblation / fovea.ab）。排除并注释：真机类
+`realMachine*` / `largeScale*`（Linux Xvfb+xdotool 或 D-5 物理服务 tcp :8421，
+非确定性）；`autonomy.closedloop`（确定性但当前 B3 红，基线必须全绿）；
+jointCalibration 的「真机复测」子测经 `--test-skip-pattern 真机复测` 整体剔除
+（其自跳过在 TAP 记 SKIP ⇒ 按未通过计，会卡死 `--update`）。确定性计数类指标
+±15% 从告警升**硬门**（缺省；`DSH_BENCH_GATE_COUNT_HARD=0` 恢复旧告警口径）；
+时间类 duration 恒仅告警。纯函数 `compareBenchmarks` 缺省保持历史口径
+（`test/w7gate.test.ts` 门h 锁定），升硬经 CLI 策略层接线，零回归。
+
 ```bash
 # 带核查与回归门的一轮电池
 node bench/battery.mjs bench/suite-w2.json --compare bench/reports/<旧runId>/report.json
 
 # 离线自检（可信度包自身的测试证据）
 node bench/verify.selftest.mjs
+
+# 性能回归门（ΝΩ-39 扩容后白名单，含 jointCalibration 约 4–5 分钟）
+node scripts/bench_gate.mjs --check
 ```
 
 ## 轮次结果

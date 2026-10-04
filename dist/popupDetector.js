@@ -8,6 +8,8 @@
 // （popupGuard 拦截后模型只需多看一眼截图，代价有界；漏报则盲操作直接失败）。
 //
 // 测量双路径（本轮接线）：D-5 帧环统计（frame_stats）优先；sharp buffer 保留。
+// ΝΩ-32：语义 OCR 通道改吃调用方传入的帧（有 buffer ⇒ 零服务端自截）——
+// 服务端 L2 自截路径退役为「无帧调用方」专属；几何通道不动（本就用帧）。
 import { getSharp } from './_legacyDeps.js';
 import { readTextAny } from './textReader.js';
 import * as backend from './physicalBackend.js';
@@ -16,6 +18,7 @@ function avg(nums) {
     return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 /** 中央区域裁剪框（几何与语义共用同一「弹窗栖息地」假设） */
+const POPUP_SEMANTIC_CROP_MIN_EDGE_PX = 32; // 语义通道中央裁剪的最小边长（OCR 可用分辨率下限）
 function centerRegionNorm(fraction = 0.4) {
     const inset = (1 - fraction) / 2;
     return { x: inset, y: inset, width: fraction, height: fraction };
@@ -158,37 +161,57 @@ export function resetPopupBelief() {
 }
 /**
  * 语义证据：OCR 中央带，词表命中任一即确认。
- * 双路径：服务端 L2 OCR（readTextAny 截屏+识别一体）→ legacy buffer+sharp。
- * 失败（OCR 不可用/超时/无语言包）静默返回空 —— 几何证据独立生效，行为零回归。
+ * ΝΩ-32 通道复用：调用方帧（buffer）在场 ⇒ **零自截** —— 直接对传入帧的中央带
+ * 取 OCR（take_screenshot 已把 cap.buffer 传入：同一屏同一时刻的第二次服务端
+ * 自截是纯浪费）。buffer 路径失败（tesseract 缺席/图过小）⇒ 语义证据诚实缺席
+ * （[]），绝不为此回退服务端自截 —— 几何通道独立生效，行为不因证据缺席而退化。
+ * buffer 缺席（无帧调用方）⇒ 服务端 L2 路径（readTextAny 服务端自截）—— 旧
+ * 行为零回归。诚实边界：服务端 L2 OCR 无「带 buffer 的 region API」（getUiTree
+ * 只收 region 自截）—— 待服务端补 API 后 buffer 通道可吃到服务端引擎。
+ * 失败（OCR 不可用/超时/无语言包）静默返回空 —— 行为零回归。
  */
 async function detectPopupSemantic(frameId, buffer, keywords, ocrLang) {
     if (keywords.length === 0)
         return [];
     try {
         let text = null;
-        try {
-            const r = await readTextAny(centerRegionNorm(0.6), ocrLang);
-            text = r.text;
+        const hasBuffer = !!buffer && buffer.length > 0;
+        if (hasBuffer) {
+            // ΝΩ-32：帧通道（零自截）—— 调用方帧的中央带裁剪 + 本地 OCR
+            try {
+                const sharp = await getSharp();
+                const meta = await sharp(buffer).metadata();
+                const w = meta.width, h = meta.height;
+                if (w >= POPUP_SEMANTIC_CROP_MIN_EDGE_PX && h >= POPUP_SEMANTIC_CROP_MIN_EDGE_PX) { // ΝΩ 收官：小于 32px 的帧语义 OCR 无意义（分辨率下限，非阈值旋钮）
+                    const crop = await sharp(buffer)
+                        .extract(centerRegion(w, h, 0.6))
+                        .resize(1200)
+                        .toBuffer();
+                    const { readText } = await import('./textReader.js');
+                    text = (await readText(crop, ocrLang)).text;
+                }
+            }
+            catch {
+                text = null;
+            }
+            if (text == null) {
+                void frameId; // frameId 语义通道不消费（服务端自截路径已退役为无帧专属）
+                return []; // 零自截律：有帧不回退服务端截屏 —— 语义证据诚实缺席
+            }
         }
-        catch {
-            text = null;
-        }
-        if (text == null && buffer && buffer.length > 0) {
-            const sharp = await getSharp();
-            const meta = await sharp(buffer).metadata();
-            const w = meta.width, h = meta.height;
-            if (w < 32 || h < 32)
+        else {
+            // 无帧调用方：服务端 L2（readTextAny 服务端自截）—— 旧路径逐字节保持
+            try {
+                const r = await readTextAny(centerRegionNorm(0.6), ocrLang);
+                text = r.text;
+            }
+            catch {
+                text = null;
+            }
+            if (text == null)
                 return [];
-            const crop = await sharp(buffer)
-                .extract(centerRegion(w, h, 0.6))
-                .resize(1200)
-                .toBuffer();
-            const { readText } = await import('./textReader.js');
-            text = (await readText(crop, ocrLang)).text;
         }
-        if (text == null)
-            return [];
-        void frameId; // frameId 语义通道由服务端截屏覆盖（readTextAny 服务端自截）
+        void frameId; // frameId 语义通道不消费（几何通道独用）
         const hay = text.toLowerCase();
         const matched = [];
         for (const kw of keywords) {

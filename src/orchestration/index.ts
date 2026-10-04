@@ -302,7 +302,14 @@ export async function apply(ctx: Context, config?: Partial<PipelineConfig>): Pro
       // 未装探针 ⇒ 报告 0（未计量 ≠ 未消耗 —— 命名 Reported 如实申报）
       usageMeter: { decision: () => decisionTokensUsed },
     },
-    { reportDir: (config as any)?.reportDir ?? '' },
+    {
+      reportDir: (config as any)?.reportDir ?? '',
+      // ΝΩ-26（四修之四）：D-4 判决回收内联进 persistReport 之前 —— 报告一次
+      // 成稿，盘上 verdict 与内存同刻（旧序 run 返回后才 reconcile ⇒ 盘上停旧）。
+      // run 返回后的外层 reconcileVerdicts 保留（幂等）：兜住落盘与返回之间
+      // 理论上迟到的判决，内存面永不落单。
+      reconcileReport: (report) => reconcileVerdicts(report, attemptVerdicts),
+    },
   );
 
   // ── 事件总线接线（与 D-1/D-4 的唯一咬合通道）──

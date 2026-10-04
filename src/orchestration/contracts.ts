@@ -176,15 +176,43 @@ export interface ExecutionOrder {
   /** rationale 已在信封构造时剥离（入审计链）——执行工位物理上看不见规划理由
    *  （注意力隔离的类型层执法：不是「不许看」，是类型上没有这个字段） */
   action: SandboxAction;
+  /** 尝试止损信号（ΝΩ-8）：编排器铸造 —— attemptTimeoutMs 越限或外部取消即 abort。
+   *  执行链据此断流（microFetch 组合超时 → Python 收到断连即中断），消灭
+   *  「超时后幽灵动作落地」（computer-use 的不可逆世界污染）。缺席 = 工位/宿主
+   *  链路按旧路径执行（信号是授权不是义务 —— 忽略它的工位行为零变化） */
+  signal?: AbortSignal;
 }
 
 /** 执行失败分类（执行工位产出域） */
 export type ExecutionFailureKind =
   | 'gate-rejected'      // D-5 四重门禁拒绝
   | 'host-error'         // 宿主管线执行错误
-  | 'timeout'            // attemptTimeoutMs 越限（单尝试墙钟）
+  | 'timeout'            // attemptTimeoutMs 越限（单尝试墙钟；被动 race 超时 / 内层超时回传）
+  | 'timeout-aborted'    // ΝΩ-8：attemptTimeoutMs 越限且止损信号已主动 abort（与被动
+                         // race 超时分治 —— 归因可见「in-flight 执行已被叫停」；
+                         // 仍入重试循环，杀一刀不杀流水线）
   | 'sandbox-degraded'   // D-5 预演降级且不可放行
-  | 'cancelled';         // 外部终止（造物主取消/宿主关停）——不入重试循环（路由铁律见 §9）
+  | 'cancelled'          // 外部终止（造物主取消/宿主关停）——不入重试循环（路由铁律见 §9）
+  // ── ΝΩ-27：物理传输细分（与 D-5 PhysicalErrorKind 同构）—— 旧 router.mapErrorKind
+  //     把 14 种压成 host-error/timeout 二元，unauthorized/element_not_found/
+  //     internal_error 不可区分，上层重试策略失去判据。命名随本枚举 kebab-case
+  //     方言；failure.detail 保留结构化 kind 字段（[snake_case 原值] 前缀）。
+  //     既有消费方不需改动：按值匹配的分支（'host-error'/'cancelled'/…）对细分值
+  //     自然不命中，落入缺省/else 臂即旧行为（零回归）；读细分值方获增量判据。──
+  | 'invalid-args'          // D-5 invalid_args：动作参数畸形（域外拒绝等）
+  | 'out-of-bounds'         // D-5 out_of_bounds：坐标越界
+  | 'unknown-button'        // D-5 unknown_button：鼠标键名不受支持
+  | 'unknown-key'           // D-5 unknown_key：热键键名不受支持
+  | 'element-not-found'     // D-5 element_not_found：目标元素不存在（重扫判据）
+  | 'screen-capture-failed' // D-5 screen_capture_failed：截屏失败
+  | 'ocr-unavailable'       // D-5 ocr_unavailable：OCR 通道不可用
+  | 'vlm-unavailable'       // D-5 vlm_unavailable：VLM 通道不可用
+  | 'window-unavailable'    // D-5 window_unavailable：窗口管理不可用
+  | 'unauthorized'          // D-5 unauthorized：认证失败（密钥/时钟偏移类，客户端可修）
+  | 'internal-error'        // D-5 internal_error：微服务内部错误
+  | 'transport-error';      // D-5 transport_error：HTTP 传输层失败（连接拒绝/DNS/断开）
+  // （action_timeout / client_timeout 不另立细分：既有 'timeout' 即其归宿 ——
+  //  D-7 的超时重试预算语义负载在 'timeout' 上，拆分反而破坏判据同一性）
 
 /** 执行工位产出（硬证据哲学对齐 D-3：只有验证器的 effect_detected 是世界回击） */
 export interface ExecutionResult {
@@ -324,8 +352,11 @@ export interface PipelineOrchestrator {
 
   /** 运行层方法（《异常诚实分层契约》第二条）：永不抛错 ——
    *  任何工位失败结构化捕获入 PipelineReport，交 D-4 裁决；
-   *  cancelled 不入重试循环（给已终止的尝试做重规划是无意义烧钱）——直达 'aborted' 终局 */
-  run(intent: IntentPayload, opts?: { snapshotId?: string }): Promise<PipelineReport>;
+   *  cancelled 不入重试循环（给已终止的尝试做重规划是无意义烧钱）——直达 'aborted' 终局。
+   *  ΝΩ-8：opts.signal = run 级外部终止信号（造物主取消/宿主关停）——与每次尝试的
+   *  attemptTimeoutMs 内部超时组合（httpClient 组合语义）；abort 后的失败不论工位
+   *  归因如何皆路由 'aborted'（终止的回声 ≠ 世界回击）。缺席 = 旧路径（零回归） */
+  run(intent: IntentPayload, opts?: { snapshotId?: string; signal?: AbortSignal }): Promise<PipelineReport>;
 
   /** 运行层方法：Result 降级（账本审计语义对齐 D-5 verifyLog） */
   verifyLog(): Result<{ ok: boolean; length: number; brokenAt: number | null }>;

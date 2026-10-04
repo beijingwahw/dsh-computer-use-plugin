@@ -28,16 +28,26 @@ W6-6 常驻视频流 PoC（scrcpyStream.py 携带实现）：
     行为与 W4-5 完全一致（零回归）；
   - 流内另有一道 dhash 门控（同算法）＋ idle 看门狗停流/惰性重启，
     见 scrcpyStream.py 的资源纪律注释。
+
+ΝΩ-52 控制通道复用（tap 50-200ms → <10ms）：
+  - ``tap``/``drag``/``scroll``/``key`` 在**有活跃流**时优先走 scrcpy 控制
+    socket（``ControlWriter``，纯写字节，无子进程税）；降级链完整保留：
+    无流 / 无控制 socket / 写失败 ⇒ adb ``input`` 原路径逐字节不变
+    （回执也不多一个字段 —— "channel" 仅在控制命中时申报）；
+  - 动作路径绝不惰性建流（不付探测/spawn/首帧税），只有 grab 触发的
+    活跃流才拥有快速通道；swipe 用 down-move-up 序列（时长语义保留）。
 """
 from __future__ import annotations
 
 import io
+import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Literal
@@ -53,6 +63,17 @@ from .scrcpyStream import (  # W6-6 常驻视频流
     StreamHub,
     resolve_decoder_factory,
     stream_config_from_env,
+)
+from .scrcpyStream import (  # ΝΩ-52 控制通道复用
+    ACTION_DOWN,
+    ACTION_UP,
+    ACTION_MOVE,
+    POINTER_ID_GENERIC_FINGER,
+    ControlWriter,
+    encode_keycode,
+    encode_scroll,
+    encode_touch,
+    scroll_ticks_per_message,
 )
 
 # ─── W4-5 Surface id 方言（host 显示器 / android 设备统一入列虚拟显示器）───
@@ -176,6 +197,14 @@ class AndroidController:
         self._stream_decoder_factory = stream_decoder_factory
         self._stream_hub: StreamHub | None = None
         self._stream_dead_reason: str | None = None
+        # ΝΩ-36:scrcpy --screenshot 的 per-serial 复用工作目录 + 帧序号
+        # (旧实现每帧 mkdtemp+rmtree —— 高频截图的目录 churn)。并发核对结论:
+        # screen.py 的 DEVICE_POOL **不按 serial 串行**(6 worker 可同抓同
+        # serial)⇒ 本处补单 serial 锁(锁粒度 = 单 serial,跨 serial 不互斥)。
+        self._grab_dirs: dict[str, str] = {}
+        self._grab_seq: dict[str, int] = {}
+        self._grab_locks: dict[str, threading.Lock] = {}
+        self._grab_admin = threading.Lock()
 
     # ─── W6-6 常驻流枢纽(惰性构造;缺席 = 单帧链独走)───
 
@@ -377,14 +406,46 @@ class AndroidController:
         self._scrcpy_probe = (True, version)
         return self._scrcpy_probe
 
+    @staticmethod
+    def _safe_dir_token(serial: str) -> str:
+        """ΝΩ-36:serial → 目录名安全 token(ip:port 冒号等 Windows 非法字符 → 下划线)。"""
+        tok = re.sub(r"[^A-Za-z0-9._-]", "_", serial)
+        return (tok or "dev")[:40]
+
+    def _acquire_grab_slot(self, serial: str) -> tuple[str, str]:
+        """ΝΩ-36:per-serial 复用目录 + 帧序号产物名(调用方须持该 serial 的锁)。
+
+        目录缺失/被外部清走 ⇒ 重建;序号单调递增 ⇒ 产物文件与本次抓帧一一
+        对应(帧序号命名,mtime 排序保留为兜底)。返回 ``(workdir, frame_path)``。
+        """
+        with self._grab_admin:
+            workdir = self._grab_dirs.get(serial)
+            if workdir is None or not os.path.isdir(workdir):
+                workdir = tempfile.mkdtemp(
+                    prefix=f"dsh-scrcpy-{self._safe_dir_token(serial)}-")
+                self._grab_dirs[serial] = workdir
+            self._grab_seq[serial] = self._grab_seq.get(serial, 0) + 1
+            seq = self._grab_seq[serial]
+        return workdir, os.path.join(workdir, f"frame-{seq:08d}.png")
+
+    def _grab_serial_lock(self, serial: str) -> threading.Lock:
+        """单 serial 串行化锁(惰性建;ΝΩ-36 —— 见 __init__ 的并发核对注)。"""
+        with self._grab_admin:
+            return self._grab_locks.setdefault(serial, threading.Lock())
+
     def _scrcpy_grab(self, serial: str) -> Image.Image:
-        """scrcpy 单帧：``--screenshot`` 写 PNG 到进程 cwd（tempdir 隔离）。
+        """scrcpy 单帧：``--screenshot`` 写 PNG 到 per-serial 复用工作目录。
 
         ``--max-size`` 先行降采样（带宽第一道门）；``--no-audio --no-control``
         关闭无关通道。找不到产物 ⇒ ``SCREEN_CAPTURE_FAILED``（调用方降级链接手）。
+
+        ΝΩ-36 churn 治理:旧实现每帧 ``mkdtemp``+``rmtree``;现在目录复用 +
+        产物改名到帧序号名后即读即删(目录零残留 ⇒ 下帧 mtime 排序不被陈旧
+        产物污染)。并发:单 serial 一把锁(DEVICE_POOL 不按 serial 串行 ——
+        核对结论无既有锁,本处补)。
         """
-        tmp = tempfile.mkdtemp(prefix="dsh-scrcpy-")
-        try:
+        with self._grab_serial_lock(serial):
+            workdir, frame_path = self._acquire_grab_slot(serial)
             argv = [
                 self.cfg.scrcpy_path,
                 f"--serial={serial}",
@@ -393,24 +454,38 @@ class AndroidController:
                 f"--max-size={self.cfg.scrcpy_max_frame_size}",
                 "--screenshot",
             ]
-            rc, out, err = self._run(argv, cwd=tmp)
+            rc, out, err = self._run(argv, cwd=workdir)
             if rc != 0:
                 raise PhysicalError(
                     ErrorKind.SCREEN_CAPTURE_FAILED,
                     self._detail(err, rc, f"scrcpy --screenshot on {serial}"),
                 )
-            pngs = sorted(Path(tmp).glob("*.png"), key=lambda p: p.stat().st_mtime)
+            pngs = sorted(Path(workdir).glob("*.png"), key=lambda p: p.stat().st_mtime)
             if not pngs:
                 raise PhysicalError(
                     ErrorKind.SCREEN_CAPTURE_FAILED,
-                    f"scrcpy --screenshot on {serial} produced no png in {tmp}",
+                    f"scrcpy --screenshot on {serial} produced no png in {workdir}",
                 )
-            with open(pngs[-1], "rb") as f:
-                img = Image.open(io.BytesIO(f.read()))
-                img.load()  # 截断图在此现形，不流进下游管线
+            produced = pngs[-1]
+            final = Path(frame_path)
+            if produced != final:
+                try:
+                    produced.replace(final)  # 帧序号命名(同目录 rename,原子)
+                except OSError:
+                    final = produced  # rename 失败(占位残留等):读原产物名
+            try:
+                with open(final, "rb") as f:
+                    img = Image.open(io.BytesIO(f.read()))
+                    img.load()  # 截断图在此现形，不流进下游管线
                 return img
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            finally:
+                # 产物即删:复用目录内零残留(churn 治理的核心不变量);
+                # 其他陈旧 png(异常路径遗留)一并清扫
+                for stale in [final, *pngs]:
+                    try:
+                        Path(stale).unlink()
+                    except OSError:
+                        pass
 
     def _adb_screencap(self, serial: str) -> Image.Image:
         """降级帧源：``adb exec-out screencap -p``（exec-out 二进制安全）。"""
@@ -479,6 +554,100 @@ class AndroidController:
                 self._detail(err, rc, f"adb shell input {' '.join(args)} on {serial}"),
             )
 
+    # ─── ΝΩ-52 控制通道(tap/swipe/scroll/key 的快速路径;缺席 ⇒ 降级 adb)───
+
+    def _control_ctx(self, serial: str):
+        """快速通道上下文 ``(writer, vw, vh)``;不可用 ⇒ None(降级 adb)。
+
+        只看**已活跃**的流 —— ``self._stream_hub`` 直读(动作路径绝不惰性
+        建 hub/流:那要付 scrcpy 探测 + spawn + 首帧等待数百 ms,快速通道
+        反而变慢)。任何异常吞掉返 None(运行层不抛铁律)。``vw/vh`` 是
+        视频坐标系(scrcpy server 要求 position 的 screen_size 与其视频
+        尺寸全等,设备像素换算由 server 按比例代劳 —— max_size 降采样正确)。
+        """
+        hub = self._stream_hub
+        if hub is None:
+            return None
+        try:
+            writer = hub.control_writer(serial)
+            size = hub.video_size(serial)
+        except Exception:
+            return None
+        if writer is None or size is None:
+            return None
+        return writer, size[0], size[1]
+
+    @staticmethod
+    def _video_px(vw: int, vh: int, x: float, y: float) -> tuple[int, int]:
+        """归一化 [0,1]² → 视频像素(钳制边界;合法性已由 _to_px 执法)。"""
+        return max(0, min(int(round(x * vw)), vw - 1)), max(0, min(int(round(y * vh)), vh - 1))
+
+    def _control_tap(self, serial: str, x: float, y: float, long_press: bool) -> bool:
+        """控制通道点击:down(+时长)+up 两报文;右键 = 长按惯用语(同 adb 语义)。"""
+        ctl = self._control_ctx(serial)
+        if ctl is None:
+            return False
+        writer, vw, vh = ctl
+        vx, vy = self._video_px(vw, vh, x, y)
+        down = encode_touch(ACTION_DOWN, POINTER_ID_GENERIC_FINGER, vx, vy, vw, vh, pressure=1.0)
+        up = encode_touch(ACTION_UP, POINTER_ID_GENERIC_FINGER, vx, vy, vw, vh, pressure=0.0)
+        inter = self.cfg.long_press_threshold_ms / 1000.0 if long_press else 0.0
+        return writer.send_sequence([down, up], inter_s=inter, rescue=up)
+
+    def _control_drag(self, serial: str, sx: float, sy: float, ex: float, ey: float,
+                      duration_ms: int, stationary: bool) -> bool:
+        """控制通道拖拽:down-move…-up 序列(move 步进插值,inter_s 摊时长
+        —— 手势速度语义与 input swipe 对齐;原地 = down+长按+up)。"""
+        ctl = self._control_ctx(serial)
+        if ctl is None:
+            return False
+        writer, vw, vh = ctl
+        x0, y0 = self._video_px(vw, vh, sx, sy)
+        x1, y1 = self._video_px(vw, vh, ex, ey)
+        up = encode_touch(ACTION_UP, POINTER_ID_GENERIC_FINGER, x1, y1, vw, vh, pressure=0.0)
+        if stationary:
+            down = encode_touch(ACTION_DOWN, POINTER_ID_GENERIC_FINGER, x0, y0, vw, vh, pressure=1.0)
+            return writer.send_sequence([down, up], inter_s=duration_ms / 1000.0, rescue=up)
+        moves = max(1, min(24, int(duration_ms / 25)))  # 25ms/步封顶 24 步(带宽/保真折中)
+        gaps = moves + 1
+        msgs = [encode_touch(ACTION_DOWN, POINTER_ID_GENERIC_FINGER, x0, y0, vw, vh, pressure=1.0)]
+        for i in range(1, moves + 1):
+            t = i / gaps
+            mx, my = self._video_px(vw, vh, sx + (ex - sx) * t, sy + (ey - sy) * t)
+            msgs.append(encode_touch(ACTION_MOVE, POINTER_ID_GENERIC_FINGER, mx, my, vw, vh, pressure=1.0))
+        msgs.append(up)
+        return writer.send_sequence(msgs, inter_s=duration_ms / (gaps * 1000.0), rescue=up)
+
+    def _control_scroll(self, serial: str, direction: str, ticks: int) -> bool:
+        """控制通道滚动:屏心 INJECT_SCROLL_EVENT(tick 数按剖面分片承载)。"""
+        ctl = self._control_ctx(serial)
+        if ctl is None:
+            return False
+        writer, vw, vh = ctl
+        cx, cy = vw // 2, vh // 2
+        h = ticks if direction == "right" else (-ticks if direction == "left" else 0)
+        v = ticks if direction == "down" else (-ticks if direction == "up" else 0)
+        per = scroll_ticks_per_message(writer.profile)
+        msgs = []
+        remaining = ticks
+        while remaining > 0:
+            chunk = min(remaining, per)
+            scale = chunk / ticks
+            msgs.append(encode_scroll(cx, cy, vw, vh, h * scale, v * scale,
+                                      profile=writer.profile))
+            remaining -= chunk
+        return writer.send_sequence(msgs)
+
+    def _control_key(self, serial: str, keycode: int) -> bool:
+        """控制通道按键:INJECT_KEYCODE down+up(= input keyevent 的设备侧等价)。"""
+        ctl = self._control_ctx(serial)
+        if ctl is None:
+            return False
+        writer, _vw, _vh = ctl
+        down = encode_keycode(ACTION_DOWN, keycode)
+        up = encode_keycode(ACTION_UP, keycode)
+        return writer.send_sequence([down, up], rescue=up)
+
     def tap(
         self, serial: str, x: float, y: float, button: str = "left", dry_run: bool = False,
     ) -> dict:
@@ -497,6 +666,16 @@ class AndroidController:
                 "middle click has no android equivalent (no middle button on touch surfaces)",
             )
         if not dry_run:
+            # ΝΩ-52:有活跃流 ⇒ 控制通道(回执申报 channel);缺席/写失败 ⇒
+            # 以下 adb 路径分毫不动(零回归铁律)。
+            if self._control_tap(serial, x, y, long_press=(button == "right")):
+                return {
+                    "pixel": {"x": px, "y": py},
+                    "screen": {"width": w, "height": h},
+                    "surface": format_surface_id("android", serial),
+                    **({"mode": "long_press"} if button == "right" else {}),
+                    "channel": "scrcpy_control",
+                }
             if button == "right":
                 self._shell(serial, "swipe", str(px), str(py), str(px), str(py),
                             str(self.cfg.long_press_threshold_ms))
@@ -534,6 +713,21 @@ class AndroidController:
             duration = max(duration, self.cfg.long_press_threshold_ms)
             epx, epy = spx, spy  # 原地长按（钳制抖动）
         if not dry_run:
+            # ΝΩ-52:控制通道优先(down-move-up 序列;原地 = down+长按+up,
+            # 终点用钳制后的起点 —— 与 adb 路径的原地语义一致)。降级 adb 原路径。
+            if stationary:
+                cex, cey = sx, sy
+            else:
+                cex, cey = ex, ey
+            if self._control_drag(serial, sx, sy, cex, cey, duration, stationary):
+                return {
+                    "start_pixel": {"x": spx, "y": spy},
+                    "end_pixel": {"x": epx, "y": epy},
+                    "duration_ms": duration,
+                    "mode": mode,
+                    "surface": format_surface_id("android", serial),
+                    "channel": "scrcpy_control",
+                }
             self._shell(serial, "swipe", str(spx), str(spy), str(epx), str(epy), str(duration))
         return {
             "start_pixel": {"x": spx, "y": spy},
@@ -638,6 +832,10 @@ class AndroidController:
                 "send keys one at a time",
             )
         if not dry_run:
+            # ΝΩ-52:控制通道优先(INJECT_KEYCODE down+up);降级 adb 原路径。
+            if self._control_key(serial, codes[0]):
+                return {"pressed": keys, "surface": format_surface_id("android", serial),
+                        "channel": "scrcpy_control"}
             self._shell(serial, "keyevent", str(codes[0]))
         return {"pressed": keys, "surface": format_surface_id("android", serial)}
 
@@ -668,20 +866,50 @@ class AndroidController:
         else:  # left
             x0, y0, x1, y1 = cx + d // 2, cy, cx - d // 2, cy
         if not dry_run:
+            # ΝΩ-52:控制通道优先(屏心 INJECT_SCROLL_EVENT);降级 adb 原路径。
+            if self._control_scroll(serial, direction, amount):
+                return {"scrolled": amount, "pixels": d,
+                        "surface": format_surface_id("android", serial),
+                        "channel": "scrcpy_control"}
             self._shell(serial, "swipe", str(x0), str(y0), str(x1), str(y1),
                         str(self.cfg.swipe_duration_ms))
         return {"scrolled": amount, "pixels": d, "surface": format_surface_id("android", serial)}
 
     # ─── 生命周期 ───
 
+    def stream_stats(self) -> dict:
+        """ΝΩ-36:常驻流枢纽诊断面（/v1/stats 读）。
+
+        未建枢纽 ⇒ ``{"absent": true, reason}``（诚实缺席）—— 诊断读**不得**
+        触发惰性构造（_hub() 会跑 scrcpy 探测/解码器解析,那是抓帧路径的
+        副作用,不是诊断的）;死因（decoder 缺席等）如实申报。
+        """
+        hub = self._stream_hub
+        if hub is None:
+            reason = self._stream_dead_reason or (
+                "resident stream not started "
+                "(disabled by config or no grab has triggered lazy startup)"
+            )
+            return {"absent": True, "reason": reason}
+        return {"decoder": hub.decoder_name, "streams": hub.stats()}
+
     def close(self) -> None:
-        """关闭:清缓存 + W6-6 常驻流全停(kill 子进程/关 socket/join 线程)。"""
+        """关闭:清缓存 + W6-6 常驻流全停(kill 子进程/关 socket/join 线程)
+        + ΝΩ-36 复用工作目录回收(进程级 teardown,正在飞的抓帧持锁者
+        以其自身引用收尾)。"""
         hub = self._stream_hub
         if hub is not None:
             hub.close()
             self._stream_hub = None
         self._resolution_cache.clear()
         self._inventory_cache = None
+        with self._grab_admin:
+            dirs = list(self._grab_dirs.values())
+            self._grab_dirs.clear()
+            self._grab_seq.clear()
+            self._grab_locks.clear()
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 # ═══ W6-6 自测入口:python -m dsh_physical.android --selftest ═══
@@ -696,6 +924,9 @@ class AndroidController:
 #   S8 惰性重启                 S9 启动失败降级单帧链(+冷却退避)
 #   S10 解码器缺席 ⇒ 降级单帧链  S11 清理执法(mock 计数:无残留句柄/线程)
 #   S12 集成正路径(note 契约)  S13 缺省 off ⇒ 流零触碰(零回归)
+#   S16 ΝΩ-52 控制命中(tap/drag/scroll/key 走控制通道,adb 零触碰)
+#   S17 写失败 ⇒ 通道病亡降级 adb(回执无 channel,argv 原样)
+#   S18 无流 ⇒ 回执/argv 与 W4-5 逐字节同(零回归离线证明)
 
 def _run_selftest() -> int:
     import itertools
@@ -1038,6 +1269,209 @@ def _run_selftest() -> int:
     check("S14 bare percent passes without note", "note" not in r14)
     r14b = ctrl14.type_text("emu1", "a%sb")
     check("S14 literal %s flagged in note", "note" in r14b)
+
+    # ── S15 ΝΩ-36 ctempdir churn 治理:目录复用 + 帧序号 + 零残留 ──
+    calls15: list = []
+    cwds15: set = set()
+
+    def runner15(argv, timeout_s=15.0, cwd=None):
+        calls15.append(list(argv))
+        if cwd is not None:
+            cwds15.add(cwd)
+        if "--version" in argv:
+            return 0, b"scrcpy 2.7.1\n", b""
+        if "--screenshot" in argv:
+            # 模拟 scrcpy 产物:写一张 PNG 到进程 cwd(任意 *.png 名)
+            img15 = Image.new("RGB", (32, 48), (11, 22, 33))
+            img15.save(os.path.join(cwd, "screenshot_0001.png"), format="PNG")
+            return 0, b"", b""
+        return 0, b"", b""
+
+    ctrl15 = AndroidController(cfgA, runner=runner15)  # env 缺省 ⇒ 流 off
+    imgs15 = [ctrl15.grab_frame("emu1")[0] for _ in range(3)]
+    check("S15 three grabs succeed",
+          all(im.size == (32, 48) and im.getpixel((0, 0)) == (11, 22, 33)
+              for im in imgs15))
+    check("S15 single reused workdir (no per-frame mkdtemp churn)", len(cwds15) == 1)
+    workdir15 = next(iter(cwds15))
+    check("S15 workdir empty after grabs (zero residue)",
+          os.path.isdir(workdir15) and list(Path(workdir15).glob("*")) == [])
+    seq15 = ctrl15._grab_seq.get("emu1")
+    check("S15 frame sequence advanced", seq15 == 3)
+    # 并发面:两个 serial 各自独立目录(锁粒度 = 单 serial)
+    ctrl15.grab_frame("192.168.1.5:5555")
+    dirs15 = dict(ctrl15._grab_dirs)
+    check("S15 second serial gets its own dir",
+          len(dirs15) == 2 and ctrl15._grab_seq["192.168.1.5:5555"] == 1)
+    check("S15 _safe_dir_token strips illegal chars",
+          AndroidController._safe_dir_token("192.168.1.5:5555") == "192.168.1.5_5555")
+    ctrl15.close()
+    check("S15 close removes reused dirs",
+          all(not os.path.isdir(d) for d in dirs15.values()))
+
+    # ── S16-S18 ΝΩ-52 控制通道复用:命中/降级/零回归 ──
+
+    class CtrlFakeSock:
+        """假控制 socket:字节捕获 + fail_at(第 n 次 sendall 抛 OSError)。"""
+
+        def __init__(self, fail_at=()):
+            self.sent = []
+            self.timeouts = []
+            self.closed = 0
+            self._closed = False
+            self.fail_at = set(fail_at)
+            self._n = 0
+
+        def settimeout(self, t):
+            self.timeouts.append(t)
+
+        def sendall(self, b):
+            if self._n in self.fail_at:
+                self._n += 1
+                raise OSError(f"stub failure #{self._n - 1}")
+            self._n += 1
+            self.sent.append(bytes(b))
+
+        def close(self):
+            if not self._closed:
+                self._closed = True
+                self.closed += 1
+
+    class CtrlFakeSource(FakeByteSource):
+        def __init__(self, spawner_ref):
+            super().__init__(spawner_ref)
+            self.control_sock = None
+            self._control_taken = False
+
+        def take_control_socket(self):
+            sock = self.control_sock if not self._control_taken else None
+            self._control_taken = True
+            return sock
+
+    class CtrlSpawner(FakeSpawner):
+        """FakeSpawner + 每源一枚假控制 socket + wm size 感知的 runner 配套。"""
+
+        def open(self, serial):
+            self.opens += 1
+            src = CtrlFakeSource(self)
+            src.control_sock = CtrlFakeSock()
+            self.sources.append(src)
+            self._emit(src, [next(self._seeds)], header=True)
+            return src
+
+        __call__ = open
+
+    def mk_action_runner(calls):
+        """动作桩 runner:wm size 1080x1920 + scrcpy 2.7.1;其余记录。"""
+
+        def runner(argv, timeout_s=15.0, cwd=None):
+            calls.append(list(argv))
+            if "--version" in argv:
+                return 0, b"scrcpy 2.7.1\n", b""
+            if "wm" in argv:
+                return 0, b"Physical size: 1080x1920\n", b""
+            return 0, b"", b""
+
+        return runner
+
+    calls16: list = []
+    fake16c = CtrlSpawner()
+    ctrl16 = AndroidController(cfgA, runner=mk_action_runner(calls16),
+                               stream_cfg=StreamConfig(enabled=True, first_frame_timeout_s=2.0),
+                               stream_spawner=fake16c,
+                               stream_decoder_factory=mk_fake_decoder({"made": 0, "closed": 0}))
+    img16, note16 = ctrl16.grab_frame("emu1")  # 激活流(视频 32x48)
+    check("S16 stream active for control", img16.size == (32, 48) and "resident" in note16)
+    r16 = ctrl16.tap("emu1", 0.25, 0.5)
+    sock16 = fake16c.sources[-1].control_sock
+    adb16 = [c for c in calls16 if "input" in c]
+    check("S16 tap via control (adb untouched)",
+          r16.get("channel") == "scrcpy_control" and adb16 == []
+          and len(sock16.sent) == 2 and sock16.sent[0][1] == 0 and sock16.sent[1][1] == 1
+          and sock16.sent[0][2:10].hex() == "fffffffffffffffe")
+    # 视频坐标系换算:0.25*32=8, 0.5*48=24;尺寸对 = 视频帧 32x48
+    check("S16 tap encoded in video space",
+          sock16.sent[0][10:14].hex() == "00000008" and sock16.sent[0][14:18].hex() == "00000018"
+          and sock16.sent[0][18:22].hex() == "00200030")
+    check("S16 device-space receipt intact",
+          r16["pixel"] == {"x": 270, "y": 960} and r16["screen"] == {"width": 1080, "height": 1920})
+    r16d = ctrl16.drag("emu1", {"x": 0.1, "y": 0.2}, {"x": 0.9, "y": 0.8}, duration_ms=300)
+    acts16d = [b[1] for b in sock16.sent[2:]]
+    check("S16 drag down-move-up sequence",
+          r16d.get("channel") == "scrcpy_control" and acts16d[0] == 0
+          and acts16d[-1] == 1 and acts16d[1:-1] == [2] * 12)
+    r16s = ctrl16.scroll("emu1", "down", 3)
+    check("S16 scroll chunks per 2x dialect",
+          r16s.get("channel") == "scrcpy_control"
+          and len([b for b in sock16.sent if b[0] == 3]) == 3)
+    r16k = ctrl16.key("emu1", ["enter"])
+    check("S16 key via keycode down/up",
+          r16k.get("channel") == "scrcpy_control"
+          and [b.hex() for b in sock16.sent if b[0] == 0]
+          == ["0000" + "00000042" + "00000000" + "00000000",
+              "0001" + "00000042" + "00000000" + "00000000"])
+    ctrl16.type_text("emu1", "hi")  # 文本不迁移(工单范围外),恒 adb
+    check("S16 type_text stays adb",
+          any("text" in c for c in calls16 if "input" in c))
+    ctrl16.close()
+
+    # ── S17 写失败 ⇒ 通道病亡降级 adb(回执无 channel,argv 原样) ──
+    calls17: list = []
+    fake17 = CtrlSpawner()
+    ctrl17 = AndroidController(cfgA, runner=mk_action_runner(calls17),
+                               stream_cfg=StreamConfig(enabled=True, first_frame_timeout_s=2.0),
+                               stream_spawner=fake17,
+                               stream_decoder_factory=mk_fake_decoder({"made": 0, "closed": 0}))
+    ctrl17.grab_frame("emu1")
+    sock17 = fake17.sources[-1].control_sock
+    sock17.fail_at = {0}  # 首条即败:零注入,可无痕降级
+    r17 = ctrl17.tap("emu1", 0.5, 0.5)
+    adb17 = [c for c in calls17 if "input" in c]
+    check("S17 write failure falls back to adb",
+          "channel" not in r17 and len(adb17) == 1
+          and adb17[0][adb17[0].index("input"):] == ["input", "tap", "540", "960"])
+    check("S17 dead channel not retried",
+          sock17.sent == [] and sock17.closed >= 1)
+    r17b = ctrl17.tap("emu1", 0.5, 0.5)  # 病亡记忆:后续恒 adb
+    adb17b = [c for c in calls17 if "input" in c]
+    check("S17 subsequent actions stay adb",
+          "channel" not in r17b and len(adb17b) == 2)
+    sock17.fail_at = set()  # 解除故障也救不回(死通道不复活,流重启才有新通道)
+    r17c = ctrl17.tap("emu1", 0.5, 0.5)
+    check("S17 dead channel stays dead after transient failure clears",
+          "channel" not in r17c and len([c for c in calls17 if "input" in c]) == 3)
+    ctrl17.close()
+
+    # ── S18 无流 ⇒ 回执/argv 与 W4-5 逐字节同(零回归离线证明) ──
+    def _legacy18(method, *args, **kwargs):
+        c: list = []
+        ctl = AndroidController(cfgA, runner=mk_action_runner(c))
+        try:
+            out = getattr(ctl, method)("emu1", *args, **kwargs)
+        finally:
+            ctl.close()
+        return c, out
+
+    def _off18(method, *args, **kwargs):
+        c: list = []
+        sp = CtrlSpawner()
+        ctl = AndroidController(cfgA, runner=mk_action_runner(c),
+                                stream_cfg=StreamConfig(enabled=False),
+                                stream_spawner=sp,
+                                stream_decoder_factory=mk_fake_decoder({"made": 0, "closed": 0}))
+        try:
+            out = getattr(ctl, method)("emu1", *args, **kwargs)
+        finally:
+            ctl.close()
+        return c, out
+
+    for name, args in (("tap", (0.5, 0.5)),
+                       ("drag", ({"x": 0.1, "y": 0.2}, {"x": 0.9, "y": 0.8})),
+                       ("scroll", ("down", 3)),
+                       ("key", (["enter"],))):
+        lc18, lr18 = _legacy18(name, *args)
+        mc18, mr18 = _off18(name, *args)
+        check(f"S18 {name} byte-identical without stream", (lc18, lr18) == (mc18, mr18))
 
     print(f"\nandroid selftest: {'OK' if not failures else 'FAILED'} "
           f"({passed} passed, {len(failures)} failed)")

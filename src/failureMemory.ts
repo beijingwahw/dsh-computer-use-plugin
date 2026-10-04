@@ -1,7 +1,9 @@
 // src/failureMemory.ts
 // 第六轮创新之二：失败记忆（Anti-Skill，反技能）。
 // 技能库学习「什么有效」，本模块学习「什么无效」—— 两条记忆对称共存：
-//   记录：手动 remember_failure + 熔断触发时自动捕获（场景指纹 + 动作签名 + 症状）
+//   记录：熔断触发时自动捕获（场景指纹 + 动作签名 + 症状）
+//   （ΑΩ-R34：旧注释称「手动 remember_failure + …」—— 该工具面在本插件从未
+//    注册（全史仅此注释行），实际唯一写入方是 circuitBreakerGuard 自动接线）
 //   检索：match_skill 召回技能时同步附上「同场景已知失败路径」，先验正负对照
 // 价值：大多数系统只从成功学习；而一次探索中验证过的死路，本会话内不必再走第二遍。
 import { similarity } from './perceptualHash';

@@ -13,7 +13,7 @@ import type {
 } from './contracts';
 import type { RegionSpec } from '../orchestration/contracts';
 import { tokenize } from '../uiMemory';
-import { embed, cosine } from '../semanticHash';
+import { embed, cosine, type SparseVector } from '../semanticHash';
 import { trustOf } from './knowledgeBase';
 import { P } from './params';
 import { SANDBOX_ACTION_KINDS } from '../sandbox/types';
@@ -45,6 +45,7 @@ export interface HostExecutePort {
 
 // ─── 网格分区铸造（'g{col}x{row}' —— D-6 坐标同一性方案复刻，跨轮稳定）───
 
+// exempt(ΝΩ-41 BC-5)：与 orchestration/pipeline.helpers.ts 同体有意双份（knowledge 与 orchestration 互不 import 的器官边界律，行为由 D-6 同一性测试锁定）—— 知情申报
 function gridRegions(grid: { cols: number; rows: number }): RegionSpec[] {
   const regions: RegionSpec[] = [];
   for (let col = 0; col < grid.cols; col++) {
@@ -252,8 +253,10 @@ export class StubDecisionStation implements DecisionStation {
     this.opts = opts;
   }
 
-  /** 决策上下文 → 紧凑 prompt（Token 纪律：结构化场景表 + 隐知识摘要，零散文背景） */
-  buildPrompt(ctx: DecisionContext, retryCtx?: FailureFeedback): string {
+  /** 决策上下文 → 紧凑 prompt（Token 纪律：结构化场景表 + 隐知识摘要，零散文背景）。
+   *  ΝΩ-16：advisory = 级联仲裁上一级的咨询性证据附注（压制证据 / Tier2 效用
+   *  排序）—— 提示非指令，裁决权仍在模型。 */
+  buildPrompt(ctx: DecisionContext, retryCtx?: FailureFeedback, advisory?: string): string {
     const scene = ctx.scene
       .map(p => `[${p.region.id}] ${p.funnelDepth}: ` +
         p.elements.map(e => `${e.role}(${e.name})@${e.rect.x.toFixed(2)},${e.rect.y.toFixed(2)}`).join(' '))
@@ -261,11 +264,12 @@ export class StubDecisionStation implements DecisionStation {
     const knowledge = ctx.knowledgeContext
       ? `\nTACIT KNOWLEDGE (conf ${ctx.knowledgeContext.maxConfidence.toFixed(2)}): ${ctx.knowledgeContext.summary}`
       : '';
+    const advisoryNote = advisory ? `\nADVISORY: ${advisory}` : '';
     const retry = retryCtx ? `\nLAST FAILURE (retry ${retryCtx.retryCount}): ${retryCtx.reason}` : '';
     const prev = ctx.previousResults?.length
       ? `\nPREVIOUS RESULTS: ${ctx.previousResults.map(r => `${r.action.kind}=${r.status}`).join(', ')}`
       : '';
-    return `GOAL: ${ctx.intent.description}${knowledge}${prev}${retry}\nSCENE:\n${scene}\n` +
+    return `GOAL: ${ctx.intent.description}${knowledge}${advisoryNote}${prev}${retry}\nSCENE:\n${scene}\n` +
       'OUTPUT (strict JSON): {"type":"action","action":{"kind":"click_mouse|type_text|...","args":{...}},"rationale":"..."} ' +
       'or {"type":"need-grounding","reason":"...","focus":"..."}';
   }
@@ -275,12 +279,24 @@ export class StubDecisionStation implements DecisionStation {
     retryCtx?: FailureFeedback,
     signal?: AbortSignal,
   ): Promise<AtomicAction | NeedGrounding> {
+    return this.decideAdvisory(env, retryCtx, signal);
+  }
+
+  /** 咨询性证据注入的决策变体（ΝΩ-16 级联仲裁的 LLM 断后面）：级联上一级
+   *  的判定证据（免疫压制 / 效用排序）随 prompt 交大脑 —— 大脑可凭理由推翻，
+   *  推翻与否由其 rationale 自证（审计面不减）。通道语义与 decide 完全同律。 */
+  async decideAdvisory(
+    env: AttentionEnvelope<'decision', DecisionContext>,
+    retryCtx?: FailureFeedback,
+    signal?: AbortSignal,
+    advisory?: string,
+  ): Promise<AtomicAction | NeedGrounding> {
     if (!this.opts.chat) {
       return { reason: 'no decision channel wired (stub era — honest degradation)', focus: 'full-scene' };
     }
     let raw: string;
     try {
-      raw = await this.opts.chat(this.buildPrompt(env.payload, retryCtx), signal);
+      raw = await this.opts.chat(this.buildPrompt(env.payload, retryCtx, advisory), signal);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       return { reason: `decision channel fault: ${msg}`, focus: 'full-scene' };
@@ -327,8 +343,71 @@ const DELIB_ERROR_WEIGHT = 3;
 /** 探针闩锁容量上限（防爆环保险丝：已探针 intent 不许无界滞留内存 —— FIFO 淘汰） */
 const PROBE_LATCH_MAX = 128;
 
+// ─── ΝΩ-16 级联仲裁：决策轨迹的层别标注 ───
+
+/** 层别（谁裁的）：rationale 记「为什么」，tierUsed 记「哪一级裁定」——
+ *  reflex = 零模型层（反射弧/前额叶仿真/探针）直发；llm = 大脑层裁决。 */
+export type DecisionTier = 'reflex' | 'llm';
+
+/** 带层别标注的决策动作（AtomicAction 的可选字段扩展 —— 结构兼容，既有
+ *  消费方（执行工位只读 kind/args/expect）零感知；审计链可回答「这一步
+ *  是谁裁的」，LLM 独裁/反射越权的归因从此有据）。 */
+export type TieredAction = AtomicAction & { tierUsed?: DecisionTier };
+
+// ─── DS-3（ΝΩ-16 顺修）：仿真层文本嵌入的进程级 LRU 缓存 ───
+// 病灶：deliberate 每轮对同一 intent / fragment / 元素名重复 embed —— run 内
+// 场景与证据高度复现（重试轮尤甚），重复哈希是纯浪费。embed 是纯函数
+// （同文本恒同向量）⇒ 进程级共享零语义漂移；key = 文本自身（Map 字符串键
+// 即引擎级哈希寻址 —— 不自铸 hash，零碰撞语义负担），容量 1024，纯 Map 实现：
+// 命中即删重插（新鲜度刷新，严格 LRU），超容逐最旧（Map 迭代序 = 插入序）。
+const EMBED_CACHE_CAPACITY = 1024;
+const embedCache = new Map<string, SparseVector>();
+
+/** LRU 嵌入查询（deliberate 全通道消费；导出为测试面 —— 命中返回同一引用可断言） */
+export function embedCached(text: string): SparseVector {
+  const hit = embedCache.get(text);
+  if (hit !== undefined) {
+    embedCache.delete(text);
+    embedCache.set(text, hit); // 命中重插 = LRU 新鲜度刷新（不是 FIFO）
+    return hit;
+  }
+  const v = embed(text);
+  embedCache.set(text, v);
+  if (embedCache.size > EMBED_CACHE_CAPACITY) {
+    const oldest = embedCache.keys().next().value;
+    if (oldest !== undefined) embedCache.delete(oldest);
+  }
+  return v;
+}
+
+// ─── DS-4（ΝΩ-16 顺修）：探针闩锁的进程级升级层 ───
+// 病灶：「一 run 一针」的跨 run 保护由知识闭环兑现（探针失败 ⇒ auto-learn
+// 亲证压制诞生 ⇒ 信任门控通过 ⇒ 不再探针）；learnFromOutcome 因容量拒绝
+// （满库且无 auto-learn 可驱逐 —— 全 manual/import 主权库）时该闭环断裂，
+// 工位实例闩锁只护 run 内 —— 每个 run 都重付探针学费。修法：学习侧容量
+// 拒绝上报时（escalateProbeLatch，接线缝 = pipeline learnSettled 的
+// r.error.field === 'capacity' 分支），该 intent 的闩锁升进程级 —— 跨工位
+// 实例存活；1h 衰减懒过期自动解除（容量拒绝可被上游清库解除，永久闩锁
+// 会把「世界会变」的复活通道焊死 —— 探针本是传闻的解药，不是刑具）。
+const PROCESS_LATCH_DECAY_MS = 60 * 60 * 1000;
+const processProbeLatch = new Map<string, number>(); // intentId → 升级时刻
+
+/** 进程级闩锁查询（懒过期）：过线即除键 —— 1h decay 自动解除无需扫 Timer
+ *  （查询时才结算，零后台开销）。 */
+function processLatchActive(intentId: string): boolean {
+  const at = processProbeLatch.get(intentId);
+  if (at === undefined) return false;
+  if (Date.now() - at >= PROCESS_LATCH_DECAY_MS) {
+    processProbeLatch.delete(intentId);
+    return false; // 衰减过线 = 闩锁自动解除（世界会变，复活通道不焊死）
+  }
+  return true;
+}
+
 export interface ReflexiveDecisionOpts {
-  /** 大模型通道（在场 ⇒ 大脑路径优先 —— LLM 是奢侈品，反射是保底本能） */
+  /** 大模型通道（ΝΩ-16 级联语义：在场 ⇒ 大脑**断后** —— 免疫压制恒跑、无歧义
+   *  反射直发跳过 LLM，歧义/压制改道才交大脑（证据随 prompt 注入）；
+   *  缺席 ⇒ 零模型四层脑独立成军。LLM 是慢路径的终审，不是快路径的门卫） */
   chat: DecisionChatFn | null;
   /** 免疫抑制阈值（缺省 REFLEX_SUPPRESS_CONFIDENCE；测试可注入） */
   suppressConfidence?: number;
@@ -342,22 +421,28 @@ export interface ReflexiveDecisionOpts {
 }
 
 /**
- * 反射决策工位：神经纪元四层脑 —— 无 LLM 通道时的完整决策智能。
+ * 反射决策工位：级联仲裁脑（ΝΩ-16 反转「LLM 独裁坍缩」—— 旧律 chat 在场
+ * 则 Tier0/1/2/2.5 全部旁路：陷阱记忆拦不住 LLM、每个明确点击也过 LLM。
+ * 新律：反射先行，LLM 断后）。
  *
- * 层级（快→慢，每层失败才降级到下一层）：
- *   Tier 0 免疫抑制（最高优先）→ KnowledgeInjection 含高置信 error-pattern ⇒
- *          压制本能弧 + 交前额叶改道（「陷阱已知」不该是死刑判决：
- *          停手是为了找活路 —— error-pattern 在效用上压负陷阱，workflow
- *          托举替代路径；找不到活路才诚实接地。消融基准暴露的缺陷修复：
- *          旧版 suppression 直接接地 = 「知道哪错但从不想别的路」）
- *   Tier 1 脊髓反射          → intent 词汇 × 场景元素名的严格领先匹配 ⇒ 直接
- *          click 元素中心（刺激→反应，零幻觉、确定性、可重放审计）
- *   Tier 2 前额叶仿真        → 反射不明确（平票/零重合/被免疫压制）时，全候选
- *          证据评估：语义相似度（零样本泛化）× 知识证据（error-pattern 惩罚 /
- *          workflow 奖励）的效用评分 —— 「整理数据」的 workflow 证据能托举
- *          「筛选数据」按钮；陷阱记忆能在效用上压垮字面匹配。最高效用且
- *          严格领先 ⇒ 执行。
- *   Tier 3 大脑（chat 在场） → LLM 规划（复用 StubDecisionStation —— 组合不重写）
+ * 级联序（快→慢，每级失败才降级到下一级；chat 在场与否只改写降级终点）：
+ *   Tier 0 免疫抑制（恒跑 —— 安全机制无 LLM 豁免）→ KnowledgeInjection 含
+ *          高置信 error-pattern ⇒ 压制本能弧。两级语义：
+ *            · 确定性一级：被压制的本能弧绝不发射（chat 在否都一样）；
+ *            · 咨询性二级：chat 在场时压制证据注入 prompt 交大脑绕行/换路
+ *              —— 证据不被旁路，但裁决权不剥夺；chat 缺席时前额叶改道 +
+ *              核证探针兜底（「陷阱已知」不是死刑判决：停手是为了找活路）。
+ *   Tier 1 脊髓反射（反射先行）→ intent 词汇 × 场景元素名的严格领先匹配
+ *          （平票/零重合不发射 —— 发射条件零放宽）且无压制且非重试语境
+ *          ⇒ 直接 click 元素中心跳过 LLM（延迟/成本归零；重试 = 上次发射
+ *          已失败，确定性复读交大脑绕行 —— 保守原则：不确定 ⇒ 多花钱）。
+ *   Tier 2 前额叶仿真 → chat 缺席时的破局者：全候选效用评分（语义相似度 ×
+ *          知识证据），最高效用且严格领先 ⇒ 执行；chat 在场时降格为 prompt
+ *          排序提示（RANKING HINT —— 提示非指令，大脑可推翻）。
+ *   Tier 2.5 核证探针 → 仅 chat 缺席的压制终局（信任门控一针验证，闩锁
+ *          一 run 一针；DS-4：学习闭环容量断裂时闩锁升进程级 1h）。
+ *   Tier 3 大脑（chat 在场）→ LLM 断后（复用 StubDecisionStation —— 组合
+ *          不重写）：歧义/无弧/压制改道/重试的全量终审 + 消融对照组。
  *
  * 核证接地（verified grounding 纪元）：Tier 0 压制 + Tier 2 无活路（即将
  * 接地终局）时，对压制证据族（error-pattern fragments）做信任门控 ——
@@ -374,7 +459,9 @@ export interface ReflexiveDecisionOpts {
  * 消除三害：误告（传闻冤枉活路 → 一针反证）、死锁（压制+无活路+传闻
  * → 探针破局）、陈年死锁（亲证过期 → 复活探针）。
  *
- * 决策轨迹全量写入 rationale（审计可回放）—— 反射与仿真都是白盒推理。
+ * 决策轨迹全量写入 rationale（审计可回放）—— 反射与仿真都是白盒推理；
+ * ΝΩ-16 增列 tierUsed 层别标注（'reflex' | 'llm'）：审计链可回答
+ * 「这一步是谁裁的」，每级判定理由不减面。
  */
 export class ReflexiveDecisionStation implements DecisionStation {
   private readonly suppressAt: number;
@@ -399,38 +486,107 @@ export class ReflexiveDecisionStation implements DecisionStation {
     retryCtx?: FailureFeedback,
     signal?: AbortSignal,
   ): Promise<AtomicAction | NeedGrounding> {
-    if (this.llm) return this.llm.decide(env, retryCtx, signal);
+    // ΝΩ-16 级联仲裁：Tier0 免疫压制评估**恒跑**（chat 在场也不旁路 ——
+    // 安全机制没有 LLM 豁免权）。压制评估（Tier 0）与本能弧（Tier 1）
+    // 并行计算 —— 探针需要被压制的弧
     const ctx = env.payload;
-    // 压制评估（Tier 0）与本能弧（Tier 1）并行计算 —— 探针需要被压制的弧
     const suppression = this.assessSuppression(ctx);
     const arc = this.reflexOn ? this.arcOf(ctx) : null;
 
-    // ── 压制路径：本能弧冻结，前额叶改道；无活路 ⇒ 核证接地（信任门控探针）──
+    // ── 压制路径：本能弧冻结。两级语义（chat 在场）：
+    //    一级（确定性）—— 被压制的本能弧绝不发射，Tier2 陷阱相似候选照旧否决；
+    //    二级（咨询性）—— 压制证据 + 效用排序注入 prompt，大脑绕行/换路；
+    //    大脑接地/故障 ⇒ 压制接地兜底（最坏情形 = 诚实停手，绝不是本能弧）。
+    //    chat 缺席 = 既有四层链零改动（仿真改道 → 核证探针 → 诚实接地）──
     if (suppression) {
-      if (this.deliberationOn) {
-        const deliberated = this.deliberate(ctx);
-        if (deliberated) return deliberated;
+      if (!this.llm) {
+        if (this.deliberationOn) {
+          const deliberated = this.deliberate(ctx);
+          if (deliberated) return this.stampTier(deliberated, 'reflex');
+        }
+        const probe = this.verdictProbe(ctx, arc);
+        if (probe) return this.stampTier(probe, 'reflex');
+        return suppression;
       }
-      const probe = this.verdictProbe(ctx, arc);
-      if (probe) return probe;
-      return suppression;
+      const advisory = [
+        this.suppressionHint(ctx, suppression),
+        this.utilityHint(ctx),
+      ].filter(s => s.length > 0).join('\n');
+      const rerouted = await this.llm.decideAdvisory(env, retryCtx, signal, advisory || undefined);
+      return 'kind' in rerouted ? this.stampTier(rerouted, 'llm') : suppression;
     }
 
-    // ── 常规路径：弧直行 / 歧义交仿真 / 反射断电交仿真 ──
-    if (arc && 'action' in arc) return arc.action;
-    if (arc) {
+    // ── 反射先行（Tier 1）：无歧义 = 既有严格词法领先匹配（平票/零重合不
+    //    发射 —— 发射条件零放宽）且无压制 ⇒ 直接发射，chat 在场也不打扰大脑
+    //    （延迟/成本归零）。重试语境例外（仅 chat 在场时）：上次发射已失败，
+    //    确定性复读大概率徒劳，交大脑读失败上下文绕行 —— 保守原则：不确定
+    //    是否仍无歧义 ⇒ 宁可多花钱不多误点。chat 缺席保持确定性复读语义
+    //    （决策纯函数，同刺激同反应 —— 零回归）──
+    if (arc && 'action' in arc && !(this.llm && retryCtx)) {
+      return this.stampTier(arc.action, 'reflex');
+    }
+
+    // ── LLM 断后（Tier 3）：歧义 / 无弧 / 反射断电 / 重试 ⇒ 大脑终审。
+    //    Tier2 效用评分降格为 prompt 排序提示（提示非指令 —— 大脑可凭理由
+    //    推翻，推翻与否由其 rationale 自证）。大脑的接地就是接地（不再
+    //    探针 —— 探针是零模型世界的验证通道；大脑在场时大脑本身就是改道）──
+    if (this.llm) {
+      const hint = this.utilityHint(ctx);
+      const out = await this.llm.decideAdvisory(env, retryCtx, signal, hint || undefined);
+      return 'kind' in out ? this.stampTier(out, 'llm') : out;
+    }
+
+    // ── chat 缺席：既有慢路径（与级联化之前逐行同语义 —— 零回归。能走到
+    //    这里 arc 只剩接地变体：action 变体已在上方反射门返回或已交大脑）──
+    if (arc && 'grounding' in arc) {
       if (arc.deliberable && this.deliberationOn) {
         const deliberated = this.deliberate(ctx);
-        if (deliberated) return deliberated;
+        if (deliberated) return this.stampTier(deliberated, 'reflex');
       }
       return arc.grounding;
     }
     // 反射断电（消融）：一切交慢路径
     if (this.deliberationOn) {
       const deliberated = this.deliberate(ctx);
-      if (deliberated) return deliberated;
+      if (deliberated) return this.stampTier(deliberated, 'reflex');
     }
     return { reason: 'reflex ablated — slow path only', focus: 'full-scene' };
+  }
+
+  /** 层别标注（ΝΩ-16）：纯附加可选字段 —— rationale 之上的「谁裁的」维度，
+   *  不改既有字段语义，执行工位（只读 kind/args/expect）零感知。 */
+  private stampTier(action: AtomicAction, tier: DecisionTier): TieredAction {
+    return { ...action, tierUsed: tier };
+  }
+
+  /** 压制证据的 prompt 注入（压制路径二级面，ΝΩ-16）：证据交大脑，指令面
+   *  只声明「本能路径已被压制 + 绕行要求」—— 不点名坐标不替大脑选路
+   *  （两级语义：确定性的事结构执法，判断性的事归大脑）。有界 400 字符
+   *  （Token 纪律）。 */
+  private suppressionHint(ctx: DecisionContext, suppression: NeedGrounding): string {
+    const kc = ctx.knowledgeContext;
+    const traps = (kc?.fragments ?? [])
+      .filter(f => f.category === 'error-pattern')
+      .slice(0, 3)
+      .map(f => `'${f.content.slice(0, 60)}' (conf ${f.confidence.toFixed(2)})`)
+      .join('; ');
+    const evidence = traps || (kc ? kc.summary.slice(0, 120) : '');
+    return (`IMMUNE SUPPRESSION ACTIVE: ${suppression.reason}` +
+      (evidence ? ` | trap evidence: ${evidence}` : '') +
+      '. The instinctive click path is suppressed — reroute via a different element or ground; do not repeat the known trap.'
+    ).slice(0, 400);
+  }
+
+  /** Tier2 效用评分的 prompt 排序提示（LLM 断后路径，ΝΩ-16）：deliberate 的
+   *  胜者证据链交大脑作排序先验 —— 提示非指令，大脑可推翻。消融（仿真断电）
+   *  / 无证据 / 全负 ⇒ 空串（诚实缺席，不伪造排序）。有界 400 字符。 */
+  private utilityHint(ctx: DecisionContext): string {
+    if (!this.deliberationOn) return '';
+    const best = this.deliberate(ctx);
+    if (!best) return '';
+    return (`RANKING HINT (tier-2 utility): ${best.rationale}` +
+      ' — consider this ranking first; overrule only with reason.'
+    ).slice(0, 400);
   }
 
   /** 免疫压制评估（Tier 0）：error-pattern 在场且置信度达阈值 ⇒ 压制。
@@ -469,7 +625,8 @@ export class ReflexiveDecisionStation implements DecisionStation {
    *      （衰减过线 —— 世界会变，亲证会过期）
    *   3. 被压制的本能弧在场（无从探针 ⇒ 诚实接地）
    *   4. 本 intent 尚未探过针（一次性闩锁 —— 一 run 一针，与结算时序解耦：
-   *      探针失败后的 run 内重试不再放行，直接诚实接地）
+   *      探针失败后的 run 内重试不再放行，直接诚实接地；DS-4 升级：
+   *      学习闭环因容量断裂的 intent 由进程级闩锁跨实例续护 1h）
    *
    * 探针语义：放行一针验证 —— 探针是普通 AtomicAction（rationale 带
    * probe 标记，审计可识别），走既有执行-结算-学习闭环：
@@ -483,7 +640,9 @@ export class ReflexiveDecisionStation implements DecisionStation {
     if (!arc || !('action' in arc)) return null; // 无被压制的本能弧 ⇒ 无从探针
     const fragments = ctx.knowledgeContext?.fragments;
     if (!fragments || fragments.length === 0) return null; // 无证据面 ⇒ 门控无从评估（旧实现兼容）
-    if (this.probeLatch.has(ctx.intent.id)) return null; // 一次性闩锁：已探针 ⇒ 诚实接地
+    // 一次性闩锁：run 内（实例闩锁）或学习闭环断裂升级（进程闩锁，DS-4）
+    // 已探针 ⇒ 诚实接地
+    if (this.probeLatch.has(ctx.intent.id) || processLatchActive(ctx.intent.id)) return null;
     const now = Date.now();
     let maxTrust = 0;
     for (const f of fragments) {
@@ -500,6 +659,23 @@ export class ReflexiveDecisionStation implements DecisionStation {
       ...arc.action,
       rationale: `probe(verified-grounding): trap evidence untrusted (max trust ${maxTrust.toFixed(2)} < floor ${P.VERIFY_TRUST_FLOOR.toFixed(2)}) — suppressed arc released for one-shot verification; ${arc.action.rationale}`,
     };
+  }
+
+  /**
+   * DS-4 学习闭环断裂上报（接线缝：pipeline 侧 learnSettled 检出容量拒绝
+   * `r.error.field === 'capacity'` 时对本工位调用 —— 工位在 pipeline deps 内
+   * 可直达）：该 intent 的探针闩锁升进程级（跨工位实例存活），1h 衰减自动
+   * 解除（容量拒绝可被上游清库解除 —— 探针是传闻的解药不是刑具）。
+   * 运行层永不抛错：非法输入静默拒绝（守卫不炸流水线）。
+   * now 可注入（时间旅行测试缝 —— 与 trustOf 同方言）；缺省墙钟。
+   */
+  escalateProbeLatch(intentId: string, now: number = Date.now()): void {
+    if (typeof intentId !== 'string' || !intentId) return;
+    processProbeLatch.set(intentId, now);
+    if (processProbeLatch.size > PROBE_LATCH_MAX) {
+      const oldest = processProbeLatch.keys().next().value; // Map 迭代序 = 插入序（FIFO 保险丝同律）
+      if (oldest !== undefined) processProbeLatch.delete(oldest);
+    }
   }
 
   /** 弧合流点（Tier 1）：运动类刺激 ⇒ 运动反射弧主权；否则点击弧（既有律） */
@@ -698,8 +874,11 @@ export class ReflexiveDecisionStation implements DecisionStation {
     const motorClass = classifyMotor(ctx.intent.description);
     const intentTokens = new Set(
       motorClass ? residueTokens(ctx.intent.description) : tokenize(ctx.intent.description));
-    const intentVec = embed(ctx.intent.description);
-    const fragmentVecs = fragments.map(f => embed(f.content));
+    // DS-3（ΝΩ-16 顺修）：三处嵌入全走进程级 LRU 缓存 —— run 内 intent/
+    // fragment/元素名高度复现（重试轮尤甚），重复哈希是纯浪费；embed 纯函数
+    // ⇒ 缓存命中零语义漂移。
+    const intentVec = embedCached(ctx.intent.description);
+    const fragmentVecs = fragments.map(f => embedCached(f.content));
 
     let best: { name: string; cx: number; cy: number; utility: number; evidence: string[] } | null = null;
     let second: { name: string; utility: number; evidence: string[] } | null = null;
@@ -708,7 +887,7 @@ export class ReflexiveDecisionStation implements DecisionStation {
     for (const patch of ctx.scene) {
       for (const el of patch.elements) {
         total += 1;
-        const elVec = embed(el.name);
+        const elVec = embedCached(el.name);
         const evidence: string[] = [];
         let utility = 0;
         let veto = false;

@@ -13,11 +13,29 @@ import { estimateRowShift } from './motionEstimator.js';
 import { normalizedToPatchRect } from './vlm/codec.js';
 const DIFF_WIDTH = 480; // 差分分辨率：够定位，无需高清
 const PIXEL_THRESHOLD = 70; // RGB 三通道差之和超此值算变化（容忍 JPEG 噪声）
+/** ΝΩ-24：图像维度守卫（computeDiffRegions 的判据原子）—— 有限正数双轴
+ *  校验，非法 ⇒ null（旧实现 height!/width! 无守卫，维度缺席时 NaN 比值直
+ *  喂 resize 深处炸出）。真 buffer 上 sharp 的 metadata 对多数病态输入自抛
+ *  （调用方既有 catch 兜底），本守卫覆盖「解析成功但维度缺席/非有限/非正」
+ *  的契约面。导出：守卫原子的测试面。 */
+export function usableImageDims(meta) {
+    const w = meta?.width, h = meta?.height;
+    if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0)
+        return null;
+    if (typeof h !== 'number' || !Number.isFinite(h) || h <= 0)
+        return null;
+    return { width: w, height: h };
+}
 export async function computeDiffRegions(beforeBuf, afterBuf, tileCols = 16) {
     const sharp = await getSharp();
     const afterMeta = await sharp(afterBuf).metadata();
+    // ΝΩ-24：维度守卫 —— 非法返回 null（调用方 diffView/rootCauseGuard 的
+    // 既有 catch 面兼容：同为错误路径降级，不击穿）。
+    const dims = usableImageDims(afterMeta);
+    if (!dims)
+        return null;
     const W = DIFF_WIDTH;
-    const H = Math.max(1, Math.round(W * (afterMeta.height / afterMeta.width)));
+    const H = Math.max(1, Math.round(W * (dims.height / dims.width)));
     // ensureAlpha：像素差循环按 4 通道步长索引（i=(y*W+x)*4）—— RGB 输入
     //（JPEG/无 alpha 的 PNG）的 raw 缓冲只有 3 通道，通道会整体错位静默毒化判决
     const [a, b] = await Promise.all([
@@ -603,6 +621,11 @@ export class ScreenStateLedger {
         }
         // 重置信号 ①：显式逃生口（模型请求整帧 / 补丁模式显式关闭）
         if (opts?.forceKeyframe === true) {
+            // ΝΩ-24：维度缓存命中 ⇒ 免自 diff（重置只为重建账本，判决只消费维度）
+            const cached = this.cachedDimsAnalysis();
+            if (cached) {
+                return this.adoptKeyframe(frame, cached, now, 'forceKeyframe requested (escape hatch to full frame)');
+            }
             const probe = await this.safeAnalyze(frame, frame);
             if (probe.ok) {
                 return this.adoptKeyframe(frame, probe.analysis, now, 'forceKeyframe requested (escape hatch to full frame)');
@@ -611,6 +634,11 @@ export class ScreenStateLedger {
         }
         // 重置信号 ②：惊异（世界快照的语义跳变 —— 压过一切像素证据）
         if (surprise >= this.tuning.surpriseBitsThreshold) {
+            // ΝΩ-24：维度缓存命中 ⇒ 免自 diff（同重置信号 ①）
+            const cached = this.cachedDimsAnalysis();
+            if (cached) {
+                return this.adoptKeyframe(frame, cached, now, `surpriseBits ${surprise} >= ${this.tuning.surpriseBitsThreshold} (world snapshot surprise)`);
+            }
             const probe = await this.safeAnalyze(frame, frame);
             if (probe.ok) {
                 return this.adoptKeyframe(frame, probe.analysis, now, `surpriseBits ${surprise} >= ${this.tuning.surpriseBitsThreshold} (world snapshot surprise)`);
@@ -619,6 +647,11 @@ export class ScreenStateLedger {
         }
         // 重置信号 ③：TTL 到期（关键帧的最大年龄 —— P 帧链漂移的时间天花板）
         if (now - this.keyframeAt >= this.tuning.ttlMs) {
+            // ΝΩ-24：维度缓存命中 ⇒ 免自 diff（同重置信号 ①）
+            const cached = this.cachedDimsAnalysis();
+            if (cached) {
+                return this.adoptKeyframe(frame, cached, now, `ledger TTL expired (${Math.round(now - this.keyframeAt)}ms >= ${this.tuning.ttlMs}ms)`);
+            }
             const probe = await this.safeAnalyze(frame, frame);
             if (probe.ok) {
                 return this.adoptKeyframe(frame, probe.analysis, now, `ledger TTL expired (${Math.round(now - this.keyframeAt)}ms >= ${this.tuning.ttlMs}ms)`);
@@ -792,6 +825,26 @@ export class ScreenStateLedger {
         catch {
             return null;
         }
+    }
+    /** ΝΩ-24：帧维度缓存命中 ⇒ 合成最小分析结果（adoptKeyframe 只消费维度 ——
+     *  重置路径的判决字段零参与）。缓存 = 上次分析所得维度（advancePrev /
+     *  adoptKeyframe 铸入 prevW/prevH；adoptKeyframeDimsFree/reset 归零即出册，
+     *  prev 为空时缓存必为空 —— 冷启动恒自 diff）。重置路径（force/surprise/
+     *  TTL）此前各做一次 safeAnalyze(frame, frame) 纯为拿维度，是逐重置一次的
+     *  全帧解码+差分开销；缓存缺席才回落自 diff。分辨率真变时由主路径重置
+     *  信号 ④（srcW !== prevW）在下一帧自愈 —— 掩码网格按新维度重建。 */
+    cachedDimsAnalysis() {
+        if (!(this.prevW >= 1) || !(this.prevH >= 1))
+            return null;
+        return {
+            width: this.prevW,
+            height: this.prevH,
+            regions: [],
+            changedPct: 0,
+            identical: true,
+            rowShift: null,
+            diffRows: 0,
+        };
     }
     /** 分析端口安全执行（缺省内置 sharp 管线；抛错/脏返回 ⇒ {ok:false,error}） */
     async safeAnalyze(before, after) {

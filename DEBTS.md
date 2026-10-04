@@ -12,9 +12,13 @@
 > 生产化/开闸是部署方知识决策，代码不代立法）｜**需人工**（插件面/CI 环境/拆分
 > 决策等非代码职权）｜**已知取舍**（历史枚举——本族已由 W9-5 全体升格「已定谳」，
 > 保留防旧档引用）｜**已定谳**（W9-5 终谳 2026-10-04：设计决策定谳维持，非未闭
-> 债——留档防反复翻案）。
+> 债——留档防反复翻案）｜**部分闭环**（ΑΩ-R45 补登 2026-10-04：窗口份额已闭、
+> 余量留案待后续窗口提案——D-F4 在用；W9 收稿时点的枚举口径遗留，ΑΩ 补正入册）｜
+> **待拆**（ΝΩ-54 新立 2026-10-04：cycle_lint 执法在案的结构债——破环属后续窗口
+> 代码工程职权，登记防依赖图回到无执法演化的旧态）。
 
 <!-- W7 审计改正：状态枚举补「已知取舍」（原头部遗漏，11+ 条目在用） -->
+<!-- ΝΩ-54 审计补正：状态枚举补「待拆」（D-F5 依赖环债在用） -->
 
 ## A. 真机验证清单（离线执法已绿，待硬件/长跑在环定谳）
 
@@ -56,6 +60,11 @@
 > config / Θ-Ξ 内核键（55 键可进化）。本表登记「留在常量侧」的每一笔及其理由。
 > W9-5 终谳（2026-10-04）：本表在册取舍族十二条逐条定谳维持——设计决策定谳面，
 > 非未闭债；各条描述尾带「终谳（2026-10-04）」一句定谳语，状态列改「已定谳」。
+> ΑΩ-R45 补登（2026-10-04）：新增 D-D13——ΑΩ-R43 宪法 backgroundRisk 终版立法
+> 是有意决策非未闭债，入本设计决策类在册。
+> ΝΩ-54 补登（2026-10-04）：新立 D-D14..D-D17 四条（ΝΩ 战役有意决策——riskGate
+> 词边界双轨制 / 沙箱五门与位宽域 / journal 组提交崩溃窗口 / optionalDependencies
+> 迁移搁置），均设计决策定谳面非未闭债。
 
 | # | 来源 | 描述 | 状态 | 证据 |
 | --- | --- | --- | --- | --- |
@@ -71,15 +80,21 @@
 | D-D10 | W6R（移动 Surface 文本注入） | adb `input text` 官方只认 `%s` 空格惯用语且设备端无法转义字面 `%s`——文本含字面 "%s" 时被设备解码为空格（协议层不可表达，历史行为保持）；回执 note 已诚实申报（"literal '%s' in text is decoded as space by device 'input text'"）——调用方须知，非缺陷。**终谳（2026-10-04）**：协议局限如实申报，调用方须知在册，终谳维持 | 已定谳（设计决策：协议局限如实申报维持） | python_service/dsh_physical/android.py:552-557（诚实边界注释）/ :598（空格→%s 转义 + shlex 单引号包裹）/ :604-607（回执 note 申报） |
 | D-D11 | W6R-A9（重复动作守卫）→ W8 修法（已闭） | 原取舍「轨迹网格固有半格悬崖：TRAJECTORY_GRID=20 ⇒ 微调幅度超半格（0.025）可落邻桶逃逸轨迹级检测（宁漏勿杀）」——W8 已修法收口：桶判等之上叠加叶级真数值距离判等 isNearParam（同名数值叶的数值距离 abs(a−b) ≤ 1/TRAJECTORY_GRID(=0.05) 即近参数，以真数值距离独立于桶边界判决；桶判等保留为快路径——同桶 ⇔ 各叶落在同一 0.05 桶 ⇒ 各叶阈内，数值比较补上桶边界带）。半格悬崖带归案，宁漏勿杀的合法重试边界不误伤 | 已闭环（修法落地，半格悬崖取舍不复存在） | src/guards/repeatActionGuard.ts:14-20（修法注释）/ :37-41（TRAJECTORY_NEAR_EPS 叶级阈）/ :90（isNearParam 桶判等 ∪ 叶级数值距离）/ :142-143（轨迹窗消费点）；本册全量 2472 用例 0 fail 复跑 |
 | D-D12 | W6R-A9（入口审计扩容）→ W8 分流（已闭） | 原取舍「MUTATING_TOOLS 6→18 件（补 switch_tab / switch_window / open_url / replay_actions / run_skill / shape_environment / autonomous_run / autonomy_resume / save_skill / save_checkpoint / switch_vision_model / vlm_wizard——入口审计是整批动作唯一的 WAL 机会）中，shape_environment 的 capabilities / undo_log 两只读子动作被过度覆盖（按整工具入册的粒度取舍——宁过度勿遗漏）」——W8 已分流收口：SHAPE_ENV_READ_ONLY_ACTIONS 闭集（恰 capabilities / undo_log 两员）在 shape_environment 审计臂内免派发记账，其余子动作照旧 fail-closed 全覆盖；MUTATING_TOOLS 名单计数不变（18 件整工具粒度保留），只读子动作不再过度覆盖——「宁过度勿遗漏」的粒度取舍就此消解为精确分流 | 已闭环（分流落地，粒度取舍消解） | src/guards/auditGuard.ts:59-102（18 件清单照旧）/ :62（闭集执法注释）/ :85（免派发注记）/ :116（SHAPE_ENV_READ_ONLY_ACTIONS 定义）/ :124（分流判定）；本册全量 2472 用例 0 fail 复跑 |
+| D-D13 | ΑΩ-R43（宪法 backgroundRisk 审计标注 · 终版立法） | 宪法扫描面分层：goal 原文的危险词不再参与动作级判决，降为「任务级背景风险」（backgroundRisk 标注，取值 elevated / high——进判决书字段与 reason，审计可见、信息不丢）；**终版立法（2026-10-04，ΑΩ-R43）**：保守顶格保持——backgroundRisk 不抬高任何动作的审批阈值，也不因任务背景危险而自动升级 benign 动作（可用性让位于保守是有意决策，非未闭债）；危险动作的审批语义仍由动作自身危险词与 riskGate 分级唯一决定（Σ-3⑦ / W7-D3 定谳同源） | 已定谳（设计决策：保守优先立法在案） | src/autonomy/autonomyConstitution.ts:9（分层立法注释）/ :67（backgroundRisk 字段）/ :73（扫描面分层注释）；GENESIS「ΑΩ 隐患清账战役」段第 5 批 R43 行 |
+| D-D14 | ΝΩ-23（riskGate 词法匹配升级 · 词边界立法） | riskGate 词边界双轨制立法：Aho-Corasick 自动机多模式匹配 + 归一化带位置映射（MappedNormalization——归一化串逐码点记账其在原串的 UTF-16 起始索引，跨不动点迭代逐遍组合）+ 拉丁短词硬边界回原文判定（「enter pin」剥空格成「enterpin」不得借粘词误中「pin」的词内位置）；**双轨制是有意决策**：边界收紧只作用于拉丁字母系，免边界族（中文/CJK——无空格分界、词表命中即危险信号；标点相邻形态）立法维持逐字节子串语义——对中文上硬边界会大面积杀伤检出（中文危险词天然无词界），宁可拉丁侧防粘词误报、CJK 侧维持宽网；等价律：归一化输出与旧 normalizeOnce 逐字节一致（整串 toLowerCase 的语境规则 İ/Final_Sigma 不破——逐码点小写会破坏前者）。工单正反例全量 + 边界律立法面 + 中文逐字节零回归由 riskGate 册执法 | 已定谳（设计决策：拉丁硬边界 + 免边界族双轨制立法在案） | src/riskGate.ts:96-101（位置映射设计段）/ :184-185（编译集缓存 + Aho-Corasick）/ :208（免边界族注释）/ :212（buildAhoCorasick）；test/riskGate.test.ts（10/0 本册实跑）；GENESIS「ΝΩ 前沿升级战役」段第 3 批 ΝΩ-23 行 |
+| D-D15 | ΝΩ-1（沙箱执行器 · 宿主安全链五门 + 位宽域） | 沙箱宿主重放执行器接入宿主安全链五门（危险词/分级/审批令牌/审计 WAL/守卫链全过才真派发）+ 每步派发经 journal.appendMarker 提交 SANDBOX_HOST_REPLAY 审计存证；指纹位宽域 [32,256] 单源立法（FINGERPRINT_MIN_BITS=32——低于即证据量不足保守拒绝摄取，**32 下限是有意立法非可调参数**：更短位宽的指纹在防降级/防碰撞上不可信；MAX=256 拒绝非已知方言）——ΑΩ-R19 只修了比对侧（fpSimilarity 不等宽前缀比对），本批把摄取侧硬编码 64 位对齐成域常量单源（摄取不再先于比对没收 128 位等演进格式，现行 64 位照常摄取零回归）；执行器缺省关（enableHostReplayExecution——ΑΩ-R19 立法不变，本批只补执行器与五门收口） | 已定谳（设计决策：五门序与位宽域下限在案） | src/sandbox/events.ts:116-126（位宽域常量 + 设计注释）/ :129（BINARY_FINGERPRINT_RE 单源）；src/sandbox/index.ts:26（宿主执行器适配层）/ :49（安全链接入）/ :62（审计接线）；src/sandbox/engine.ts:55-59（ΑΩ-R19 比对侧）；test/epochChi.attestation.test.ts |
+| D-D16 | ΝΩ-45（journal 组提交 · 崩溃窗口） | journal 组提交崩溃窗口：主 JSONL 行缓冲 + 三重触发（缓冲 256 防涨上限立即冲刷 / 32 行批阈值立即提交 / 50ms 周期计时器——每批一次 open/write/fsync/close，旧路径每条 4 syscall 摊销为 1/32）；取舍面：**窗口内进程崩溃 ⇒ 缓冲中 ≤32 行（防涨上界 256）的主 JSONL 行丢失**，对照旧路径每条 fsync 零丢失。为什么有界丢失可接受（有意决策）：① 审计底线不由主 JSONL 承担——全部变更类工具的审计行经 appendPreDispatch 的 WAL（appendFileSync 同步写）**先行**落盘（W2-2 fail-closed 语义零变化；WAL 行自带主链交叉锚 hash，崩溃后审计史以 .wal 为准对账复原）；② checkpoint 随行持久化 + 卸载链在 saveCheckpoint 与 journal.reset 之间显式 flushJournal（优雅关闭零丢失）；③ 主 JSONL 角色本就是吞吐导向的磁盘取证副本（W2-2 注记原文「主 JSONL 是异步批写……吞吐导向，不满足先行性」——组提交正是该立法的兑现）。否决折中方案（每条 writeSync 进页缓存 + 定期 fsync）：挡得住进程崩溃挡不住断电，且把丢行边界从显式有界的 32/256 行换成 OS 页缓存的隐式承诺——显式有界窗口 + WAL 同步底线的组合更可论证可测试（journalDiskStats().buffered 即窗口深度观测面） | 已定谳（设计决策：显式有界窗口 + WAL 底线组合立法在案） | src/journal.ts:138-152（组提交参数 + 三重触发）/ :208（行缓冲 FIFO + 磁盘行序恒等链序）/ :296-321（崩溃窗口论证原文——选定方案 vs 否决折中的完整对照）；test/journal.test.ts（组提交执法） |
+| D-D17 | ΝΩ 批 5 工程治理（optionalDependencies 迁移提议 · 否决搁置） | 原生依赖（sharp / tesseract.js）迁 optionalDependencies（弱平台装机韧性——平台不兼容时安装不整体失败）的提议被 sec.runtime-deps（W6R 依赖归类守护：运行时 import 的依赖必须在 dependencies——进 dev/缺席 = 生产装机 npm install --omit=dev 即缺件、感知/OCR 面整面 dead-boot，major 级 finding）否决：迁移会使两者从 dependencies 消失、doctor 立即报警。**记为搁置项（有意决策）**：除非先修法 doctor 规则（引入「optionalDependencies + 装机自检面」新类目并配套 runtime 探测降级），否则不迁——依赖归类守护的执法优先于装机韧性提议，两条立法不得静默互斥 | 已定谳（设计决策：否决在案，搁置项留档） | src/doctorRules.security.ts:129-153（sec.runtime-deps 规则本体 + finding 文案）；package.json:48-49（sharp ^0.35.4 / tesseract.js ^7.0.0 在 dependencies）；test/w6r.doctor.test.ts:152-168（规则执法） |
 
 ## E. 环境暴露缺陷（复核新发现——账实不一致的如实登记）
 
 | # | 来源 | 描述 | 状态 | 证据 |
 | --- | --- | --- | --- | --- |
 | D-E1 | W5-1 复核发现（W6-0，2026-10-03）→ W6R 修复（已闭） | 原债「Cv2FrameSource.read 双重包装：`Image.fromarray(cv2_to_rgb(frame, np))` 中 cv2_to_rgb 已返回 PIL Image 再包一层 fromarray ⇒ cv2 在场 + DirectShow 设备 isOpened 且可 read 的环境必 TypeError → internal_error」——已核实修复：read() 直接 `return cv2_to_rgb(frame, np)`。本册收稿假 cap 实测（注入假 cv2 模块 + 假 DirectShow 设备 isOpened 可读——即原缺陷的触发环境）：返回 PIL Image、BGR→RGB 通道序正确（输入 BGR 蓝 [255,0,0] ⇒ RGB (0,0,255)，输入 BGR 红 [0,0,255] ⇒ RGB (255,0,0)）、无 fromarray TypeError。全量基线偏差归因点就此清零（w5pyreg 本册复跑 9/0——②b 在本机走硬件缺席诚实降级路径，kinds 逐项符合） | 已闭环 | python_service/dsh_physical/uvc.py:298-299（修复注释 + return cv2_to_rgb(frame, np)）/ :314-318（cv2_to_rgb 定义：BGR ndarray → RGB PIL）/ :244（Cv2FrameSource）；test/w5pyreg.test.ts:195-210（②b）本册复跑 9/0；本册假 cap 实测记录见 W6R-B5 复核段 |
-| D-E2 | W9-4 实证发现（2026-10-04，新登记） | audio.py 的 comtypes WASAPI 路径在 py3.14 + comtypes 1.4.17 下因 ctypes 出参约定回归不可用（报文在 real_probe_report.json 在案）——**阻塞是软件约定非硬件**：W9-4 已用原始 vtable(ctypes) 探针实证真回环采集可行（D-A4 真环已闭），`--selftest-real` 四入口与修复所需的全部对照实现在案；修复 runner 本体（comtypes 调用约定或整体换原始 vtable）留给下一窗口 | 本纪元后续处理（修复路径已实证、对照实现在案） | python_service/real_probe_report.json（D-A4 段：vtable 探针 vs comtypes 失败报文）；python_service/dsh_physical/audio.py（--selftest-real）；W9-4 报告 |
+| D-E2 | W9-4 实证发现（2026-10-04，新登记）→ ΑΩ-R1 闭环 | 原债「audio.py 的 comtypes WASAPI 路径在 py3.14 + comtypes 1.4.17 下因 ctypes 出参约定回归不可用（报文在 real_probe_report.json 在案）」——已闭：ΑΩ-R1（ΑΩ 隐患清账战役第 1 批）把 WASAPI 建链整体移植为原始 vtable(ctypes) 路径（comtypes 不再在环——出参约定回归的依赖面直接拆除），raw-vtable 会话全生命周期管理（Stop + 逆序 Release 尽力回收 COM 引用）；本机 Python 3.14.6 真硬件冒烟通过（真回环采集 + 真播放合成提示音分类命中——D-A4 真环同语义，非合成波形桥） | 已闭环（ΑΩ-R1：本机 py3.14.6 真硬件冒烟通过） | python_service/dsh_physical/audio.py:529（engine: raw-vtable）/:830（py≥3.14 首选路径）/:878（会话标死回收）；python_service/real_probe_report.json（W9-4 对照报文在案）；GENESIS「ΑΩ 隐患清账战役」段第 1 批 |
+| D-E3 | ΝΩ-54 收官复核发现（2026-10-04，新登记） | w9real D-A5（真三进程真 socket barrier 往返）在本机 **node v24.19.0 / Windows 确定性红**：客户端 A 完成 barrier 往返（RESULT {"ok":true,"ackOk":true,"peers":["A","B"]} —— 协议本身成功）后 `process.exit(0)` 与 libuv 异步句柄关闭竞态 ⇒ fastfail 0xC0000409（stderr「Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94」），测试断言「客户端 A 退出码 0」失败。归因证据三链：① 测试 + 客户端脚本 + crossMachine 栈**零 ΝΩ 标记**（federation-server 的 ΝΩ-19 改动仅 /aggregate 摘要中继、不涉 barrier 端点——git diff 亲验）；② **git archive HEAD（W9 纯净树）同款复现**（RESULT ok:true 后退出异常——非 ΝΩ 回归；node v22.14.0/v22.18.0 历史 W9/AΩ 收官 0 fail 记录在 GENESIS 在册）；③ 单跑 4/4 同款红（确定性非偶发）。出路（任一，非本册 .md 产权）：CI/开发机钉选 node LTS 22.x；或客户端退出序列补丁（transport 优雅关闭后再 exit——scripts 域一行级改动）；或测试断言放宽为「RESULT ok 即过」（退出码与协议成败解耦） | 需人工（Node 版本钉选 / 退出序列补丁取舍属 runner 与部署决策面） | test/w9real.test.ts:96-117（断言面）/ :116（exit code 断言）；scripts/w9real-barrier-client.mjs:54（process.exit）；本册 standalone 复现记录（exit 127 / 0xC0000409 双形态 + HEAD 纯净树对照）；GENESIS「ΝΩ 前沿升级战役」段审判口径① |
 
-## F. 结构性大文件（拆分是决策不是缺陷——先立案再动刀）
+## F. 结构性大文件与依赖环（拆分/破环是决策不是缺陷——先立案再动刀）
 
 | # | 来源 | 描述 | 状态 | 证据 |
 | --- | --- | --- | --- | --- |
@@ -87,6 +102,7 @@
 | D-F2 | 各纪元累积 → W8 部分拆分 | 千行级产权文件：W8 已拆两大件——approval.ts 1584→97 桶 + 9 卫星件（approval.bypass 226 / approval.ledger 316 / approval.queue 275 / approval.queueState 313 / approval.security 250 / approval.constants 42 / approval.queueContracts 147 / approval.registry 67 / approval.shapes 73）、autonomy/runtime.ts 1581→989 + 6 卫星件（runtime.deps / runtime.perceive / runtime.tuning / runtime.types / runtime.utils / runtime.verdict）；index.ts 1104→1147（组合根——五脏六腑挂号处，聚集合法）。仍千行在案：skillLibrary.ts 1542 / autonomy/autoPilot.ts 1540 / reversalEscrow.ts 1439 / federation/index.ts 1205 / subAgent.ts 1335。**终谳（2026-10-04）**：组合根聚集合法终谳维持；其余千行件的拆分提案另案（未豁免清单见 D-F4，拆分/豁免是决策不是缺陷） | 已定谳（设计决策：组合根聚集合法维持；其余待拆分提案另案——19 件未豁免 >500 行的 doctor info 见 D-F4） | wc -l 实测（2026-10-04）；dist 272 件对齐（build 复跑） |
 | D-F3 | W5-3（双实现口径）→ W8-A7 单源化（已闭） | 原债「crossMachine 的 TS 权威源与 federation-server.mjs 的 JS 移植并存（等价性由 w5cross ⑧ 逐字段执法——刻意架构立案备忘）」——已单源化：federation-server.mjs 改薄 re-export——barrier 状态机经 `import { createBarrierCore, BARRIER_MAX_LIVE } from '../dist/crossMachine.js'` 直连 TS 权威源的构建产物，本文件不再持有第二份实现（federation 域的 HTTP 协议胶水仍在本文件，明确不在 crossMachine 单源化范围）；w5cross ⑧ 等价性执法照旧在册 | 已闭环（单源化落地，双实现口径债消解） | scripts/federation-server.mjs:62（import dist/crossMachine.js）/ :133-138（W8-A7 单源化注释「本文件不再持有第二份」）；src/crossMachine.ts（唯一权威源）；test/w5cross.test.ts ⑧ |
 | D-F4 | W8-C1V→W8-C2（doctor 分差来源） | 19 个未豁免 >500 行文件的 smell.over-engineering info（doctor score=90.5 与满分的分差来源；另 21 件结构性保留已豁免、可见不扣分）：riskGate.confusables.generated 1672 / skillLibrary 1542 / reversalEscrow 1439 / federation/index 1205 / index 1147 / contextManager 685 / processScore 818 / prophecy/index 616 / journal 604 / notary/index 547 / qualityDoctor 545 / riskGate 545 / selfmodel/index 552 / orchestration/index 509 / tools/skillTools 510 / guards/canaryGuard 516 / vlm/som 565 / config 577 / subAgent 1335——拆分或豁免是决策不是缺陷——**W9-3 窗口份额执行**：confusables.generated 豁免入册（生成物）+ skillLibrary/subAgent/federation-index 三巨件拆分（1541→1005+2卫星 / 1334→872+2卫星 / 1204→96+4卫星，豁免 21→24）；doctor 90.5→92.5（minor 归零）；剩余 15 件未豁免 info 属后续窗口（非本轮职权，如实留案） | 部分闭环（W9-3 窗口份额；剩余 15 件留案） | doctor-report.json（W8-C2 2026-10-04 实跑：findings 40 info = 21 豁免 applied + 19 未豁免）；src/doctorRules.exemptions.ts（21 件豁免注册表） |
+| D-F5 | ΝΩ-41（cycle_lint 依赖环执法 · 5 value 环新债） | src 依赖图 5 个 **value 依赖环**（运行时真环——bundler 循环依赖 / 初始化顺序未定义）登记为新债：① 感知主环 SCC(10)（som.layout ↔ som ↔ grounding ↔ vlmOcr ↔ textReader ↔ wordShape ↔ knowledge/stations ↔ physicalExecution/d7HostPort ↔ physicalExecution/index ↔ physicalBackend）；② gym 家族 SCC(7)（gym ↔ gym.world ↔ pcgCampaign/Grammar/Derive/World ↔ noise——W8-B1 拆分的桶-卫星互指残留）；③ actionVerifier 三册 SCC(3)（stable ↔ 主册 ↔ channels）；④ branchCards ↔ branchCards.card（SCC 2）；⑤ rollbackPlanner ↔ rollbackPlanner.plan（SCC 2）。另 9 个 type-only 环（环上全为 import type——编译后蒸发运行时无害，warning 建议降级不执法）。cycle_lint（零依赖自带 Tarjan + value/type 边保守判定）**exit 1 立法在案：环在案一日执法红一日**——现状按「已知环不新增」执行（方言单源化 ΝΩ-41 施工期内环数封顶不增），破环（残余 value 边降 import type，或桶-卫星互指拆解经接口/常量件反转）属后续窗口结构决策，登记防依赖图回到 ΝΩ-41 之前「15 个 SCC 无执法演化」的旧态 | 待拆（cycle_lint 执法在案——破环属后续窗口代码工程职权） | scripts/cycle_lint.mjs:1-17（立法背景 + 边判定律）/ :198-253（Tarjan 找环 + value-cycle 判定）；本册收稿实跑（2026-10-04）：287 文件 / 1438 相对边 / 14 非平凡 SCC（5 value 环 exit 1 + 9 type-only warning）；test/no41.dialectClones.test.ts（9/0 本册实跑——六处方言副本退役的种子对照）；GENESIS「ΝΩ 前沿升级战役」段第 5 批 ΝΩ-41 行 |
 
 ## G. 其他遗留（悬挂测试 / 数据面缺失 / 增强通道）
 
@@ -106,10 +122,13 @@
 
 ## 统计与复核记录
 
-条数（含已闭环与已定谳留档，W9-5 终账重数 2026-10-04）：A 真机 7 ｜ B 激活开关 7 ｜
-C 部署决策 5 ｜ D 已知取舍 12（全体终谳）｜ E 环境暴露 1 ｜ F 大文件 4 ｜ G 其他 11
-—— 合计 47 条（沿革：W6-0 立账三十六 → W6R 增至四十三 → W8 增至四十七；
-W9-5 零增减，只补终谳标记不添新债。W8 轮翻案闭十一条：D-G1 / D-B3 / D-B4 /
+条数（含已闭环与已定谳留档，ΝΩ-54 收官重数 2026-10-04）：A 真机 7 ｜ B 激活开关 7 ｜
+C 部署决策 5 ｜ D 已知取舍 17（W9-5 终谳十二条 + ΑΩ-R43 新立 D-D13 + ΝΩ-54 新立
+D-D14..D-D17 四条）｜ E 环境暴露 3 ｜ F 大文件与依赖环 5 ｜ G 其他 11
+—— 合计 55 条（沿革：W6-0 立账三十六 → W6R 增至四十三 → W8 增至四十七 →
+W9 终账四十八（新增 D-E2）→ ΑΩ 收官四十九（新立 D-D13 一条、闭环 D-E2 一条；
+E 节 W9 收稿时点申报 1 为口径滞后，ΑΩ 补正为实数 2）→ ΝΩ 收官五十五（新立
+D-D14/D-D15/D-D16/D-D17/D-E3/D-F5 六条，无闭环翻案）。W8 轮翻案闭十一条：D-G1 / D-B3 / D-B4 /
 D-C3 / D-F1 / D-F3 / D-G2 / D-G3 / D-G5 / D-D11 / D-D12，新增 D-F4 / D-G9 /
 D-G10 / D-G11 四条；D-C1 部分闭环在案，D-A7 半闭）。
 未闭债主分类（W9-5 终谳收口后逐条重数，复合状态按主状态计）：需真机 9｜本纪元W6处理 1｜
@@ -132,6 +151,16 @@ D-B1 稀疏 SoM 在线 A/B / D-G4 生产数据——全部唯余物理在场，�
 （D-F4 剩余 15 件）｜**需人工 2**（D-C4 git 提交卫生——工作树 300+ 文件未提交，须
 仓库主人亲裁切分方案；D-G6 宿主面 #5/#7——宿主仓库职权）——**未闭合计 10**；
 已定谳 12 + 已闭环 26，三项合计 48。除物理边界与主人亲裁项外，**可闭之债已全部闭清**。
+
+**ΑΩ-R45 收官重数（结案文档工单，2026-10-04，ΑΩ 隐患清账战役 46 项隐患 /
+5 批次 / 44 编号工单 R1-R46 收官后）**：合计 **49 条**（新立 D-D13 一条）。本轮
+翻案闭一条：D-E2（ΑΩ-R1 audio.py WASAPI raw-vtable 移植——本机 Python 3.14.6
+真硬件冒烟通过，证据见条内）。未闭重数（按状态主词逐条重数）：需真机 7｜需人工 2｜
+部分闭环 1（D-F4 剩余 15 件 info 留案）——未闭合计 10；本纪元W6处理 0、需部署决策 0
+（W9 三条部署决策落锤 + D-E2 闭环后，该两族状态主词已全部清空）。已定谳 13（含
+新立 D-D13）+ 已闭环留档 26，三项合计 49。台账自洽补正：头部枚举补「部分闭环」
+（D-F4 状态主词入册——W9 收稿时点为口径遗留）；统计段 E 节 1→2、D 节 12→13、
+合计 47→49 对账归位（genesis_audit 分节条数对照与枚举校验就此全净）。
 
 W6-0 复核记录（2026-10-03 登记 / 2026-10-04 02:2x 收官复验，登记前实跑）：
 - w5wire 14/0、w5dream 9/0、w5cross 25/0、w5somcall 9/0、w5steer 17/0（逐件实跑全绿，
@@ -248,3 +277,63 @@ W9-5 收稿复核记录（2026-10-04，终账代理：取舍终谳 + GENESIS 纪
   每窗失败七→二→三→一且逐窗换脸，涉红文件单独复跑全绿——红均归因并行在途施工
   瞬时态（各潮「并行批次在途文件瞬时红不由本批背书」先例同律），详见 GENESIS
   W9 占位段。
+
+ΑΩ-R45 收稿复核记录（2026-10-04，ΑΩ 隐患清账战役结案文档工单：三册治理文档收官 +
+审计器与全量回归复跑；本批产权仅 DEBTS.md / GENESIS.md / README.md 三份 .md，
+不进 tsc 编译目标，禁改一切源码/测试/脚本）：
+- 翻案 D-E2：python_service/dsh_physical/audio.py 的 raw-vtable(ctypes) 路径在库
+  （:529 engine 标记 / :830 py≥3.14 首选路径 / :878 会话标死回收），ΑΩ-R1 本机
+  Python 3.14.6 真硬件冒烟通过（真回环采集 + 真播放合成提示音分类命中——D-A4
+  真环同语义）——闭环留档，证据列随条更新。
+- 新立 D-D13（ΑΩ-R43 宪法 backgroundRisk 终版立法：保守顶格保持、可用性让位于
+  保守——有意决策入设计决策类，非未闭债）；头部状态枚举补「部分闭环」（D-F4
+  状态主词入册——W9 收稿时点为枚举口径遗留，ΑΩ 补正）。
+- 统计段重数：条数合计 48→49（D 节 12→13、E 节 1→2 口径滞后补正）；未闭主分类
+  按状态主词逐条重数（需真机 7 / 需人工 2 / 部分闭环 1；本纪元W6处理与需部署决策
+  两族状态主词清零）；W9 终账收官重数段为收稿时点快照，不回改（校勘沿革律）。
+- GENESIS 补录「ΑΩ 隐患清账战役」段（按 W6-W9 浪潮章节格式，标题不带「纪元 Wn」
+  ——不入审计器纪元宇宙，w7audit 执法册 deepEqual 锁定 W1-W5 律）；卷首全景行
+  同步（W9「收口中·占位」改「终数已收口」+ ΑΩ 战役入列）。README 补 ΑΩ 段
+  （全量 2613 用例口径 + 新能力极简提及，中英两区）。
+- 收官复跑（登记前实跑）：新执法册四册 23/0（aor5.tsaSignature 10 / r14.gymDialect
+  5 / r18.prophecy 4 / r29.dialectCensus 4，TAP 计数）；genesis_audit --check 退出码 0
+  （虚报 0，DEBTS 台账枚举违例 0 / 分节条数偏差 0 / 主分类口径对账全净——本册
+  统计补正的直接兑现）；全量 2613 用例 / 0 失败 / 5 skipped（环境守卫 skip 与
+  W8-C2 基线同款）。战役五批次各自的全量零回归闸门（2503 → 2613 逐批上漂、
+  0 失败放行）由各批收稿背书，本册只收官对账。
+
+ΝΩ-54 收稿复核记录（2026-10-04，ΝΩ 前沿升级战役结案文档工单：三册治理文档收官 +
+审计器与全量回归复跑；本批产权仅 DEBTS.md / GENESIS.md / README.md 三份 .md，
+不进 tsc 编译目标，禁改一切源码/测试/脚本）：
+- 落地质检（登记前 git grep 抽验）：工单标记 ΝΩ-1..45 五批全数在册（src/test/
+  python_service/scripts/bench/.github 五域，逐批首注释验读）；批 6 ΝΩ-46..53 于
+  本册收稿窗口内由并行施工补齐（首验时点 48/51/52 三件零命中，落定后复验 8/8
+  全数在册——46 反事实世界模型端口 / 47 合议庭 quorum / 48 注视进 grounding /
+  49 测试提速共享基建 / 50 Linux L1 / 51 DXGI / 52 scrcpy 控制 / 53 RawInput）。
+- 新立六条逐项取证：D-D14（riskGate.ts:96/:184/:208/:212 + riskGate 册 10/0 本册
+  实跑）、D-D15（sandbox/events.ts:116-126 + sandbox/index.ts:26/:49/:62）、
+  D-D16（journal.ts:296-321 崩溃窗口论证原文）、D-D17（doctorRules.security.ts:
+  129-153 + package.json:48-49）、D-E3（w9real node v24 libuv 退出竞态——standalone
+  与 git archive HEAD 纯净树双重复现归因，证据三链见条内）、D-F5（cycle_lint 收稿
+  实跑 287 文件/1438 边/14 SCC，5 value 环 exit 1 立法执法）。
+- 数字实测面（本册亲跑）：新执法册十一册 100/0（no3fixes 11 / no29.bilingual 9 /
+  no31fixes 7 / no41.dialectClones 9 / now25.systemPerf 19 / configDocs 2 /
+  w8.abortSignal 12 / w8.no26 7 / riskGate 10 / physicalExecution.router 8 /
+  physicalExecution.serviceManager 6——逐册 TAP 取数）；mutationSelfcheck 显式
+  独占跑 1/1（缺省 skip 律不破）；批 6 册单跑全绿（ensemble 19 / epochBeta.refute
+  17 / counterfactual 24 / arbitration 10 / d7HostPort 12）；python 152（pytest
+  实收集）；SBOM 287 模块（build_manifest 实跑 digest 475f2b8fbea7）。
+- 全量三窗实测（node v24.19.0 / Windows）：首窗 2938 用例 / 2916 过 / 2 fail /
+  20 skip；次窗 2927 / 2901 / 2 fail / 24 skip（计数逐窗上落归因批 6 施工在途
+  ——测试面活体）；**收官窗 2963 / 2952 / 1 fail / 10 skip（终值口径）**。
+  fail 逐件归因：w9real D-A5 三窗皆红=确定性环境暴露（**D-E3 新登记**，
+  HEAD 纯净树同款复现 ⇒ 非 ΝΩ 回归；收官窗唯一 fail 即此）；时序偶发仅见
+  前两窗（首窗 w8.no26 TTL / 次窗 w7fullon W7-D3 真跑 161s；单独复跑各
+  7/0、10/0 全绿且收官窗双绿——并行施工 CPU 争载，W9-5「瞬时红换脸」
+  先例同律）。除 D-E3 单点外 0 失败。
+- 台账滚动：49→55 条（新立六、翻案零）；未闭重数（按状态主词逐条重数）：需真机 7｜
+  需人工 3（+D-E3）｜部分闭环 1｜待拆 1（D-F5）——未闭合计 12；本纪元W6处理与
+  需部署决策两族维持清零；已定谳 17（+D-D14..17 四条）+ 已闭环 26，三项合计 55。
+  头部状态枚举补「待拆」（D-F5 在用——ΑΩ-R45 补「部分闭环」同款补正先例）。
+- genesis_audit --check 收稿复跑退出码 0（虚报 0；本册统计段 D/E/F 节与合计对账
+  的直接兑现，见收官复跑输出）。

@@ -38,6 +38,12 @@ export const SANDBOX_ACTION_KINDS: ReadonlySet<string> = new Set<SandboxActionKi
   'drag_mouse', 'switch_tab', 'switch_window', 'dismiss_popup', 'noop',
 ]);
 
+/** 预期效果 scale 词表运行时集合（ΑΩ-R19：与 SANDBOX_ACTION_KINDS 同方言 ——
+ *  解析边界执法的唯一事实源，防入参校验器复制第二份词表） */
+export const EXPECTED_EFFECT_SCALES: ReadonlySet<string> = new Set<string>([
+  'page-level', 'element-level', 'text-level',
+]);
+
 /** 预期效果声明（对齐宿主四层验证栈的 L4 预期锚定层） */
 export interface ExpectedEffect {
   scale: 'page-level' | 'element-level' | 'text-level';
@@ -61,6 +67,9 @@ export interface VirtualWidget {
   scrollable?: boolean;
   /** 模态弹窗：press_hotkey ['esc'] 的可关闭对象（K 纪元补全） */
   popup?: boolean;
+  /** ΝΩ-30：堆叠序（z 轴，高者在上）。缺省 0；asVirtualWidget 对 popup 类铸
+   *  更高层。命中测试自顶向下（最高 z 先判命中）—— 被遮挡控件不可点。 */
+  z?: number;
 }
 
 export interface SandboxAction {
@@ -225,6 +234,26 @@ export interface HostReplayOutcome {
   createdAt: number;
 }
 
+// ─── 6.5 宿主执行器端口（ΑΩ-R19：replayOnHost 四门全过后的物理派发面）───
+
+/** 单步派发结果：ok=false = 该步未落到物理世界（如实在 note 归因） */
+export interface HostExecutorStepResult {
+  ok: boolean;
+  /** 紧凑归因短语（Token 纪律：对话流只见紧凑数字，短语进 divergence/report） */
+  note: string;
+}
+
+/**
+ * 宿主执行器端口 —— 结构注入（engine 不 import 根层模块，破环纪律；装配主权
+ * 在 sandbox/index.ts apply 装配层）。端口契约与《异常诚实分层契约》第二条同律：
+ * executeAction 永不抛错 —— 一切异常/非法参数语义收敛为 ok:false + note 归因。
+ * 动作方言与 SandboxAction 逐字同构（归一化坐标 [0,1]² 直通，零换算零漂移）。
+ */
+export interface HostExecutor {
+  /** 派发单步沙箱动作到宿主物理面（调用方按 entry.steps 顺序逐步调用） */
+  executeAction(action: SandboxAction): Promise<HostExecutorStepResult>;
+}
+
 // ─── 7. 双闸门矩阵：D-5 自审 × D-4 外审，两权威正交，绝不合并枚举 ───
 
 export type ConsolidationDecision = 'consolidate' | 'discard' | 'freeze-for-review';
@@ -303,6 +332,11 @@ export interface SandboxConfig {
   hostReplayMinReliability?: number;
   /** 入口指纹同屏判定阈值（TRUST IS A FINGERPRINT：宿主观察 vs 排练入口的相似度下限） */
   entrySceneMinSimilarity?: number;
+  /** ΑΩ-R19：宿主重放执行接线开关。缺省关闭 = 既有开发者预览语义零回归
+   *  （四门全过仍诚实 failed "no host executor wired"）；true ⇒ apply 装配层把
+   *  根层 physicalBackend 动作面适配为 HostExecutor 注入（四门全过 ⇒ 真派发，
+   *  派发失败/装配失败仍诚实 failed 归因）。 */
+  enableHostReplayExecution?: boolean;
 }
 
 export interface SandboxEngine {
@@ -333,10 +367,16 @@ export interface SandboxEngine {
   /**
    * 宿主重放：唯一出口。四重门禁（两阶段令牌 / 医生 approved / 可靠度阈值 /
    * 入口指纹匹配）任一失败 ⇒ verdict='failed' + 拒绝原因落盘。
-   * 门禁全过但宿主执行器未接线（开发者预览）⇒ 诚实 failed 并如实记载
-   * （对齐现世 orchestrator Actor 未接线先例 —— 诚实失败优于虚假成功）。
+   * 门禁全过后按接线分岔（ΑΩ-R19）：执行器未注入（缺省）⇒ 诚实 failed 并如实
+   * 记载（对齐现世 orchestrator Actor 未接线先例 —— 诚实失败优于虚假成功）；
+   * 已注入（apply 装配层经 enableHostReplayExecution 开关）⇒ 逐动作真派发，
+   * 首败即停 + 结局如实入 divergence 与可靠度计数。
    */
   replayOnHost(entryId: string, opts: { confirmToken: string }): Promise<HostReplayOutcome>;
+
+  /** ΑΩ-R19：宿主执行器端口注入（结构注入 —— null = 拔线，回到未接线语义）。
+   *  运行层方法：注入物形状非法不 throw，静默视为未接线（诚实降级）。 */
+  wireHostExecutor(executor: HostExecutor | null): void;
 
   /** 可观测性：沙箱会话日志审计（append-only 哈希链，verify 语义对齐 journal） */
   verifyLog(): Result<{ ok: boolean; length: number; brokenAt: number | null }>;

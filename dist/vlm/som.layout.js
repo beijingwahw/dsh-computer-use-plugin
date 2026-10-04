@@ -1,5 +1,9 @@
 import { classifyWordShape } from '../wordShape.js';
 import { cosine, embed } from '../semanticHash.js';
+// ΝΩ-41（方言克隆律）：本地 FNV-1a 复刻退役 —— 单源 src/dialects/random.ts
+// （「与 semanticHash 同族」自此同函数；染色键不变；金样
+// test/no41.dialectClones.test.ts）。
+import { fnv1a } from '../dialects/random.js';
 /** W1-7: clamp 到 [0,1]；非有限数按 0（无证据不加分） */
 function clamp01(v) {
     return typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
@@ -158,15 +162,6 @@ function hsvToHex(hDeg, s, v) {
 }
 /** W1-7: 稳定染色调色板 —— 16 色 HSV 均匀分布（hue 步进 360/16、s=0.85、v=1） */
 export const SOM_COLOR_PALETTE = Object.freeze(Array.from({ length: SOM_PALETTE_SIZE }, (_, i) => hsvToHex((i * 360) / SOM_PALETTE_SIZE, 0.85, 1)));
-/** W1-7: 32 位 FNV-1a（与 semanticHash 同族；其未导出，本地五行复刻） */
-function fnv1a(s) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-    }
-    return h >>> 0;
-}
 /** W1-7: 稳定染色 —— key 短哈希取调色板（同 key 恒同色，跨帧稳定，零随机） */
 export function stableColor(key) {
     return SOM_COLOR_PALETTE[fnv1a(key) % SOM_PALETTE_SIZE];

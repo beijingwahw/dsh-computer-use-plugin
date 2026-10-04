@@ -143,3 +143,59 @@ test('PyS-3: ui_tree.py 源码取证 —— score 字段/序列化/赋值点/剔
   // 真端到端（微服务真起 + RapidOCR 真识图 + HMAC wire）属真机 bench 职权，
   // 本文件以「假 adapter 行为级 + 源码取证级」双证据离线证明通道已通。
 });
+
+// ═══ ΝΩ-24：textReader worker 池按 lang 键控 —— 并发双 lang 各得其所 ═══
+
+test('ΝΩ-24: 双 lang worker 并发各得其所 —— 后到者不拆先到者的 worker，terminate 延迟到 dispose', async (t) => {
+  const { getSharp } = await import('../src/_legacyDeps.ts');
+  type TesseractWorkerLike = import('../src/_legacyDeps.ts').TesseractWorkerLike;
+  let sharp: any;
+  try {
+    sharp = await getSharp();
+  } catch (e: any) {
+    t.skip(`sharp not installed — ${e?.message?.slice(0, 200) ?? ''}`);
+    return;
+  }
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#808080' } }).png().toBuffer();
+  const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+  const created: string[] = [];
+  const terminated: string[] = [];
+  // 假 worker：recognize 带 in-flight 窗口 —— 被提前 terminate 的 worker 在
+  // 窗口后自爆（旧实现「后到者 terminate 先到者正在用的 worker」的显影剂）
+  const makeWorker = (lang: string): TesseractWorkerLike => {
+    let dead = false;
+    return {
+      recognize: async () => {
+        await delay(15); // in-flight 窗口：旧竞态的 terminate 落在此窗口内
+        if (dead) throw new Error(`worker for ${lang} was terminated mid-recognize`);
+        return { data: { text: `text-from-${lang}`, confidence: 99, words: [], lines: [], paragraphs: [] } };
+      },
+      terminate: async () => { dead = true; terminated.push(lang); },
+    };
+  };
+  textReader._setWorkerFactory_forTest(async (lang: string) => {
+    created.push(lang);
+    await delay(5); // 创建交错窗口（并发双 lang 的竞态触发面）
+    return makeWorker(lang);
+  });
+  try {
+    await textReader.disposeOcr(); // 隔离前置：清空模块级 worker 池
+    const [ra, rb] = await Promise.all([
+      textReader.readText(png, 'langA'),
+      textReader.readText(png, 'langB'),
+    ]);
+    assert.equal(ra.text, 'text-from-langA', '先到者：langA worker 顺利完成 recognize');
+    assert.equal(rb.text, 'text-from-langB', '后到者：langB worker 顺利完成 recognize');
+    assert.deepEqual([...created].sort(), ['langA', 'langB'], '每 lang 恰铸一个 worker（Map 键控）');
+    assert.deepEqual(terminated, [], '语言并发不再 terminate（终止延迟到 dispose）');
+    // 同 lang 二次调用复用池中 worker（不重铸）
+    const again = await textReader.readText(png, 'langA');
+    assert.equal(again.text, 'text-from-langA');
+    assert.deepEqual([...created].sort(), ['langA', 'langB'], '同 lang 命中池（零重铸）');
+    await textReader.disposeOcr();
+    assert.deepEqual([...terminated].sort(), ['langA', 'langB'], 'dispose 时池级清算：全部 terminate');
+  } finally {
+    textReader._setWorkerFactory_forTest(null); // 还原生产路径
+    await textReader.disposeOcr();
+  }
+});

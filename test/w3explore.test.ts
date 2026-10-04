@@ -16,6 +16,14 @@
 //   R2-10 集成：真实账本进环 —— 探索动作替代升级步、journal 注记、总汇报记账、
 //         observe 全流回报、探索预算耗尽后回归升级终局
 //   R2-11 防御：垃圾入参绝不抛（advise/observe/quantize/端口抛异常不炸环）
+//   R22   容量驱逐复杂度（ΑΩ-R22：懒最小堆索引）：大账本驱逐与旧判据（全扫
+//         min-lru）差分逐格一致 / 索引与主账本同步（插入·恢复·持久化往返）/
+//         索引破损防御回退全扫并注记
+//   ΝΩ-12 利用项（explore-exploit 平衡恢复）：第四项 k·posteriorMean ——
+//         同 tries 异 successes ⇒ 高 successes 胜 / exploitWeight=0 ⇒ 旧公式
+//         逐字节 / 内核键 exploration.exploitWeight 覆写（含越界夹取）生效 /
+//         负先验×低均值不被过度双重惩罚（只奖不罚 + 有界下压）/ 持久化往返后
+//         成功账照常入式
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -31,10 +39,12 @@ import {
   EXPLORATION_GRID_COLS,
   EXPLORATION_GRID_ROWS,
   EXPLORATION_UCB_C,
+  EXPLORATION_EXPLOIT_WEIGHT,
   EXPLORATION_ALTERNATION_PENALTY,
   type ExplorationContext,
   type ExplorationPort,
 } from '../src/autonomy/exploration.ts';
+import { cellKey } from '../src/autonomy/explorationCore.ts';
 import { runAutonomousLoop } from '../src/autonomy/autoPilot.ts';
 import type { AutonomyDeps, StepRecord } from '../src/autonomy/autoPilot.ts';
 import { failureMemory } from '../src/failureMemory.ts';
@@ -365,6 +375,143 @@ test('R2-6: 负先验降权 —— failureMemory 命中的区域×模态组合�
   }
 });
 
+// ─── ΝΩ-12：利用项（explore-exploit 平衡恢复） ───
+
+test('ΝΩ-12a: 利用项数值 —— 只奖不罚 / 字段缺席 ⇒ 0 / k=0 ⇒ 旧公式逐字节 / k 覆写', () => {
+  failureMemory.reset();
+  // 旧公式（W3-7 三项加减 —— ΝΩ-12 前的 explorationScore 逐型重铸，差分对照面）
+  const oldFormula = (i: {
+    regionTries: number; cellTries: number; totalTries: number;
+    riskCost: number; negativePriorPenalty: number; sameModalityAsLast: boolean; ucbC?: number;
+  }): number =>
+    1 / (1 + i.regionTries) + 1 / (1 + i.cellTries)
+    + (i.ucbC ?? EXPLORATION_UCB_C) * Math.sqrt(Math.log(1 + i.totalTries) / (1 + i.cellTries))
+    - i.riskCost - i.negativePriorPenalty
+    - (i.sameModalityAsLast ? EXPLORATION_ALTERNATION_PENALTY : 0);
+  const base = {
+    regionTries: 3, cellTries: 3, totalTries: 7,
+    riskCost: 0.3, negativePriorPenalty: 0.45, sameModalityAsLast: true,
+  };
+  const old = oldFormula(base);
+  // 字段缺席 ⇒ 利用项 0（零回归：无成功账的格不受罚）—— 与旧公式逐字节相等
+  assert.equal(explorationScore(base), old);
+  // k=0 ⇒ 旧行为逐字节（成功账在场也归零：利用项 0·均值 = 0 恰为比特恒等加数）
+  for (const s of [0, 1, 3]) {
+    assert.equal(explorationScore({ ...base, cellSuccesses: s, exploitWeight: 0 }), old);
+  }
+  // Laplace 手算：tries=3 下 successes 0/3 ⇒ 后验均值 (0+1)/(3+2)=0.2 与 (3+1)/(3+2)=0.8
+  assert.ok(Math.abs(explorationScore({ ...base, cellSuccesses: 0 }) - (old + EXPLORATION_EXPLOIT_WEIGHT * (1 / 5))) < 1e-12);
+  assert.ok(Math.abs(explorationScore({ ...base, cellSuccesses: 3 }) - (old + EXPLORATION_EXPLOIT_WEIGHT * (4 / 5))) < 1e-12);
+  // k 覆写：2 ⇒ 利用权重加倍（内核键 [0,2] 上界的同位面）
+  assert.ok(Math.abs(explorationScore({ ...base, cellSuccesses: 3, exploitWeight: 2 }) - (old + 2 * (4 / 5))) < 1e-12);
+  // 垃圾 cellSuccesses（负 / NaN）⇒ 视同缺席（防御收敛，绝不抛、不受罚）
+  assert.equal(explorationScore({ ...base, cellSuccesses: -1 }), old);
+  assert.equal(explorationScore({ ...base, cellSuccesses: Number.NaN }), old);
+  // 垃圾 successes > tries ⇒ 均值夹 1（不虚发 >1 的后验）
+  assert.ok(Math.abs(explorationScore({ ...base, cellSuccesses: 99, exploitWeight: 2 }) - (old + 2)) < 1e-12);
+});
+
+test('ΝΩ-12b: 同 tries 异 successes ⇒ 高 successes 者胜；内核键覆写生效；往返后成功账照常入式', () => {
+  failureMemory.reset();
+  const dir = mkdtempSync(join(tmpdir(), 'w3explore-n12-'));
+  try {
+    const ledger = new ExplorationLedger('打开设置', { enabled: true });
+    // 布景：r0 click ×2 全败（已知坏格，后验 0.25）、r82 click ×2 全胜（已知好格，
+    // 后验 0.75）—— 同 tries 异 successes；全局三候选（scroll down/up、hotkey tab
+    // @r54）各灌 3 笔饱和其新颖度，隔离出「两格之争只有利用项能裁决」
+    const bad = clickAction('按钮甲', 100, 100, { region: R_TL, modality: 'click', strategy: 'click#0#按钮甲' });
+    const good = clickAction('按钮乙', 1700, 900, { region: R_BR, modality: 'click', strategy: 'click#82#按钮乙' });
+    ledger.observe(bad, 'no_effect', VP);
+    ledger.observe(bad, 'no_effect', VP);
+    ledger.observe(good, 'progress', VP);
+    ledger.observe(good, 'progress', VP);
+    const markedGlobal = (kind: 'scroll' | 'hotkey', payload: Record<string, unknown>, strategy: string): Act => ({
+      kind, payload: { ...payload, exploration: { region: R_CENTER, modality: kind, strategy } },
+      rationale: 'r', expectedEffect: 'e', utility: 0.5, riskTier: 'benign',
+    } as Act);
+    for (const scrollDir of ['down', 'up'] as const) {
+      const act = markedGlobal('scroll', { direction: scrollDir }, `scroll#${scrollDir}`);
+      for (let i = 0; i < 3; i++) ledger.observe(act, 'no_effect', VP);
+    }
+    const tab = markedGlobal('hotkey', { keys: ['tab'] }, 'hotkey#tab');
+    for (let i = 0; i < 3; i++) ledger.observe(tab, 'no_effect', VP);
+    const snapshot = makeSnap([el('按钮甲', 100, 100), el('按钮乙', 1700, 900)]);
+    const regionOf = (adv: { action: Act }): number | undefined =>
+      (adv.action.payload as { exploration?: { region?: number } } | undefined)?.exploration?.region;
+    // ① 缺省 k=0.5（内核键未注册 ⇒ getOrDefault 回声模块常量）：已知好格 r82 胜过
+    //    候选序在前的已知坏格 r0 —— 利用差恰 k·(0.75−0.25)=0.25
+    const a1 = ledger.advise(ctx({ snapshot }));
+    assert.ok(a1);
+    assert.equal(a1.action.kind, 'click');
+    assert.equal(regionOf(a1), R_BR, '同 tries 异 successes ⇒ 高 successes 者胜');
+    // ② 内核键覆写：exploitWeight=0 ⇒ 纯探索旧行为（两 click 格同分 ⇒ 候选序破平 r0 胜）
+    kernelRegistry.register({
+      key: 'exploration.exploitWeight', organ: 'w3explore-test', defaultValue: 0.5, min: 0, max: 2,
+    });
+    kernelRegistry.set('exploration.exploitWeight', 0);
+    const a2 = ledger.advise(ctx({ snapshot }));
+    assert.ok(a2);
+    assert.equal(a2.action.kind, 'click');
+    assert.equal(regionOf(a2), R_TL, 'exploitWeight=0 ⇒ 旧行为（同分候选序破平）');
+    // ③ 覆写回程：2 ⇒ 利用加倍，好格仍胜
+    kernelRegistry.set('exploration.exploitWeight', 2);
+    const a3 = ledger.advise(ctx({ snapshot }));
+    assert.ok(a3);
+    assert.equal(regionOf(a3), R_BR, 'exploitWeight=2 ⇒ 好格仍胜（利用加倍）');
+    // ④ 越界覆写：99 ⇒ 注册表夹取 [0,2] ⇒ 与 2 同行为
+    kernelRegistry.set('exploration.exploitWeight', 99);
+    const a4 = ledger.advise(ctx({ snapshot }));
+    assert.ok(a4);
+    assert.equal(regionOf(a4), R_BR, '越界 set 被夹取 ⇒ 行为与 2 一致');
+    // ⑤ 持久化往返后 successes 保留且利用项照常吃它：落盘 ⇒ 新账本恢复（回缺省 k）⇒ 好格仍胜
+    kernelRegistry.set('exploration.exploitWeight', 0.5);
+    const file = join(dir, 'n12.json');
+    assert.equal(ledger.persist(file).ok, true);
+    const restored = new ExplorationLedger('打开设置', { enabled: true });
+    assert.equal(restored.restore(file).ok, true);
+    assert.deepEqual(restored.cellFor(R_BR, 'click', 'click#82#按钮乙'), { tries: 2, successes: 2 }, '往返后 successes 在账');
+    const a5 = restored.advise(ctx({ snapshot }));
+    assert.ok(a5);
+    assert.equal(regionOf(a5), R_BR, '恢复账本的成功账照常入式（好格胜）');
+  } finally {
+    failureMemory.reset();
+    kernelRegistry.reset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ΝΩ-12c: 负先验 × 低均值 —— 不被过度双重惩罚（只奖不罚 + 有界下压 + 软先验可翻案）', () => {
+  failureMemory.reset();
+  // 已知坏格的极端面：regionTries/cellTries/totalTries 全 3、三重罚全开
+  const moderate = {
+    regionTries: 3, cellTries: 3, totalTries: 3,
+    riskCost: 0.6, negativePriorPenalty: 0.45, sameModalityAsLast: true,
+  };
+  const old = explorationScore(moderate); // 字段缺席 ⇒ 旧公式（无成功账不受罚）
+  const withBad = explorationScore({ ...moderate, cellSuccesses: 0 });
+  const withGood = explorationScore({ ...moderate, cellSuccesses: 3 });
+  // 只奖不罚：成功账入场（即使 0 成功）也绝不压低分数 —— 低均值失去的是奖励而非额外罚金，
+  // 「双重惩罚」实为 negPrior 罚 + 缺奖励，二者叠加仍严格可加
+  assert.ok(withBad > old, `已知坏格不受成功账罚（${withBad} > ${old}）`);
+  assert.ok(Math.abs((withGood - withBad) - EXPLORATION_EXPLOIT_WEIGHT * (3 / 5)) < 1e-12, '好坏差恰 k·Δ后验（有界）');
+  // 有界下压：最坏情形（双罚全夹 1 + 交替律 + k=2 上界 + 海量 tries）⇒ 有限且 > −2.25
+  //（先验下界：正项全 0 − 1 − 1 − 0.25；后验分母 n_i+2 恒正 ⇒ 绝无「分母为负」）
+  const worst = explorationScore({
+    regionTries: 1_000_000, cellTries: 1_000_000, totalTries: 1_000_000,
+    riskCost: 1, negativePriorPenalty: 1, sameModalityAsLast: true,
+    cellSuccesses: 0, exploitWeight: 2,
+  });
+  assert.ok(Number.isFinite(worst) && worst > -2.25, `双重惩罚有界（实测 ${worst}）`);
+  // 软先验可翻案（降权不除名）：重罚已知坏格仍可与全新格同台竞技 —— 全新格凭
+  // 满额新颖度领先，但差距恰为两重下压之和（有界 ⇒ UCB 其余三项仍可翻案）
+  const fresh = explorationScore({
+    regionTries: 0, cellTries: 0, totalTries: 1_000_000,
+    riskCost: 0, negativePriorPenalty: 0, sameModalityAsLast: false,
+    cellSuccesses: 0,
+  });
+  assert.ok(fresh > worst, `全新格仍胜重罚格（${fresh} > ${worst}），探索侧不被利用项挤压`);
+});
+
 // ─── R2-7 恢复态门（触发 / 常态 / 红线 / 双闸） ───
 
 test('R2-7: 恢复态触发、常态不触发、预算红线绝不探索、双闸', () => {
@@ -652,4 +799,155 @@ test('R2-11: 防御 —— 垃圾入参与极端场景绝不抛', () => {
   } finally {
     failureMemory.reset();
   }
+});
+
+// ─── ΑΩ-R22：容量驱逐复杂度（懒最小堆索引）───
+
+/** ΑΩ-R22：带预标的点击（驱逐差分用最小动作面 —— (region,modality,strategy) 唯一即唯一格） */
+function markedClick(region: number, strategy: string): Act {
+  return clickAction('x', 5, 5, { region, modality: 'click', strategy });
+}
+
+/**
+ * ΑΩ-R22：旧驱逐判据的对照实现 —— 与改造前 evictOverflow 逐字节同逻辑
+ * （全扫 min-lru、Map 迭代序破平），驱动影子账（key → lru）做差分对照。
+ */
+function legacyObserveEvict(
+  shadow: Map<string, number>, tick: { n: number }, key: string, maxCells: number,
+): void {
+  shadow.set(key, ++tick.n);
+  while (shadow.size > maxCells) {
+    let oldestKey: string | null = null;
+    let oldest = Infinity;
+    for (const [k, lru] of shadow) {
+      if (lru < oldest) { oldest = lru; oldestKey = k; }
+    }
+    if (oldestKey === null) break;
+    shadow.delete(oldestKey);
+  }
+}
+
+/** ΑΩ-R22：账本在册格键集（与影子账做集合对照） */
+function ledgerKeys(ledger: ExplorationLedger): Set<string> {
+  return new Set(ledger.snapshot().cells.map(c => cellKey(c.region, c.modality, c.strategy)));
+}
+
+test('R22-A: 大账本驱逐 —— 懒堆索引与旧判据逐格一致（>4096 格）', () => {
+  failureMemory.reset();
+  // maxCells 缺省 4096（EXPLORATION_MAX_CELLS_DEFAULT）
+  const ledger = new ExplorationLedger('打开设置', { enabled: true });
+  const shadow = new Map<string, number>();
+  const tick = { n: 0 };
+  const feed = (region: number, strategy: string): void => {
+    ledger.observe(markedClick(region, strategy), 'no_effect', VP);
+    legacyObserveEvict(shadow, tick, cellKey(region, 'click', strategy), 4096);
+  };
+  // 灌 4210 格（> 4096 上限 ⇒ 连续 114 次驱逐，期间每笔 observe 都走索引弹出）
+  for (let i = 0; i < 4210; i++) feed(i % 96, `s${i}`);
+  // 回触：升 lru 的再观察（含早已被驱逐的 s0 —— 「删后重建」的懒失效压力面）
+  for (let i = 0; i < 4210; i += 213) feed(i % 96, `s${i}`);
+  // 再灌 30 新格 ⇒ 每笔都驱逐
+  for (let i = 4210; i < 4240; i++) feed(i % 96, `s${i}`);
+  assert.equal(ledger.snapshot().cells.length, 4096, '驱逐后恰压回容量上限');
+  assert.equal(ledger.evictIndexDegraded, false, '正常路径索引不降级');
+  // 差分对照：同输入 ⇒ 同被驱逐集合（在册键集与旧判据影子账逐格一致）
+  assert.deepEqual(ledgerKeys(ledger), new Set(shadow.keys()));
+  // 索引内存有界：压实阈值（2×在册格 + 64）之内
+  const internals = ledger as unknown as { evictIndex: unknown[] };
+  assert.ok(internals.evictIndex.length <= 4096 * 2 + 64, `堆长 ${internals.evictIndex.length} 越界`);
+});
+
+test('R22-B: 索引与主账本同步 —— 插入/恢复/持久化往返后驱逐仍与旧判据一致', () => {
+  failureMemory.reset();
+  const dir = mkdtempSync(join(tmpdir(), 'w3explore-r22-'));
+  try {
+    const file = join(dir, 'ledger.json');
+    // 阶段一：小账本（容量 16）灌 24 格 ⇒ 8 次驱逐；影子账同步差分
+    const a = new ExplorationLedger('打开设置', { enabled: true, maxCells: 16 });
+    const shadowA = new Map<string, number>();
+    const tickA = { n: 0 };
+    for (let i = 0; i < 24; i++) {
+      const region = i % 96, strategy = `s${i}`;
+      a.observe(markedClick(region, strategy), 'no_effect', VP);
+      legacyObserveEvict(shadowA, tickA, cellKey(region, 'click', strategy), 16);
+    }
+    assert.equal(a.snapshot().cells.length, 16);
+    assert.deepEqual(ledgerKeys(a), new Set(shadowA.keys()));
+    assert.equal(a.evictIndexDegraded, false);
+    // 阶段二：持久化 ⇒ 新账本恢复 ⇒ 快照逐字段往返（cells / regionTries / 总账）
+    assert.equal(a.persist(file).ok, true);
+    const b = new ExplorationLedger('打开设置', { enabled: true, maxCells: 16 });
+    const resB = b.restore(file);
+    assert.equal(resB.ok, true);
+    assert.equal(resB.restored, 16);
+    assert.deepEqual(b.snapshot().cells, a.snapshot().cells);
+    assert.deepEqual(b.snapshot().regionTries, a.snapshot().regionTries);
+    assert.equal(b.totalTryCount, a.totalTryCount);
+    assert.equal(b.evictIndexDegraded, false);
+    // 阶段三：恢复后继续观察 + 驱逐 —— 影子账按恢复语义重放（恢复格按落盘序
+    // （region,modality,strategy 排序）重编 lru 1..16 —— 与实现同律），差分一致
+    const shadowB = new Map<string, number>();
+    const tickB = { n: 0 };
+    for (const c of a.snapshot().cells) {
+      shadowB.set(cellKey(c.region, c.modality, c.strategy), ++tickB.n);
+    }
+    for (let i = 100; i < 118; i++) {
+      const region = i % 96, strategy = `s${i}`;
+      b.observe(markedClick(region, strategy), 'no_effect', VP);
+      legacyObserveEvict(shadowB, tickB, cellKey(region, 'click', strategy), 16);
+    }
+    assert.equal(b.snapshot().cells.length, 16);
+    assert.deepEqual(ledgerKeys(b), new Set(shadowB.keys()));
+    assert.equal(b.evictIndexDegraded, false);
+  } finally {
+    failureMemory.reset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('R22-C: 防御 —— 索引覆盖破损回退全扫并注记，驱逐结果仍与旧判据一致', () => {
+  failureMemory.reset();
+  const ledger = new ExplorationLedger('打开设置', { enabled: true, maxCells: 16 });
+  const shadow = new Map<string, number>();
+  const tick = { n: 0 };
+  for (let i = 0; i < 16; i++) {
+    const region = i % 96, strategy = `s${i}`;
+    ledger.observe(markedClick(region, strategy), 'no_effect', VP);
+    shadow.set(cellKey(region, 'click', strategy), ++tick.n);
+  }
+  assert.equal(ledger.evictIndexDegraded, false);
+  // 人为破损：向 cells 直注 4 个无索引目的格（绕过 observe —— 模拟索引与主账本
+  // 失同步；lru 取小数保证与真实 tick 不并列），再把索引整体替换为全陈旧目
+  const internals = ledger as unknown as {
+    cells: Map<string, { region: number; modality: 'click'; strategy: string; tries: number; successes: number; lru: number }>;
+    evictIndex: Array<{ lru: number; key: string }>;
+    evictOverflow(): void;
+  };
+  const injected: ReadonlyArray<readonly [number, number]> = [[100, 0.5], [101, 5.5], [102, 11.5], [103, 16.5]];
+  for (const [i, lru] of injected) {
+    const region = i % 96, strategy = `s${i}`;
+    internals.cells.set(cellKey(region, 'click', strategy), { region, modality: 'click', strategy, tries: 1, successes: 0, lru });
+    shadow.set(cellKey(region, 'click', strategy), lru);
+  }
+  internals.evictIndex = [{ lru: -1, key: 'ghost-a' }, { lru: -2, key: 'ghost-b' }];
+  internals.evictOverflow();
+  // 注记降级为真；驱逐结果与旧判据影子账逐格一致（全扫回退保证语义不变）
+  assert.equal(ledger.evictIndexDegraded, true);
+  while (shadow.size > 16) {
+    let oldestKey: string | null = null;
+    let oldest = Infinity;
+    for (const [k, lru] of shadow) if (lru < oldest) { oldest = lru; oldestKey = k; }
+    if (oldestKey === null) break;
+    shadow.delete(oldestKey);
+  }
+  assert.equal(ledger.snapshot().cells.length, 16);
+  assert.deepEqual(ledgerKeys(ledger), new Set(shadow.keys()));
+  // 自愈：注记粘性，但索引已重建 —— 后续驱逐恢复索引路径且仍与旧判据一致
+  ledger.observe(markedClick(50, 's-new'), 'no_effect', VP);
+  legacyObserveEvict(shadow, tick, cellKey(50, 'click', 's-new'), 16);
+  assert.deepEqual(ledgerKeys(ledger), new Set(shadow.keys()));
+  assert.equal(ledger.evictIndexDegraded, true, '注记粘性（reset 才归零）');
+  ledger.reset();
+  assert.equal((ledger as unknown as { evictDegraded: boolean }).evictDegraded, false, 'reset 归零注记');
+  assert.equal(ledger.snapshot().cells.length, 0);
 });

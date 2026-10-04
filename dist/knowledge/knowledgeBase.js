@@ -2,8 +2,13 @@ import { embed, cosine } from '../semanticHash.js';
 import { P } from './params.js';
 // W6-2（doctor smell.over-engineering 清偿）：出册常数与纯函数面已分区提取至
 // knowledgeBase.core.ts（行为零变化）；导入面不变 —— 再分发。
-import { CATEGORIES, decay, learnTopicKey, CONTENT_MAX_CHARS, SEMANTIC_WEIGHT, SEMANTIC_FLOOR, MAX_ENTRIES, HALF_LIFE_CAP_MS, CONFIDENCE_HALF_LIFE_MS, STABILITY_GROWTH, AUTO_LEARN_FAILURE_CONFIDENCE, MIN_CLUSTER_SIZE, CLUSTER_SIMILARITY, CONSENSUS_BONUS, CORTICALIZE_DECAY, } from './knowledgeBase.core.js';
+import { CATEGORIES, decay, learnTopicKey, CONTENT_MAX_CHARS, SEMANTIC_WEIGHT, SEMANTIC_FLOOR, MAX_ENTRIES, HALF_LIFE_CAP_MS, CONFIDENCE_HALF_LIFE_MS, STABILITY_GROWTH, AUTO_LEARN_FAILURE_CONFIDENCE, MIN_CLUSTER_SIZE, CLUSTER_SIMILARITY, CONSENSUS_BONUS, CORTICALIZE_DECAY, SEMANTIC_DEDUP_COSINE, } from './knowledgeBase.core.js';
 import { tokenize } from '../uiMemory.js';
+// ΝΩ-28 任务2（M5 决策接线）：强化步长 / 铸造置信消费 kernelRegistry 的
+// memory.op.<category>.<op> 键（memoryOps.ts 铸键）。getOrDefault 缺省 = 各消费点
+// 现行字面量 —— 未入册 / 未收敛 ⇒ 零漂移安全带；sleep 第④幕收敛后逐类可调。
+import { kernelRegistry } from '../kernel/registry.js';
+import { memoryOpKey } from './memoryOps.js';
 export { trustOf, distillInjection, CONTENT_MAX_CHARS, INJECTION_MAX_CHARS } from './knowledgeBase.core.js';
 /**
  * 内存隐知识库（免疫系统纪元）。
@@ -18,6 +23,28 @@ export class InMemoryKnowledgeBase {
     /** 语义记忆产物 ID（consolidate 铸造 —— 它们是皮层内容物，不是情景） */
     semanticMemoryIds = new Set();
     idCounter = 0;
+    /**
+     * ΑΩ-R21-2：BM25 语料统计的增量缓存（df / 逐条目 tf / docLen / lenSum）。
+     * 旧实现（Δ-1）每次 query 全库重新 tokenize（O(N) 分词/次，满库 1000 条时
+     * 每次检索都重付全语料分词成本）；现在 insert / 驱逐 / 水合时同步增删，
+     * query 零重算 —— 只做 O(查询词数 × 命中条目) 的查表算术。
+     * tf 缓存**全词表**（不只查询词）—— df 由此对任意 token 成立，query 侧
+     * 无需预知词表。口径与 Δ-1 逐次重算严格同构：df = 含该 token 的条目数，
+     * tf = 条目内 token 真实词频，avgdl = lenSum/N（空库下不消费该值）。
+     */
+    corpusStats = {
+        lenSum: 0,
+        df: new Map(),
+        docTf: new Map(),
+        docLen: new Map(),
+    };
+    /**
+     * ΑΩ-R21-3：主题→条目 ID 索引（learnFromOutcome 免疫应答的抗原定位器）。
+     * 只收录 auto-learn 条目（免疫应答的扫描域），键 = learnTopicKey(scenario)。
+     * insert / 驱逐 / 水合同步维护；发现任何不同步迹象（死 ID / 键漂移）时
+     * 防御性全扫重建（见 topicCandidates）—— 绝不消费已知过期 的索引。
+     */
+    topicIndex = new Map();
     query(query) {
         if (!query || typeof query !== 'object') {
             return { ok: false, error: { field: 'query', reason: 'query must be an object' } };
@@ -25,13 +52,6 @@ export class InMemoryKnowledgeBase {
         if (typeof query.sceneDescription !== 'string' || typeof query.intentDescription !== 'string') {
             return { ok: false, error: { field: 'query', reason: 'sceneDescription and intentDescription are required strings' } };
         }
-        const startedAt = Date.now();
-        const text = `${query.sceneDescription} ${query.intentDescription}`;
-        const tokens = tokenize(text);
-        const queryVec = embed(text);
-        // Δ-1：BM25 语料统计在 query 入口一次成型（O(N) 单遍），逐条目下传 ——
-        // 旧实现把统计埋进 hybridScore 逐条目重算，见 bm25Corpus 注记
-        const corpus = tokens.length > 0 ? this.bm25Corpus(tokens) : null;
         const minConfidence = query.minConfidence ?? 0;
         const maxResults = query.maxResults ?? 5;
         // 域执法（与 insert 同律 —— 域外拒绝，不钳制）：NaN/负数经 slice/filter
@@ -42,6 +62,15 @@ export class InMemoryKnowledgeBase {
         if (!Number.isInteger(maxResults) || maxResults < 1) {
             return { ok: false, error: { field: 'maxResults', reason: `maxResults must be a positive integer, got ${maxResults} (domain rejection, no clamp)` } };
         }
+        const startedAt = Date.now();
+        const text = `${query.sceneDescription} ${query.intentDescription}`;
+        // J 纪元 query 侧去重口径（Map/Set 迭代天然去重）→ 逐条目查表
+        const queryTokens = [...new Set(tokenize(text))];
+        const queryVec = embed(text);
+        // ΑΩ-R21-2：BM25 上下文从增量缓存一次成型（查询词为空 / 空库 ⇒ null ⇒
+        // 词法通道 0 分，与 Δ-1 的 corpus null / N=0 守卫同语义）。缓存写入
+        // （防御性重建）只发生在此处 —— 遍历开始后读路径不再有任何写动作。
+        const corpus = this.bm25Context(queryTokens);
         const ranked = [...this.entries.values()]
             // 遗忘曲线执法点：过滤与排序均用有效置信度 —— 老知识自然让位
             .map(e => ({ entry: e, eff: decay(e.confidence, e.updatedAt, startedAt, e.halfLifeMs) }))
@@ -50,7 +79,11 @@ export class InMemoryKnowledgeBase {
             .filter(s => s.score > 0)
             .sort((a, b) => b.score - a.score || b.eff - a.eff)
             .slice(0, maxResults);
-        // 使用度簿记（检索即使用 —— usageCount 是后续置信度进化的燃料）
+        // ΑΩ-R21-4（读路径纯化）：上面整条遍历/评分/排序链是纯读 —— usageCount
+        // 不再在遍历途中变异（旧写法虽在 slice 后提交，但与评分链同段，驱逐判据
+        // 被检索频率污染的窗口糊在一起）。现在显式分两段：收集命中（ranked 即
+        // 命中清单）→ 遍历彻底结束后**一次性 touch 提交**。对外行为不变：
+        // 连续两次 query 后 usageCount 照常 +1（检索即使用的簿记语义保持）。
         for (const { entry } of ranked)
             entry.usageCount += 1;
         return {
@@ -59,37 +92,74 @@ export class InMemoryKnowledgeBase {
         };
     }
     /**
-     * Δ-1 BM25 语料统计（query 入口一次成型的 O(N) 单遍）：每条目恰好 tokenize
-     * 一次，同时产出文档长度表、查询词 tf 表（逐条目）与 df 表、avgdl。
-     * 旧实现把统计埋进 hybridScore 逐条目重算 —— 求avgdl 每条目重 tokenize
-     * 全语料、求 df 每查询词全库子串扫描，O(N²)；满库（1000 条）时单次检索
-     * 付出百万次分词。df 口径同步收敛为 token 精确匹配：旧实现用子串 includes
-     * （含 'clickable' 的条目被计入 'click' 的 df —— 与 tf 的 token 域不同构，
-     * 稀有词 IDF 被无关条目稀释）。
+     * ΑΩ-R21-2：BM25 查询上下文（从增量语料缓存一次成型）。
+     * 查询词为空 ⇒ null；空库 ⇒ null（两种情形词法通道都恒 0，与 Δ-1 口径
+     * 同语义）。附带的 ensureCorpusFresh 是缓存失效的防御执法点：计数失配
+     * （任何未经收口的增删路径）⇒ 整体重建 —— 宁可付一次 O(N) 重建，绝不
+     * 消费一份与库内条目数对不上的统计（统计谎言比慢更糟）。
      */
-    bm25Corpus(tokens) {
-        const df = new Map();
-        const docLen = new Map();
-        const tf = new Map();
-        const querySet = new Set(tokens);
-        let lenSum = 0;
-        for (const e of this.entries.values()) {
-            const docTokens = tokenize(`${e.scenario} ${e.content}`.toLowerCase());
-            docLen.set(e.id, docTokens.length);
-            lenSum += docTokens.length;
-            const entryTf = new Map();
-            for (const t of docTokens) {
-                if (querySet.has(t))
-                    entryTf.set(t, (entryTf.get(t) ?? 0) + 1);
-            }
-            if (entryTf.size > 0) {
-                tf.set(e.id, entryTf);
-                for (const t of entryTf.keys())
-                    df.set(t, (df.get(t) ?? 0) + 1);
-            }
-        }
+    bm25Context(tokens) {
+        if (tokens.length === 0)
+            return null;
+        this.ensureCorpusFresh();
         const N = this.entries.size;
-        return { N, avgdl: Math.max(1, lenSum / Math.max(1, N)), df, docLen, tf };
+        if (N === 0)
+            return null;
+        return {
+            N,
+            avgdl: Math.max(1, this.corpusStats.lenSum / Math.max(1, N)),
+            df: this.corpusStats.df,
+            docLen: this.corpusStats.docLen,
+            docTf: this.corpusStats.docTf,
+            tokens,
+        };
+    }
+    /** ΑΩ-R21-2：缓存一致性守卫 —— 条目数与 tf 簿记数失配 ⇒ 整体重建（防御式） */
+    ensureCorpusFresh() {
+        if (this.corpusStats.docTf.size === this.entries.size)
+            return;
+        this.rebuildCorpus();
+    }
+    /** ΑΩ-R21-2：全量重建语料统计（水合 / 防御失效时的诚实路径） */
+    rebuildCorpus() {
+        this.corpusStats.lenSum = 0;
+        this.corpusStats.df = new Map();
+        this.corpusStats.docTf = new Map();
+        this.corpusStats.docLen = new Map();
+        for (const [id, e] of this.entries) {
+            this.corpusAdd(id, `${e.scenario} ${e.content}`.toLowerCase());
+        }
+    }
+    /** ΑΩ-R21-2：单条目统计入账（insert 铸造点 / 重建路径共用 —— 恰好 tokenize 一次） */
+    corpusAdd(id, text) {
+        const tokens = tokenize(text);
+        const tf = new Map();
+        for (const t of tokens)
+            tf.set(t, (tf.get(t) ?? 0) + 1);
+        this.corpusStats.docTf.set(id, tf);
+        this.corpusStats.docLen.set(id, tokens.length);
+        this.corpusStats.lenSum += tokens.length;
+        // df 按去重后的 token 计（含该 token 的文档数 —— 与 Δ-1 逐次重算口径一致）
+        for (const t of tf.keys())
+            this.corpusStats.df.set(t, (this.corpusStats.df.get(t) ?? 0) + 1);
+    }
+    /** ΑΩ-R21-2：单条目统计销账（驱逐路径）。条目不在缓存 ⇒ 防御性整体重建 */
+    corpusRemove(id) {
+        const tf = this.corpusStats.docTf.get(id);
+        if (!tf) {
+            this.rebuildCorpus(); // 未收口的删除被当场发现 —— 重建，绝不留缺口
+            return;
+        }
+        this.corpusStats.lenSum -= this.corpusStats.docLen.get(id) ?? 0;
+        this.corpusStats.docLen.delete(id);
+        this.corpusStats.docTf.delete(id);
+        for (const t of tf.keys()) {
+            const remaining = (this.corpusStats.df.get(t) ?? 1) - 1;
+            if (remaining <= 0)
+                this.corpusStats.df.delete(t);
+            else
+                this.corpusStats.df.set(t, remaining);
+        }
     }
     /**
      * hybrid 双通道评分（纯函数视角）：**BM25** 词法通道主导 + 语义 cosine 补零样本泛化。
@@ -101,17 +171,23 @@ export class InMemoryKnowledgeBase {
      *   二值计数把它们等权；② 条目长度归一 —— 长文本不再靠篇幅堆命中；
      * ③ tf 饱和 —— 同词重复出现边际递减。
      * J 纪元 Set 去重口径保留（query 侧）；tf 按条目侧真实词频计数。
-     * Δ-1：语料统计（df/avgdl/tf/docLen）由 bm25Corpus 在 query 入口一次算好
-     * 下传 —— 本方法退化为纯算术，不再触碰语料（O(N²) → O(N)）。
+     * Δ-1：语料统计由 query 入口一次算好下传，本方法退化为纯算术。
+     * ΑΩ-R21-2：统计源从「query 入口 O(N) 单遍重算」换成「增量维护的缓存」
+     * —— 求和项改按查询词序遍历（逐词查 docTf 表；项集与 Δ-1 的按文档词序
+     * 遍历完全相同，仅浮点求和次序可能不同 —— 差异在 1e-15 量级，不影响
+     * 任何排序语义）。本方法零写动作（ΑΩ-R21-4 读路径纯化的评分侧承诺）。
      */
     hybridScore(entry, queryVec, corpus) {
         let bm25 = 0;
-        const entryTf = corpus?.tf.get(entry.id);
-        if (corpus && entryTf && corpus.N > 0) {
+        const docTf = corpus?.docTf.get(entry.id);
+        if (corpus && docTf && corpus.N > 0) {
             const k1 = 1.2, b = 0.75;
             const docLen = corpus.docLen.get(entry.id) ?? 1;
             const norm = k1 * (1 - b + b * (docLen / corpus.avgdl));
-            for (const [t, tf] of entryTf) { // Map 迭代天然去重（J 纪元 query 侧口径）
+            for (const t of corpus.tokens) { // 查询词已去重（J 纪元口径）
+                const tf = docTf.get(t);
+                if (tf === undefined)
+                    continue; // 该查询词不在本文档 —— 零贡献
                 const dcount = corpus.df.get(t) ?? 0;
                 const idf = Math.log((corpus.N - dcount + 0.5) / (dcount + 0.5) + 1);
                 bm25 += idf * (tf * (k1 + 1)) / (tf + norm);
@@ -140,16 +216,24 @@ export class InMemoryKnowledgeBase {
         if (entry.source !== 'manual' && entry.source !== 'auto-learn' && entry.source !== 'import') {
             return { ok: false, error: { field: 'source', reason: `source must be manual|auto-learn|import, got "${entry.source}"` } };
         }
-        // 容量守卫：驱逐最低使用度的 auto-learn 条目（manual/import 是造物主主权，永不驱逐）。
-        // 风险加固：全部条目皆不可驱逐（全 manual/import）时 —— 诚实拒绝插入，
-        // 绝不静默越限膨胀（容量上限是结构承诺，不是软建议）。
+        // 容量守卫：驱逐「使用度 × 有效置信」最低的 auto-learn 条目（manual/import 是
+        // 造物主主权，永不驱逐）。风险加固：全部条目皆不可驱逐（全 manual/import）时 ——
+        // 诚实拒绝插入，绝不静默越限膨胀（容量上限是结构承诺，不是软建议）。
+        // ΝΩ-28 任务4（驱逐分修正）：旧判据裸 usageCount —— 高频陈年错知识的使用度
+        // 只增不减，永久占座赶走一切新证据。改 usageCount × decay(当前有效置信)：
+        // 使用度只在记忆仍可信时计价，遗忘曲线把陈年条目的占座分自然折旧，
+        // 新鲜证据（哪怕低使用）优先保座。
         if (this.entries.size >= MAX_ENTRIES) {
+            const evictNow = Date.now();
             let victim = null;
-            let victimUsage = Number.POSITIVE_INFINITY;
+            let victimScore = Number.POSITIVE_INFINITY;
             for (const [id, e] of this.entries) {
-                if (e.source === 'auto-learn' && e.usageCount < victimUsage) {
+                if (e.source !== 'auto-learn')
+                    continue;
+                const score = e.usageCount * decay(e.confidence, e.updatedAt, evictNow, e.halfLifeMs);
+                if (score < victimScore) {
                     victim = id;
-                    victimUsage = e.usageCount;
+                    victimScore = score;
                 }
             }
             if (!victim) {
@@ -161,13 +245,33 @@ export class InMemoryKnowledgeBase {
                     },
                 };
             }
+            // ΑΩ-R21-2/3：派生索引先于条目本体销账（corpusRemove / topicRemove 都
+            // 只依赖缓存自身状态，删除次序无耦合；ensureCorpusFresh 守卫兜底）
+            const victimEntry = this.entries.get(victim);
+            this.corpusRemove(victim);
+            if (victimEntry)
+                this.topicRemove(victimEntry);
             this.entries.delete(victim);
             this.vectors.delete(victim);
             this.corticalizedIds.delete(victim);
             this.semanticMemoryIds.delete(victim);
         }
+        // ΑΩ-R21-5（ID 防撞）：id = kb-<Date.now().toString(36)>-<counter>，同毫秒
+        // 撞号的三条通道全部封死 ——
+        //   ① counter 在实例生命周期内严格单调递增（永不复用：同一毫秒内后铸的
+        //      counter 恒大于先铸的，dispose 也不回卷 —— ID 序列是对外承诺，旧 id
+        //      可能活在注入溯源 sources[].ref / 流水线报告里，回卷重铸 = 溯源谎言；
+        //      dispose 归零的是记忆内容，不是身份命名空间）；
+        //   ② 水合时扫描存量 ID 的 counter 最大值续号（见 restoreSnapshot）——
+        //      旧脑的编号被新脑继承，跨会话不撞；
+        //   ③ 铸造点终审守卫：万一外部注入的任意格式 ID 恰好占住铸造位，续号
+        //      直到让出（entries.has 是唯一真相，O(1) 典型）。
         this.idCounter += 1;
-        const id = `kb-${Date.now().toString(36)}-${this.idCounter}`;
+        let id = `kb-${Date.now().toString(36)}-${this.idCounter}`;
+        while (this.entries.has(id)) {
+            this.idCounter += 1;
+            id = `kb-${Date.now().toString(36)}-${this.idCounter}`;
+        }
         this.entries.set(id, {
             id,
             category: entry.category,
@@ -184,6 +288,13 @@ export class InMemoryKnowledgeBase {
         });
         // 语义向量铸造（hybrid 通道的检索索引 —— insert 时一次成型，query 零重算）
         this.vectors.set(id, embed(`${entry.scenario} ${entry.content}`));
+        // ΑΩ-R21-2：BM25 语料统计入账（缓存文本口径与 Δ-1 重算口径逐字一致：
+        // `${scenario} ${content}`.toLowerCase() 后 tokenize —— content 已是截断后
+        // 的入账本体，scenario 是入账原样）
+        this.corpusAdd(id, `${String(entry.scenario ?? '')} ${content}`.toLowerCase());
+        // ΑΩ-R21-3：主题索引入账（免疫应答只扫 auto-learn —— 其他来源不入索引）
+        if (entry.source === 'auto-learn')
+            this.topicAdd(id, String(entry.scenario ?? ''));
         return { ok: true, value: id };
     }
     learnFromOutcome(outcome) {
@@ -204,16 +315,17 @@ export class InMemoryKnowledgeBase {
         //   新铸 ⇒ verifiedAt = now（自体学习生而亲证 —— 与 manual 种子的
         //         传闻身份对立：执行结果是自己亲眼看的）
         let reinforced = false;
-        for (const e of this.entries.values()) {
-            if (e.source !== 'auto-learn' || learnTopicKey(e.scenario) !== topic)
-                continue;
+        // ΑΩ-R21-3：抗原定位从全库线性扫描换成主题索引（O(命中主题的条目数)）。
+        // 语义零变化：候选集 = 全扫描会触达的同一批条目（auto-learn 且
+        // learnTopicKey(scenario) === topic）；强化/反证的算术逐行保持原样。
+        // learnFromOutcome 的强化路径只动 confidence/updatedAt/verifiedAt/
+        // halfLifeMs —— 不动 content/scenario ⇒ 语料统计与主题索引皆无需更新
+        // （ΑΩ-R21-2 缓存对 boost 天然免疫，这是内容不变式，不是遗漏）。
+        for (const e of this.topicCandidates(topic)) {
             if (e.category === category) {
-                e.confidence = e.confidence + (1 - e.confidence) * P.REINFORCE_STEP; // 渐近 1，结构不越界
-                e.updatedAt = now; // 复证即保鲜（遗忘曲线重置）
-                e.verifiedAt = now; // 复证即亲证（信任时钟重置）
-                // E-1 间隔重复：复证不仅升滴度（confidence），也升稳定性（半衰期 ×1.6）——
-                // 越被复证的记忆越抗遗忘；封顶 365 天（间隔效应不许把旧知识变成永恒）
-                e.halfLifeMs = Math.min(HALF_LIFE_CAP_MS, Math.round((e.halfLifeMs ?? CONFIDENCE_HALF_LIFE_MS) * STABILITY_GROWTH));
+                // ΝΩ-28 任务2（M5 决策接线）：强化步长消费 kernelRegistry 键
+                // memory.op.<category>.boost（缺省 = P.REINFORCE_STEP 现行字面量 —— 零漂移）。
+                this.reinforceEntry(e, now);
                 reinforced = true;
             }
             else {
@@ -229,23 +341,117 @@ export class InMemoryKnowledgeBase {
         const content = failed
             ? `action ${outcome.action.kind} failed (${outcome.result.failure?.kind ?? 'unclassified'}): ${outcome.result.failure?.detail ?? outcome.result.status}`
             : `action ${outcome.action.kind} succeeded${degradedNote} for intent "${outcome.intent.description.slice(0, 80)}" (retries: ${outcome.retryCount})`;
+        // ΝΩ-28 任务2（M5 决策接线）：失败铸造置信消费 kernelRegistry 键
+        // memory.op.<category>.insert（缺省 = AUTO_LEARN_FAILURE_CONFIDENCE 现行字面量
+        // —— 与 memoryOps.ts OP_THRESHOLDS.insert.defaultValue 同值，零漂移安全带）。
+        const mintConfidence = failed
+            ? kernelRegistry.getOrDefault(memoryOpKey(category, 'insert'), AUTO_LEARN_FAILURE_CONFIDENCE)
+            : P.AUTO_LEARN_SUCCESS_CONFIDENCE;
         const r = this.insert({
             category,
             content,
             scenario: outcome.intent.description,
-            confidence: failed ? AUTO_LEARN_FAILURE_CONFIDENCE : P.AUTO_LEARN_SUCCESS_CONFIDENCE,
+            confidence: mintConfidence,
             source: 'auto-learn',
             intentRef: outcome.intent.id,
             verifiedAt: now, // 生而亲证：亲历执行的直接观察（核证接地纪元）
         });
         return r.ok ? { ok: true, value: undefined } : { ok: false, error: r.error };
     }
+    /**
+     * 免疫应答强化原子（ΝΩ-28 提取 —— learnFromOutcome 复证路径与 consolidate
+     * 语义去重锚共用同一滴度动力学）：confidence += (1−confidence)×步长（渐近 1，
+     * 结构不越界；步长消费 memory.op.<category>.boost 内核键，缺省 = P.REINFORCE_STEP
+     * 现行字面量）+ 复证即保鲜（updatedAt）+ 复证即亲证（verifiedAt）+ 间隔重复
+     * （半衰期 ×1.6 封顶 365 天 —— 越被复证的记忆越抗遗忘）。
+     * 只动 confidence/updatedAt/verifiedAt/halfLifeMs —— 不动 content/scenario
+     * ⇒ 语料统计与主题索引皆无需更新（ΑΩ-R21-2 缓存对 boost 天然免疫）。
+     */
+    reinforceEntry(e, now) {
+        const step = kernelRegistry.getOrDefault(memoryOpKey(e.category, 'boost'), P.REINFORCE_STEP);
+        e.confidence = e.confidence + (1 - e.confidence) * step; // 渐近 1，结构不越界
+        e.updatedAt = now; // 复证即保鲜（遗忘曲线重置）
+        e.verifiedAt = now; // 复证即亲证（信任时钟重置）
+        // E-1 间隔重复：复证不仅升滴度（confidence），也升稳定性（半衰期 ×1.6）——
+        // 越被复证的记忆越抗遗忘；封顶 365 天（间隔效应不许把旧知识变成永恒）
+        e.halfLifeMs = Math.min(HALF_LIFE_CAP_MS, Math.round((e.halfLifeMs ?? CONFIDENCE_HALF_LIFE_MS) * STABILITY_GROWTH));
+    }
+    // ─── ΑΩ-R21-3：主题→条目索引（免疫应答的抗原定位器）───
+    /** 索引入账（insert 铸造点 / 重建路径共用；只收 auto-learn —— 应答扫描域） */
+    topicAdd(id, scenario) {
+        const key = learnTopicKey(scenario);
+        const set = this.topicIndex.get(key) ?? new Set();
+        set.add(id);
+        this.topicIndex.set(key, set);
+    }
+    /** 索引销账（驱逐路径）：清空集合即顺手摘键 —— 键空间与条目同生命周期，不泄漏 */
+    topicRemove(entry) {
+        const key = learnTopicKey(entry.scenario);
+        const set = this.topicIndex.get(key);
+        if (!set)
+            return;
+        set.delete(entry.id);
+        if (set.size === 0)
+            this.topicIndex.delete(key);
+    }
+    /**
+     * 免疫应答候选集（防御式索引消费）：
+     *   索引命中 ⇒ 直接返回；任何不同步迹象（死 ID / 键漂移 —— 如快照后门改了
+     *   scenario）⇒ 立即全扫重建索引后按重建结果应答 —— 回退的是**全扫描的
+     *   诚实**，绝不是带着已知过期的索引继续跑。空主题键不存在 ⇒ 空候选
+     *   （与全扫描「无同抗原条目」同语义）。
+     */
+    topicCandidates(topic) {
+        const indexed = this.topicIndex.get(topic);
+        if (!indexed)
+            return [];
+        const out = [];
+        let stale = false;
+        for (const id of indexed) {
+            const e = this.entries.get(id);
+            // 域复核（防御）：索引说的与库里的不一致 —— scenario 被外部改写 / 条目已被
+            // 未收口路径删除。任何一例 ⇒ 放弃本轮索引视图
+            if (!e || e.source !== 'auto-learn' || learnTopicKey(e.scenario) !== topic) {
+                stale = true;
+                break;
+            }
+            out.push(e);
+        }
+        if (!stale)
+            return out;
+        this.rebuildTopicIndex();
+        const rebuilt = this.topicIndex.get(topic) ?? new Set();
+        const honest = [];
+        for (const id of rebuilt) {
+            const e = this.entries.get(id);
+            if (e)
+                honest.push(e);
+        }
+        return honest;
+    }
+    /** 全量重建主题索引（水合 / 防御失效时的诚实路径 —— 单遍 O(N)） */
+    rebuildTopicIndex() {
+        this.topicIndex = new Map();
+        for (const [id, e] of this.entries) {
+            if (e.source === 'auto-learn')
+                this.topicAdd(id, e.scenario);
+        }
+    }
     dispose() {
         this.entries.clear();
         this.vectors.clear();
         this.corticalizedIds.clear();
         this.semanticMemoryIds.clear();
-        this.idCounter = 0;
+        // ΑΩ-R21-2/3：派生缓存随本体归零（corpusStats 换新容器三表清空）
+        this.corpusStats.lenSum = 0;
+        this.corpusStats.df = new Map();
+        this.corpusStats.docTf = new Map();
+        this.corpusStats.docLen = new Map();
+        this.topicIndex = new Map();
+        // ΑΩ-R21-5：idCounter 不随 dispose 回卷 —— ID 序列是跨生命周期的对外
+        // 承诺（旧 id 活在注入溯源 / 报告里，回卷重铸 = 同毫秒撞号 + 溯源谎言）。
+        // dispose 归零的是记忆内容与派生缓存，不是身份命名空间（一个 number 的
+        // 保留不构成泄漏 —— 它不引用任何条目）。
         return { ok: true, value: undefined };
     }
     /**
@@ -267,7 +473,33 @@ export class InMemoryKnowledgeBase {
         if (episodes.length < MIN_CLUSTER_SIZE) {
             return { ok: true, value: { episodes: episodes.length, clusters: 0, consolidated: 0, episodedDecayed: 0, durationMs: Date.now() - startedAt } };
         }
-        // 贪心单链聚类：以未分簇条目为种子，吸收所有语义近邻
+        // 贪心单链聚类：以未分簇条目为种子，吸收所有语义近邻。
+        // ΑΩ-R21-1（桶化预筛）：旧实现对每个种子全量扫描未分簇条目两两 cosine
+        // （O(N²) 对比、满库 1000 条情景时每次 run-end 的 consolidate 都重付）。
+        // 现在先按语义向量的**维度桶**（32 位 FNV 桶号）建倒排索引，cosine 只在
+        // 与种子共享 ≥1 维的候选内精算。**严格等价论证**（保守超集的反面 ——
+        // 这是精确等价，不是近似）：
+        //   embed 产出非负稀疏向量，cosine(a,b) = Σ_{i∈dims(a)∩dims(b)} aᵢbᵢ/(‖a‖‖b‖)；
+        //   维度零相交 ⇒ 分子恒 0 ⇒ cosine = 0 < CLUSTER_SIMILARITY(0.45) ——
+        //   被桶预筛排除的条目对在旧全扫下也必然落选，不可能漏簇。
+        //   种子序（episodes 插入序）、成员判定（cosine ≥ 阈值）、unassigned 语义
+        //   （收集期间不变异、整簇收集完再摘除）与旧算法逐点一致 ⇒ 簇划分恒同。
+        // 性能形状：典型语料下无关条目哈希维几乎零相交（全域 32 位哈希，碰撞近零），
+        // 候选集收敛到同话题近邻；最坏退化（全员共享一维，如同一高频词）回落到
+        // 旧 O(N²) —— 上界不劣于旧实现，绝不更差。
+        const dimBuckets = new Map();
+        for (const e of episodes) {
+            const vec = this.vectors.get(e.id);
+            if (!vec)
+                continue; // 无向量条目不占桶（旧算法对它们恒 cosine 跳过）
+            for (const [dim] of vec.dims) {
+                const bucket = dimBuckets.get(dim);
+                if (bucket)
+                    bucket.push(e);
+                else
+                    dimBuckets.set(dim, [e]);
+            }
+        }
         const unassigned = new Set(episodes);
         const clusters = [];
         for (const seed of episodes) {
@@ -276,11 +508,21 @@ export class InMemoryKnowledgeBase {
             const cluster = [seed];
             unassigned.delete(seed);
             const seedVec = this.vectors.get(seed.id);
-            if (seedVec) {
-                for (const other of unassigned) {
-                    const otherVec = this.vectors.get(other.id);
-                    if (otherVec && cosine(seedVec, otherVec) >= CLUSTER_SIMILARITY) {
-                        cluster.push(other);
+            if (seedVec && seedVec.dims.length > 0) {
+                // 候选去重章戳（同一条目与种子共享多维时只精算一次）
+                const seen = new Set();
+                for (const [dim] of seedVec.dims) {
+                    const bucket = dimBuckets.get(dim);
+                    if (!bucket)
+                        continue;
+                    for (const other of bucket) {
+                        if (other === seed || seen.has(other) || !unassigned.has(other))
+                            continue;
+                        seen.add(other);
+                        const otherVec = this.vectors.get(other.id);
+                        if (otherVec && cosine(seedVec, otherVec) >= CLUSTER_SIMILARITY) {
+                            cluster.push(other);
+                        }
                     }
                 }
                 for (const member of cluster)
@@ -306,7 +548,45 @@ export class InMemoryKnowledgeBase {
             const meanConfidence = cluster.reduce((s, e) => s + e.confidence, 0) / cluster.length;
             const consensus = Math.min(1, meanConfidence + CONSENSUS_BONUS * Math.sqrt(cluster.length));
             const representative = cluster.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+            // ΝΩ-28 任务5（语义去重锚）：蒸馏 insert 前查既有语义记忆 —— 同主题
+            //（learnTopicKey 同抗原，与免疫应答同一匹配键）且语义向量 cosine ≥
+            // SEMANTIC_DEDUP_COSINE(0.8) 的锚在场 ⇒ 该簇不是新知识，是新证据：
+            // 走免疫应答强化路径（滴度升高 + 保鲜 + 亲证 + 稳定性增长），不新建条目
+            // —— 同题两夜只沉淀一条语义记忆，皮层不增殖。
+            // 向量基对齐律：既有语义记忆的存量向量 = 其铸造时的
+            // embed(scenario + 蒸馏文本)（insert 铸造点）；锚比较必须用**本簇将铸造的
+            // 蒸馏文本向量**（同一文本基 —— 与 insert 的 vectors.set 逐字一致）对照，
+            // 而非情景原文向量：蒸馏壳与情景原文的余弦实测 ~0.74（永久失锚），
+            // 蒸馏文本对蒸馏文本则同内容跨簇规模 0.975 / 异内容 0.758 —— 判别性成立。
+            // 双重严判据（主题精确同 + 高余弦）：宁可漏合并（退回原蒸馏路径，无损），
+            // 不可错合并两条异义语义记忆。
             const content = `consolidated pattern from ${cluster.length} episodes: ${representative.content.slice(0, 340)}`;
+            const repTopic = learnTopicKey(representative.scenario);
+            const candidateVec = embed(`${representative.scenario} ${content}`);
+            let anchored = false;
+            for (const sid of this.semanticMemoryIds) {
+                const sem = this.entries.get(sid);
+                if (!sem)
+                    continue; // 死 ID（防御）：跳过 —— semanticMemoryIds 与条目同生命周期
+                if (learnTopicKey(sem.scenario) !== repTopic)
+                    continue;
+                const semVec = this.vectors.get(sid);
+                if (!semVec || cosine(candidateVec, semVec) < SEMANTIC_DEDUP_COSINE)
+                    continue;
+                this.reinforceEntry(sem, Date.now());
+                anchored = true;
+                break;
+            }
+            if (anchored) {
+                // 锚命中：簇成员照常皮层化（已被既有语义记忆吸收 —— 让位不销毁）；
+                // consolidated 不增（无新铸 —— 报告口径 = 新语义记忆数，诚实不虚报）
+                for (const e of cluster) {
+                    e.confidence = Math.round(e.confidence * CORTICALIZE_DECAY * 1000) / 1000;
+                    this.corticalizedIds.add(e.id);
+                    episodedDecayed += 1;
+                }
+                continue;
+            }
             const r = this.insert({
                 category,
                 content,
@@ -441,8 +721,31 @@ export class InMemoryKnowledgeBase {
             if (typeof id === 'string' && this.entries.has(id))
                 this.semanticMemoryIds.add(id);
         }
-        this.idCounter = typeof s.idCounter === 'number' && Number.isFinite(s.idCounter)
+        // ΑΩ-R21-2/3：派生缓存随换脑整体重建（水合是缓存的全量失效点 ——
+        // 旧脑的增量簿记对新脑毫无意义；重建 = 单遍 O(N)，与旧 query 逐次重算
+        // 相比仍是零和以上的赢面）
+        this.rebuildCorpus();
+        this.rebuildTopicIndex();
+        // ΑΩ-R21-5（水合推进 ID counter）：旧实现无条件信快照的 idCounter（缺席
+        // 即归零）—— 同毫秒续铸同号 ⇒ Map 静默覆盖丢条。现在取三值最大：
+        //   快照 idCounter（正常路径）/ 存量 ID 扫描出的 counter 峰值（防御：快照
+        //   缺 idCounter 的旧档 / 手工拼接快照 / 编号领先于簿记的任何形态）/ 0。
+        //   counter 全局单调 ⇒ 续铸编号恒大于存量 ⇒ 同毫秒同号在结构上不可能。
+        //   （对非 kb-* 格式的外部 ID 不解析 —— 铸造点终审守卫兜底它们的撞位。）
+        let maxMintedCounter = 0;
+        for (const id of this.entries.keys()) {
+            const m = /^kb-[0-9a-z]+-(\d+)$/.exec(id);
+            if (!m)
+                continue;
+            const c = Number(m[1]);
+            // 域执法（防御）：超出 int32 的巨号不是本铸造器可续的序列（parseInt 对
+            // 超长数字串会产出非有限数）—— 忽略之，交由铸造点守卫防撞
+            if (Number.isFinite(c) && c > maxMintedCounter && c <= 0x7fffffff)
+                maxMintedCounter = c;
+        }
+        const snapCounter = typeof s.idCounter === 'number' && Number.isFinite(s.idCounter)
             ? Math.max(0, Math.floor(s.idCounter)) : 0;
+        this.idCounter = Math.max(snapCounter, maxMintedCounter);
         return { ok: true, value: undefined };
     }
 }

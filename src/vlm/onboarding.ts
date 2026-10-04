@@ -10,7 +10,9 @@
 //   1. 环回铁律 —— 只绑 127.0.0.1（host 入参仅接受回环名，非回环一律强制
 //      127.0.0.1），绝不绑 0.0.0.0 —— 向导只对本机可见，互联网上不存在这扇门
 //   2. 密钥卫生 —— 密钥从不回显：一切响应面（/api/state、/api/connect、页面）
-//      只出现 maskKey() 打码形态，明文 key 只进存档文件与上游请求头
+//      只出现 maskKey() 打码形态，明文 key 只进存档文件、向导请求头（ΑΩ-R7：
+//      /api/models 的密钥走 Authorization/x-api-key 头）与上游请求头 ——
+//      绝不进 URL query（gemini.ts 同律：URL 会进访问日志/错误信息/探针回显）
 //   3. 请求体限 32KB（超出 ⇒ 413）；非法 JSON ⇒ 400；未知路由 ⇒ 404；
 //      方法不符 ⇒ 405；OPTIONS 预检 ⇒ 204 兜底（同源页面本无 CORS 面，留作
 //      宿主内嵌环境的兼容缓冲）
@@ -21,6 +23,19 @@
 //      close() 恒可兑现且幂等
 //   5. 零外链 —— renderOnboardingHtml 是纯内嵌单文件页面（无 CDN、无外链资源），
 //      离线可用；vanilla JS + fetch，同源直连本服务的 JSON API
+//   6. ΝΩ-4 跨站密钥外发封堵（三重防护 + connect 探测）——
+//      a) Host 头必须是回环名 + 本服务端口（403 host-not-allowed；DNS
+//         rebinding 防护 —— 恶意域重绑定到 127.0.0.1 时浏览器仍携原域名 Host）；
+//      b) Sec-Fetch-Site 头在场且非 same-origin/none ⇒ 403 cross-site-blocked
+//         （浏览器跨站标记：恶意页的 <img>/fetch 皆命中；非浏览器工具无此头
+//         不受影响）；
+//      c) base_url 仅接受同平台预设端点（复用 detectPresetFromBaseUrl 归一
+//         比对）或显式回环地址 —— 违例 400 base-url-not-allowed（GET 是简单
+//         请求无预检，恶意页可借 <img src=…/api/models?base_url=…> 诱导宿主
+//         把 env 密钥以 Bearer 头发往任意 URL —— 此通道由此封死）；
+//      d) /api/connect 保存非预设 host 的 baseUrl 前强制探测通过
+//         （endpoint-probe-failed 拒存）—— 防「被诱导存攻击者端点致截图
+//         持续外发」。
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,7 +44,7 @@ import { createGeminiProvider } from './providers/gemini';
 import { createOpenAiProvider } from './providers/openai';
 import { discoverModels, probeProvider } from './providers/probe';
 import type { DiscoveredModel, ProviderProbe } from './providers/probe';
-import { getPreset, listPlatforms } from './providers/registry';
+import { detectPresetFromBaseUrl, getPreset, listPlatforms } from './providers/registry';
 import type { PlatformPreset } from './providers/registry';
 import type { VisionProvider } from './providers/types';
 import { ConnectionStore, maskKey } from './connection';
@@ -122,6 +137,95 @@ function firstEnv(keys: readonly string[]): string {
     } catch { /* 环境面故障视为未设置 */ }
   }
   return '';
+}
+
+/**
+ * ΑΩ-R7 密钥卫生：从请求头取密钥 —— `Authorization: Bearer <key>` 优先，
+ * `x-api-key` 兜底（与上游 openai/anthropic 方言的头形一致；LM Studio/vLLM 的
+ * OpenAI 兼容 /v1/models 均认 Bearer，Ollama 免鉴权时无害忽略）。密钥绝不进
+ * URL query（gemini.ts 同律：URL 会进访问日志/错误信息/探针回显，query 携
+ * 密钥等于日志裸奔）—— query 中的 api_key 一律无视（不读、不转发、不回显）。
+ * 头读取面故障视为无 key。绝不抛异常。
+ */
+function apiKeyFromHeaders(req: IncomingMessage): string {
+  try {
+    const auth = req.headers['authorization'];
+    if (typeof auth === 'string') {
+      const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+      const key = m?.[1]?.trim() ?? '';
+      if (key !== '') return key;
+    }
+  } catch { /* 头读取故障视为无 key */ }
+  try {
+    const alt = req.headers['x-api-key'];
+    if (typeof alt === 'string' && alt.trim() !== '') return alt.trim();
+  } catch { /* 同上 */ }
+  return '';
+}
+
+// ─── ΝΩ-4 跨站密钥外发封堵（三重防护的裁决函数；永不抛异常） ───
+
+/** ΝΩ-4 Host 白名单形：回环名（127.0.0.1/localhost/[::1]）+ 可选端口 */
+const ALLOWED_HOST_RE = /^(\[::1\]|127\.0\.0\.1|localhost)(?::(\d+))?$/;
+
+/**
+ * ΝΩ-4 防护一（Host 头校验，DNS rebinding 防护）：req.headers.host 必须是
+ * 回环名 + 本服务端口。恶意域 DNS 重绑定到 127.0.0.1 后浏览器仍携原域名
+ * Host ⇒ 此处拒之门外；端口缺席按 HTTP 缺省 80 折算（本服务不绑 80，恒不
+ * 匹配 ⇒ 诚实拒）。头缺失/脏值/读取面故障 ⇒ false（HTTP/1.1 强制 Host 头，
+ * 缺席即异常流量）。绝不抛异常。
+ */
+function hostHeaderAllowed(req: IncomingMessage, port: number): boolean {
+  try {
+    const raw = req.headers.host;
+    if (typeof raw !== 'string') return false;
+    const m = ALLOWED_HOST_RE.exec(raw.trim().toLowerCase());
+    if (!m) return false;
+    const claimed = m[2] === undefined ? 80 : Number(m[2]);
+    return claimed === port;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ΝΩ-4 防护二（Sec-Fetch-Site 跨站标记）：头在场且非 same-origin/none ⇒ true
+ * （跨站/同站异源一律拦 —— 恶意页的 <img>/fetch 皆带 cross-site/same-site
+ * 标记；'none' 是用户直开导航，same-origin 是本向导页自身 fetch，均放行）。
+ * 非浏览器工具（curl/node 客户端/宿主探针）不携此头 ⇒ 不受影响。头读取面
+ * 故障视为无标记（不拦）。绝不抛异常。
+ */
+function crossSiteMarked(req: IncomingMessage): boolean {
+  try {
+    const v = req.headers['sec-fetch-site'];
+    if (typeof v !== 'string' || v.trim() === '') return false;
+    const s = v.trim().toLowerCase();
+    return s !== 'same-origin' && s !== 'none';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ΝΩ-4 防护三（base_url 白名单）：候选 base_url 是否允许用于所选平台 ——
+ * 仅接受 a) 同平台预设端点：复用 detectPresetFromBaseUrl 的归一比对
+ * （host+端口+路径前缀；'api.openai.com.evil.tld' 类后缀仿冒不匹配），且
+ * 命中预设与所选平台一致；或 b) 显式回环地址（任意端口/路径 —— 本地服务
+ * 常改口，回环不出本机）。空覆盖 ⇒ true（走预设缺省，天然合法）；脏 URL
+ * （无协议/碎片串）⇒ false。绝不抛异常。
+ */
+function baseUrlAllowedForPlatform(platformId: string, rawBaseUrl: string): boolean {
+  const candidate = rawBaseUrl.trim();
+  if (candidate === '') return true;
+  let hostname = '';
+  try {
+    hostname = new URL(candidate).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
+  const detected = detectPresetFromBaseUrl(candidate);
+  return detected !== null && detected.id === platformId;
 }
 
 /** HTML 文本转义（& < > " ' —— 页面服务端渲染的唯一出口） */
@@ -255,6 +359,10 @@ const ROUTES: Readonly<Record<string, ReadonlySet<string>>> = {
  *    强制 127.0.0.1，绝不绑 0.0.0.0（向导只对本机可见）
  *  - 密钥从不回显 —— 一切响应面只出现 maskKey() 打码形态
  *  - 请求体限 32KB（413）；非法 JSON（400）；未知路由（404）；方法不符（405）
+ *  - ΝΩ-4 跨站封堵 —— Host 头必须回环名+本端口（403 host-not-allowed）；
+ *    Sec-Fetch-Site 在场且非 same-origin/none ⇒ 403 cross-site-blocked；
+ *    base_url 仅接受同平台预设端点或显式回环（400 base-url-not-allowed）；
+ *    /api/connect 存非预设 host 前强制探测通过（endpoint-probe-failed 拒存）
  *
  * @param opts.port       缺省 18432；被占则 +1 逐试至 +8（EADDRINUSE 捕获）；
  *                        传 0 = 内核随机分配（单次尝试）。九口全占 ⇒ Promise
@@ -349,6 +457,16 @@ export async function startOnboarding(opts?: {
     }
   };
 
+  /** ΝΩ-4：服务实际监听端口（Host 校验的比对基准；地址面故障 ⇒ -1 恒不匹配） */
+  const boundPort = (): number => {
+    try {
+      const a = server.address();
+      return a !== null && typeof a === 'object' ? a.port : -1;
+    } catch {
+      return -1;
+    }
+  };
+
   // ─── 请求处理面 ───
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const u = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -359,6 +477,20 @@ export async function startOnboarding(opts?: {
     if (method === 'OPTIONS') {
       res.writeHead(204, { allow: 'GET, POST, OPTIONS' });
       res.end();
+      return;
+    }
+
+    // ── ΝΩ-4 门前双闸（一切路由含 404/405 面统一先过）──
+    //   1) Host 头必须回环名 + 本服务端口（DNS rebinding 防护）；
+    //   2) Sec-Fetch-Site 在场且非 same-origin/none ⇒ 跨站请求拒之
+    //   （GET 是简单请求无预检 —— 恶意页 <img>/text-plain 表单皆可无感抵达，
+    //    故须在服务端门口自证来源，而非指望浏览器 CORS）
+    if (!hostHeaderAllowed(req, boundPort())) {
+      sendJson(res, 403, { ok: false, error: 'host-not-allowed：Host 头须为本服务的回环地址与端口（DNS rebinding 防护）' });
+      return;
+    }
+    if (crossSiteMarked(req)) {
+      sendJson(res, 403, { ok: false, error: 'cross-site-blocked：跨站请求被拒（Sec-Fetch-Site）—— 向导只服务本机同源页面' });
       return;
     }
 
@@ -405,8 +537,15 @@ export async function startOnboarding(opts?: {
         sendJson(res, 400, { ok: false, error: `未知平台：${strField(body.value.platform) || '(空)'}` });
         return;
       }
+      // ΝΩ-4 base_url 白名单：text/plain 表单 POST 属简单请求无预检，与
+      // /api/models 同律封堵 —— 恶意外发目标（含后缀仿冒/他平台预设）一律 400
+      const baseUrlOverride = strField(body.value.base_url);
+      if (!baseUrlAllowedForPlatform(preset.id, baseUrlOverride)) {
+        sendJson(res, 400, { ok: false, error: 'base-url-not-allowed：base_url 仅接受同平台预设端点或本机回环地址' });
+        return;
+      }
       const apiKey = strField(body.value.api_key) || firstEnv(preset.envKeys);
-      const baseUrl = strField(body.value.base_url) || preset.baseUrl;
+      const baseUrl = baseUrlOverride || preset.baseUrl;
       const model = strField(body.value.model) || preset.defaultModel;
       const provider = castProvider({ preset, apiKey, baseUrl, model, fetchImpl: deps.fetchImpl });
       const probe: ProviderProbe = await probeProvider(provider); // 永不抛
@@ -415,14 +554,25 @@ export async function startOnboarding(opts?: {
     }
 
     // ── GET /api/models —— 对所选平台做模型发现 ──
+    // ΑΩ-R7 密钥卫生：密钥只从请求头取（Bearer 优先、x-api-key 兜底）；
+    // URL query 里的 api_key 一律无视（绝不读取 —— 密钥绝不进 URL query）。
+    // 头缺失 ⇒ 回退该平台预设的 env 密钥；env 亦空 ⇒ 免鉴权直连（本地服务）
+    // ΝΩ-4：GET 是简单请求无预检 —— 恶意页可借 <img src=…/api/models?…&
+    // base_url=http://attacker/v1> 触发本服务把 env 密钥以 Bearer 头发往任意
+    // URL；base_url 白名单（同平台预设端点或显式回环）封死该通道。
     if (path === '/api/models') {
       const preset = getPreset((u.searchParams.get('platform') ?? '').trim());
       if (!preset) {
         sendJson(res, 400, { ok: false, models: [], error: `未知平台：${(u.searchParams.get('platform') ?? '') || '(空)'}` });
         return;
       }
-      const apiKey = (u.searchParams.get('api_key') ?? '').trim() || firstEnv(preset.envKeys);
-      const baseUrl = (u.searchParams.get('base_url') ?? '').trim() || preset.baseUrl;
+      const baseUrlOverride = (u.searchParams.get('base_url') ?? '').trim();
+      if (!baseUrlAllowedForPlatform(preset.id, baseUrlOverride)) {
+        sendJson(res, 400, { ok: false, models: [], error: 'base-url-not-allowed：base_url 仅接受同平台预设端点或本机回环地址' });
+        return;
+      }
+      const apiKey = apiKeyFromHeaders(req) || firstEnv(preset.envKeys);
+      const baseUrl = baseUrlOverride || preset.baseUrl;
       const r = await discoverModels({
         baseUrl,
         ...(apiKey !== '' ? { apiKey } : {}),
@@ -449,6 +599,33 @@ export async function startOnboarding(opts?: {
       const apiKey = strField(body.value.api_key);
       const baseUrl = strField(body.value.base_url);
       const model = strField(body.value.model);
+      // ΝΩ-4 base_url 白名单：向导不得被诱导保存攻击者端点（存了即致截图
+      // 持续外发）；仅同平台预设端点或显式回环地址可入档
+      if (!baseUrlAllowedForPlatform(preset.id, baseUrl)) {
+        sendJson(res, 400, { ok: false, error: 'base-url-not-allowed：base_url 仅接受同平台预设端点或本机回环地址' });
+        return;
+      }
+      // ΝΩ-4 非预设 host 强制探测：白名单已保证此时的 baseUrl 必为回环自定义
+      // 端点 —— 保存前先过一道现有 probe 面（与 /api/test 同装配线），探测未
+      // 通过 ⇒ 拒存（endpoint-probe-failed），防「存了一个不可达/钓鱼端点后
+      // 截图持续外发」。预设端点（官方域名）与未覆盖（走预设缺省）免探测 ——
+      // 既有 connect 语义零变化。
+      if (baseUrl !== '' && detectPresetFromBaseUrl(baseUrl)?.id !== preset.id) {
+        const probe: ProviderProbe = await probeProvider(castProvider({
+          preset,
+          apiKey: apiKey !== '' ? apiKey : firstEnv(preset.envKeys),
+          baseUrl,
+          model: model !== '' ? model : preset.defaultModel,
+          fetchImpl: deps.fetchImpl,
+        })); // 永不抛
+        if (!probe.ok) {
+          sendJson(res, 200, {
+            ok: false,
+            error: `非预设端点探测未通过，已拒绝保存（endpoint-probe-failed）：${probe.detail}`,
+          });
+          return;
+        }
+      }
       const conn: VisionConnection = {
         platform: preset.id,
         ...(apiKey !== '' ? { apiKey } : {}),
@@ -791,10 +968,12 @@ async function loadModels() {
   var qs = new URLSearchParams({ platform: selectedId() });
   var key = $('apiKey').value.trim();
   var base = $('baseUrl').value.trim();
-  if (key) qs.set('api_key', key);
   if (base) qs.set('base_url', base);
   try {
-    var r = await fetch('/api/models?' + qs.toString());
+    // ΑΩ-R7 密钥卫生：密钥走 Authorization 头，绝不进 URL query（日志卫生）
+    var r = await fetch('/api/models?' + qs.toString(), {
+      headers: key ? { authorization: 'Bearer ' + key } : {}
+    });
     var j = await r.json();
     if (j.ok) {
       var sel = $('modelSelect');

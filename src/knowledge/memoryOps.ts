@@ -32,6 +32,7 @@
 
 import type { KnowledgeCategory, KnowledgeEntry } from './contracts';
 import type { RunMetricRecord } from './metrics';
+import { cohensH } from './metrics';
 import { kernelRegistry, evidenceLedger, type KernelParamSpec } from '../kernel/registry';
 
 // ─── W2-6：依赖面（结构子集 —— 生产传单例，测试传隔离实例；皆为真实类同构形状）───
@@ -147,6 +148,8 @@ export type { SeededRng } from './memoryOps.random';
 
 
 // ─── W2-6：奖励函数（M5 规格：奖励 = 该条目 N 天内被检索命中 + 注入后助益）───
+// ΝΩ-28 任务3（奖励归因去噪·第一阶段）：helped 判定从「窗口级全局布尔」升级为
+// 两队列对照 —— 详见 compareHelpedCohorts 与 harvestMemoryOpRewards 的归因注记。
 
 /** 奖励窗口缺省：7 天（M5 规格的 N —— 一周的自然任务周期量级） */
 export const DEFAULT_REWARD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -155,13 +158,47 @@ export const DEFAULT_REWARD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * 逐条目二元奖励判定（纯函数，手算可回验）：
  *   success := 命中(hit) ∧ 助益(helped)
  *   · hit = 该条目被检索过（usageCount > 0 —— query 的使用度簿记）；
- *   · helped = 窗口内存在「知识注入在场（knowledgeRounds > 0）且 run 完成
- *     （verdict === 'completed'）」的 run 记录（metrics.ts 命中统计的反馈源 ——
- *     注入在场 = 经验被消费，run 完成 = 消费有助益）。
+ *   · helped 的语义由收割方（harvestMemoryOpRewards）铸造：两队列对照充足时 =
+ *     注入在场组完成率显著占优；样本不足时回退「∃ 注入在场且完成的 run」。
  * 未命中或未助益 ⇒ failure（占库不产出 / 产出未变现，都是操作的机会成本）。
  */
 export function evaluateMemoryOpSuccess(hit: boolean, helped: boolean): boolean {
   return hit === true && helped === true;
+}
+
+/** 窗口内 run 的两队列完成账（奖励归因去噪的原始观测面） */
+export interface HelpedCohortStats {
+  /** 注入在场组（knowledgeRounds > 0）的 run 数 */
+  present: number;
+  /** 注入在场组中 verdict='completed' 的 run 数 */
+  presentCompleted: number;
+  /** 注入缺席组（knowledgeRounds ≤ 0 —— 对照组）的 run 数 */
+  absent: number;
+  /** 缺席组中 completed 的 run 数 */
+  absentCompleted: number;
+}
+
+/**
+ * 两队列完成率对照（纯函数，ΝΩ-28 任务3）：
+ *   · helped := 在场组完成率 > 缺席组完成率，以 Cohen's h 定号（h > 0 ⇔ 在场组
+ *     更高；二元 0/1 结局下秩检验与比例差完全同序，h 在比例近 0/1 域不虚胀 ——
+ *     复用 metrics.ts 的既有效应量面，不新铸统计）；
+ *   · 两队列各 ≥ 2（样本充足下限）⇒ 对照成立；任一侧 < 2 ⇒ null —— 诚实交给
+ *     调用方回退窗口级全局布尔（1v1 的完成率对照是掷硬币，不是证据）。
+ * 垃圾计数（负数 / 非有限 / 分母 0 已被 <2 守卫排除）⇒ null，绝不抛。
+ */
+export function compareHelpedCohorts(c: Partial<HelpedCohortStats> | null | undefined): boolean | null {
+  if (!c || typeof c !== 'object') return null;
+  const { present, presentCompleted, absent, absentCompleted } = c;
+  if (present === undefined || presentCompleted === undefined || absent === undefined || absentCompleted === undefined) {
+    return null;
+  }
+  if (![present, presentCompleted, absent, absentCompleted].every(v => Number.isFinite(v) && v >= 0)) {
+    return null;
+  }
+  if (present < 2 || absent < 2) return null;
+  const h = cohensH(presentCompleted / present, absentCompleted / absent);
+  return (h ?? 0) > 0;
 }
 
 /** 逐类别试验账：窗口内每条目一次伯努利试验的成败计数 */
@@ -176,7 +213,13 @@ export interface CategoryTrials {
  * 奖励收割（metrics 反馈源 → 逐类别试验账）：
  *   · 窗口 W = [now − windowMs, now]；runs 取 ts ∈ W，条目取 updatedAt ∈ W
  *     （usageCount 无逐次时间戳 —— updatedAt 是最后一次触碰的诚实代理，文档在案）；
- *   · helped 见 evaluateMemoryOpSuccess；逐类别逐条目判定成败。
+ *   · helped 归因（ΝΩ-28 任务3 两队列对照）：窗口内 run 按知识注入在场性分
+ *     两队列 —— 在场组（knowledgeRounds > 0，经验被消费）/ 缺席组（对照组），
+ *     比较完成率（Cohen's h 定号）。任一侧 < 2 ⇒ 回退现行窗口级全局布尔
+ *     （∃ 注入在场且 completed 的 run）：样本不足时完成率对照无统计力，
+ *     旧布尔是它诚实（且零漂移）的退化形。去噪收益：知识全速注射但完成率
+ *     反而更差的库不再全员记 success —— 全局布尔把「恰好有完成的 run」
+ *     归因为「注入有助益」，两队列对照拆穿这个混杂。
  * 垃圾输入（非数组 / 字段缺失 / 时间戳畸形）静默跳过 —— 绝不抛。返回恒为全分类学
  * 键的完整映射（无数据类别 = 全零账，不缺席 —— 消费方可直索引）。
  */
@@ -190,8 +233,9 @@ export function harvestMemoryOpRewards(
   const windowMs = Number.isFinite(opts?.windowMs) && (opts?.windowMs as number) > 0
     ? (opts?.windowMs as number) : DEFAULT_REWARD_WINDOW_MS;
   const now = Number.isFinite(opts?.now) ? (opts?.now as number) : Date.now();
-  // 助益判定：窗口内知识消费 run 的完成性（metrics 命中统计反馈源的唯一消费点）
-  let helped = false;
+  // 助益归因：两队列完成账 + 现行布尔（样本不足的回退臂）
+  const cohorts: HelpedCohortStats = { present: 0, presentCompleted: 0, absent: 0, absentCompleted: 0 };
+  let fallbackHelped = false;
   if (Array.isArray(runs)) {
     for (const r of runs) {
       if (!r || typeof r !== 'object') continue;
@@ -199,9 +243,16 @@ export function harvestMemoryOpRewards(
       const kr = (r as Partial<RunMetricRecord>).knowledgeRounds;
       if (typeof ts !== 'number' || !Number.isFinite(ts) || ts < now - windowMs || ts > now) continue;
       if (typeof kr !== 'number' || !Number.isFinite(kr)) continue;
-      if (kr > 0 && r.verdict === 'completed') { helped = true; break; }
+      if (kr > 0) {
+        cohorts.present += 1;
+        if (r.verdict === 'completed') { cohorts.presentCompleted += 1; fallbackHelped = true; }
+      } else {
+        cohorts.absent += 1;
+        if (r.verdict === 'completed') cohorts.absentCompleted += 1;
+      }
     }
   }
+  const helped = compareHelpedCohorts(cohorts) ?? fallbackHelped;
   if (!Array.isArray(entries)) return out;
   // isArray 守卫把 readonly KnowledgeEntry[] 窄化成与 any[] 的交集（元素被 any
   // 传染 —— TS 已知行为），显式还原元素类型；运行时垃圾防御靠下方逐字段守卫

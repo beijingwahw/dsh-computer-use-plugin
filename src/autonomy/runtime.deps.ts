@@ -63,6 +63,15 @@ export interface RuntimeDeps {
   /** W1-1：执行层节奏/阈值覆盖（测试与调参；不接 config —— 集成阶段统一接） */
   w1?: Partial<W1ExecTuning>;
   /**
+   * ΑΩ-R12（drag 执行面落地）：拖拽派发端口 —— 像素四元组（起点/终点，屏幕
+   * 像素坐标 —— 与 system.clickMouse 的 px/py 同域）。接线层（index.ts 的
+   * buildAutonomyStack）把根层 system.dragMouse 的四拍时序适配注入；autonomy
+   * 器官本体不 import system —— 经 deps 注入破环。缺席 ⇒ drag 动作防御式
+   * 降级 no_effect + 诚实注记（绝不凭空移动鼠标）。失败收敛 {ok:false, error}
+   *（绝不抛 —— 运行层铁律由端口收口）。
+   */
+  drag?: (startX: number, startY: number, endX: number, endY: number) => Promise<{ ok: boolean; error?: string }>;
+  /**
    * W4-1（A1）：宏执行注入面 —— 排练门禁场景与宏链预算的覆盖位。
    * 缺席 ⇒ 场景取感知快照元素（lastSnapshotRef）、预算取 MACRO_DEFAULT_BUDGET。
    */

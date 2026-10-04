@@ -233,9 +233,13 @@ test('Ψ-3: jsonMode —— prompt 尾部追加约定行，围栏回复剥壳提
   assert.equal(body.response_format, undefined, 'Anthropic 无原生 response_format');
   assert.equal(
     body.messages[0].content[body.messages[0].content.length - 1].text,
-    '给出判决\n\n只输出严格 JSON，不要围栏。',
+    '给出判决\n\nOutput strict JSON only. 只输出严格 JSON，不要围栏。',
     'jsonMode ⇒ prompt 尾部追加约定行',
   );
+  // ΑΩ-R35：追加行中英双语 —— 英文语境模型同样读得懂约定
+  const sent = String(body.messages[0].content[body.messages[0].content.length - 1].text);
+  assert.match(sent, /Output strict JSON only\./);
+  assert.match(sent, /只输出严格 JSON，不要围栏。/);
 });
 
 test('Ψ-3: 非 jsonMode ⇒ prompt 原样发送（无追加行），结果不带 json 字段', async () => {
@@ -478,7 +482,7 @@ test('Ψ-3: chatJson —— 强制 jsonMode（追加行）+ 围栏/杂文提取 
   const body = bodyOf(calls[0]!);
   assert.equal(
     body.messages[0].content[body.messages[0].content.length - 1].text,
-    '圈出目标\n\n只输出严格 JSON，不要围栏。',
+    '圈出目标\n\nOutput strict JSON only. 只输出严格 JSON，不要围栏。',
     'chatJson 强制 jsonMode ⇒ prompt 追加约定行',
   );
 });
@@ -536,4 +540,103 @@ test('Ψ-3: 配置优先级 —— env ANTHROPIC_* 生效，options 覆盖 env',
     delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.ANTHROPIC_MODEL;
   }
+});
+
+// ─── ΝΩ-44（结构化输出约束解码）：tool_use 强 schema ───
+
+/** ΝΩ-44 测试共用 schema */
+const NO44_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['click', 'type'] },
+    detail: { type: 'object', properties: { x: { type: 'number' } } },
+  },
+  required: ['action'],
+};
+
+/** tool_use 成功响应 —— content 含 text 前导块 + tool_use 块（检验 input 包装优先） */
+function toolUseOk(input: unknown, usage?: Record<string, number>): Response {
+  return ok([
+    { type: 'text', text: '先看一眼' },
+    { type: 'tool_use', id: 'toolu_013WzZ', name: 'emit', input },
+  ], usage);
+}
+
+test('ΝΩ-44: 开 —— jsonSchema ⇒ tools/tool_choice 强 schema；tool_use input 包装为文本 + 对象透传 json', async () => {
+  const meters: ProviderMeterRecord[] = [];
+  const { fetchImpl, calls } = recorder(() => toolUseOk({ action: 'click', detail: { x: 12 } }, { input_tokens: 10, output_tokens: 5 }));
+  const p = anth.createAnthropicProvider({ apiKey: 'k', fetchImpl, meter: rec => meters.push(rec) });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click', detail: { x: 12 } }, 'input 对象透传（不二道串解）');
+  assert.equal(r.text, JSON.stringify({ action: 'click', detail: { x: 12 } }), 'input 包装为文本结果（剥壳链消费面无感）');
+  assert.deepEqual(r.usage, { promptTokens: 10, completionTokens: 5 }, 'meter/usage 面同律');
+  assert.equal(calls.length, 1);
+  assert.equal(meters.length, 1, 'tool_use 路径仍恰一条遥测');
+  const body = bodyOf(calls[0]!);
+  assert.deepEqual(body.tools, [{
+    name: 'emit',
+    description: 'Emit the structured response for this request.',
+    input_schema: NO44_SCHEMA,
+  }], 'input_schema 原样透传');
+  assert.deepEqual(body.tool_choice, { type: 'tool', name: 'emit' });
+  assert.equal(body.messages[0].content[1].text, '描述这张截图', 'tool 模式不追加 JSON 约定行（纪律由 tool_choice 承担）');
+});
+
+test('ΝΩ-44: 开（chatJson 贯通）—— tool_use input 经包装文本剥壳还原同值', async () => {
+  const { fetchImpl, calls } = recorder(() => toolUseOk({ action: 'type' }));
+  const p = anth.createAnthropicProvider({ apiKey: 'k', fetchImpl });
+  const j = await p.chatJson(req({ jsonSchema: NO44_SCHEMA }));
+  assert.equal(j.ok, true);
+  assert.deepEqual(j.value, { action: 'type' });
+  assert.deepEqual(JSON.parse(j.raw), { action: 'type' }, 'raw = 包装后的 tool_use input 文本');
+  assert.equal(bodyOf(calls[0]!).tools[0].name, 'emit');
+});
+
+test('ΝΩ-44: 关 —— jsonSchema 缺席 ⇒ 无 tools/tool_choice 键（逐字节旧形状）+ jsonMode 后缀照旧', async () => {
+  const { fetchImpl, calls } = recorder(() => ok([{ type: 'text', text: '{}' }]));
+  const p = anth.createAnthropicProvider({ apiKey: 'k', fetchImpl });
+  await p.chat(req({ jsonMode: true }));
+  const body = bodyOf(calls[0]!);
+  assert.equal('tools' in body, false);
+  assert.equal('tool_choice' in body, false);
+  assert.match(body.messages[0].content[1].text, /只输出严格 JSON/, '旧 jsonMode 提示词后缀不变');
+});
+
+test('ΝΩ-44: 模型违约未出 tool_use 块 ⇒ 落回文本剥壳旧路径（诚实回退，不抛）', async () => {
+  const { fetchImpl, calls } = recorder(() => ok([{ type: 'text', text: '```json\n{"action":"type"}\n```' }]));
+  const p = anth.createAnthropicProvider({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'type' }, '文本剥壳兜底');
+  assert.equal(calls.length, 1);
+});
+
+test('ΝΩ-44: 降级链 —— 400 ⇒ 剥 tools/tool_choice、提示词后缀重发恰一次后成功', async () => {
+  const { fetchImpl, calls } = queue(
+    () => httpStatus(400, '{"type":"error","error":{"type":"invalid_request_error","message":"tools.0.input_schema invalid"}}'),
+    () => ok([{ type: 'text', text: '{"action":"click"}' }]),
+  );
+  const p = anth.createAnthropicProvider({ apiKey: 'k', fetchImpl });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.json, { action: 'click' });
+  assert.equal(calls.length, 2, '恰一次回退重发');
+  assert.equal('tools' in bodyOf(calls[0]!), true, '首发带 tools');
+  const second = bodyOf(calls[1]!);
+  assert.equal('tools' in second, false);
+  assert.equal('tool_choice' in second, false);
+  assert.match(second.messages[0].content[1].text, /只输出严格 JSON/, '回退态补提示词后缀');
+});
+
+test('ΝΩ-44: 降级链终败 ⇒ 注记入 error（ΝΩ-44 标记）+ meter 恰一条', async () => {
+  const meters: ProviderMeterRecord[] = [];
+  const { fetchImpl, calls } = queue(() => httpStatus(400, '{"type":"error","error":{"type":"invalid_request_error","message":"tools not supported"}}'));
+  const p = anth.createAnthropicProvider({ apiKey: 'k', fetchImpl, meter: rec => meters.push(rec) });
+  const r = await p.chat(req({ jsonMode: true, jsonSchema: NO44_SCHEMA }));
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /ΝΩ-44/);
+  assert.match(r.error!, /tool_use/);
+  assert.equal(calls.length, 2, '恰一次回退，无循环');
+  assert.equal(meters.length, 1, '两次拨号仍恰一条遥测');
 });

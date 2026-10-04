@@ -6,38 +6,23 @@ const LEDGER_CAPACITY = 500;
 const CAPACITY_MAX = 10_000;
 /** 挂起预言的诚实作废时限（ms）：60s 内取不到真实下一屏型 ⇒ 作废（绝不伪造） */
 const PENDING_TTL_MS = 60_000;
-// ─── D-G2 细化（W8 第 2 批）：屏型身份粗层桥 + 惊异喂养通道 ───
-//
-// 台账原文（DEBTS D-G2）：「屏型身份用 dhash 指纹（粒度粗于世界模型聚类 ⇒
-// no-model 偏多——诚实但待细化）+ 惊异喂 EvolutionEngine 通道未接」。两处细化：
-//   1. 身份桥：闭环屏型身份是整幅 dhash 指纹（hex 方言）—— 像素级抖动（光标
-//      闪烁/任务栏时钟/广告位轮换）翻掉任意比特 ⇒ 新指纹 ⇒ 转移表精确键查无
-//      ⇒ no-model 偏多。细化 = 铸造时精确键优先、无证据则粗层回退一问（dhash
-//      前 8 hex 字 = 上 32 位梯度的汇聚格）；结算回灌双写（精细格 + 粗格，
-//      粗格只粗化 from 侧 —— to 侧保持精细身份，结算比对 fine↔fine 方言不串）。
-//      非 hex / 短于前缀的屏型（世界模型聚类 id 'screen-12' 等）不经此桥 ——
-//      旧方言逐字节零漂移。粗层预言在记录上诚实标注 predictedVia:'coarse'
-//      （统计面 coarseAssisted 可观测 —— 回退的收益不掺水分）。
-//   2. 惊异喂养：错题本的消费面 —— 失手记录（含惊异 bits）经结构性端口
-//      surpriseFeed.ingest 喂给进化引擎（EvolutionEngine 结构性满足，与
-//      sleep/dreamReplay 的 DreamEvolutionLike 同律；autonomy 栈侧接线属
-//      autonomy 产权域，本模块只出通道与执法面）。
-/** 粗层屏型前缀长度（hex 字符）：闭环 dhash 16 hex 字 ⇒ 前 8 字符 = 上 32 位梯度 */
-export const COARSE_PREFIX_HEX = 8;
 /**
- * 屏型粗化（纯函数，永不抛 —— D-G2 身份桥）：hex 方言指纹截前
- * COARSE_PREFIX_HEX 字符；非 hex / 不长于前缀 ⇒ 原样返回（旧方言零漂移 ——
- * 世界模型聚类 id 不经 dhash 面，双写与回退对它们天然跳过）。
+ * 有界 keyed pending 缺省槽数（ΑΩ-R18）：闭环 mint→settle 严格交替（单槽即
+ * 足），富余只兜并发/跨 run 边界的滞留铸造 —— 8 槽 ≈ 8 条并发 run 的在途预
+ * 言，是「审计丢件有痕」与「挂起集有界」的折中。
  */
-export function coarseScreenType(screenType) {
-    const s = typeof screenType === 'string' ? screenType : '';
-    if (s.length <= COARSE_PREFIX_HEX)
-        return s;
-    return /^[0-9a-f]+$/i.test(s) ? s.slice(0, COARSE_PREFIX_HEX) : s;
-}
+const PENDING_SLOTS = 8;
+/** 挂起槽数夹取上限（防注入式爆内存：挂起集与账本同律不值得无界） */
+const PENDING_SLOTS_MAX = 64;
 // W6-2（doctor smell.over-engineering 清偿）：内部纯工具已分区提取至 internal.ts
 // （行为零变化；PROB_EPSILON 随迁 —— 仅 settleSurpriseBits 消费）。
-import { nonEmptyStr, safeNow, shortId, resultValue, settleSurpriseBits } from './internal.js';
+// ΑΩ-R18：屏型量化/粗层方言（quantizedScreenType/coarseScreenType）定义于
+// internal.ts（惊异读面的层级匹配需要它们，值定义在 internal 内避免值环）；
+// 此处消费 + 再分发 —— 公开导入面与 W8 逐字节不变。
+import { nonEmptyStr, safeNow, shortId, resultValue, settleSurpriseBits, coarseScreenType, quantizedScreenType, } from './internal.js';
+export { coarseScreenType, COARSE_PREFIX_HEX, quantizedScreenType, QUANT_KEEP_HEX, QUANT_MIN_KEEP_HEX, QUANT_MAX_KEEP_HEX, PROPHECY_QUANT_KERNEL_KEY, 
+// ΝΩ-11：惊异夹帽（错题本排序防单条拉爆）—— 常量与夹取函数随迁公开面
+SURPRISE_MAX_BITS, clampSurpriseBits, } from './internal.js';
 // ─── 铸造与结算（纯函数面） ───
 /**
  * 铸预言（纯函数，永不抛）：按 (屏型, 动作键) 问世界模型 predict 读面。
@@ -45,10 +30,14 @@ import { nonEmptyStr, safeNow, shortId, resultValue, settleSurpriseBits } from '
  *     绝不把「没见过」伪装成任何预测）；
  *   · 有历史 ⇒ 取分布首名（typeId + prob），outcome 'pending'（铸而未验 ——
  *     三态终值只由 settleProphecy 落锤）。
- *   · D-G2 粗层回退：精确键查无 ⇒ 粗格（coarseScreenType）再问一次；粗格有
- *     证据 ⇒ 预言标注 predictedVia:'coarse'（抖动变体免于无知的细化通道，
- *     来源层如实入账）；粗格也无 ⇒ 仍诚实 no-model。非 hex 屏型无粗格
- *     （coarseScreenType 原样返回 ⇒ 回退跳过）—— 旧方言零漂移。
+ *   · ΑΩ-R18 三层梯级（细 → 粗，先到先得，来源层如实入账）：
+ *       ① 原始指纹（'exact'）—— 字节级复现的旧通道（非 hex 方言的唯一通道，
+ *          旧方言零漂移）；
+ *       ② 量化格（'quant'）—— quantizedScreenType：dhash 低 16 位（屏幕下
+ *          1/4 条带抖动正源）掩没 ⇒ 同场景抖动变体命中同键（R18 主诉的
+ *          结构性修法）；
+ *       ③ 粗格（'coarse'）—— D-G2 coarseScreenType（上 32 位）回退。
+ *     各层查无 ⇒ 仍诚实 no-model。非 hex 屏型三键合一 ⇒ 逐字节旧路径。
  * @param ts 铸造时刻（缺省 Date.now —— 引擎注入闭环时钟）
  */
 export function mintProphecy(worldModel, screenType, actionKey, ts) {
@@ -78,20 +67,20 @@ export function mintProphecy(worldModel, screenType, actionKey, ts) {
             return null; // 模型故障 = 无知识（诚实吞掉，绝不炸，绝不伪造）
         }
     };
-    const exact = ask(s);
-    if (exact !== null) {
-        const rec = { ...base, predictedType: exact.typeId, predictedVia: 'exact', outcome: 'pending' };
-        if (typeof exact.prob === 'number')
-            rec.predictedProb = exact.prob;
-        return rec;
-    }
+    // ΑΩ-R18：梯级去重（量化格与原始键相同时不重问；粗格亦然 —— 键相同即同格）
+    const quant = quantizedScreenType(s);
     const coarse = coarseScreenType(s);
-    if (coarse !== s) {
-        const viaCoarse = ask(coarse);
-        if (viaCoarse !== null) {
-            const rec = { ...base, predictedType: viaCoarse.typeId, predictedVia: 'coarse', outcome: 'pending' };
-            if (typeof viaCoarse.prob === 'number')
-                rec.predictedProb = viaCoarse.prob;
+    const tiers = [{ key: s, via: 'exact' }];
+    if (quant !== s)
+        tiers.push({ key: quant, via: 'quant' });
+    if (coarse !== s && coarse !== quant)
+        tiers.push({ key: coarse, via: 'coarse' });
+    for (const tier of tiers) {
+        const hit = ask(tier.key);
+        if (hit !== null) {
+            const rec = { ...base, predictedType: hit.typeId, predictedVia: tier.via, outcome: 'pending' };
+            if (typeof hit.prob === 'number')
+                rec.predictedProb = hit.prob;
             return rec;
         }
     }
@@ -99,8 +88,13 @@ export function mintProphecy(worldModel, screenType, actionKey, ts) {
 }
 /**
  * 结预言（纯函数，永不抛）：命中律三态落锤。
- *   · predictedType === actualType ⇒ 'hit'；
- *   · 有预言而不符 ⇒ 'miss' + 惊异差值（settleSurpriseBits 口径）；
+ *   · ΑΩ-R18 键粒度两侧一致：比对一律经量化折算 —— predictedType ===
+ *     quantizedScreenType(actualType) ⇒ 'hit'。引擎回灌的目的地恒为量化身份
+ *     （见 ProphecyEngine.settle 三写），预言侧与见证侧在同一把量化尺上对账
+ *     （不得 fine↔coarse 串味）；非 hex 方言量化恒等 ⇒ 逐字节旧判律。记录上
+ *     的 actualType 保持原始精细见证（只作记录，比对经折算）。
+ *   · 有预言而不符 ⇒ 'miss' + 惊异差值（settleSurpriseBits 口径 —— 同按来源
+ *     层对键、目的地量化，读写同方言）；
  *   · 无预言（no-model 铸造）⇒ 直通 —— 无知就是无知，actualType 只作见证记录。
  * actualType 非非空字符串 ⇒ 原样直通（不结算 —— 挂起由引擎的 60s 作废律收口，
  * 绝不在这里伪造见证）。返回结算后的**新记录**（入参不可变）。
@@ -116,7 +110,7 @@ export function settleProphecy(record, actualType, worldModel) {
             out.outcome = 'no-model'; // 直通：模型无知
             return out;
         }
-        if (out.predictedType === actualType) {
+        if (out.predictedType === quantizedScreenType(actualType)) {
             out.outcome = 'hit';
             out.surpriseBits = settleSurpriseBits(out, actualType, 'hit', worldModel);
             return out;
@@ -167,8 +161,8 @@ export function prophecyJournalTag(record) {
     try {
         const cell = `${shortId(record.screenType)}|${record.actionKey}`;
         const to = nonEmptyStr(record.actualType) ? shortId(String(record.actualType)) : '?';
-        // D-G2：粗层回退铸出的预言在注记上如实标注（via 粗层）—— 精确层注记逐字节旧方言
-        const via = record.predictedVia === 'coarse' ? '，via 粗层' : '';
+        // D-G2/ΑΩ-R18：回退/量化层铸出的预言在注记上如实标注 —— 精确层注记逐字节旧方言
+        const via = record.predictedVia === 'coarse' ? '，via 粗层' : record.predictedVia === 'quant' ? '，via 量化层' : '';
         if (record.outcome === 'hit') {
             const p = typeof record.predictedProb === 'number' && Number.isFinite(record.predictedProb)
                 ? Math.round(record.predictedProb * 1000) / 1000
@@ -221,26 +215,37 @@ export function surpriseRunRecord(rec) {
 }
 /**
  * 预言引擎（ProphecyPort 的真实实现）：铸造 → 挂起 → 结算 → 入账 的账本主人。
- *   · mint：先作废超时挂起，再铸新预言（盲屏指纹 ⇒ 不铸）；已有挂起被新铸
- *     覆盖时静默丢弃（闭环里 mint 恒在 settle 之后 —— 覆盖只在跨 run 边界）；
- *   · settle：actualType 缺席 ⇒ 挂起保持（60s 后作废计数，绝不伪造见证）；
- *     结算成功 ⇒ 记录入环形账本（500 封顶，逐出最旧）+（learn 时）observe
- *     回灌世界模型（先 surprise 后 observe —— 与 D-7 回路同序，误差先于学习）；
+ *   · mint（ΑΩ-R18 有界 keyed pending）：先作废超时挂起，再铸新预言（盲屏
+ *     指纹 ⇒ 不铸）；各铸造各占一槽（按铸造序键控，缺省 8 槽）—— 并发/跨
+ *     run 边界的铸造不再静默覆盖未结算预言，溢出最旧作废计入 expired（作废
+ *     有痕，绝不无痕丢件）；
+ *   · settle（ΑΩ-R18 LIFO 配对）：结算见证恒属最近执行的动作 ⇒ 配对最近铸造
+ *     （后进先出）；actualType 缺席 ⇒ 挂起保持（60s 后作废计数，绝不伪造
+ *     见证）；结算成功 ⇒ 记录入环形账本（500 封顶，逐出最旧）+（learn 时）
+ *     observe 回灌世界模型三写 {原始, 量化, 粗格}（先 surprise 后 observe ——
+ *     与 D-7 回路同序，误差先于学习；目的地一律量化身份 ⇒ 表内键与目的地
+ *     粒度同律，结算比对两侧一致不串味）；
  *   · 一切公开面永不抛异常。
  */
 export class ProphecyEngine {
     worldModel;
     now;
     pendingTtlMs;
+    pendingSlots;
     capacity;
     learn;
     /** 惊异喂养通道（D-G2；缺席 ⇒ 零行为） */
     surpriseFeedTarget;
     /** 环形账本（入账序；超容量逐出最旧） */
     ledger = [];
-    /** 挂起中的预言（至多一条） */
-    pending = null;
-    /** 挂起作废累计（诚实计数 —— 取不到真实下一屏型的预言归宿） */
+    /**
+     * 挂起中的预言（ΑΩ-R18 有界 keyed pending）：铸造序 → 记录（插入序 = 铸
+     * 造序 ⇒ 首 key = 最旧、末 key = 最近；Map 有界 pendingSlots 槽）
+     */
+    pending = new Map();
+    /** 铸造序发号器（单调计数 —— 挂起键的身份源；绝不用时钟充当 id） */
+    mintSeq = 0;
+    /** 挂起作废累计（诚实计数 —— TTL 超时与容量逐出同律入账：取不到真实下一屏型的预言归宿） */
     expiredCount = 0;
     /** 已扫视入账总数（喂养水位线 —— 与 evictedTotal 的差即当前未扫视起点） */
     fedCursor = 0;
@@ -253,6 +258,10 @@ export class ProphecyEngine {
             typeof opts.pendingTtlMs === 'number' && Number.isFinite(opts.pendingTtlMs) && opts.pendingTtlMs > 0
                 ? opts.pendingTtlMs
                 : PENDING_TTL_MS;
+        this.pendingSlots =
+            typeof opts.pendingSlots === 'number' && Number.isFinite(opts.pendingSlots)
+                ? Math.min(PENDING_SLOTS_MAX, Math.max(1, Math.floor(opts.pendingSlots)))
+                : PENDING_SLOTS;
         this.capacity =
             typeof opts.capacity === 'number' && Number.isFinite(opts.capacity)
                 ? Math.min(CAPACITY_MAX, Math.max(1, Math.floor(opts.capacity)))
@@ -261,14 +270,17 @@ export class ProphecyEngine {
         this.surpriseFeedTarget =
             opts.surpriseFeed && typeof opts.surpriseFeed.ingest === 'function' ? opts.surpriseFeed : null;
     }
-    /** 挂起超时作废（内部件）：now − ts 越过 TTL ⇒ expired 计数 + 丢弃 */
+    /** 挂起超时作废（内部件）：逐槽扫视，now − ts 越过 TTL ⇒ expired 计数 + 丢弃 */
     voidStalePending() {
-        if (this.pending === null)
+        if (this.pending.size === 0)
             return;
-        const age = safeNow(this.now) - this.pending.ts;
-        if (Number.isFinite(age) && age > this.pendingTtlMs) {
-            this.expiredCount++;
-            this.pending = null;
+        const t = safeNow(this.now);
+        for (const [seq, rec] of [...this.pending.entries()]) { // 快照遍历（作废中改 Map）
+            const age = t - rec.ts;
+            if (Number.isFinite(age) && age > this.pendingTtlMs) {
+                this.expiredCount++;
+                this.pending.delete(seq);
+            }
         }
     }
     /** 铸造面（ProphecyPort）：盲屏不铸；任何故障只丢预言。永不抛。 */
@@ -277,21 +289,38 @@ export class ProphecyEngine {
             this.voidStalePending();
             if (!nonEmptyStr(screenType) || !nonEmptyStr(actionKey))
                 return; // 盲屏/空键不可预言
-            this.pending = mintProphecy(this.worldModel, String(screenType), String(actionKey), safeNow(this.now));
+            // ΑΩ-R18：容量律 —— 溢出最旧作废（expired 有痕），铸造各占一槽不覆盖
+            while (this.pending.size >= this.pendingSlots) {
+                const oldest = this.pending.keys().next();
+                if (oldest.done)
+                    break;
+                this.pending.delete(oldest.value);
+                this.expiredCount++;
+            }
+            const seq = ++this.mintSeq;
+            this.pending.set(seq, mintProphecy(this.worldModel, String(screenType), String(actionKey), safeNow(this.now)));
         }
         catch {
-            this.pending = null; // 铸造故障吞掉 —— 丢预言不炸环
+            this.pending.clear(); // 铸造故障吞掉 —— 丢预言不炸环
         }
     }
     /**
      * 结算面（ProphecyPort）：新屏型指纹 = actualType（结算见证）。
+     * ΑΩ-R18 LIFO 配对：见证恒属最近执行的动作 ⇒ 结算最近铸造（早铸预言留待
+     * 各自结算或作废律收口 —— 并发双预言各得其所，绝不互相顶掉）。
      * 返回结算记录（null = 无待结算 / 见证缺席仍挂起 / 已作废）。永不抛。
      * learn 时结算后回灌 observe（success 由闭环传执行结局 —— 缺省按成功入账）。
      */
     settle(actualType, success) {
         try {
             this.voidStalePending();
-            const pending = this.pending;
+            // LIFO：插入序末位 = 最近铸造（Map 迭代序保证）
+            let lastSeq = null;
+            for (const seq of this.pending.keys())
+                lastSeq = seq;
+            if (lastSeq === null)
+                return null;
+            const pending = this.pending.get(lastSeq) ?? null;
             if (pending === null)
                 return null;
             if (!nonEmptyStr(actualType))
@@ -299,20 +328,25 @@ export class ProphecyEngine {
             const settled = settleProphecy(pending, String(actualType), this.worldModel);
             // Dyna 回灌：真实转移喂模型（先 surprise 后 observe —— settleProphecy 已读
             // 惊异，此处才入账学习；回灌故障吞掉 —— 审计绝不为学习停摆）。
-            // D-G2 粗层双写：from 侧粗化一格（coarseScreenType）、to 侧保持精细身份 ——
-            // 粗格汇聚抖动变体的出弧证据（回退铸造的证据源），目的地不粗化（结算
-            // 比对 fine↔fine，方言不串）。非 hex / 短屏型无粗格 ⇒ 双写天然跳过。
+            // ΑΩ-R18 三写：from 侧 {原始, 量化格, 粗格}（去重 —— 非 hex/短屏型三键
+            // 合一即单写，旧方言观察计数不翻倍）；to 侧一律量化身份 —— 表内目的地
+            // 与铸造梯级、结算比对共用同一把量化尺（键粒度两侧一致，方言不串）。
+            // 原始键一写是 D-G2 既有积累面的延续（字节级复现通道的证据源）。
             if (this.learn && this.worldModel && typeof this.worldModel.observe === 'function') {
                 try {
-                    this.worldModel.observe(settled.screenType, settled.actionKey, String(actualType), success !== false);
-                    const coarse = coarseScreenType(settled.screenType);
-                    if (coarse !== settled.screenType) {
-                        this.worldModel.observe(coarse, settled.actionKey, String(actualType), success !== false);
+                    const witness = quantizedScreenType(String(actualType));
+                    const fromKeys = new Set([
+                        settled.screenType,
+                        quantizedScreenType(settled.screenType),
+                        coarseScreenType(settled.screenType),
+                    ]);
+                    for (const key of fromKeys) {
+                        this.worldModel.observe(key, settled.actionKey, witness, success !== false);
                     }
                 }
                 catch { /* 回灌故障吞掉 */ }
             }
-            this.pending = null;
+            this.pending.delete(lastSeq);
             this.ledger.push(settled);
             if (this.ledger.length > this.capacity) {
                 const evicted = this.ledger.length - this.capacity;
@@ -325,7 +359,7 @@ export class ProphecyEngine {
             return settled;
         }
         catch {
-            this.pending = null; // 结算故障吞掉 —— 丢预言不炸环
+            this.pending.clear(); // 结算故障吞掉 —— 丢预言不炸环
             return null;
         }
     }
@@ -382,7 +416,7 @@ export class ProphecyEngine {
             this.voidStalePending();
             return {
                 ...prophecyStats(this.ledger),
-                pending: this.pending !== null ? 1 : 0,
+                pending: this.pending.size,
                 expired: this.expiredCount,
                 capacity: this.capacity,
             };
@@ -439,8 +473,8 @@ export class ProphecyEngine {
                 };
                 if (nonEmptyStr(r.predictedType))
                     rec.predictedType = String(r.predictedType);
-                if (r.predictedVia === 'exact' || r.predictedVia === 'coarse') {
-                    rec.predictedVia = r.predictedVia; // D-G2：来源层白名单（域外值弃置）
+                if (r.predictedVia === 'exact' || r.predictedVia === 'quant' || r.predictedVia === 'coarse') {
+                    rec.predictedVia = r.predictedVia; // D-G2/ΑΩ-R18：来源层白名单（域外值弃置）
                 }
                 if (typeof r.predictedProb === 'number' && Number.isFinite(r.predictedProb)) {
                     rec.predictedProb = Math.min(1, Math.max(0, r.predictedProb));
@@ -456,7 +490,7 @@ export class ProphecyEngine {
             if (typeof s.expired === 'number' && Number.isFinite(s.expired) && s.expired >= 0) {
                 this.expiredCount = Math.floor(s.expired);
             }
-            this.pending = null; // 挂起不可序列化 —— 水合即清（诚实：跨进程的未验预言作废）
+            this.pending.clear(); // 挂起不可序列化 —— 水合即清（诚实：跨进程的未验预言作废）
             // D-G2：水合后喂养水位线直抵账尾（已在册记录视为已消化 —— 与「挂起不可
             // 序列化 ⇒ 水合即清」同律：跨进程的喂养账不复存在，保守不重喂；重喂会使
             // 进化侧失手双计。dump/restore 消费面如需重喂自可直调 surpriseRunRecord）。

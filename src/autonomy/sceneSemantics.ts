@@ -15,12 +15,16 @@
 //     （reading:null + degraded:true）；VLM 失败 ⇒ degraded + error 且不缓存
 //     失败（下次同屏仍可重拨）。缓存条目存 {reading, question, at}。
 // 纪律：具名导出、无 default、零新增依赖、时间可注入（now）、对一切脏输入绝不抛异常。
+// ΑΩ-R10（方言三重复制单源化）：本地汉明距离查表副本（nibble popcount 表 +
+// HEX_VALUE 映射）已迁出至 ../dialects/hashing 的 hammingDistanceHex 单源模块 ——
+// 本文件导出名保留为哨兵 9999 方言的薄包装（导入面与既有测试口径不变）。
 
 import {
   extractGlmJson, getGlmClient, isGlmConfigured,
   type GlmClient, type GlmImageInput,
 } from '../vlm/glmClient'
 import { encodeForVlm } from '../vlm/codec'
+import { hammingDistanceHex as hammingHexCore } from '../dialects/hashing'
 
 /** 缓存有效期缺省（毫秒）：同指纹自写入起 30s 内免重问 */
 const DEFAULT_TTL_MS = 30000
@@ -33,36 +37,19 @@ const MAX_AFFORDANCES = 8
 /** 汉明距离哨兵值：不可比（长度不等/空串/非十六进制字符）时的返回值 */
 const UNCOMPARABLE_DISTANCE = 9999
 
-/** 半字节 popcount 表（0..15 的置位数）：按 nibble 异或的查表核 */
-const NIBBLE_POPCOUNT: readonly number[] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4]
-
-/** 十六进制字符 → 数值（大小写归一）；查无此字符记 undefined（调用方按不可比处理） */
-const HEX_VALUE: Readonly<Record<string, number>> = (() => {
-  const map: Record<string, number> = {}
-  for (let i = 0; i < 10; i++) map[String(i)] = i
-  for (let i = 0; i < 6; i++) map[String.fromCharCode(97 + i)] = 10 + i // a..f → 10..15
-  return map
-})()
-
 /**
  * 等长十六进制串的汉明距离（纯函数）：逐字符转 nibble 后异或 popcount 累加，
  * 大小写不敏感。长度不等、任一侧非字符串/空串/含非十六进制字符 ⇒ 返回 9999
  * （哨兵值而非 Infinity —— number 的可序列化可比性优先，调用方以 > 容差判不可比）。
+ * ΑΩ-R10：查表本体已单源化至 ../dialects/hashing（null = 不可比）—— 本函数保留
+ * 本器官的哨兵 9999 方言：归一（trim+小写）后委托单源核，null ⇔ 9999 一一对应，
+ * 行为与迁移前逐字节等价。
  */
 export function hammingDistanceHex(a: string, b: string): number {
   try {
     if (typeof a !== 'string' || typeof b !== 'string') return UNCOMPARABLE_DISTANCE
-    const x = a.trim().toLowerCase()
-    const y = b.trim().toLowerCase()
-    if (!x || !y || x.length !== y.length) return UNCOMPARABLE_DISTANCE
-    let dist = 0
-    for (let i = 0; i < x.length; i++) {
-      const va = HEX_VALUE[x[i]!]
-      const vb = HEX_VALUE[y[i]!]
-      if (va === undefined || vb === undefined) return UNCOMPARABLE_DISTANCE
-      dist += NIBBLE_POPCOUNT[va ^ vb]!
-    }
-    return dist
+    const dist = hammingHexCore(a.trim().toLowerCase(), b.trim().toLowerCase())
+    return dist === null ? UNCOMPARABLE_DISTANCE : dist
   } catch {
     return UNCOMPARABLE_DISTANCE
   }

@@ -17,6 +17,14 @@
 //   D8 水位线幂等：主水位线不动 ⇒ 整轮 noop（既有律不破）；主水位线动而
 //      失败集不动 ⇒ 梦独立水位线拦下；新失败 ⇒ 再回放；跨进程（trace 尾行
 //      恢复梦水位线）同律。
+//   D10（ΑΩ-R40 预算现实主义）：条间预算感知选梦 —— 小预算选短梦/零梦诚实
+//      收场；大预算长短皆按 PER 序；冷启动保守估计；耗时估计随注入时钟收敛
+//      （EMA 账本 + 行为验证）；剩余预算读数面（dep 显式 + overBudget 闭包属性）；
+//   D10d/D11（ΝΩ-34 睡眠编排四件）：梦回放移序立法（audit 后迟到演出 —— 小预算
+//      下校准/审计先吃预算不再恒 timeout 饿死）；梦水位线策略指纹（策略显著
+//      进化 ⇒ 同失败集允许重梦；同策略仍去重）；perWeight = p/mean(p) 批内
+//      归一备账；dream.cf:<rootCause|世界指纹桶> 分桶 + divergenceStep 注记
+//     （账本 margin 通道退役 —— 步序不是裕量）。
 // 全程离线（sharp 合成帧）、注入时钟、确定性（零真钟零网络零睡眠）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,6 +39,9 @@ import {
 import {
   computeDreamPriority, dreamTrajectories, dreamBatchWatermark, pickIsomorphicWorld,
   locateDivergence, resolveDreamBudget, runDreamReplay, PER_WEIGHTS, DREAM_BUDGET_DEFAULTS,
+  dreamExpectedSteps, pickDreamByBudget, DREAM_COST_ESTIMATOR, readDreamCostLedger, resetDreamCostLedger,
+  // ΝΩ-34：策略指纹与 dream.cf 分桶的纯逻辑面
+  dreamCfKey, policyFingerprintOf, POLICY_FINGERPRINT_GRID,
   type DreamFailureTrajectory,
 } from '../src/sleep/dreamReplay.ts';
 import { EvolutionEngine } from '../src/autonomy/evolutionEngine.ts';
@@ -215,14 +226,20 @@ test('D4: 分歧点双写 —— lab 账本 dream.counterfactual + EXP4 ingest�
   const entry = res.report.entries[0];
   assert.notEqual(entry.replay?.divergence, null, '分歧在场（双写门槛）');
 
-  // (a) kernel 证据：现有 lab 记账通道 —— runPcgWorld 的 Θ-3 记账 + 分歧结局补记
+  // (a) kernel 证据：现有 lab 记账通道 —— runPcgWorld 的 Θ-3 记账 + 分歧结局补记。
+  //     ΝΩ-34：dream.counterfactual 单键滑窗 ⇒ 分桶 dream.cf:<桶>（traj() 无
+  //     rootCause ⇒ 世界指纹桶）；margin 通道不再装分歧步序（步序不是裕量 ——
+  //     防 calibrator 学到伪结构），divergenceStep 记梦侧注记 cfLedger
   const lab = res.lab;
   assert.ok(lab, '梦训练营实验室在场（隔离自铸）');
   assert.notEqual(lab!.registry, kernelRegistry as unknown, '实验室注册表绝非遗漏生产单例');
-  const cf = lab!.ledger.stats('dream.counterfactual');
-  assert.equal(cf.n, 1, '分歧结局入账一条');
-  assert.deepEqual(cf.margins, [0], 'margin = 分歧步序');
-  assert.ok(res.report.kernelEvidence.some(k => k.key === 'dream.counterfactual'), '报告携带 kernel 证据对账面');
+  const cfKey = dreamCfKey(undefined, pickIsomorphicWorld(traj()).world.derivation.fingerprint);
+  const cf = lab!.ledger.stats(cfKey);
+  assert.equal(cf.n, 1, '分歧结局入账一条（ΝΩ-34 分桶键）');
+  assert.deepEqual(cf.margins, [], 'ΝΩ-34：账本 margin 通道不装分歧步序（步序≠裕量）');
+  assert.equal(entry.cfLedger?.key, cfKey, '梦侧注记携带分桶键');
+  assert.equal(entry.cfLedger?.divergenceStep, 0, 'divergenceStep = 分歧步序（margin 语义改名的落点）');
+  assert.ok(res.report.kernelEvidence.some(k => k.key === cfKey), '报告携带 kernel 证据对账面（分桶键）');
   assert.ok(entry.doubleWrite.kernel, 'kernel 双写执法面为真');
 
   // (b) evolution 双写：ingest 带 bandit 标注（arm = EXP4 greedy 只读面）
@@ -252,7 +269,7 @@ test('D4: 分歧点双写 —— lab 账本 dream.counterfactual + EXP4 ingest�
   assert.equal(e2.doubleWrite.kernel, false, '无分歧 ⇒ kernel 不双写');
   assert.equal(e2.doubleWrite.evolution, false, '无分歧 ⇒ evolution 不双写');
   assert.ok((e2.note ?? '').includes('无分歧'), '不双写的注记在案');
-  assert.equal(noDiv.lab!.ledger.stats('dream.counterfactual').n, 0, '无分歧批次零 dream.counterfactual 入账');
+  assert.equal(noDiv.lab!.ledger.stats(cfKey).n, 0, '无分歧批次零 dream.cf 入账（ΝΩ-34 分桶键同桶对照）');
   assert.equal(engine.history.length, histBefore + 1, '无分歧批次零 ingest');
 });
 
@@ -481,7 +498,7 @@ test('D9: 形状卫兵 —— 梦在场时六幕形状/幕序不变；晨报行�
     assert.deepEqual(
       report.acts.map(a => a.name),
       ['replay', 'distill', 'immune', 'calibrate', 'audit', 'report'],
-      '六幕幕序不因梦在场而变',
+      '六幕幕序不因梦在场而变（ΝΩ-34：梦在 audit 与 report 之间迟到演出，不占幕名）',
     );
     assert.ok(report.dream && report.dream.replayed >= 1, '至少一条梦真实回放');
     assert.equal(JSON.stringify(kernelRegistry.list()), prodKernel, '全程生产 kernel 注册表逐字节不变（隔离铁律）');
@@ -492,4 +509,340 @@ test('D9: 形状卫兵 —— 梦在场时六幕形状/幕序不变；晨报行�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─── D10（ΑΩ-R40）：条间预算感知选梦 —— 预算现实主义 ───
+
+/** ΑΩ-R40 预算假钟：now 每读一次走 costPerRead()；剩余预算 = cap − 已流时间
+ *（读数面直读 elapsed 不额外 tick —— 估计/预算账目可精确断言） */
+function budgetedClock(capMs: number, costPerRead: () => number): { now: () => number; overBudget: () => boolean } {
+  let elapsed = 0;
+  const now = (): number => 5_000_000 + (elapsed += costPerRead());
+  const overBudget = (): boolean => elapsed > capMs;
+  (overBudget as (() => boolean) & { remainingMs?: () => number }).remainingMs = (): number => capMs - elapsed;
+  return { now, overBudget };
+}
+
+test('D10: 预算感知选梦 —— 小预算选短梦/零梦诚实收场；大预算 PER 序；期望步数证据链', async () => {
+  resetDreamCostLedger(); // 冷启动（模块级账本 —— 跨测试隔离）
+
+  // 长/短两条轨迹：长梦 PER 更高（惊异更大），短梦失败步数更少
+  const long = traj({ id: 'long', surpriseBits: 16, stepsWasted: 20, sceneHash: 'd10-long' });
+  const short = traj({ id: 'short', surpriseBits: 2, stepsWasted: 2, sceneHash: 'd10-short' });
+  const pLong = computeDreamPriority(long, { now: 5000 }).p;
+  const pShort = computeDreamPriority(short, { now: 5000 }).p;
+  assert.ok(pLong > pShort, `长梦 PER 更高（${pLong} > ${pShort}）—— 选短不是选低分的前提`);
+
+  // 期望步数证据链：stepsWasted 优先 > history 回落 > 先验兜底；钳到步上限
+  assert.equal(dreamExpectedSteps(long, 8), 8, 'stepsWasted=20 钳到 maxSteps=8');
+  assert.equal(dreamExpectedSteps(short, 8), 2, 'stepsWasted=2 原样');
+  assert.equal(
+    dreamExpectedSteps(traj({ stepsWasted: undefined, history: [{ kind: 'click' }, { kind: 'click' }, { kind: 'click' }] }), 8),
+    3, 'history 回落（无 stepsWasted 时取决策对照面长度）',
+  );
+  assert.equal(dreamExpectedSteps(traj({ stepsWasted: undefined, history: [] }), 8), PER_WEIGHTS.stepsWastedPrior, '先验兜底');
+  assert.equal(dreamExpectedSteps(traj({ stepsWasted: 99 }), 5), 5, '钳到步上限（垃圾大步数不虚增估计）');
+
+  // 选梦纯函数面：无读数 ⇒ 纯 PER 序；队首装不下 ⇒ 装得下的最短者；全装不下 ⇒ -1
+  const est = (steps: number): number => steps * DREAM_COST_ESTIMATOR.coldStepMs;
+  assert.deepEqual(pickDreamByBudget([{ t: long, p: pLong }, { t: short, p: pShort }], null, est, 8), { index: 0, mode: 'per' }, '无读数面 ⇒ 队首（既有行为）');
+  assert.deepEqual(pickDreamByBudget([{ t: long, p: pLong }, { t: short, p: pShort }], 400, est, 8), { index: 0, mode: 'per' }, '队首装得下 ⇒ PER 序');
+  assert.deepEqual(pickDreamByBudget([{ t: long, p: pLong }, { t: short, p: pShort }], 160, est, 8), { index: 1, mode: 'short' }, '队首装不下 ⇒ 最短可行者');
+  assert.deepEqual(pickDreamByBudget([{ t: long, p: pLong }, { t: short, p: pShort }], 30, est, 8), { index: -1, mode: 'none' }, '全装不下 ⇒ 诚实收场');
+  assert.deepEqual(pickDreamByBudget([], 100, est, 8), { index: -1, mode: 'none' }, '空池 ⇒ none');
+
+  // (a) 小预算：冷启动估计下队首（8 步 × 40ms = 320ms）装不下 ⇒ 选短梦（2 步 × 40ms = 80ms ≤ 160ms）
+  const clock200 = budgetedClock(200, () => 40);
+  const tight = await runDreamReplay({
+    trajectories: dreamTrajectories([long, short]),
+    now: clock200.now,
+    overBudget: clock200.overBudget,
+    budget: { maxDreams: 1, maxStepsPerDream: 8 },
+  });
+  assert.equal(tight.report.replayed, 1, '小预算仍完成一条（短梦让位长梦）');
+  assert.equal(tight.report.entries[0].id, 'short', '选中的是短梦而非 PER 更高的长梦');
+  assert.equal(tight.report.entries[0].pick, 'short', '预算感知选短标记在案（审计面）');
+  assert.equal(tight.report.entries.length, 1, 'maxDreams=1 ⇒ 一条占位');
+
+  // (b) 更小预算：最短梦也装不下 ⇒ 零梦诚实收场（逐条注记 + truncated/time）
+  resetDreamCostLedger();
+  const clock45 = budgetedClock(45, () => 10);
+  const starved = await runDreamReplay({
+    trajectories: dreamTrajectories([long, short]),
+    now: clock45.now,
+    overBudget: clock45.overBudget,
+    budget: { maxDreams: 2, maxStepsPerDream: 8 },
+  });
+  assert.equal(starved.report.replayed, 0, '剩余 35ms < 最短估计 80ms ⇒ 零梦');
+  assert.equal(starved.report.entries.length, 2, '每条候选都带诚实注记');
+  assert.ok(starved.report.entries.every(e => !e.replayed && (e.note ?? '').includes('不足以完成')), '注记含估计 vs 剩余的量化对照');
+  assert.equal(starved.report.budget.truncated, true);
+  assert.equal(starved.report.budget.reason, 'time');
+
+  // (c) 大预算：长短皆按 PER 序（预算充裕 ⇒ 零漂移）
+  resetDreamCostLedger();
+  const clockBig = budgetedClock(100_000, () => 10);
+  const ample = await runDreamReplay({
+    trajectories: dreamTrajectories([long, short]),
+    now: clockBig.now,
+    overBudget: clockBig.overBudget,
+    budget: { maxDreams: 2, maxStepsPerDream: 8 },
+  });
+  assert.equal(ample.report.replayed, 2);
+  assert.deepEqual(ample.report.entries.map(e => e.id), ['long', 'short'], '大预算 ⇒ PER 序（长在前）');
+  assert.ok(ample.report.entries.every(e => e.pick === undefined), '无让位标记（纯 PER 序）');
+  assert.equal(ample.report.budget.truncated, false);
+  assert.equal(ample.report.budget.reason, 'none');
+});
+
+test('D10b: 耗时估计收敛 —— EMA 账本随注入时钟收敛；收敛后冷启动会弃的预算放行；dep 直投读数面', async () => {
+  // 批一：微型耗时（每读 1ms ⇒ 单梦实测 1ms）—— 冷启动入账
+  resetDreamCostLedger();
+  let perRead = 1;
+  const clock = budgetedClock(10_000, () => perRead);
+  const w1 = await runDreamReplay({
+    trajectories: dreamTrajectories([traj({ id: 'w1', sceneHash: 'd10-w1' })]),
+    now: clock.now,
+    overBudget: clock.overBudget,
+    budget: { maxDreams: 1, maxStepsPerDream: 8 },
+  });
+  assert.equal(w1.report.replayed, 1);
+  const n1 = w1.report.entries[0].replay?.steps ?? 1;
+  const led1 = readDreamCostLedger();
+  assert.equal(led1.perDreamMs, 1, '首梦实测 1ms 入账（零差样本之外的第一手）');
+  assert.ok(Math.abs((led1.perStepMs ?? 0) - 1 / n1) < 1e-9, `每步均值 = 1ms/${n1} 步`);
+
+  // 批二：重耗时（每读 60ms）—— EMA（α=0.5）半新半旧走到新水平的一半路程
+  perRead = 60;
+  const w2 = await runDreamReplay({
+    trajectories: dreamTrajectories([traj({ id: 'w2', sceneHash: 'd10-w2' })]),
+    now: clock.now,
+    overBudget: clock.overBudget,
+    budget: { maxDreams: 1, maxStepsPerDream: 8 },
+  });
+  assert.equal(w2.report.replayed, 1);
+  const n2 = w2.report.entries[0].replay?.steps ?? 1;
+  const led2 = readDreamCostLedger();
+  assert.ok(Math.abs((led2.perDreamMs ?? 0) - 30.5) < 1e-9, `单梦 EMA = 0.5×1 + 0.5×60 = 30.5（实得 ${led2.perDreamMs}）`);
+  assert.ok(Math.abs((led2.perStepMs ?? 0) - (0.5 / n1 + 30 / n2)) < 1e-9, '每步 EMA 同律收敛');
+
+  // 行为收敛：收敛后估计（≈8×perStepMs）放行的预算，冷启动估计（8×40=320ms）会拒绝
+  const convergedEst = (led2.perStepMs ?? DREAM_COST_ESTIMATOR.coldStepMs) * 8;
+  const cap3 = Math.min(300, Math.ceil(convergedEst) + 40);
+  assert.ok(DREAM_COST_ESTIMATOR.coldStepMs * 8 > cap3, `冷启动估计 320ms > cap ${cap3}ms（冷启动会弃梦）`);
+  const clock3 = budgetedClock(cap3, () => 1);
+  const w3 = await runDreamReplay({
+    trajectories: dreamTrajectories([traj({ id: 'w3', sceneHash: 'd10-w3', stepsWasted: 20 })]),
+    now: clock3.now,
+    overBudget: clock3.overBudget,
+    budget: { maxDreams: 1, maxStepsPerDream: 8 },
+  });
+  assert.equal(w3.report.replayed, 1, '估计收敛 ⇒ 冷启动会拒绝的预算现在放行（预算现实主义的收益面）');
+
+  // dep 直投读数面（remainingBudgetMs 显式通道）+ 恒时钟零差样本不入账
+  resetDreamCostLedger();
+  const longB = traj({ id: 'longB', surpriseBits: 16, stepsWasted: 20, sceneHash: 'd10-longb' });
+  const tiny = traj({ id: 'tiny', stepsWasted: 1, sceneHash: 'd10-tiny' });
+  const viaDep = await runDreamReplay({
+    trajectories: dreamTrajectories([longB, tiny]),
+    now: () => 5000,
+    overBudget: () => false,
+    remainingBudgetMs: () => 50,
+    budget: { maxDreams: 1, maxStepsPerDream: 8 },
+  });
+  assert.equal(viaDep.report.replayed, 1);
+  assert.equal(viaDep.report.entries[0].id, 'tiny', 'dep 读数面同律：长梦估 320ms > 50ms ⇒ 选 tiny（估 40ms）');
+  assert.equal(viaDep.report.entries[0].pick, 'short');
+  assert.equal(readDreamCostLedger().perDreamMs, null, '恒时钟零差样本不入账（不污染估计）');
+});
+
+test('D10c: 集成小预算 —— runSleepCycle 预算紧 ⇒ 梦零回放诚实收场（六幕照常）', async () => {
+  resetSleepCycle();
+  resetDreamCostLedger();
+  const dir = mkdtempSync(join(tmpdir(), 'w5dream-d10-'));
+  try {
+    const trace = join(dir, 'sleep.jsonl');
+    const r = await runSleepCycle(
+      {
+        journal: fakeJournal([entry('d10h-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')]),
+        dream: {
+          failures: () => [traj(), traj({ id: 't2', stepsWasted: 1, sceneHash: 'd10s' })],
+          budget: { maxDreams: 2, maxStepsPerDream: 8 },
+        },
+        log: () => {},
+      },
+      { sleepTracePath: trace, now: tickClock().now, budgetMs: 60 },
+    );
+    assert.ok(r.dream, '梦摘要在场（dep 在场）');
+    assert.equal(r.dream!.replayed, 0, '60ms 预算 + 冷启动保守估计 ⇒ 零梦（名存实亡不如诚实缺席）');
+    assert.equal(r.dream!.entries.length, 2, '两条候选各带注记');
+    // ΝΩ-34 移序立法的账面变化：梦迟到演出（audit 之后）时预算已被维护四幕吃满
+    // ⇒ 走 overBudget 的「预算耗尽」臂（本测试 +10 假钟下 d.now 预读已越线）；
+    // 「不足以完成（估计 vs 剩余）」的量化臂由 D10 直投 runDreamReplay 面覆盖
+    assert.ok(r.dream!.entries.every(e => !e.replayed && (e.note ?? '').includes('预算耗尽')), '未回放注记在案（预算耗尽臂）');
+    assert.equal(r.dream!.budget.reason, 'time');
+    assert.deepEqual(
+      r.acts.map(a => a.name),
+      ['replay', 'distill', 'immune', 'calibrate', 'audit', 'report'],
+      '六幕幕序不因预算感知选梦而变（ΝΩ-34：梦在 audit 与 report 之间迟到演出，不占幕名）',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── D10d（ΝΩ-34 梦回放移序立法）：小预算下校准/审计先吃预算，不再恒 timeout 饿死 ───
+
+test('D10d（ΝΩ-34）: 小预算 + 梦在场 —— 维护四幕先吃预算（calibrate/audit 实跑）；梦诚实饿死不占幕名', async () => {
+  resetSleepCycle();
+  resetDreamCostLedger();
+  const dir = mkdtempSync(join(tmpdir(), 'w5dream-d10d-'));
+  try {
+    const trace = join(dir, 'sleep.jsonl');
+    let calTicks = 0;
+    let audits = 0;
+    const fakeAudit: SleepDeps['selfAudit'] = steps => {
+      audits++;
+      assert.ok(Array.isArray(steps), '审计面收到 StepRecord 轨迹');
+      return { verdict: 'healthy', findings: [], score: 100, advice: [] };
+    };
+    const r = await runSleepCycle(
+      {
+        journal: fakeJournal([entry('d10dh-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')]),
+        calibrator: {
+          tick: () => {
+            calTicks++;
+            return [{ key: 'popup.offThreshold', from: 0.35, to: 0.37, reason: 'optimal-threshold', generation: 2 }];
+          },
+        },
+        selfAudit: fakeAudit,
+        dream: {
+          failures: () => [traj(), traj({ id: 't2', stepsWasted: 1, sceneHash: 'd10d' })],
+          budget: { maxDreams: 2, maxStepsPerDream: 8 },
+        },
+        log: () => {},
+      },
+      { sleepTracePath: trace, now: tickClock().now, budgetMs: 60 },
+    );
+    const byName = Object.fromEntries(r.acts.map(a => [a.name, a]));
+    // 立法前（梦寄居第①幕）：60ms 预算被梦吃满 ⇒ calibrate/audit 恒 timeout 饿死；
+    // 立法后：维护四幕先吃预算 —— 校准/审计真实演出（假钟 +10/读、预算 60ms 下
+    // 五道幕闸共耗 50ms 仍在其内），梦在 audit 后迟到演出、剩余不足 ⇒ 诚实饿死
+    assert.equal(byName.calibrate.status, 'ok', '校准幕先吃预算（不再恒 timeout）');
+    assert.equal(calTicks, 1, 'calibrator.tick 真被调（不是 skipped/timeout 的空占位）');
+    assert.equal(byName.audit.status, 'ok', '审计幕先吃预算（不再恒 timeout）');
+    assert.equal(audits, 1, 'selfAudit 真被调');
+    assert.ok(r.dream, '梦摘要在场（dep 在场）');
+    assert.equal(r.dream!.replayed, 0, '剩余预算不足以装下最短梦 ⇒ 零回放（宁短勿挂）');
+    assert.ok(r.dream!.entries.every(e => e.perWeight === undefined && e.cfLedger === undefined),
+      '饿死条目不带 perWeight/cfLedger（未双写 —— 备账面零伪造）');
+    assert.equal(byName.report.status, 'timeout', '梦后剩余预算耗尽 ⇒ 晨报幕标 timeout（半程报告照铸的既有立法）');
+    assert.deepEqual(
+      r.acts.map(a => a.name),
+      ['replay', 'distill', 'immune', 'calibrate', 'audit', 'report'],
+      '六幕幕序不变（梦不占幕名 —— ΝΩ-34 移序只动演出位，不动幕表）',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── D11（ΝΩ-34）：梦水位线策略指纹 + perWeight 批内归一 + dream.cf 分桶键 ───
+
+test('D11（ΝΩ-34）: 策略指纹水位线 —— 显著进化允许重梦；同策略同失败集仍去重；网格内微漂不算变', async () => {
+  // 纯函数面：指纹网格（η=0.05 单步恰一格 —— 网格内微漂同指纹，跨格换指纹）
+  assert.equal(policyFingerprintOf({ click: 1, scroll: 1 }), policyFingerprintOf({ scroll: 1, click: 1 }), '键序无关');
+  assert.equal(policyFingerprintOf({ click: 1 }), policyFingerprintOf({ click: 1 + POLICY_FINGERPRINT_GRID * 0.4 }), '网格内微漂 ⇒ 同指纹');
+  assert.notEqual(policyFingerprintOf({ click: 1 }), policyFingerprintOf({ click: 1 + POLICY_FINGERPRINT_GRID }), '跨格 ⇒ 换指纹（策略显著变化）');
+  assert.equal(policyFingerprintOf(null), 'void', '垃圾 ⇒ void');
+  assert.equal(policyFingerprintOf({ click: Number.NaN }), 'void', '非有限值键跳过 ⇒ 空指纹');
+
+  // 水位线的策略分量：同失败集同指纹同水位线（去重）；异指纹异水位线（重梦资格）
+  const batch = [traj({ id: 'd11f' })];
+  assert.equal(dreamBatchWatermark(batch, 'h1'), dreamBatchWatermark(batch, 'h1'), '同策略 ⇒ 同水位线');
+  assert.notEqual(dreamBatchWatermark(batch, 'h1'), dreamBatchWatermark(batch, 'h2'), '策略变 ⇒ 水位线动');
+
+  // 集成面：恒定策略假件（heuristics 恒 1.0 —— ingest 不动权重表）⇒ 同失败集二梦被拦
+  const calmFace = {
+    greedyArm: () => 'click',
+    armProbabilities: (): Record<string, number> => ({ click: 1 }),
+    ingest: () => {},
+    heuristics: (): Record<string, number> => ({ scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1 }),
+  };
+  const run = (evolution: unknown, priorWatermark?: string): ReturnType<typeof runDreamReplay> =>
+    runDreamReplay({
+      trajectories: dreamTrajectories([traj({ id: 'd11f', sceneHash: 'd11-s1' })]),
+      now: () => 5000,
+      overBudget: () => false,
+      evolution: evolution as never,
+      budget: { maxDreams: 1, maxStepsPerDream: 10 },
+      // 直投面：水位线由调用方回灌（集成面经 trace 尾行/内存账自动流转）
+      priorWatermark,
+    });
+  const once = await run(calmFace);
+  assert.equal(once.report.replayed, 1, '首轮实梦');
+  assert.equal(once.report.entries[0].perWeight, 1, '单条批次 p=mean(p) ⇒ perWeight=1');
+  const again = await run(calmFace, once.report.watermark);
+  assert.equal(again.report.replayed, 0, '同策略同失败集 ⇒ 去重（水位线拦下）');
+  assert.ok((again.report.note ?? '').includes('水位线未动'), '去重注记在案');
+
+  // 策略显著进化（click 1.0 → 1.1：成功奖励 +0.1 跨两格）⇒ 同失败集允许重梦
+  const evolvedFace = { ...calmFace, heuristics: (): Record<string, number> => ({ scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1.1 }) };
+  const redream = await run(evolvedFace, once.report.watermark);
+  assert.equal(redream.report.replayed, 1, '策略显著变化 ⇒ 同失败集重梦（旧梦结局已过时）');
+
+  // 真引擎对照：一条成功运行入史 ⇒ heuristics 权重跨格 ⇒ 指纹换（策略真的在进化）
+  const engine = new EvolutionEngine({ seed: 21 });
+  const fpBefore = policyFingerprintOf(engine.heuristics());
+  engine.ingest({ goal: '对照', success: true, steps: 2, durationMs: 1, strategies: ['click'] });
+  assert.notEqual(policyFingerprintOf(engine.heuristics()), fpBefore, '真引擎 heuristics 进化 ⇒ 指纹换');
+});
+
+test('D11b（ΝΩ-34）: perWeight 批内归一（均值 1）+ dream.cf 分桶（病因桶/世界指纹桶）', async () => {
+  // 两条皆分歧的轨迹：p_hi ≠ p_lo ⇒ perWeight = p/mean(p)（手算对照 + 批均值 1）
+  const hi = traj({ id: 'hi', surpriseBits: 16, stepsWasted: 20, sceneHash: 'd11b-hi' });
+  const lo = traj({ id: 'lo', surpriseBits: 2, stepsWasted: 2, sceneHash: 'd11b-lo' });
+  const res = await runDreamReplay({
+    trajectories: dreamTrajectories([hi, lo]),
+    now: () => 5000,
+    overBudget: () => false,
+    budget: { maxDreams: 2, maxStepsPerDream: 8 },
+  });
+  assert.equal(res.report.replayed, 2, '两条皆回放');
+  assert.ok(res.report.entries.every(e => e.replay?.divergence !== null), '两条皆分歧（perWeight 的注记门槛）');
+  const pHi = computeDreamPriority(hi, { now: 5000 }).p;
+  const pLo = computeDreamPriority(lo, { now: 5000 }).p;
+  assert.ok(pHi > pLo, `高惊异 PER 更高（${pHi} > ${pLo}）—— 权重分化前提`);
+  const mean = (pHi + pLo) / 2;
+  const eHi = res.report.entries.find(e => e.id === 'hi')!;
+  const eLo = res.report.entries.find(e => e.id === 'lo')!;
+  assert.ok(eHi.perWeight !== undefined && eLo.perWeight !== undefined, '分歧双写条目携带 perWeight');
+  assert.equal(eHi.perWeight, Math.round((pHi / mean) * 1e6) / 1e6, 'w_hi = p_hi/mean(p)（手算对照）');
+  assert.equal(eLo.perWeight, Math.round((pLo / mean) * 1e6) / 1e6, 'w_lo = p_lo/mean(p)（手算对照）');
+  assert.ok(Math.abs((eHi.perWeight! + eLo.perWeight!) / 2 - 1) < 1e-6, '批内归一：权重均值 = 1');
+
+  // 无 rootCause ⇒ 世界指纹桶；键与梦侧注记一致；margin 通道空
+  assert.equal(eHi.cfLedger?.key, dreamCfKey(undefined, eHi.world.fingerprint), 'cfLedger 键 = 世界指纹桶');
+  assert.ok((eHi.cfLedger?.key ?? '').startsWith('dream.cf:w:'), '世界桶词头在案');
+  assert.deepEqual(res.lab!.ledger.stats(eHi.cfLedger!.key).margins, [], '世界桶 margin 通道空（步序≠裕量）');
+
+  // 有 rootCause ⇒ 病因桶（与 EXP4 failureCluster 同源词表）：异病因异桶
+  const rc1 = traj({ id: 'rc1', rootCause: 'stall', sceneHash: 'd11b-rc1' });
+  const rc2 = traj({ id: 'rc2', rootCause: 'timeout', sceneHash: 'd11b-rc2' });
+  const rcRun = await runDreamReplay({
+    trajectories: dreamTrajectories([rc1, rc2]),
+    now: () => 5000,
+    overBudget: () => false,
+    budget: { maxDreams: 2, maxStepsPerDream: 8 },
+  });
+  const eRc1 = rcRun.report.entries.find(e => e.id === 'rc1')!;
+  const eRc2 = rcRun.report.entries.find(e => e.id === 'rc2')!;
+  assert.equal(eRc1.cfLedger?.key, 'dream.cf:rc:stall', '病因桶：rootCause 入键');
+  assert.equal(eRc2.cfLedger?.key, 'dream.cf:rc:timeout', '异病因异桶（滑窗不再混装）');
+  assert.equal(rcRun.lab!.ledger.stats('dream.cf:rc:stall').n, 1, '病因桶各自入账一条');
+  assert.equal(rcRun.lab!.ledger.stats('dream.cf:rc:timeout').n, 1, '病因桶各自入账一条（对照）');
+  // 分桶纯函数边界：rootCause 空白/超长；世界指纹缺席
+  assert.equal(dreamCfKey('   ', 'fp'), 'dream.cf:w:fp', '空白病因 ⇒ 回落世界桶');
+  assert.equal(dreamCfKey('x'.repeat(80), ''), 'dream.cf:rc:' + 'x'.repeat(40), '病因截 40');
+  assert.equal(dreamCfKey(undefined, ''), 'dream.cf:w:void', '双缺席 ⇒ void 桶（键恒非空）');
 });

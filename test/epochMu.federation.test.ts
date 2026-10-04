@@ -24,6 +24,25 @@
 //   Μ-8 客户端 HMAC 签名头（W6R-A5）：env 缺省零头；DSH_FEDERATION_TOKEN
 //        在场 ⇒ federationSync 自动附 x-dsh-fed-* 双头（与权威实现逐字段
 //        一致）；authToken 显式注入优先；null 显式禁用。
+//   Μ-9 试用期缓升（ΑΩ-R6 —— 堵"初见全信"的 Sybil 空间）：新源首掺 trust 封顶
+//        0.35（quota=floor(cap×0.35) 自然折减）；累计 3 次干净合并解除封顶；
+//        试用期内吃检疫票 ⇒ 干净计数回退归零 + 污点轮不计干净（先票后掺的
+//        wired 序执法）；毕业永久但票的 1/(1+regressed) 折减照咬（忏悔通道不
+//        变）；'local' 源豁免；试用期原始计数持久化往返保持；v=1 旧档版本闸拒绝。
+//   Μ-10 掺入 provenance 标记（ΑΩ-R41）：掺入记录逐条打 origin:'federation' ——
+//        dump 可分离「自己试出来的」与「联邦学来的」；本地 record 缺省不带
+//        origin 照常（缺席 = local 既有语义）；水合往返 origin 保持；未知 origin
+//        防御归 local；stats/摘要铸造读路径零行为区分（只立账不立规）；
+//        sourceId 来源纪要不进记录（只打布尔级来源，避免膨胀）。
+//   ΝΩ-20 隐私会计 + 掺入统计修正：
+//   ΝΩ-20a rdpEpsilon（Mironov 闭式：零点/D_α≤ε/双单调/溢出臂）+ 子采样放大
+//          公式 + 预算账本（同窗口 ε=1×10 放行、第 11 次拒绝不抛且如实申报
+//          budget-exhausted、换窗口新指纹新预算、RDP 审计口径更省）+ n 加噪
+//          （整数非负/有界/近无偏/跨 seed 生效）+ 空窗零记账 + 首次 release
+//          零回归对照。
+//   ΝΩ-20b 掺入 margin 坨宽内均匀抖动（坨内不恒等、近全宽、四分位近均匀）、
+//          ts 按源 mintedAt 邻域散布（±APPLY_TS_SCATTER_MS、不恒等、mintedAt
+//          非法回落注入时钟）、抖动种子确定性派生自记录坐标。
 // 全程离线（fetch 全假件/零调用）、rng/时钟全注入、确定性；生产单例 try/finally 复位。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,6 +57,7 @@ import {
   kernelRegistry,
   evidenceLedger,
   resetKernelRuntime,
+  type KernelOutcome,
 } from '../src/kernel/registry.ts';
 import {
   mintEvidenceDigest,
@@ -56,6 +76,11 @@ import {
   flushFederationTrust,
   federationTrustPersistenceStatus,
   federationAuthHeaders,
+  applyQuarantineToTrust,
+  restoreFederationTrust,
+  PROBATION_TRUST_CAP,
+  PROBATION_CLEAN_MERGES,
+  TRUST_PROBATION_EXEMPT_SOURCE,
   FEDERATION_AUTH_ENV,
   FEDERATION_AUTH_TIMESTAMP_HEADER,
   FEDERATION_AUTH_SIGNATURE_HEADER,
@@ -64,6 +89,18 @@ import {
 } from '../src/federation/index.ts';
 import { createFederationSyncTool } from '../src/tools/federationTools.ts';
 import type { Config } from '../src/config.ts';
+// ΝΩ-20 新面（预算账本/RDP 公式/散布常量）自卫星件直取 —— index.ts 再分发面由
+// sync/trust/aggregate 的工单维护，此处不越权改聚合根。
+import {
+  rdpEpsilon,
+  subsampleAmplifiedEpsilon,
+  privacyBudgetOf,
+  privacyBudgetReport,
+  resetPrivacyBudgetRuntime,
+  PRIVACY_BUDGET_EPSILON_TOTAL,
+  RDP_ORDER,
+} from '../src/federation/digest.ts';
+import { APPLY_TS_SCATTER_MS } from '../src/federation/apply.ts';
 
 // ─── 假件工坊（全注入、零网络、确定性） ───
 
@@ -141,11 +178,15 @@ test('Μ-1: 同 seed 同账本 ⇒ 摘要逐字段一致；异 seed ⇒ 噪声�
   assert.equal(d1.mintedAt, 123456, 'mintedAt 走注入时钟');
   assert.equal(d1.epsilon, 1, 'ε 注记在案');
 
-  // (b) 形状：keys 覆盖两 key；n 是真值（margin-less 条目计入 n）；格子非负整数
+  // (b) 形状：keys 覆盖两 key；n 是加噪估计（ΝΩ-20 (c)：真值 + Laplace(1/ε) 取整
+  //     非负 —— margin-less 条目计入真值口径）；格子非负整数
   const alpha = d1.keys.find(k => k.key === 'fed.alpha')!;
   const beta = d1.keys.find(k => k.key === 'fed.beta')!;
   assert.ok(alpha && beta, '两 key 皆入摘要');
-  assert.equal(alpha.n, 105, 'n = 真值窗口条数（含 5 条无 margin）');
+  assert.ok(
+    Number.isInteger(alpha.n) && alpha.n >= 0 && Math.abs(alpha.n - 105) <= 12,
+    `n = 真值的 DP 估计（真值 105 含 5 条无 margin；实测 ${alpha.n}，|噪声| ≤ 12 护栏）`,
+  );
   for (const entry of d1.keys) {
     assert.equal(entry.bins.length, DIGEST_BINS, 'K=8 坨');
     for (const cell of entry.bins) {
@@ -326,14 +367,17 @@ test('Μ-3: 本地 n=10 × share 0.5 ⇒ 掺入 ≤5；零证据 key 零掺入+�
     const ledger3 = new EvidenceLedger();
     for (let i = 0; i < 10; i++) ledger3.record({ key: 'fed.share', success: false, margin: 0, ts: i });
     const rep3 = applyFederatedEvidence(ledger3, { v: 1, mintedAt: 1, epsilon: 1, keys: [{ key: 'fed.share', n: 40, bins: bins0 }] }, { maxRemoteShare: 0.5, now: () => 779 });
-    assert.equal(rep3.applied, 5, 'bin0 success 列全质量 ⇒ 5 条');
+    assert.equal(rep3.applied, 5, 'bin0 success 列全质量 ⇒ 5 条（ΝΩ-20 后 margin/ts 见下）');
     const tail3 = ledger3.entries('fed.share').slice(-5);
     for (const e of tail3) {
       assert.equal(e.success, true, '成败由坨坐标反演（success 列）');
-      assert.ok(Math.abs((e.margin ?? Number.NaN) - centerOf(0)) < 1e-12, `margin 取坨中心 ${centerOf(0)}`);
-      assert.equal(e.ts, 779, 'ts 走注入时钟');
+      const m = e.margin ?? Number.NaN;
+      assert.ok(Number.isFinite(m) && m >= -1 - 1e-9 && m <= -0.75 + 1e-9, `margin 落 bin0 覆盖区间 [-1,-0.75]（ΝΩ-20 坨宽抖动，实测 ${m}）`);
+      assert.ok(e.ts >= Math.max(0, 1 - APPLY_TS_SCATTER_MS) && e.ts <= 1 + APPLY_TS_SCATTER_MS, `ts 落源 mintedAt=1 邻域（实测 ${e.ts}）`);
     }
-    // bin7 fail 列 ⇒ success=false、margin=+0.875
+    assert.ok(new Set(tail3.map(e => e.margin)).size >= 2, '坨内 margin 不恒等（ΝΩ-20 抖动恢复分布形状）');
+    assert.ok(new Set(tail3.map(e => e.ts)).size >= 2, '掺入 ts 不共享同一值（ΝΩ-20 邻域散布）');
+    // bin7 fail 列 ⇒ success=false、margin 落 bin7 覆盖区间 [0.75, 1]（ΝΩ-20 抖动）
     const bins7 = Array.from({ length: DIGEST_BINS }, () => [0, 0]);
     bins7[7] = [0, 40];
     const ledger4 = new EvidenceLedger();
@@ -342,7 +386,8 @@ test('Μ-3: 本地 n=10 × share 0.5 ⇒ 掺入 ≤5；零证据 key 零掺入+�
     assert.equal(rep4.applied, 5, 'bin7 fail 列全质量 ⇒ 5 条');
     for (const e of ledger4.entries('fed.share').slice(-5)) {
       assert.equal(e.success, false, 'fail 列反演为败');
-      assert.ok(Math.abs((e.margin ?? Number.NaN) - centerOf(7)) < 1e-12, `margin 取坨中心 ${centerOf(7)}`);
+      const m = e.margin ?? Number.NaN;
+      assert.ok(Number.isFinite(m) && m >= 0.75 - 1e-9 && m <= 1 + 1e-9, `margin 落 bin7 覆盖区间 [0.75,1]（实测 ${m}）`);
     }
 
     // (f) 非法输入的诚实拒绝臂：版本错 / 形状坏 / 目标账本坏 ⇒ ok:false 零掺入（不抛）
@@ -398,9 +443,10 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
     assert.equal(captured.value.method, 'POST', '方法 POST');
     assert.equal(captured.value.headers?.['content-type'], 'application/json', 'JSON 头在场');
     assert.equal(captured.value.body, JSON.stringify(res1.digest), '上行载荷 = 本地摘要（摘要外零信息）');
-    assert.equal(res1.applied?.applied, 5, '响应合并摘要被应用（floor(0.5×10)=5）');
-    assert.equal(target.stats('fed.net').n, 15, '目标账本 10 → 15');
-    assert.ok(Math.abs(federationTrustOf(EP) - 1) < 1e-12, '端点即源自动立信任账（初见 trust=1）');
+    // ΑΩ-R6：新端点首掺即试用期 —— trust 封顶 0.35 ⇒ quota = floor(5 × 0.35) = 1（首掺不再免费）
+    assert.equal(res1.applied?.applied, 1, '响应合并摘要被应用（试用期 quota = floor(floor(0.5×10) × 0.35) = 1）');
+    assert.equal(target.stats('fed.net').n, 11, '目标账本 10 → 11');
+    assert.ok(Math.abs(federationTrustOf(EP) - PROBATION_TRUST_CAP) < 1e-12, '端点即源自动立账：初见试用期 trust 封顶 0.35（ΑΩ-R6）');
 
     // (c) 响应垃圾 JSON ⇒ 只上传不掺入，不炸
     const fakeGarbage = (async () => ({ json: async () => ({ hello: 1 }) })) as unknown as FederationFetch;
@@ -456,38 +502,42 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
 
 // ─── Μ-5：信任账 ───
 
-test('Μ-5: applied 后记一次 regressed ⇒ trust 减半且下次掺入折减；status 动作可见；垃圾入账不抛', async () => {
+test('Μ-5: applied 后记一次 regressed ⇒ trust 折减且下次掺入打折；status 动作可见；垃圾入账不抛', async () => {
   resetFederationRuntime();
   try {
-    // (a) 初见全信；applied 立账
+    // (a) ΑΩ-R6：初见即试用期（封顶 0.35）；applied 立账（merge 1，干净 1）
     recordFederationTrust('peer-a', { applied: 5 });
-    assert.equal(federationTrustOf('peer-a'), 1, '初见 trust=1');
-    assert.equal(federationTrustOf('stranger'), 1, '未立账源 trust=1');
-    assert.equal(federationTrustOf(''), 1, '垃圾 id ⇒ 1（匿名不折减）');
+    assert.ok(Math.abs(federationTrustOf('peer-a') - PROBATION_TRUST_CAP) < 1e-12, `applied 立账但试用期封顶 ${PROBATION_TRUST_CAP}`);
+    assert.ok(Math.abs(federationTrustOf('stranger') - PROBATION_TRUST_CAP) < 1e-12, '未立账源（初见）⇒ 试用期封顶 0.35（不再首掺免费）');
+    assert.equal(federationTrustOf(''), 1, '垃圾 id ⇒ 1（匿名不折减、也不试用期）');
 
-    // (b) 一次 regressed ⇒ 1/(1+1) = 0.5；下次掺入折减 quota 5 → 2
+    // (b) 一次 regressed ⇒ raw = 1/(1+1) = 0.5，但试用期封顶取小 ⇒ 0.5 → 0.35；下次掺入 quota 5 → 1
+    //     （票照咬：raw 低于封顶时封顶不再是约束 —— 见 (c)）
     recordFederationTrust('peer-a', { regressed: 1 });
-    assert.equal(federationTrustOf('peer-a'), 0.5, 'trust = 1/(1+regressed) = 1/2');
+    assert.ok(Math.abs(federationTrustOf('peer-a') - 0.35) < 1e-12, 'raw 0.5 与试用期 0.35 取小 = 0.35');
     const ledger = new EvidenceLedger();
     for (let i = 0; i < 10; i++) ledger.record({ key: 'fed.trust', success: true, margin: 0.1, ts: i });
     const merged = { v: 1 as const, mintedAt: 1, epsilon: 1, keys: [{ key: 'fed.trust', n: 99, bins: bigBins() }] };
     const rep = applyFederatedEvidence(ledger, merged, { maxRemoteShare: 0.5, sourceId: 'peer-a', now: () => 555 });
-    assert.equal(rep.trust, 0.5, '默认信任走信任账');
-    assert.equal(rep.applied, 2, 'quota floor(5 × 0.5) = 2 —— 信任折减生效');
+    assert.equal(rep.trust, 0.35, '默认信任走信任账（试用期封顶后）');
+    assert.equal(rep.applied, 1, 'quota floor(5 × 0.35) = 1 —— 信任折减生效');
     const rec = federationTrustReport().find(r => r.sourceId === 'peer-a')!;
     assert.ok(rec, '信任报告含 peer-a');
-    assert.equal(rec.applied, 7, 'applied 累账 5 + 2');
+    assert.equal(rec.applied, 6, 'applied 累账 5 + 1');
     assert.equal(rec.regressed, 1, 'regressed = 1');
-    assert.equal(rec.trust, 0.5, '报告 trust = 0.5');
+    assert.equal(rec.merges, 2, 'merges = 2 轮（ΑΩ-R6 原始计数如实）');
+    assert.equal(rec.cleanMerges, 0, '试用期内吃票 ⇒ 干净计数回退归零 + 污点轮（先票后掺）不计干净');
+    assert.equal(rec.probation, true, '仍在试用期');
+    assert.equal(rec.trust, 0.35, '报告 trust = 0.35');
 
-    // (c) 再记一次 ⇒ 1/3（永不归零 —— 留忏悔通道）
+    // (c) 再记一次 ⇒ raw 1/3 < 封顶 ⇒ 信任取 raw 1/3（永不归零 —— 留忏悔通道）
     recordFederationTrust('peer-a', { regressed: 1 });
-    assert.ok(Math.abs(federationTrustOf('peer-a') - 1 / 3) < 1e-12, 'trust = 1/3');
+    assert.ok(Math.abs(federationTrustOf('peer-a') - 1 / 3) < 1e-12, 'raw = 1/3 低于封顶 ⇒ 试用期不再额外折');
 
-    // (d) 垃圾入账不抛、不立脏账
+    // (d) 垃圾入账不抛、不立脏账（增量按 0；账面干净但 ΑΩ-R6 初见封顶仍罩）
     recordFederationTrust('', { applied: 1 });
     recordFederationTrust('junk', { applied: Number.NaN, regressed: -5 });
-    assert.equal(federationTrustOf('junk'), 1, 'NaN/-5 增量按 0 ⇒ trust 仍 1');
+    assert.ok(Math.abs(federationTrustOf('junk') - PROBATION_TRUST_CAP) < 1e-12, 'NaN/-5 增量按 0 ⇒ 账面干净但试用期封顶 0.35');
     assert.equal(federationReportHas(''), false, '空 id 不立账');
 
     // (e) status 动作可见信任账 + 上次同步结果
@@ -557,7 +607,7 @@ test('Μ-6: 工具 sync 缺省 robust（中位数聚合+检疫票折端点信任
     const tool2 = createFederationSyncTool(fedConfig({ kernelEvolutionEnabled: true, federationEndpoint: EP2 }));
     const out2 = await runTool(tool2, { action: 'sync', robust: false });
     assert.equal(out2.status, 'SUCCESS', 'legacy 回退成功');
-    assert.equal(out2.state_anchor.applied.applied, 5, 'legacy：floor(0.5×10)=5（Μ 旧语义）');
+    assert.equal(out2.state_anchor.applied.applied, 1, 'legacy：新端点试用期 ⇒ quota floor(5 × 0.35) = 1（ΑΩ-R6 对两臂同律）');
     assert.equal(out2.state_anchor.robust, undefined, 'legacy 结果形状无 robust 字段（Μ 旧行为逐字节）');
 
     // (c) 源码取证（Φ-V 同法）：工具面 robust 缺省投产在源（防回归锁）
@@ -593,7 +643,7 @@ test('Μ-7: 信任账文件往返 —— 记账→原子落盘→跨进程归零
 
     // (b) 跨进程模拟：内存归零（旧世界的信任账在进程退出时蒸发 —— 持久化的立意）
     resetFederationRuntime();
-    assert.equal(federationTrustOf('peer-x'), 1, '未恢复前初见全信（跨进程信任归零的旧病）');
+    assert.ok(Math.abs(federationTrustOf('peer-x') - PROBATION_TRUST_CAP) < 1e-12, '未恢复前：账面归零 ⇒ 初见试用期封顶 0.35（ΑΩ-R6 后不再是 1 —— Sybil 折面仍在）');
 
     // (c) 恢复：loadFederationTrust 防御读档 ⇒ 信任续账（1/(1+2)=1/3）
     const restored = loadFederationTrust(store);
@@ -681,6 +731,356 @@ test('Μ-8: env 缺省零签名头；DSH_FEDERATION_TOKEN 在场自动附双头�
     else process.env[FEDERATION_AUTH_ENV] = prevEnv;
     resetFederationRuntime();
   }
+});
+
+// ─── Μ-9：试用期缓升（ΑΩ-R6）—— 堵"初见全信"的 Sybil 空间 ───
+
+test('Μ-9: 新源首掺 trust 封顶 0.35；3 次干净合并解除；试用期内检疫票 ⇒ 回退+污点轮不计干净；local 豁免；持久化往返保持', () => {
+  resetFederationRuntime();
+  const dir = mkdtempSync(path.join(tmpdir(), 'fed-probation-'));
+  try {
+    // 常量锁（ΑΩ-R6 立法值）：封顶 0.35、门槛 3、豁免 'local'
+    assert.equal(PROBATION_TRUST_CAP, 0.35, '试用期封顶 = 0.35');
+    assert.equal(PROBATION_CLEAN_MERGES, 3, '解除门槛 = 3 次干净合并');
+    assert.equal(TRUST_PROBATION_EXEMPT_SOURCE, 'local', '豁免源 = local（本机不是外源）');
+
+    /** n=10 的靶账本 + 远端洪泛滥洪摘要（cap = floor(0.5×10) = 5 —— 封顶/信任的乘法面） */
+    const mkLedger = (): EvidenceLedger => {
+      const l = new EvidenceLedger();
+      for (let i = 0; i < 10; i++) l.record({ key: 'fed.prob', success: true, margin: 0.1, ts: i });
+      return l;
+    };
+    const merged = { v: 1 as const, mintedAt: 1, epsilon: 1, keys: [{ key: 'fed.prob', n: 999, bins: bigBins() }] };
+    const recOf = (id: string) => federationTrustReport().find(r => r.sourceId === id)!;
+
+    // (a) 新源首见：未立账 ⇒ 试用期封顶；首掺 quota = floor(5 × 0.35) = 1；记账如实
+    assert.ok(Math.abs(federationTrustOf('fresh-ep') - 0.35) < 1e-12, '初见（未立账）⇒ 0.35 —— 首掺不再免费');
+    const r1 = applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'fresh-ep', now: () => 1 });
+    assert.equal(r1.trust, 0.35, '首掺走试用期封顶');
+    assert.equal(r1.applied, 1, 'quota = floor(5 × 0.35) = 1');
+    assert.equal(recOf('fresh-ep').merges, 1, '第 1 轮合并入账');
+    assert.equal(recOf('fresh-ep').cleanMerges, 1, '干净 1/3');
+    assert.equal(recOf('fresh-ep').probation, true, '仍在试用期');
+
+    // (b) 3 次干净合并解除：第 2 次仍封顶；第 3 次毕业 ⇒ raw=1 全信恢复、quota 回 5（毕业永久）
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'fresh-ep', now: () => 2 });
+    assert.ok(Math.abs(federationTrustOf('fresh-ep') - 0.35) < 1e-12, '干净 2/3 仍在试用期');
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'fresh-ep', now: () => 3 });
+    assert.ok(Math.abs(federationTrustOf('fresh-ep') - 1) < 1e-12, '干净 3/3 ⇒ 试用期解除（raw=1）');
+    assert.equal(recOf('fresh-ep').probation, false, '毕业在案');
+    const r4 = applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'fresh-ep', now: () => 4 });
+    assert.equal(r4.trust, 1, '毕业后不再封顶');
+    assert.equal(r4.applied, 5, 'quota 回 floor(5 × 1) = 5（缓升到位 —— 留忏悔通道的奖励面）');
+
+    // (c) 试用期内吃检疫票 ⇒ 回退：wired 序（先折算票、后掺入）—— 16 票 ⇒ 3 regressed；
+    //     干净计数归零 + 污点轮不计干净；票的 1/(1+regressed)=0.25 照咬（试用期不是豁免）；
+    //     再 3 次干净合并毕业 ⇒ 封顶解除但 raw 0.25 保留（毕业 ≠ 洗白票）
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'poison-ep', now: () => 5 });
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'poison-ep', now: () => 6 });
+    assert.equal(recOf('poison-ep').cleanMerges, 2, '先攒 2 次干净');
+    const conv = applyQuarantineToTrust({ 'poison-ep': 16 }, recordFederationTrust);
+    assert.deepEqual(conv, [{ sourceId: 'poison-ep', votes: 16, regressed: 3 }], '16 票折算 3 次 regressed');
+    assert.equal(recOf('poison-ep').cleanMerges, 0, '试用期内吃票 ⇒ 干净计数回退归零（试用期重启）');
+    const rp = applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'poison-ep', now: () => 7 });
+    assert.ok(Math.abs(rp.trust - 0.25) < 1e-12, '票折减 0.25 低于封顶 ⇒ 取 raw（试用期不是豁免）');
+    assert.equal(rp.applied, 1, 'quota = floor(5 × 0.25) = 1');
+    assert.equal(recOf('poison-ep').cleanMerges, 0, '污点轮（先票后掺）不计干净');
+    assert.equal(recOf('poison-ep').merges, 3, 'merges 如实累账（试用期内每次合并如实记账）');
+    for (const t of [8, 9, 10]) applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'poison-ep', now: () => t });
+    assert.equal(recOf('poison-ep').probation, false, '回退后再 3 次干净合并 ⇒ 毕业');
+    assert.ok(Math.abs(federationTrustOf('poison-ep') - 0.25) < 1e-12, '毕业解除封顶但票的 0.25 折减保留（忏悔通道立法不变）');
+
+    // (d) 'local' 源豁免：立账/回归都只走 1/(1+regressed)，无试用期封顶
+    assert.equal(federationTrustOf('local'), 1, 'local 初见不封顶（豁免）');
+    recordFederationTrust('local', { applied: 5 });
+    assert.equal(federationTrustOf('local'), 1, 'local 立账后仍不封顶');
+    recordFederationTrust('local', { regressed: 1 });
+    assert.equal(federationTrustOf('local'), 0.5, 'local 回归只走 1/(1+regressed) = 0.5（无试用期面）');
+    assert.equal(recOf('local').probation, false, '报告面 probation=false（豁免）');
+
+    // (e) 持久化往返：试用期中段（干净 2/3）落盘 → 跨进程归零 → 恢复 ⇒ 进度续账、
+    //     再 1 次干净合并毕业；档上是原始计数（v=2、无 trust 派生量）；v=1 旧档版本闸拒绝
+    const file = path.join(dir, 'federation-trust.json');
+    const store = createFederationTrustFileStore(file);
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'persist-ep', now: () => 11 });
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'persist-ep', now: () => 12 });
+    assert.equal(recOf('persist-ep').cleanMerges, 2, '落盘前：干净 2/3（试用期中段）');
+    assert.equal(armFederationTrustPersistence(store, { flushEvery: 1 }), true, '武装');
+    assert.equal(flushFederationTrust().ok, true, '冲刷');
+    const doc = JSON.parse(readFileSync(file, 'utf8')) as {
+      v: number; accounts: Array<{ sourceId: string; merges?: number; cleanMerges?: number; dirty?: boolean }>;
+    };
+    assert.equal(doc.v, 2, '档版本 = 2（ΑΩ-R6 试用期计数入档）');
+    const pe = doc.accounts.find(a => a.sourceId === 'persist-ep')!;
+    assert.equal(pe.cleanMerges, 2, '试用期进度随原始计数落盘');
+    assert.ok(!('trust' in pe), 'trust 仍是派生量不落盘（立法不变）');
+    resetFederationRuntime();
+    assert.equal(loadFederationTrust(store).restored, 4, '恢复全档 4 条（本测试累计账：fresh/poison/local/persist）');
+    assert.equal(recOf('persist-ep').cleanMerges, 2, '恢复后续账：干净 2/3（试用期状态跨进程保持）');
+    assert.equal(recOf('persist-ep').probation, true, '仍在试用期');
+    assert.ok(Math.abs(federationTrustOf('persist-ep') - 0.35) < 1e-12, '恢复后 trust = 0.35（封顶照罩）');
+    applyFederatedEvidence(mkLedger(), merged, { maxRemoteShare: 0.5, sourceId: 'persist-ep', now: () => 13 });
+    assert.equal(recOf('persist-ep').probation, false, '恢复后第 3 次干净合并 ⇒ 毕业（进度不因重启丢失）');
+    assert.ok(Math.abs(federationTrustOf('persist-ep') - 1) < 1e-12, '毕业后全信恢复');
+    // v=1 旧档（无试用期计数的上代形态）⇒ 版本闸诚实整档拒绝（不静默吞异版）
+    const legacy = restoreFederationTrust({ v: 1, savedAt: 0, accounts: [{ sourceId: 'x', applied: 1, regressed: 0 }] });
+    assert.equal(legacy.restored, 0, 'v=1 旧档整档拒绝');
+    assert.ok(legacy.note?.includes('版本不符'), `拒绝原因在案（${legacy.note}）`);
+
+    // (f) 匿名（''）不适用试用期（垃圾 id ⇒ 1 —— 匿名不折减不封顶）
+    assert.equal(federationTrustOf(''), 1, '匿名 ⇒ 1（试用期只对外源 id 生效）');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    resetFederationRuntime();
+  }
+});
+
+// ─── Μ-10：掺入 provenance 标记（ΑΩ-R41）── 只立账不立规 ───
+
+test('Μ-10: 掺入逐条打 origin:federation 可与本地分离；本地缺省照常；水合往返保持；未知 origin 归 local；读路径零区分', () => {
+  resetFederationRuntime();
+  try {
+    const K = 'fed.prov';
+    const ledger = new EvidenceLedger();
+    // 本地真实观察 10 条（不带 origin —— 既有本地路径逐字节照常）
+    for (let i = 0; i < 10; i++) ledger.record({ key: K, success: i % 2 === 0, margin: 0.1, ts: i });
+
+    // (a) 掺入：quota = floor(0.5×10) = 5（显式 trust:1 —— sourceId 只作审计面不折减）
+    const merged = { v: 1 as const, mintedAt: 1, epsilon: 1, keys: [{ key: K, n: 999, bins: bigBins() }] };
+    const rep = applyFederatedEvidence(ledger, merged, { maxRemoteShare: 0.5, trust: 1, sourceId: 'prov-ep', now: () => 888 });
+    assert.equal(rep.ok, true, '合法输入 ok');
+    assert.equal(rep.applied, 5, 'quota = floor(0.5 × 10) = 5');
+
+    // (b) dump 分离两类计数：10 条本地（origin 缺席）+ 5 条联邦（origin:'federation'）
+    const es = ledger.entries(K);
+    assert.equal(es.length, 15, '滑窗内两类共存');
+    const federated = es.filter(e => e.origin === 'federation');
+    const local = es.filter(e => e.origin !== 'federation');
+    assert.equal(federated.length, 5, '联邦掺入 5 条全带 federation 标');
+    assert.equal(local.length, 10, '本地观察 10 条照常');
+    assert.ok(local.every(e => !('origin' in e)), '本地 record 不带 origin ⇒ 字段缺席（缺省 = local 既有语义）');
+    assert.ok(
+      federated.every(e => e.ts >= Math.max(0, 1 - APPLY_TS_SCATTER_MS) && e.ts <= 1 + APPLY_TS_SCATTER_MS),
+      '掺入 ts 落源 mintedAt=1 邻域（ΝΩ-20 散布 —— 不再共享同一时钟）',
+    );
+    assert.ok(new Set(federated.map(e => e.ts)).size >= 2, '掺入 ts 不恒等（时间分布形状恢复）');
+    assert.ok(local.every(e => e.ts < 888), '本地条目在前（旧 → 新保序）');
+    // 来源纪要不进记录：只打布尔级来源（sourceId 计数汇总在报告/信任账审计面 —— 避免膨胀）
+    const flat = JSON.stringify(es);
+    assert.ok(!flat.includes('prov-ep'), 'sourceId 不进账本记录');
+    assert.ok(!flat.includes('sourceId'), '记录无来源纪要字段');
+
+    // (c) stats 不因新字段炸：两类同窗计数（读路径零行为区分 —— 只立账不立规）
+    assert.equal(ledger.stats(K).n, 15, 'stats 口径含两类（origin 零区分）');
+
+    // (d) 水合往返：dump → JSON 序列化 → 重灌新账本 → dump 逐字段一致（origin 保持）
+    const replay = new EvidenceLedger();
+    for (const e of JSON.parse(JSON.stringify(es)) as typeof es) replay.record({ key: K, ...e });
+    assert.deepStrictEqual(replay.entries(K), es, '水合往返 origin 保持（本地缺席语义 + 联邦标记皆逐字段存活）');
+
+    // (e) 未知 origin 防御归 local：异版字符串 / 非串垃圾 / 显式 undefined ⇒ 字段缺席
+    const defensive = new EvidenceLedger();
+    const junk = (origin: unknown): KernelOutcome => ({ key: K, success: true, ts: 1, origin }) as KernelOutcome;
+    defensive.record(junk('alien-version'));
+    defensive.record(junk(42));
+    defensive.record(junk(undefined));
+    defensive.record({ key: K, success: true, ts: 2, origin: 'local' });
+    const des = defensive.entries(K);
+    assert.equal(des.length, 4, '垃圾 origin 不丢条目（静默消毒，不拒收）');
+    assert.ok(!('origin' in des[0]) && !('origin' in des[1]) && !('origin' in des[2]), '未知/垃圾 origin 防御式归 local（字段缺席）');
+    assert.equal(des[3].origin, 'local', '显式 local 照常入账并保持');
+    assert.equal(defensive.stats(K).n, 4, 'stats 不因垃圾 origin 炸');
+
+    // (f) 摘要铸造对混合账本照常（digest 只读 success/margin —— origin 零区分）
+    const d = mintEvidenceDigest(ledger, { seed: 7, epsilon: 1, now: () => 9 })!;
+    const entry = d.keys.find(k => k.key === K)!;
+    assert.ok(entry, '混合账本摘要照常铸造（新字段不炸 dump/序列化面）');
+    assert.ok(
+      Number.isInteger(entry.n) && entry.n >= 0 && Math.abs(entry.n - 15) <= 12,
+      `n 计两类且加噪（ΝΩ-20 (c)：真值 15 的 DP 估计，实测 ${entry.n} —— 未来若要按来源加权，账已就绪）`,
+    );
+  } finally {
+    resetFederationRuntime();
+  }
+});
+
+// ─── ΝΩ-20a：隐私会计（RDP 公式 + 预算账本 + n 加噪 + 采样放大） ───
+
+test('ΝΩ-20a: rdpEpsilon 公式律；预算耗尽拒绝（不抛、如实申报）；n 加噪；子采样放大记账；空窗零记账；首 release 零回归', () => {
+  resetPrivacyBudgetRuntime();
+  try {
+    // (a) rdpEpsilon：Mironov 闭式的执法面 —— 零点、D_α ≤ ε、ε/α 双单调、闭式对拍、溢出臂、消毒
+    assert.equal(rdpEpsilon(0), 0, 'ε=0 ⇒ 0（完美隐私）');
+    assert.equal(rdpEpsilon(-1), 0, 'ε<0 消毒 ⇒ 0');
+    assert.equal(rdpEpsilon(Number.NaN), 0, 'ε NaN 消毒 ⇒ 0');
+    for (const eps of [0.1, 0.5, 1, 2, 5]) {
+      for (const a of [1.5, 2, RDP_ORDER, 100]) {
+        const d = rdpEpsilon(eps, a);
+        assert.ok(d >= 0 && d <= eps + 1e-12, `D_α ≤ ε（ε=${eps}, α=${a}，实测 ${d}）`);
+      }
+    }
+    for (const a of [2, RDP_ORDER, 100]) assert.ok(rdpEpsilon(2, a) < rdpEpsilon(5, a), `对 ε 单调（α=${a}）`);
+    for (const eps of [0.5, 1, 3]) assert.ok(rdpEpsilon(eps, 2) < rdpEpsilon(eps, 100), `对 α 单调收敛纯 DP（ε=${eps}）`);
+    assert.ok(
+      Math.abs(rdpEpsilon(1, 2) - Math.log((2 / 3) * Math.exp(1) + (1 / 3) * Math.exp(-2))) < 1e-12,
+      'α=2 闭式对拍：D₂ = log(⅔e + ⅓e⁻²)',
+    );
+    assert.equal(rdpEpsilon(500, 50), 500, '数值溢出臂 ⇒ 纯 DP 界 ε（恰为 α→∞ 极限，保守方向）');
+    assert.equal(rdpEpsilon(1, 1), rdpEpsilon(1), '非法 α ⇒ 冻结缺省阶');
+
+    // (b) 子采样放大公式：ε_eff = log(1 + γ(e^ε − 1))
+    assert.ok(Math.abs(subsampleAmplifiedEpsilon(1, 0.5) - Math.log(1 + 0.5 * (Math.E - 1))) < 1e-12, '公式对拍');
+    assert.ok(subsampleAmplifiedEpsilon(1, 0.5) < 1, 'γ<1 ⇒ ε_eff < ε');
+    assert.equal(subsampleAmplifiedEpsilon(1, 1), 1, 'γ=1（不采样）⇒ 原样 ε');
+    assert.equal(subsampleAmplifiedEpsilon(1, 0), 0, 'γ=0 ⇒ 0（机制看不见任何个体）');
+    assert.equal(subsampleAmplifiedEpsilon(Number.NaN, 0.5), 0, 'ε NaN ⇒ 0');
+
+    // (c) 预算耗尽拒绝：同窗口 ε=1 × 10 次放行；第 11 次拒绝（null，不抛）且如实申报
+    const ledger = new EvidenceLedger();
+    for (let i = 0; i < 20; i++) ledger.record({ key: 'fed.budget', success: i % 3 !== 0, margin: -0.9 + (i % 8) * 0.25, ts: i });
+    for (let k = 1; k <= PRIVACY_BUDGET_EPSILON_TOTAL; k++) {
+      const d = mintEvidenceDigest(ledger, { seed: k, now: () => 1000 + k });
+      assert.ok(d !== null, `第 ${k}/${PRIVACY_BUDGET_EPSILON_TOTAL} 次 release 在预算内`);
+    }
+    assert.equal(privacyBudgetReport().length, 1, '同窗口内容 ⇒ 同指纹 ⇒ 单账户');
+    let acc = privacyBudgetReport()[0]!;
+    assert.equal(acc.releases.length, PRIVACY_BUDGET_EPSILON_TOTAL, '10 行账（每次 release 记 (ts, ε)）');
+    assert.ok(acc.releases.every((r, idx) => r.ts === 1001 + idx && r.epsilon === 1), '账目行带铸造时刻 ts 与 ε');
+    assert.ok(Math.abs(acc.totalEpsilon - 10) < 1e-9, 'Σε = 10（朴素组合执法口径 —— 纯 DP 不引入 δ）');
+    assert.ok(acc.totalRdpEpsilon < 10, `RDP 审计口径更省（Σ D_α = ${acc.totalRdpEpsilon.toFixed(3)} < Σε —— 前沿 Rényi 组合）`);
+    assert.equal(acc.exhausted, true, '预算已耗尽');
+    assert.equal(privacyBudgetOf('w00000000'), null, '未知指纹 ⇒ null（诚实面不臆造）');
+    assert.equal(mintEvidenceDigest(ledger, { seed: 99, now: () => 2000 }), null, '第 11 次 ⇒ 拒绝返回 null（绝不抛）');
+    acc = privacyBudgetReport()[0]!;
+    assert.equal(acc.releases.length, 10, '拒绝不记账（账面不因拒绝增长）');
+    assert.ok(acc.lastRejection && acc.lastRejection.note.includes('budget-exhausted'), '拒绝如实申报 budget-exhausted');
+    assert.equal(acc.lastRejection!.totalEpsilon, 10, '拒绝时刻的累计如实在案');
+    assert.equal(acc.lastRejection!.epsilon, 1, '被拒的本次 ε 如实在案');
+
+    // (d) 换窗口（内容变）⇒ 新指纹新预算 —— 滑窗生命期的预算换账
+    ledger.record({ key: 'fed.budget', success: true, margin: 0.5, ts: 99 });
+    assert.ok(mintEvidenceDigest(ledger, { seed: 7, now: () => 3000 }) !== null, '窗口内容滑动 ⇒ 新指纹 ⇒ mint 恢复');
+    assert.equal(privacyBudgetReport().length, 2, '新窗口开新账户');
+
+    // (e) 旧行为对照：首次 release 不受预算影响（预算未超 ⇒ 行为不变的零回归实证）
+    resetPrivacyBudgetRuntime();
+    const fresh = new EvidenceLedger();
+    for (let i = 0; i < 30; i++) fresh.record({ key: 'fed.first', success: true, margin: 0.2, ts: i });
+    const f1 = mintEvidenceDigest(fresh, { seed: 5, now: () => 42 })!;
+    const f2 = mintEvidenceDigest(fresh, { seed: 5, now: () => 42 })!;
+    assert.ok(f1 && f2 && f1.v === 1 && f1.mintedAt === 42 && f1.epsilon === 1 && Array.isArray(f1.keys), '首次 release 结构照旧');
+    assert.deepStrictEqual(f2, f1, '预算未超 ⇒ 同 seed 同账本逐字段一致（零回归）');
+    assert.equal(privacyBudgetReport().length, 1, '首窗单账户');
+    assert.equal(privacyBudgetReport()[0]!.releases.length, 2, '两次 release 两行账（确定性重铸也是 release —— 如实记账）');
+    assert.ok(Math.abs(privacyBudgetReport()[0]!.totalEpsilon - 2) < 1e-12, 'Σε = 2（1 + 1）');
+    assert.equal(privacyBudgetReport()[0]!.exhausted, false, '远未耗尽');
+    assert.equal(privacyBudgetReport()[0]!.lastRejection, undefined, '从未被拒 ⇒ 拒绝面缺席');
+
+    // (f) n 加噪：整数非负、有界、跨窗口无偏近真值、跨 seed 生效（每 seed 独立窗口
+    //     —— 预算账本按内容指纹换账，噪声普查不吃同一窗的预算）
+    const ns: number[] = [];
+    for (let s = 1; s <= 60; s++) {
+      const l = new EvidenceLedger();
+      for (let i = 0; i < 40; i++) l.record({ key: 'fed.noisyN', success: true, margin: 0.1 + s * 1e-7, ts: i });
+      ns.push(mintEvidenceDigest(l, { seed: s, now: () => 50_000 })!.keys.find(k => k.key === 'fed.noisyN')!.n);
+    }
+    assert.ok(ns.every(v => Number.isInteger(v) && v >= 0), 'n 加噪取整非负');
+    assert.ok(ns.every(v => Math.abs(v - 40) <= 12), `逐窗 |n̂−40| ≤ 12 护栏（实测极差 ${Math.min(...ns)}~${Math.max(...ns)}）`);
+    assert.ok(Math.abs(ns.reduce((a, b) => a + b, 0) / ns.length - 40) <= 2, `近无偏（实测均值 ${(ns.reduce((a, b) => a + b, 0) / ns.length).toFixed(2)}）`);
+    assert.ok(new Set(ns).size >= 5, '跨 seed 噪声生效（不恒等）');
+
+    // (g) 子采样执法面：γ=0.5 ⇒ 直方图质量约减半 + 预算记 ε_eff（放大红利只发真采样者）
+    resetPrivacyBudgetRuntime();
+    const subLed = new EvidenceLedger();
+    for (let i = 0; i < 100; i++) subLed.record({ key: 'fed.sub', success: true, margin: 0.3, ts: i });
+    const sub1 = mintEvidenceDigest(subLed, { seed: 11, sampleGamma: 0.5, now: () => 60 })!;
+    const mass1 = sub1.keys[0]!.bins.reduce((s, c) => s + c[0] + c[1], 0);
+    assert.ok(mass1 >= 25 && mass1 <= 75, `γ=0.5 ⇒ 入样质量 ≈ 半（Binomial(100,.5)±噪声，实测 ${mass1}）`);
+    assert.ok(
+      Math.abs(privacyBudgetReport()[0]!.totalEpsilon - subsampleAmplifiedEpsilon(1, 0.5)) < 1e-12,
+      `预算记 ε_eff ≈ ${subsampleAmplifiedEpsilon(1, 0.5).toFixed(4)}（< ε=1）`,
+    );
+    // 对照臂：不采样（缺省）⇒ 记原 ε 且行为与旧实现一致
+    const plainLed = new EvidenceLedger();
+    for (let i = 0; i < 100; i++) plainLed.record({ key: 'fed.plain', success: true, margin: 0.3, ts: i });
+    assert.ok(mintEvidenceDigest(plainLed, { seed: 3, now: () => 61 }) !== null, '缺省不采样照常铸造');
+    const plainAcc = privacyBudgetReport().find(a => a.totalEpsilon === 1)!;
+    assert.ok(plainAcc && plainAcc.releases.length === 1, '不采样 ⇒ 记原 ε=1（不白拿放大红利）');
+
+    // (h) 空窗零记账：输出与任何个体无关（纯噪声）⇒ 0-DP 成本
+    resetPrivacyBudgetRuntime();
+    for (let k = 0; k < 12; k++) {
+      assert.ok(mintEvidenceDigest(new EvidenceLedger(), { seed: k, now: () => 70 }) !== null, `空窗第 ${k + 1} 次照常（超上限次数也不受影响）`);
+    }
+    assert.equal(privacyBudgetReport().length, 0, '零有效条目 ⇒ 零记账');
+  } finally {
+    resetPrivacyBudgetRuntime();
+  }
+});
+
+// ─── ΝΩ-20b：掺入统计修正（坨内抖动 + ts 散布 + 确定性） ───
+
+test('ΝΩ-20b: 掺入 margin 坨宽内均匀抖动（不恒等/近全宽/四分位近均匀）；ts 按 mintedAt 邻域散布；种子确定性；mintedAt 非法降级', () => {
+  // 大配额单坨：本地 n=200 × share 1 × trust 1 ⇒ quota=200 全落 bin3 success 列
+  const K = 'fed.jitter';
+  const seedLocal = (): EvidenceLedger => {
+    const l = new EvidenceLedger();
+    for (let i = 0; i < 200; i++) l.record({ key: K, success: true, margin: 0.1 * (i % 10) - 0.5, ts: i });
+    return l;
+  };
+  const bins3 = Array.from({ length: DIGEST_BINS }, () => [0, 0]);
+  bins3[3] = [400, 0];
+  const merged = { v: 1 as const, mintedAt: 12_345, epsilon: 1, keys: [{ key: K, n: 400, bins: bins3 }] };
+
+  const ledger = seedLocal();
+  const rep = applyFederatedEvidence(ledger, merged, { maxRemoteShare: 1, trust: 1, now: () => 999_999 });
+  assert.equal(rep.applied, 200, 'quota = floor(1×200) = 200 条全落 bin3');
+  const tail = ledger.entries(K).slice(-200);
+  assert.ok(tail.every(e => e.success === true && e.origin === 'federation'), '成败反演 + origin 标照旧');
+
+  // (a) margin：全部落 bin3 覆盖区间 [center−w/2, center+w/2]（w = 坨宽 0.25）
+  const halfW = 1 / DIGEST_BINS; // 坨宽 2/8 的一半 = 0.125
+  for (const e of tail) {
+    const m = e.margin ?? Number.NaN;
+    assert.ok(
+      Number.isFinite(m) && m >= centerOf(3) - halfW - 1e-9 && m <= centerOf(3) + halfW + 1e-9,
+      `margin 落 bin3 覆盖区间（实测 ${m}）`,
+    );
+  }
+  // (b) 坨内不恒等：200 条的高多样性（旧律恒为坨中心 1 种 —— 量化坍缩被恢复）
+  const ms = tail.map(e => e.margin!);
+  assert.ok(new Set(ms).size > 100, `坨内 margin 高多样性（实测 ${new Set(ms).size} 种 vs 旧律 1 种）`);
+  // (c) 近全宽散布：极差 ≥ 0.15（理论 0.25 的均匀分布 200 样本期望极差 ≈ 0.249）
+  assert.ok(Math.max(...ms) - Math.min(...ms) >= 0.15, `坨宽内散布近全宽（极差 ${(Math.max(...ms) - Math.min(...ms)).toFixed(4)}）`);
+  // (d) 近均匀：四分位各 ≥ 35（均匀 200/4 = 50 的 0.7 倍下限）
+  const w = 2 / DIGEST_BINS;
+  const left3 = -1 + 3 * w;
+  for (let q = 0; q < 4; q++) {
+    const c = ms.filter(m => m >= left3 + (q * w) / 4 && m < left3 + ((q + 1) * w) / 4).length;
+    assert.ok(c >= 35, `坨内四分位近均匀（Q${q} = ${c} ≥ 35）`);
+  }
+  // (e) ts：落 mintedAt=12345 ± APPLY_TS_SCATTER_MS、取整非负、不恒等
+  assert.ok(tail.every(e => e.ts >= 12_345 - APPLY_TS_SCATTER_MS && e.ts <= 12_345 + APPLY_TS_SCATTER_MS), 'ts 落源 mintedAt 邻域（±5 分钟）');
+  assert.ok(tail.every(e => Number.isInteger(e.ts) && e.ts >= 0), 'ts 取整非负');
+  assert.ok(new Set(tail.map(e => e.ts)).size > 100, `ts 散布不恒等（实测 ${new Set(tail.map(e => e.ts)).size} 种 vs 旧律 1 种）`);
+
+  // (f) 确定性：同摘要同记录坐标 ⇒ 同抖动（与注入时钟无关 —— 种子派生自 mintedAt/坐标）
+  const twin = seedLocal();
+  applyFederatedEvidence(twin, merged, { maxRemoteShare: 1, trust: 1, now: () => 1_000_000 });
+  assert.deepStrictEqual(twin.entries(K).slice(-200), tail, '孪生账本重放逐字段一致（时钟不同 ⇒ 抖动相同）');
+
+  // (g) mintedAt 非法 ⇒ ts 邻域回落注入时钟（旧律 ts=now 只作降级臂）
+  const led3 = new EvidenceLedger();
+  for (let i = 0; i < 10; i++) led3.record({ key: K, success: true, margin: 0.2, ts: i });
+  const badMinted = { v: 1 as const, mintedAt: Number.NaN, epsilon: 1, keys: [{ key: K, n: 20, bins: bins3 }] };
+  const rep3 = applyFederatedEvidence(led3, badMinted, { maxRemoteShare: 0.5, trust: 1, now: () => 555_555 });
+  assert.equal(rep3.applied, 5, '降级臂配额照常（quota = floor(0.5×10) = 5）');
+  const tail3 = led3.entries(K).slice(-5);
+  assert.ok(
+    tail3.every(e => e.ts >= 555_555 - APPLY_TS_SCATTER_MS && e.ts <= 555_555 + APPLY_TS_SCATTER_MS),
+    'mintedAt 非法 ⇒ ts 回落注入时钟邻域',
+  );
+  assert.ok(tail3.every(e => e.origin === 'federation'), '降级臂 provenance 标不丢');
 });
 
 // ─── 附：KernelRegistry/EvidenceLedger 增量导出的既有语义零回归（纯增量立法的旁证） ───

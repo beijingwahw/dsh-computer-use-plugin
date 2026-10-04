@@ -9,37 +9,78 @@
 # （d7HostPort 套件在 npm test 里经 ServiceManager 缺省 8421 自起服务 —— 其
 # spawn 不再强制 DSH_PHYSICAL_PID_ATTESTATION=false，Linux 上按服务端缺省走
 # /proc/<pid>/exe 存在性证明，auth.py 头注的 Layer-2 在 CI 真机同步覆盖）。
+#
+# ΝΩ-37（CI 大接电）：OS 矩阵化 —— ubuntu 臂保留全量执法位（Linux 专属 E2E
+# + 本纪元新增五闸：python 单测 / bench 自检 / bench 回归门 / 创世审计 /
+# dist 冒烟），windows 臂跑核心子集（typecheck / verify / python 单测 /
+# npm test —— Linux 专属段按各测试文件既有 skip 逻辑自然让位）。CI 卫生：
+# 同 ref 取消旧跑 + 30 分钟硬超时 + npm/pip 双缓存 + 失败工件（TAP 与服务
+# 日志）+ 生产依赖 npm audit（high 及以上判红；2026-10 本地核账：0 高危）。
 name: ci
 on:
   push:
   pull_request:
+
+# CI 卫生：同一 ref 的新推送取消进行中的旧跑（省额度；PR 迭代高频场景）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 矩阵：ubuntu = 全量执法臂；windows = 核心子集臂（见各步 if 条件）。
+    # fail-fast 关闭：一臂红不连坐取消另一臂（OS 间归因独立）。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          # pip 缓存键锚定服务依赖清单（本仓无 requirements.txt）
+          cache-dependency-path: python_service/pyproject.toml
       - name: Install JS deps
         run: npm ci
+      # 生产依赖安全闸：--omit=dev 只审运行时面；high 及以上 ⇒ 红。
+      # 现状核账（2026-10，本地等价查询 registry bulk 端点）：0 advisories。
+      - name: npm audit (prod deps, high+)
+        if: runner.os == 'Linux'
+        run: npm audit --omit=dev --audit-level=high
       - name: Install Python deps (service + test fixtures)
         run: pip install fastapi uvicorn numpy pillow
       # D-A7：dsh_physical 以可编辑模式安装 —— 依赖（pydantic/pyautogui/
       # python-xlib/rapidocr/opencv/pyserial/httpx…）全部按 pyproject.toml 声明
       # 闭环安装；此后 `python -m dsh_physical` 从任意 cwd 可起（不再依赖
-      # cwd=python_service 的 sys.path 侥幸）。
+      # cwd=python_service 的 sys.path 侥幸）。Linux 臂专属：E2E 预起服务需要；
+      # windows 臂只跑单测（上方轻量四件套已足够 —— tests 自注入 sys.path，
+      # 重依赖均为模块内懒加载，缺席不炸导入）。
       - name: Install dsh_physical (editable, full declared deps)
+        if: runner.os == 'Linux'
         run: pip install -e python_service
       - name: Typecheck
         run: npm run typecheck
       - name: Verify gates (bug class lint + fatal fixes)
         run: npm run verify
       - name: Python service compile gate
+        if: runner.os == 'Linux'
         run: python -m compileall python_service/dsh_physical
+      # ΝΩ-37 (a)：python_service 单测全集（152 例）双臂同跑 —— 离线确定性
+      # 合成图/闭式断言，零显示环境依赖（Windows 本机 + 干净 venv 均实跑绿）。
+      # tee 留档供失败工件（pipefail 保真实退出码）。
+      - name: Python unit tests (152)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s python_service/tests -p "test_*.py" 2>&1 | tee python-unittest.log
       # D-A7：按 test/physicalExecution.adapter.http.test.ts 头部注释的自有配方
       # 预起服务（该文件的 skip 逻辑是「服务未预起则跳」—— 预起后应实跑）：
       #   tcp:8421 + TEST_SCREEN=1（无显示环境合成图）+ PID_ATTESTATION=false +
@@ -51,6 +92,8 @@ jobs:
       #   · DSH_PHYSICAL_SHOT_TRANSPORT=mmap-file —— Linux 缺省 'shm'，而该测试
       #     在 health 与 CapabilityCache 两处断言 screenshot_transport === 'mmap-file'。
       - name: Pre-start dsh_physical on tcp:8421 (D-A7 real-service recipe)
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           head -c 32 /dev/urandom > /tmp/dsh-test.key
           DSH_PHYSICAL_TRANSPORT=tcp \
@@ -80,24 +123,82 @@ jobs:
       #   · epochSigma.display.test.ts：自起随机端口服务（tcp + base64 截图），
       #     依赖就位 ⇒ E2E 段实跑（/displays、display 语义、region 基准）。
       - name: Physical-service E2E (D-A7 - adapter.http + sigma.display real-service arms)
+        if: runner.os == 'Linux'
         run: node --test --import ./test/register.mjs test/physicalExecution.adapter.http.test.ts test/epochSigma.display.test.ts
       # 归还 tcp:8421：d7HostPort（下方 npm test 内）经 ServiceManager 缺省端口
       # 自起服务 —— 预起服务若留活会被 probeHealth 判 port_squatted（拒收陌生
       # 进程）⇒ 该套件 skip。焦点步后务必停掉，恢复 d7 的自起臂。
       - name: Stop pre-started service (return tcp:8421 to d7HostPort self-spawn arm)
-        if: always()
+        if: always() && runner.os == 'Linux'
+        shell: bash
         run: |
           if [ -f /tmp/dsh-physical-ci.pid ]; then
             kill "$(cat /tmp/dsh-physical-ci.pid)" 2>/dev/null || true
           fi
           pkill -f 'python -m dsh_physical' 2>/dev/null || true
+      # 全量 JS 套件双臂同跑：windows 臂上 Linux 专属段（shm/uds/真服务 E2E）
+      # 按各测试文件既有 skip 逻辑自然让位。tee 留档 TAP 供失败工件。
       - name: Full test suite (POSIX shm arm live on /dev/shm)
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee npm-test.log
+      # ΝΩ-37 (b)：W2-3 离线自检（E2 契约核查器 + E3 SPRT 回归门，122 断言）。
+      - name: Bench harness selftest (W2-3 offline, 122 assertions)
+        if: runner.os == 'Linux'
+        run: node bench/verify.selftest.mjs
+      # ΝΩ-37 (c)：W7-6 性能回归门 —— 重跑 w5*.bench.ts 与最近基线比对
+      # （硬门=pass/fail 回归/测试失踪/新失败 ⇒ 红；指标/时长偏离仅告警）。
+      # NODE_OPTIONS 钉死 tap 报告器：node 22 管道缺省即 TAP，node 23+ 缺省改
+      # spec —— 显式钉住使两代运行器下解析口径一致（2026-10 本地 node 24 实跑
+      # 绿：硬门 0 红 / 告警 1 条不判红）。
+      - name: Bench regression gate (W7-6 vs baseline)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          NODE_OPTIONS: --test-reporter=tap
+        run: |
+          set -o pipefail
+          node scripts/bench_gate.mjs --check 2>&1 | tee bench-gate.log
+      # ΝΩ-37 (d)：W7-2 创世审计严格模式 —— GENESIS/DEBTS 账实一致机器执法
+      # （虚报 / 实跑异常 / 0-fail 声明破产 ⇒ exit 1；抽样审计，分钟内）。
+      - name: Genesis/DEBTS ledger audit (W7-2 strict)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/genesis_audit.mjs --check 2>&1 | tee genesis-audit.log
       - name: Build (compile artifacts only)
+        if: runner.os == 'Linux'
         run: npm run build
       - name: Smoke import (all src modules)
+        if: runner.os == 'Linux'
         run: npm run smoke
+      # ΝΩ-37 (e)：dist 冒烟 —— 构建后 286 模块逐一导入洁净；dist/.manifest.json
+      # 在场时另做逐文件 sha256 对账（清单未入库 ⇒ CI 上走 MANIFEST-ABSENT
+      # 宽容臂，导入冒烟为主执法面；本地重建漂移会被 sha256 臂拦下）。
+      - name: Smoke dist (manifest sha256 attestation)
+        if: runner.os == 'Linux'
+        run: npm run smoke:dist
       # 诊断残留：焦点/全量任一失败时回显预起服务日志（启动即退/依赖缺失归因）
+      # 并把日志落进工作区供下方工件回收（windows 臂无此服务，自然缺席）。
       - name: Dump dsh_physical CI log (failure forensics)
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          cat /tmp/dsh-physical-ci.log || true
+          cp /tmp/dsh-physical-ci.log ./dsh-physical-ci.log 2>/dev/null || true
+      # ΝΩ-37：失败工件 —— 全量套件与 python 单测的 TAP 留档 + bench 门 /
+      # 审计日志 + 预起服务日志（缺席文件静默忽略，不因无服务日志而工件步红）。
+      - name: Upload failure artifacts (TAP + service logs)
         if: failure()
-        run: cat /tmp/dsh-physical-ci.log || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-${{ matrix.os }}
+          path: |
+            npm-test.log
+            python-unittest.log
+            bench-gate.log
+            genesis-audit.log
+            dsh-physical-ci.log
+          if-no-files-found: ignore

@@ -16,7 +16,7 @@ import { getGlmClient, isGlmConfigured, type GlmClient } from '../vlm/glmClient'
 import { groundElements } from '../vlm/grounding';
 import type { GroundedElement } from '../vlm/grounding';
 import type { LocalElement } from '../vlm/arbitration';
-import { composeSnapshot, type WorldSnapshot } from './worldSnapshot';
+import { composeSnapshot, snapshotChanged, type WorldSnapshot } from './worldSnapshot';
 import { SceneSemanticsCache } from './sceneSemantics';
 import { kernelRegistry } from '../kernel/registry';
 import { contextManager } from '../contextManager';
@@ -41,6 +41,14 @@ import { w1HashDistance } from './runtime.verdict';
  * 不是降级）；dhash/OCR/VLM 接地/场景语义失败 ⇒ 各自降级（快照 degraded 记账），
  * 绝不让次级传感器的故障拖垮主感知。合成后的快照写入 lastSnapshotRef
  * （在场时）供 execute 做变化判决的 before 帧。
+ *
+ * ΝΩ-14（变化门控）：每步双 VLM 往返（groundVlm + sceneRead）是自主环延迟
+ * 主导项 —— benign click 后屏未变也要照付两趟网络。门控：snapshotChanged
+ *（dhash 汉明 + 元素数突变双闸）判屏未变 ⇒ 复用上帧 groundVlm 产物跳过本轮
+ * 接地往返，快照 notes 记 'vlm-reused-unchanged' 诚实申报（复用是节流不是
+ * 降级，不占 degraded）；OCR 照跑（便宜、本地，兼作元素数闸证据）；场景语义
+ * 由 SceneSemanticsCache 组合键缓存独立节流。首轮 / 屏变 / 上帧无 VLM 产物 ⇒
+ * 照旧全价感知，行为与接线前一致。
  */
 export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnapshot> {
   const capture = deps.capture ?? ((): Promise<Buffer> => backend.captureCleanPng());
@@ -75,6 +83,12 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
   // 的汉明距离 —— 与 contextManager 页面级跳变判据同律）。
   const incrementalLedger = new ScreenStateLedger({}, {});
   let prevIncrementalDhash: string | null = null;
+  // ΝΩ-14（变化门控 · grounding 复用账）：上帧贵重产物 —— prevGround 是上帧
+  // groundVlm 的原始产出（null = 首轮不可得；空数组 = 上帧 VLM 无元素，无可
+  // 复用 ⇒ 本帧照旧全价感知，不给降级帧续命）；prevGateSnapshot 是上帧最终
+  // 快照（snapshotChanged 判决的 before 帧）。两者只在帧末成对更新。
+  let prevGround: GroundedElement[] | null = null;
+  let prevGateSnapshot: WorldSnapshot | null = null;
   // W4-1：惊异信号（前帧 vs 本帧 dhash 的汉明距离；证据缺席 ⇒ 0 —— 不伪报惊异）
   const surpriseBitsOf = (fingerprint: string | null): number => {
     if (!prevIncrementalDhash || !fingerprint) return 0;
@@ -86,25 +100,10 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
     const buf = await capture(); // 失败上抛 —— 闭环收敛为 error 步
     const { width, height } = await imageSize(buf);
 
-    // 次级传感器：指纹 / OCR / 云脑接地（各自降级，互不拖垮）
+    // 次级传感器：指纹 / OCR（各自降级，互不拖垮）。ΝΩ-14 起 OCR 仍每帧照跑
+    //（便宜、本地）—— 它既入快照文本账，也是变化门控双闸的元素数证据。
     const fingerprint = await dhashOf(buf).catch((): string | null => null);
     const words = await readWords(buf).catch((): RuntimeWord[] => []);
-    const vlmElements = await groundVlm(buf).catch((): GroundedElement[] => []);
-
-    // 纪元 Η（Η-5）：同屏语义复用 —— 指纹在场才读（无键不读，dhash 相同直接命中
-    // 缓存语义）；失败/降级零影响（sceneLabel 维持缺省 ''）
-    let sceneLabel = '';
-    if (typeof fingerprint === 'string' && fingerprint.trim() !== '') {
-      try {
-        const scene = await sceneCache.read(buf, fingerprint);
-        if (
-          scene && scene.degraded === false && scene.reading &&
-          typeof scene.reading.sceneLabel === 'string'
-        ) {
-          sceneLabel = scene.reading.sceneLabel;
-        }
-      } catch { /* 场景语义是次级传感器 —— 失败绝不拖垮主感知 */ }
-    }
 
     const localElements: LocalElement[] = words
       .filter(w => w && typeof w.label === 'string' && w.label.trim() !== '')
@@ -122,17 +121,54 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
       }));
     const ocrText = words.map(w => (typeof w.label === 'string' ? w.label : '')).filter(Boolean).join(' ');
 
-    const snap = composeSnapshot({
+    // 纪元 Η（Η-5）：同屏语义复用 —— 指纹在场才读（无键不读，dhash 相同直接命中
+    // 缓存语义）；失败/降级零影响（sceneLabel 维持缺省 ''）。ΝΩ-14：屏未变时
+    // 此读走 sceneSemantics 组合键缓存命中（零 VLM 零编码），与 grounding 门控
+    // 各自独立节流。
+    let sceneLabel = '';
+    if (typeof fingerprint === 'string' && fingerprint.trim() !== '') {
+      try {
+        const scene = await sceneCache.read(buf, fingerprint);
+        if (
+          scene && scene.degraded === false && scene.reading &&
+          typeof scene.reading.sceneLabel === 'string'
+        ) {
+          sceneLabel = scene.reading.sceneLabel;
+        }
+      } catch { /* 场景语义是次级传感器 —— 失败绝不拖垮主感知 */ }
+    }
+
+    // ΝΩ-14（变化门控 · grounding）：屏未变 ⇒ 复用上帧 vlm 元素，跳过 groundVlm
+    // 贵重往返（自主环延迟主导项）。判决复用 worldSnapshot.snapshotChanged 双闸
+    //（dhash 汉明 + 元素数突变）：以「上帧 vlm 元素 × 本帧 OCR」铸候选帧与上帧
+    // 快照对判 —— 未变 ⇒ 候选即终帧（零 groundVlm 往返），并记 note
+    // 'vlm-reused-unchanged' 诚实申报；变了 / 首轮（prev 不可得）/ 上帧无 VLM
+    // 产物可复用 ⇒ 照旧全价感知（指纹缺席时 snapshotChanged 宽松判变，天然落回
+    // 全价路径 —— 宁可重看，不可漏看）。
+    const composeBase = {
       image: buf,
       width,
       height,
       dhash: fingerprint,
-      vlmElements,
       localElements,
       ocrText,
       ...(sceneLabel !== '' ? { sceneLabel } : {}),
       now: now(),
-    });
+    };
+    let snap: WorldSnapshot | null = null;
+    if (prevGateSnapshot !== null && prevGround !== null && prevGround.length > 0) {
+      const candidate = composeSnapshot({
+        ...composeBase,
+        vlmElements: prevGround,
+        notes: ['vlm-reused-unchanged'],
+      });
+      if (!snapshotChanged(prevGateSnapshot, candidate)) snap = candidate; // 复用帧：候选转正
+    }
+    if (snap === null) {
+      const vlmElements = await groundVlm(buf).catch((): GroundedElement[] => []); // 云脑接地各自降级
+      snap = composeSnapshot({ ...composeBase, vlmElements });
+      prevGround = vlmElements; // 复用分支不更新 —— 上帧产物即本帧产物（同一账）
+    }
     // W4-1（顺带接线 · 增量账本消费）：总闸 incrementalEncodingEnabled() 缺省关
     // ⇒ 本段整跳过，感知行为与接线前逐字节一致（零回归）。开 ⇒ 每帧入账
     // （惊异 = 前帧与本帧 dhash 的汉明距离）→ deliverIncremental 出投递产物；
@@ -162,6 +198,7 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
       } catch { /* 旁路义务：账本/投递失败绝不拖垮主感知 */ }
     }
     prevIncrementalDhash = typeof fingerprint === 'string' && fingerprint !== '' ? fingerprint : prevIncrementalDhash;
+    prevGateSnapshot = snap; // ΝΩ-14：变化门控的 before 帧 —— 与 prevGround 同帧成对记账
     if (deps.lastSnapshotRef) deps.lastSnapshotRef.current = snap;
     return snap;
   };

@@ -3,6 +3,10 @@
 // （>500 行拆分信号）—— 确定性 RNG（xmur3 播种 + mulberry32 流）与 Beta 后验
 // 采样（Marsaglia–Tsang Gamma 桥）整体搬迁。纯数学零外部依赖，行为零变化；
 // memoryOps.ts 以再导出保持导入面不变。
+// ΝΩ-41（方言克隆律）：本地 mulberry32 副本退役 —— 流内核改自单源
+// src/dialects/random.ts 导入（seededRng 已在调用前 `s >>> 0` 归一种子 ⇒
+// 逐字节同流；金样 test/no41.dialectClones.test.ts）。
+import { mulberry32 } from '../dialects/random.js';
 /** xmur3 字符串散列播种器（公共域参考实现 —— 种子流的字符串入口语义） */
 function xmur3(str) {
     let h = 1779033703 ^ str.length;
@@ -14,16 +18,6 @@ function xmur3(str) {
         h = Math.imul(h ^ (h >>> 16), 2246822507);
         h = Math.imul(h ^ (h >>> 13), 3266489909);
         return (h ^= h >>> 16) >>> 0;
-    };
-}
-/** mulberry32（32 位乘法流 —— 确定性、快、周期 2^32 对阈值采样充裕） */
-function mulberry32(a) {
-    return () => {
-        a |= 0;
-        a = (a + 0x6d2b79f5) | 0;
-        let t = Math.imul(a ^ (a >>> 15), 1 | a);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
 }
 /** 种子流铸造：number 直播种，string 经 xmur3 播种 —— 同种子 ⇒ 逐位同流 */

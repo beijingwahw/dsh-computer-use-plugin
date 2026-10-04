@@ -263,6 +263,8 @@ export function detectPresetFromEnv() {
  *   4. 全无 ⇒ null。
  * 三物料的取值律（各路同法）：opts 显式值 > env 首命中（预设 envKeys） > 预设
  * 缺省值；baseUrl/model 无 env 来源；apiKey 兜底 ''（本地服务允许）。
+ * ΑΩ-R35：路 3 且 ≥2 平台 env 并存 ⇒ 结果附 ambiguousEnv:true（选择不变，
+ * 仅供观测）。
  * 空串/纯空白 opts 值视为缺席。绝不抛异常。
  */
 export function resolveProviderConfig(opts) {
@@ -295,16 +297,24 @@ export function resolveProviderConfig(opts) {
             via: 'baseurl',
         };
     }
-    // 路 3：环境变量自动识别（声明序首个命中）
+    // 路 3：环境变量自动识别（声明序首个命中；GLM 首位兼容律保持不变）
     const preset = detectPresetFromEnv();
     if (!preset)
         return null;
+    // ΑΩ-R35（ambiguousEnv 注记）：多平台密钥同时在场 ⇒ 如实标注（选择不变）。
+    // 本地预设 envKeys 恒空数组，天然不计入歧义。
+    let envPlatforms = 0;
+    for (const p of PLATFORM_PRESETS) {
+        if (firstEnvValue(p.envKeys) !== '')
+            envPlatforms++;
+    }
     return {
         preset,
         apiKey: optKey !== '' ? optKey : firstEnvValue(preset.envKeys),
         baseUrl: preset.baseUrl,
         model: optModel !== '' ? optModel : preset.defaultModel,
         via: 'env',
+        ...(envPlatforms >= 2 ? { ambiguousEnv: true } : {}),
     };
 }
 // ─── 观测面 ───

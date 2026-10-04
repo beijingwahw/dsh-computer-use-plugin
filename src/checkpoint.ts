@@ -112,13 +112,113 @@ export function migrateCheckpoint(raw: unknown): Checkpoint | null {
   return null;
 }
 
+// ─── ΝΩ-22（热路径 IO 放大③）：分段序列化缓存 ───
+//
+// 问题：collect() 后 saveCheckpoint 对整个认知态做同步全量 JSON.stringify ——
+// 日志段（每步行动全参数）随会话线性膨胀，卸载/周期保存路径的序列化成本
+// O(全量) 放大。
+// 修法：每 section 附指纹，未变段复用上次序列化字符串缓存，最终档按段拼接：
+//   · journal 段指纹 = count:tip:base（追加式哈希链上 count+链尖+链基唯一
+//     确定 content —— 过程内 append-only，恢复走 restoreChain 会翻转 tip/base）
+//     —— 指纹计算零序列化，命中即整段复用（大头：日志段）；
+//   · 其余段指纹 = 序列化内容的 (length, FNV-1a) 双指纹（子系统无廉价变更
+//     计数面 —— 以内容哈希保真判定，命中即复用同一缓存文本实例）；
+//   · 防御式：任何缓存/指纹面故障 ⇒ 该段全量重算（try/catch 兜底 —— 缓存只
+//     是加速器，内容永远以现场序列化为准）；loadCheckpoint 恢复整体失效缓存
+//    （恢复会替换子系统内容 —— 键失效路径防御）。
+
+interface SectionCacheEntry {
+  key: string;
+  text: string;
+}
+
+const sectionTextCache = new Map<string, SectionCacheEntry>();
+const sectionSerializeCounts = new Map<string, number>();
+
+/** FNV-1a 32 位滚动哈希（段内容指纹 —— 纯函数，无依赖） */
+function fnv1a32(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+/** 单段序列化（带指纹缓存）：journal 段零序列化命中；其余段内容哈希命中复用 */
+function sectionTextOf(name: string, value: unknown): string {
+  try {
+    const hit = sectionTextCache.get(name);
+    if (name === 'journal') {
+      const j = value as Checkpoint['journal'];
+      const key = `j:${j.entries.length}:${j.chainTip}:${j.chainBase}`;
+      if (hit !== undefined && hit.key === key) return hit.text; // 命中：整段复用（零序列化）
+      const text = JSON.stringify(value);
+      sectionTextCache.set(name, { key, text });
+      sectionSerializeCounts.set(name, (sectionSerializeCounts.get(name) ?? 0) + 1);
+      return text;
+    }
+    const text = JSON.stringify(value);
+    const key = `c:${text.length}:${fnv1a32(text)}`;
+    if (hit !== undefined && hit.key === key) return hit.text; // 命中：复用缓存文本实例
+    sectionTextCache.set(name, { key, text });
+    sectionSerializeCounts.set(name, (sectionSerializeCounts.get(name) ?? 0) + 1);
+    return text;
+  } catch {
+    return JSON.stringify(value); // 防御式：缓存面故障 ⇒ 全量重算（内容永远正确）
+  }
+}
+
+/**
+ * ΝΩ-22：快照档组装 —— 与 JSON.stringify(cp) 同构的紧凑 JSON（键序对齐
+ * collect() 的字面序；undefined 段省略 —— JSON.stringify 同律），未变段
+ * 直接拼接缓存文本。
+ */
+function serializeCheckpoint(cp: Checkpoint): string {
+  const sections: Array<[string, unknown]> = [
+    ['uiMemory', cp.uiMemory],
+    ['probeMemory', cp.probeMemory],
+    ['skillLibrary', cp.skillLibrary],
+    ['failureMemory', cp.failureMemory],
+    ['journal', cp.journal],
+    ['telemetry', cp.telemetry],
+    ['contextManager', cp.contextManager],
+    ['swarm', cp.swarm],
+    ['swarmAgents', cp.swarmAgents],
+    ['shaper', cp.shaper],
+    ['quantum', cp.quantum],
+    ['journalMmrRoot', cp.journalMmrRoot],
+    ['sandboxMmrRoot', cp.sandboxMmrRoot],
+    ['selfModel', cp.selfModel],
+    ['approvalQueue', cp.approvalQueue],
+    ['branchLedger', cp.branchLedger],
+  ];
+  const parts: string[] = [`{"version":${cp.version},"savedAt":${cp.savedAt}`];
+  for (const [name, value] of sections) {
+    if (value === undefined) continue;
+    parts.push(`,${JSON.stringify(name)}:${sectionTextOf(name, value)}`);
+  }
+  parts.push('}');
+  return parts.join('');
+}
+
+/** ΝΩ-22（测试/观测面）：各段累计序列化次数（命中不计数 —— 零序列化断言锚点） */
+export function checkpointSectionStats(): Readonly<Record<string, number>> {
+  return Object.fromEntries(sectionSerializeCounts);
+}
+
+/** ΝΩ-22（测试/恢复面）：分段缓存整体失效（防御 —— 恢复路径调用） */
+export function resetCheckpointSectionCache(): void {
+  sectionTextCache.clear();
+  sectionSerializeCounts.clear();
+}
+
 /**
  * 收集全认知态。日志链尖端与链基随行 —— 恢复后 append 续链、verify 不误报。
  * 纪元 Ζ 旁路律：selfModel 段以独立 try/catch 采集 —— 单例 dump 面（按 Ι 纪元
  * 立法永不抛）万一故障，只记入 warnings 诚实跳过，绝不炸 checkpoint 主流程
  * （持久化是旁路：失败 = 诚实跳过，绝不炸睡眠/卸载路径的保存链）。
- */
-function collect(): { cp: Checkpoint; warnings: string[] } {
+ */function collect(): { cp: Checkpoint; warnings: string[] } {
   const warnings: string[] = [];
   let selfModelSnap: Checkpoint['selfModel'];
   try {
@@ -180,7 +280,8 @@ function collect(): { cp: Checkpoint; warnings: string[] } {
   };
 }
 
-/** 原子写：先写临时文件再改名。写一半崩溃 ⇒ 旧档完好，新档不存在，绝无损坏的半档 */
+/** 原子写：先写临时文件再改名。写一半崩溃 ⇒ 旧档完好，新档不存在，绝无损坏的半档。
+ *  ΝΩ-22：序列化走分段缓存组装（serializeCheckpoint）—— 未变段零重序列化。 */
 export function saveCheckpoint(filePath: string): { ok: boolean; steps?: number; error?: string; warnings?: string[] } {
   if (!filePath) return { ok: false, error: 'checkpointPath is not configured' };
   const { cp, warnings } = collect();
@@ -191,7 +292,7 @@ export function saveCheckpoint(filePath: string): { ok: boolean; steps?: number;
     //（与 journal.ts 磁盘写的崩溃一致性同律：页缓存不算落盘）
     const fd = openSync(tmp, 'w');
     try {
-      writeSync(fd, Buffer.from(JSON.stringify(cp), 'utf8'));
+      writeSync(fd, Buffer.from(serializeCheckpoint(cp), 'utf8'));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -207,6 +308,9 @@ export function saveCheckpoint(filePath: string): { ok: boolean; steps?: number;
 
 /** 防御性恢复：逐子系统独立 try-catch，单点损坏不拖垮整档；返回逐项恢复报告 */
 export function loadCheckpoint(filePath: string): { restored: boolean; report: string[] } {
+  // ΝΩ-22：恢复路径整体失效分段缓存（恢复会替换各子系统内容 —— 缓存键全部
+  // 视为可疑，下次保存全量重算；防御式的缓存失效即全量重算）
+  resetCheckpointSectionCache();
   if (!filePath || !existsSync(filePath)) return { restored: false, report: ['no checkpoint file'] };
   const report: string[] = [];
   let cp: Checkpoint;

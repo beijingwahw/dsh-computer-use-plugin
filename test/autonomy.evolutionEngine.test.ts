@@ -4,6 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EvolutionEngine, shouldDistillSkill, failureSignature, type RunRecord } from '../src/autonomy/evolutionEngine.ts';
+// ΝΩ-11：权重律原语（HCA 折扣常量/幅度、恢复表、applyRun 本体）自原语区直取
+import { HCA_GAMMA, hcaStepMagnitude, applyRun, RECOVERY_MAP } from '../src/autonomy/evolutionPrimitives.ts';
 
 /** 运行记录工厂：只覆写关心的字段 */
 const R = (o: Partial<RunRecord> = {}): RunRecord => ({
@@ -17,12 +19,14 @@ test('Φ-5: heuristics 初值——五键全 1.0、表形状恒定、空历史',
   assert.equal(e.history.length, 0);
 });
 
-test('Φ-5: 成功奖励——出现过的策略去重 +0.1，未知 kind 不入表', () => {
+test('Φ-5: 成功奖励——出现过的策略去重，按最晚出现位折扣 +0.1·γ^k（ΝΩ-11 HCA），未知 kind 不入表', () => {
   const e = new EvolutionEngine();
   e.ingest(R({ strategies: ['click', 'scroll', 'click', 'type_text'] }));
   const h = e.heuristics();
-  assert.equal(h.click, 1.1, 'click 出现 2 次仍只 +0.1（一次运行的证据量是 1）');
-  assert.equal(h.scroll, 1.1);
+  // ΝΩ-11 手算（γ=0.7，N=4）：click 最晚在 i=2（0 基）⇒ γ^(4-1-2)=γ¹ ⇒ +0.07 ⇒ 1.07；
+  // scroll 在 i=1 ⇒ γ² ⇒ +0.049 ⇒ 1.049（去重 = 一次运行的证据量仍是 1）
+  assert.equal(h.click, 1.07, 'click 出现 2 次仍只计一次，按最晚位折扣 γ¹ ⇒ +0.07');
+  assert.equal(h.scroll, 1.049, 'scroll 更早出现 ⇒ γ² ⇒ +0.049（早期贡献衰减）');
   assert.equal(h.inspect, 1);
   assert.equal(h.ask_vlm, 1);
   assert.equal(h.recall_skill, 1);
@@ -41,28 +45,32 @@ test('Φ-5: 权重上夹取——封顶 2.0，触顶后实际 delta 归零', () 
   assert.equal(adj[0].delta, 0, '触顶轮的夹取对读者可见：实际增量 0');
 });
 
-test('Φ-5: 失败惩罚——末两步位置语义（重复叠加）与下限 0.2', () => {
+test('Φ-5: 失败惩罚——全轨迹折扣（ΝΩ-11：γ^(N−i)，近因全额、早期衰减；重复叠加）与下限 0.2', () => {
   const e = new EvolutionEngine();
   e.ingest(R({ success: false, strategies: ['scroll', 'click', 'click'], failureRootCause: 'timeout' }));
   const h = e.heuristics();
-  assert.equal(h.click, 0.7, '末两步均为 click：两处位置各罚 0.15（叠加）');
-  assert.equal(h.scroll, 1, 'scroll 不在末两步，不受罚');
+  // ΝΩ-11 手算（γ=0.7，N=3）：scroll i=0 ⇒ γ² ⇒ -0.073 ⇒ 0.927；
+  // click i=1 ⇒ γ¹ ⇒ -0.105 ⇒ 0.895，click i=2 ⇒ γ⁰ ⇒ -0.15 ⇒ 0.745（重复叠加计罚）
+  assert.equal(h.click, 0.745, 'click 两处位置各按折扣计罚：-0.105 - 0.15（叠加）');
+  assert.equal(h.scroll, 0.927, 'scroll 在首位 ⇒ γ² 折扣 ⇒ -0.073（旧律末两步外不受罚 ⇒ 现全轨迹有份）');
   const e2 = new EvolutionEngine();
   for (let i = 0; i < 6; i++) e2.ingest(R({ success: false, strategies: ['click'] }));
-  assert.equal(e2.heuristics().click, 0.2, '六次失败降到下限 0.2');
+  assert.equal(e2.heuristics().click, 0.2, '六次失败降到下限 0.2（单步轨迹 γ⁰ 全额——与旧律同值）');
   e2.ingest(R({ success: false, strategies: ['click'] }));
   assert.equal(e2.heuristics().click, 0.2, '触底后再罚不动');
   assert.equal(e2.report().weightAdjustments[0].delta, 0, '触底轮的实际减量被夹为 0');
 });
 
-test('Φ-5: 失败关键词恢复加成——popup/focus→inspect、ocr→ask_vlm、大小写不敏感、多关键词叠加', () => {
+test('Φ-5: 失败关键词恢复加成——popup/focus→inspect、ocr→ask_vlm、大小写不敏感、多关键词叠加；ΝΩ-11 生产方言全命中', () => {
   const e = new EvolutionEngine();
   e.ingest(R({ success: false, strategies: ['click', 'scroll'], failureRootCause: 'popup overlay blocked the button' }));
   let h = e.heuristics();
-  assert.equal(h.click, 0.85, '末两步照常受罚');
-  assert.equal(h.scroll, 0.85);
-  assert.equal(h.inspect, 1.05, 'popup ⇒ inspect 对症 +0.05');
-  assert.equal(h.ask_vlm, 1, 'popup 不加 ask_vlm');
+  // ΝΩ-11 手算（N=2）：click i=0 ⇒ γ¹ ⇒ -0.105；scroll i=1 ⇒ γ⁰ ⇒ -0.15；
+  // 恢复词 popup 与 blocked（生产相位方言）双命中 inspect ⇒ +0.05×2
+  assert.equal(h.click, 0.895, '首位折扣受罚（γ¹ ⇒ -0.105）');
+  assert.equal(h.scroll, 0.85, '末位全额受罚（γ⁰ ⇒ -0.15）');
+  assert.equal(h.inspect, 1.1, 'popup ⇒ inspect +0.05，blocked ⇒ inspect 再 +0.05（ΝΩ-11 方言扩表）');
+  assert.equal(h.ask_vlm, 1, 'popup/blocked 不加 ask_vlm');
   const e2 = new EvolutionEngine();
   e2.ingest(R({ success: false, strategies: [], failureRootCause: 'Focus lost mid-task' }));
   assert.equal(e2.heuristics().inspect, 1.05, 'focus ⇒ inspect（空策略零惩罚，只剩加成）');
@@ -248,4 +256,84 @@ test('Φ-5: history getter 返回副本 —— 外部增删改返回值不透内
   hostile.splice(0, 1);
   assert.equal(e.history.length, 1, '内部账本不受返回值增删影响');
   assert.equal(e.history[0]!.goal, '唯一记录');
+});
+
+// ─── ΝΩ-11：恢复加成律生产方言 + HCA 全轨迹折扣（手算对照） ───
+
+test('ΝΩ-11: 恢复加成生产方言全命中 —— escalateReason 五词 + 相位名三词 + gym/dream 载体；未列词零加成', () => {
+  // 生产根因词 = autonomousRun 的 failureRootCause = escalateReason ?? 终局相位；
+  // gym/dream 侧为 `phase=x` / `dream-replay:phase=x` 载体（子串命中同词根）
+  const cases: Array<[string, string]> = [
+    ['constitution-veto', 'inspect'],   // 否决 ⇒ 先看清现场
+    ['approval-required', 'inspect'],   // 审批拦截 ⇒ 看清现场换良性路
+    ['policy-escalate', 'ask_vlm'],     // 已知路全败 ⇒ 换视觉模型找新路
+    ['epistemic-gate', 'ask_vlm'],      // 置信不足 ⇒ 云脑直读补证据
+    ['steer-drift', 'inspect'],         // 意图漂移 ⇒ 重看现场
+    ['failed', 'inspect'],              // 判据未达 ⇒ 重试前先看清现场
+    ['blocked', 'inspect'],             // 阻塞 ⇒ 看清阻塞现场
+    ['aborted', 'recall_skill'],        // 步数熔断 ⇒ 复用蒸馏宏省步数
+    ['phase=failed', 'inspect'],        // gym 方言载体
+    ['dream-replay:phase=aborted', 'recall_skill'], // dream 方言载体
+  ];
+  for (const [cause, strategy] of cases) {
+    const e = new EvolutionEngine();
+    e.ingest(R({ success: false, strategies: [], failureRootCause: cause }));
+    const h = e.heuristics();
+    assert.equal(h[strategy as keyof typeof h], 1.05, `生产根因「${cause}」⇒ ${strategy} +0.05（旧表不可达——方言断裂修复）`);
+    for (const k of Object.keys(h) as Array<keyof typeof h>) {
+      if (k !== strategy) assert.equal(h[k], 1, `「${cause}」不误伤 ${k}`);
+    }
+  }
+  // 多关键词叠加（生产方言）：veto + failed 同串 ⇒ inspect 两次 +0.05
+  const both = new EvolutionEngine();
+  both.ingest(R({ success: false, strategies: [], failureRootCause: 'blocked then failed' }));
+  assert.equal(both.heuristics().inspect, 1.1, 'blocked + failed 双命中 ⇒ inspect +0.05×2 叠加');
+  // 未列词 ⇒ 零加成（对症表不是全员普惠）
+  const none = new EvolutionEngine();
+  none.ingest(R({ success: false, strategies: [], failureRootCause: 'timeout' }));
+  assert.deepEqual(none.heuristics(), { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1 }, 'timeout 不在表 ⇒ 恢复加成不动');
+  // gym 旧方言保留（零回归）：popup/focus/ocr 照旧
+  assert.ok(RECOVERY_MAP.some(x => x.keyword === 'popup' && x.strategy === 'inspect'));
+  assert.ok(RECOVERY_MAP.some(x => x.keyword === 'focus' && x.strategy === 'inspect'));
+  assert.ok(RECOVERY_MAP.some(x => x.keyword === 'ocr' && x.strategy === 'ask_vlm'));
+});
+
+test('ΝΩ-11: HCA 折扣手算对照 —— γ=0.7 冻结；三步轨迹逐位对照；成功失败同律；纯函数确定性', () => {
+  // 折扣因子冻结出册（γ=0.7 —— 论证见 evolutionPrimitives.HCA_GAMMA 注）
+  assert.equal(HCA_GAMMA, 0.7, 'γ 冻结 0.7');
+  // 单步幅度手算（千分位取整）：γ⁰=1 / γ¹=0.7 / γ²=0.49
+  assert.equal(hcaStepMagnitude(0.15, 0), 0.15);
+  assert.equal(hcaStepMagnitude(0.15, 1), 0.105);
+  assert.equal(hcaStepMagnitude(0.15, 2), 0.073);  // 0.15×0.49=0.0735 ⇒ r3 取整
+  assert.equal(hcaStepMagnitude(0.1, 0), 0.1);
+  assert.equal(hcaStepMagnitude(0.1, 1), 0.07);
+  assert.equal(hcaStepMagnitude(0.1, 2), 0.049);
+
+  // 失败三步轨迹 ['inspect','scroll','click'] 手算（N=3，i 从 0 起，折扣指数 N-1-i）：
+  //   inspect i=0 ⇒ γ² ⇒ -0.073 ⇒ 0.927；scroll i=1 ⇒ γ¹ ⇒ -0.105 ⇒ 0.895；
+  //   click  i=2 ⇒ γ⁰ ⇒ -0.15  ⇒ 0.85（旧律只罚末两步：inspect 不动 —— 新律全轨迹有份）
+  const w1: Record<string, number> = { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1 };
+  const adj1 = applyRun(w1, R({ success: false, strategies: ['inspect', 'scroll', 'click'], failureRootCause: 'timeout' }));
+  assert.equal(w1.inspect, 0.927, '首位 γ² ⇒ -0.073');
+  assert.equal(w1.scroll, 0.895, '中位 γ¹ ⇒ -0.105');
+  assert.equal(w1.click, 0.85, '末位 γ⁰ ⇒ -0.15（全额——近因归因最重）');
+  assert.deepEqual(adj1.map(a => [a.heuristic, a.delta]), [
+    ['inspect', -0.073], ['scroll', -0.105], ['click', -0.15],
+  ], '调整记录按位序逐条可读（delta = 千分位折扣值）');
+
+  // 成功三步同律（符号相反）：['inspect','scroll','click']
+  //   inspect ⇒ +0.049；scroll ⇒ +0.07；click ⇒ +0.1
+  const w2: Record<string, number> = { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1 };
+  const adj2 = applyRun(w2, R({ success: true, strategies: ['inspect', 'scroll', 'click'] }));
+  assert.equal(w2.inspect, 1.049, '成功奖励同律折扣：首位 γ² ⇒ +0.049');
+  assert.equal(w2.scroll, 1.07, '中位 γ¹ ⇒ +0.07');
+  assert.equal(w2.click, 1.1, '末位 γ⁰ ⇒ +0.1（与旧律同值——终局步不折价）');
+
+  // 纯函数确定性：同输入两次重放逐字节一致
+  const wa: Record<string, number> = { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1 };
+  const wb: Record<string, number> = { scroll: 1, inspect: 1, ask_vlm: 1, recall_skill: 1, click: 1 };
+  const run = R({ success: false, strategies: ['click', 'scroll', 'click', 'inspect'], failureRootCause: 'popup' });
+  applyRun(wa, run);
+  applyRun(wb, run);
+  assert.deepEqual(wa, wb, '同输入同输出（确定性保持）');
 });

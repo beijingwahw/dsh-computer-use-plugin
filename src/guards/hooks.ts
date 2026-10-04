@@ -54,8 +54,13 @@ function normalizeExec(exec: any): ToolCall {
   };
 }
 
-/** rc.6 ToolExecutionResult → 旧字符串值语义（守卫的 resultContract 解析面） */
-function extractResultValue(result: any): any {
+/**
+ * rc.6 ToolExecutionResult → 旧字符串值语义（守卫的 resultContract 解析面）。
+ * ΑΩ-R16：本函数是全库唯一实现（事件表面适配层的正主）——telemetryGuard 曾
+ * 按「别簇所有」纪律私有镜像一份（行为逐行相同），两份实现仅靠注释锚定，
+ * 宿主事件表面再演进时漏改一份的风险真实存在；现收口为单源导出，改只改此处。
+ */
+export function extractResultValue(result: any): any {
   if (result == null || typeof result === 'string') return result;
   if (result.isError === true) {
     // 失败臂：错误文本（circuitBreaker 的失败计数依赖可解析的失败签名）
@@ -116,6 +121,12 @@ export function onToolPost(ctx: Context, handler: PostExecuteHandler): void {
  * llm 请求前注入点（旧表面）：rc.6 起事件已不存在 —— 图像注入由
  * imageDelivery（附件服务 + 工具结果 image 块）承担。保留挂载以兼容
  * 仍发射该事件的宿主版本；永远不会触发时无害。
+ *
+ * ΝΩ-3 单源投递立法：新宿主走附件，旧宿主走滑窗 —— 两通道绝不对同一请求
+ * 双投图像。挂载方（见 src/index.ts 第 6 步接线）注入图片前必须先探测
+ * imageDeliveryAvailable()（附件服务在场性）：在场 ⇒ 滑窗注入闸门关闭
+ * （文本锚点已由工具结果携带）。本函数保持纯挂载面，不代行探测 ——
+ * 策略归调用方，挂载归此处（单一职责，宿主事件面再演进时只改一处）。
  */
 export function onLlmPreRequest(
   ctx: Context,

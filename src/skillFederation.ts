@@ -24,7 +24,9 @@
 // 端口纪律（对 W4-1 领地零侵入）：本地技能经**结构化类型端口**消费（与
 // skillLibrary 正在实现的契约 listSkillDigests / addDormantSkill 同形状），
 // 不 import 其内部 —— 生产接线由宿主一次 wireSwarmSkillFederation 完成，
-// 测试注入桩。全模块随机源/时钟/端口可注入，resetSkillFederation 供测试隔离。
+// 测试注入桩。全模块随机源/时钟/端口可注入，skillFederation.reset() 供测试隔离。
+//（ΑΩ-R34：旧注释写作 resetSkillFederation —— 该名从未存在，真实隔离缝是
+//  单例的 reset() 方法：端口/候选/计数归零并解除持久化武装。）
 
 import { Telemetry } from './telemetry';
 import { iqrOf } from './federation/aggregate';
@@ -36,6 +38,10 @@ import {
   DEFAULT_MAX_REMOTE_SHARE,
 } from './federation/index';
 import { swarm } from './swarm';
+// ΝΩ-41（方言克隆律）：本地 FNV-1a→base36 副本退役 —— 单源 src/dialects/random.ts
+// 的 fnv1aBase36（string 返回方言；逐字节同实现，指纹不变；金样
+// test/no41.dialectClones.test.ts）。
+import { fnv1aBase36 } from './dialects/random';
 // W7-0（W6-4 接线收尾）：持久化面 —— 原子写的 node:fs/node:path 原语
 //（federation 信任账 createFederationTrustFileStore 同律；零新依赖）。
 import {
@@ -126,16 +132,7 @@ export interface SkillLibraryPort {
 
 // ─── 技能指纹（场景前 8 位 + 参数 LSH 桶） ───
 
-/** FNV-1a 稳定哈希 → base36（skillLibrary.hashSkeleton 同源密码学原语的本地实现
- *  —— 零依赖纪律：不跨模块 import 私有原语） */
-function fnv1a(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36);
-}
+// （本地 fnv1a 副本已退役 —— 见上方 import：单源 fnv1aBase36 承接 string 返回方言）
 
 /**
  * W4-2：技能指纹（纯函数、确定性、绝不抛）。
@@ -164,7 +161,7 @@ export function skillFingerprintOf(sceneFingerprint: unknown, stepsDigest: unkno
         }
       });
     }
-    return `${scene}:${fnv1a(tokens.join('|'))}`;
+    return `${scene}:${fnv1aBase36(tokens.join('|'))}`;
   } catch {
     return 'noscene:err'; // 防御带（理论不可达）：确定性降级键，绝不抛
   }
@@ -912,7 +909,7 @@ export const skillFederation = new SkillFederation();
 //     state 垃圾 ⇒ dormant（dormant 安全律的恢复向：宁可重新攒两次本地命中）；
 //   · 节流 —— 突变计数制（每 N 次账本突变一次落盘）：无时钟依赖、离线可测；
 //   · 缺省未武装 —— arm 之前一切公开面零磁盘行为（与旧行为逐字节一致，
-//     resetSkillFederation 解除武装 = 测试隔离缝）。
+//     skillFederation.reset() 解除武装 = 测试隔离缝。ΑΩ-R34：旧名核正，同上）。
 
 /** W7-0：技能账档 schema 版本（版本错配 ⇒ 整档拒绝恢复） */
 export const SKILL_FED_STORE_VERSION = 1;

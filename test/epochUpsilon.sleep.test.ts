@@ -182,7 +182,7 @@ test('Υ-1: 六幕执法 —— 全 deps 计数 stub 逐幕被调、幕序正确
   assert.deepEqual(
     report.acts.map(a => a.name),
     ['replay', 'distill', 'immune', 'calibrate', 'audit', 'report'],
-    '六幕按 回放→蒸馏→免疫→校准→审计→晨报 次序演出',
+    '六幕按 回放→蒸馏→免疫→校准→审计→晨报 次序演出（ΝΩ-34：梦回放在 audit 与 report 之间迟到演出，不占幕名）',
   );
   assert.ok(report.acts.every(a => a.status === 'ok'), JSON.stringify(report.acts));
 

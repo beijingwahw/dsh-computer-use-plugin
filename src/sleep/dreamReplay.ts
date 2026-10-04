@@ -14,10 +14,20 @@
 //   · 隔离铁律 —— 梦训练营自带独立实验室（AutonomyGym 缺省自铸，Θ-3 律），
 //     生产 kernel 注册表分毫不动；值进生产的唯一通道仍是外部显式 promoteFrom。
 //
+// ΑΩ-R40（梦回放的预算现实主义）：每梦最多 8 步 + AutonomyGym + sharp 合成帧，
+// 而睡眠总预算缺省仅 2000ms 且逐幕检查 —— 修法是**自适应而非加时**：条间取梦前
+// 实读剩余预算（overBudget 闭包携带的 remainingMs 读数面），用「已测单梦耗时」的
+// 指数滑动均值（每步均值 × 期望步数；冷启动用保守常量，宁少勿挂）判断装不装得下；
+// 队首装不下 ⇒ 选「装得下的最短梦」；全装不下 ⇒ 诚实收场（truncated/time 现状
+// 语义）。无预算读数面的旧调用方 ⇒ 纯 PER 序 + overBudget 布尔执法（零漂移）。
+//
 // 本模块的装载律（与 index.ts「相对导入全部 type-only」律的关系）：
 // index.ts 对本模块只做**懒动态 import**（梦 dep 在场才装载）—— 六幕的装载器
 // 零耦合律对既有路径逐字节保持；本模块自身是梦的机房，允许运行期导入 gym 的
 // PCG 面（pcgWorldStream / AutonomyGym / runPcgWorld —— sharp 懒加载、零网络）。
+// ΝΩ-34 豁免注记：另运行期导入 kernel/registry 的生产单例 kernelRegistry ——
+// **只读** list() 取 generation 计数（策略指纹的回落读数面；该模块本就在 gym 的
+// 传递装载图里，零新增模块边；绝不写，隔离铁律逐字节保持）。
 //
 // ── PER 优先级（Prioritized Experience Replay，公式可审计）──
 //
@@ -37,18 +47,29 @@
 import { AutonomyGym } from '../autonomy/gym';
 import type { EvolutionEngine, RunRecord } from '../autonomy/evolutionEngine';
 import type { GymLabSuite } from '../autonomy/gym';
+// ΝΩ-34：kernel generation 计数（策略指纹的回落读数面 —— 只读 list()，绝不写：
+// 隔离铁律不破；该模块本就在 dreamReplay 的传递装载图里（gym 运行期导入
+// kernel/registry），零新增模块边）
+import { kernelRegistry } from '../kernel/registry';
 // W6-1（doctor 债清偿·smell.over-engineering）：PER 权重常量、确定性原语（fnv1a）、
 // 梦方言契约类型、失败记录→梦轨迹映射、PER 优先级/水位线、同构世界选取逐字节
 // 搬至 ./dreamReplayCore —— 本文件保留编排（runDreamReplay）与预算解析，导入面
 // 不变（公共面原位再导出）。
 export {
   PER_WEIGHTS, dreamTrajectories, computeDreamPriority, dreamBatchWatermark, pickIsomorphicWorld,
+  // ΑΩ-R40：条间预算感知选梦的纯逻辑面（原位再导出 —— 公共面收口在本模块）
+  DREAM_COST_ESTIMATOR, dreamExpectedSteps, pickDreamByBudget,
+  // ΝΩ-34：策略指纹与 dream.cf 分桶的纯逻辑面（原位再导出 —— 同律收口）
+  POLICY_FINGERPRINT_GRID, policyFingerprintOf, dreamCfKey,
 } from './dreamReplayCore';
 export type {
   DreamHistoricalStep, DreamWorldParams, DreamFailureTrajectory, DreamPriorityFactors,
+  DreamCandidate,
 } from './dreamReplayCore';
 import {
   computeDreamPriority, dreamBatchWatermark, fnv1a, pickIsomorphicWorld,
+  DREAM_COST_ESTIMATOR, dreamExpectedSteps, pickDreamByBudget,
+  policyFingerprintOf, dreamCfKey,
 } from './dreamReplayCore';
 import type {
   DreamFailureTrajectory, DreamHistoricalStep, DreamPriorityFactors,
@@ -63,9 +84,15 @@ export const DREAM_BUDGET_DEFAULTS = Object.freeze({
 } as const);
 
 // ─── 契约类型 ───
-/** EXP4 面（EvolutionEngine 的结构子集 —— 只读消费 greedyArm/armProbabilities，
- *  双写走 ingest；index.ts 经 type-only 推导，生产传单例、测试传假件） */
-export type DreamEvolutionLike = Pick<EvolutionEngine, 'greedyArm' | 'armProbabilities' | 'ingest'>;
+/**
+ * EXP4 面（EvolutionEngine 的结构子集 —— 只读消费 greedyArm/armProbabilities，
+ * 双写走 ingest；index.ts 经 type-only 推导，生产传单例、测试传假件）。
+ * ΝΩ-34：追加**可选** heuristics 读数面（策略指纹的首选源 —— 生产
+ * EvolutionEngine 自带满足；既有假件不投也合法，运行期防御判型后回落
+ * kernel generation 计数，零漂移）。
+ */
+export type DreamEvolutionLike = Pick<EvolutionEngine, 'greedyArm' | 'armProbabilities' | 'ingest'>
+  & Partial<Pick<EvolutionEngine, 'heuristics'>>;
 
 /** 一条轨迹的梦回放审计行 */
 export interface DreamReplayEntry {
@@ -90,8 +117,19 @@ export interface DreamReplayEntry {
   };
   /** 分歧点之后的双写执法面（无分歧 ⇒ 双 skipped） */
   doubleWrite: { kernel: boolean; evolution: boolean };
+  /** ΝΩ-34：PER 重要性采样权重 w = p / 批内 mean(p)（批归一 ⇒ 批均值 1；全零批
+   *  ⇒ 均匀 1 的诚实退化）。为未来加权消费备账（本次不接消费面）—— 只随分歧
+   *  双写注记（与 bandit prob 同位：消费面届时按名取 w，旧账可回算）。 */
+  perWeight?: number;
+  /** ΝΩ-34：kernel 双写回执 —— dream.cf:<桶> 键 + divergenceStep（分歧步序）。
+   *  立法：步序不是裕量 —— 账本 margin 通道不再装步序（防 calibrator 把步序学
+   *  成判决边距的伪结构）；步序在梦侧注记备查，margin 通道留给未来的真裕量。 */
+  cfLedger?: { key: string; divergenceStep: number };
   /** 反事实教训（重放成功且历史失败 ⇒ 在场；进晨报） */
   lesson?: string;
+  /** ΑΩ-R40：预算感知选梦标记（'short' = PER 队首装不下而本条为装得下的最短梦
+   *  —— PER 序让位的审计面；缺席 = PER 序正常取队首） */
+  pick?: 'short';
   /** 跳过/钳制/故障注记（诚实面） */
   note?: string;
 }
@@ -115,7 +153,10 @@ export interface DreamReplayReport {
   note?: string;
 }
 
-/** 梦回放编排的依赖面（index.ts 第①幕复合幕的消费契约） */
+/**
+ * 梦回放编排的依赖面（sleep 编排的消费契约 —— ΝΩ-34 移序立法后由 audit 之后
+ * report 之前的迟到梦幕调用；契约本身与幕位无关，直投调用方零漂移）
+ */
 export interface DreamReplayDeps {
   /** 已映射的失败轨迹（dreamTrajectories 的产出） */
   trajectories: DreamFailureTrajectory[];
@@ -123,8 +164,14 @@ export interface DreamReplayDeps {
   spectrum?: Record<string, number>;
   /** 注入时钟（PER 新近衰减；缺省恒 0 —— age 上限钳制的诚实退化） */
   now?: () => number;
-  /** 睡眠预算检查（实读 sleep 预算机制：safeNow(now) − startedAt > budgetMs） */
+  /** 睡眠预算检查（实读 sleep 预算机制：safeNow(now) − startedAt > budgetMs）。
+   *  ΑΩ-R40：闭包可携带 remainingMs 属性（剩余毫秒读数面 —— sleep/index.ts 铸入，
+   *  经既有 cfg 通道随闭包流转到梦机房，sleepActs 零改线；梦侧防御读法见
+   *  readRemainingBudgetMs —— 不携带的旧调用方零漂移） */
   overBudget: () => boolean;
+  /** ΑΩ-R40：剩余睡眠预算读数（毫秒）—— 条间预算感知选梦的锚；缺席时回落
+   *  overBudget.remainingMs 属性面；双缺席 ⇒ 纯 PER 序 + 布尔执法（零漂移） */
+  remainingBudgetMs?: () => number;
   /** EXP4 面（缺席 ⇒ evolution 双写缺席，注记在案） */
   evolution?: DreamEvolutionLike;
   /** 梦回放预算（缺省 DREAM_BUDGET_DEFAULTS；夹取律见 resolveDreamBudget） */
@@ -176,19 +223,141 @@ export function resolveDreamBudget(raw: unknown): { maxDreams: number; maxStepsP
   return { maxDreams, maxStepsPerDream };
 }
 
+// ─── ΑΩ-R40：单梦耗时滑动估计器（模块内私有账本 —— 进程内有效；绝不抛） ───
+
+/** 梦耗时账本（指数滑动均值：单梦整条 + 每步 —— 条间预算感知选梦的估计源） */
+const dreamCostLedger: { dreamMs: number | null; stepMs: number | null } = { dreamMs: null, stepMs: null };
+
+/** ΑΩ-R40：实测入账（EMA；非正耗时 = 恒时钟/无钟的零差样本 ⇒ 不入账不污染） */
+function observeDreamCost(elapsedMs: number, steps: number): void {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return;
+  const a = DREAM_COST_ESTIMATOR.emaAlpha;
+  const safeSteps = Number.isFinite(steps) && steps >= 1 ? steps : 1;
+  dreamCostLedger.dreamMs =
+    dreamCostLedger.dreamMs === null ? elapsedMs : dreamCostLedger.dreamMs * (1 - a) + elapsedMs * a;
+  const stepCost = elapsedMs / safeSteps;
+  dreamCostLedger.stepMs =
+    dreamCostLedger.stepMs === null ? stepCost : dreamCostLedger.stepMs * (1 - a) + stepCost * a;
+}
+
+/** ΑΩ-R40：一条梦的耗时估计（每步滑动均值 × 期望步数；冷启动用保守常量 —— 宁少勿挂） */
+function estimateDreamMs(expectedSteps: number): number {
+  const per =
+    dreamCostLedger.stepMs !== null && Number.isFinite(dreamCostLedger.stepMs) && dreamCostLedger.stepMs > 0
+      ? dreamCostLedger.stepMs
+      : DREAM_COST_ESTIMATOR.coldStepMs;
+  const steps = Number.isFinite(expectedSteps) && expectedSteps >= 1 ? expectedSteps : 1;
+  return Math.max(1, per * steps);
+}
+
+/** ΑΩ-R40：账本只读面（审计/测试 —— 进程内滑动估计的收敛观测口） */
+export function readDreamCostLedger(): { perDreamMs: number | null; perStepMs: number | null } {
+  return { perDreamMs: dreamCostLedger.dreamMs, perStepMs: dreamCostLedger.stepMs };
+}
+
+/** 测试缝：清零梦耗时账本（模拟冷启动 —— 新进程面） */
+export function resetDreamCostLedger(): void {
+  dreamCostLedger.dreamMs = null;
+  dreamCostLedger.stepMs = null;
+}
+
+/** ΑΩ-R40：剩余预算读数（dep 显式优先，overBudget 闭包属性补位；垃圾/故障 ⇒ null 回落布尔执法） */
+function readRemainingBudgetMs(d: DreamReplayDeps): () => number | null {
+  const explicit = typeof d.remainingBudgetMs === 'function' ? d.remainingBudgetMs : null;
+  let prop: (() => unknown) | null = null;
+  try {
+    // 注意：闭包的 typeof 是 'function' —— 防御判型须同时放行 object/function 两形
+    const face = d.overBudget as unknown as { remainingMs?: unknown } | undefined;
+    if (face && (typeof face === 'object' || typeof face === 'function') && typeof face.remainingMs === 'function') {
+      prop = face.remainingMs as () => unknown;
+    }
+  } catch {
+    prop = null; // 防御：读数面自身畸形 ⇒ 只走 dep/布尔执法
+  }
+  const probes = [explicit, prop];
+  return (): number | null => {
+    for (const probe of probes) {
+      if (!probe) continue;
+      try {
+        const v = probe();
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+      } catch {
+        /* 读数故障 ⇒ 下一通道，最终回落布尔执法 */
+      }
+    }
+    return null;
+  };
+}
+
+/** ΑΩ-R40：预算饿死条目（未回放的诚实注记面 —— world 全 -1，与既有形状同律） */
+function starvedEntry(
+  s: { t: DreamFailureTrajectory; p: number; factors: DreamPriorityFactors },
+  note: string,
+): DreamReplayEntry {
+  return {
+    id: s.t.id,
+    priority: s.p,
+    factors: s.factors,
+    world: { master: -1, seed: -1, index: -1, difficulty: -1, fingerprint: '' },
+    replayed: false,
+    doubleWrite: { kernel: false, evolution: false },
+    note,
+  };
+}
+
+// ─── ΝΩ-34：策略指纹读数（绝不抛 —— 两级回落，读数面故障不炸梦） ───
+
+/**
+ * ΝΩ-34：当前策略指纹（梦水位线的策略分量）：
+ *   ① 首选 —— evolution 面 heuristics 权重表（EXP4 双轨的旧权重律读数，生产
+ *      引擎自带）→ policyFingerprintOf 粗化 fnv1a；
+ *   ② 回落 —— kernel generation 计数（evolution 面缺席 / 无 heuristics / 读数
+ *      故障时）：生产 kernelRegistry 的代际和（promoteFrom 才 +1 —— 代际和
+ *      不变 ⇒ 视为同策略；只读 list()，绝不写，隔离铁律不破）；
+ *   ③ 兜底 —— 'void'（连只读都故障 ⇒ 空指纹申报，去重回落失败集身份单独定胜负）。
+ */
+function dreamPolicyFingerprint(d: DreamReplayDeps): string {
+  const evo = d.evolution as (DreamEvolutionLike & { heuristics?: () => unknown }) | undefined;
+  if (evo && typeof evo.heuristics === 'function') {
+    try {
+      const w = evo.heuristics();
+      if (w && typeof w === 'object') return policyFingerprintOf(w);
+    } catch {
+      /* 读数故障 ⇒ 回落 kernel 代际（诚实方向，绝不炸梦） */
+    }
+  }
+  try {
+    const gens = kernelRegistry.list().reduce(
+      (acc, p) => acc + (typeof p.generation === 'number' && Number.isFinite(p.generation) ? p.generation : 0),
+      0,
+    );
+    return `kg${Math.max(0, Math.floor(gens))}`;
+  } catch {
+    return 'void';
+  }
+}
+
 // ─── 梦回放编排（永不抛；确定性；预算纪律；分歧点双写） ───
 
 /**
  * W5-2 梦回放编排（async —— sharp 合成帧是唯一的真异步面）：
- *   1. 独立水位线幂等：批次指纹 === priorWatermark ⇒ 全跳过（note 申报，防重复回放）；
- *   2. PER 排序选 top-maxDreams（p 降序、平票 id 升序 —— 确定性法院）；
+ *   1. 独立水位线幂等（ΝΩ-34 修订）：批次指纹 = 失败集身份 × 策略指纹 ——
+ *      === priorWatermark ⇒ 全跳过（note 申报，防重复回放）；策略显著进化
+ *      ⇒ 指纹前移 ⇒ 同失败集允许重梦（梦的前提是当前策略重决策）；
+ *   2. PER 排序（p 降序、平票期望步数短者胜、再平票 id 升序 —— 确定性法院）；
+ *      ΑΩ-R40 条间预算感知选梦：逐条取梦前实读剩余预算（overBudget 闭包的
+ *      remainingMs 读数面 / remainingBudgetMs dep），用单梦耗时的指数滑动均值
+ *      （每步均值 × 期望步数；冷启动保守常量）判断装不装得下 —— 队首装不下 ⇒
+ *      选装得下的最短梦；全装不下 ⇒ 诚实收场（宁短勿挂，不加时）；
  *   3. 逐条：预算检查（overBudget —— 实读 sleep 预算机制，条间执法）⇒ 取同构
  *      世界（冻结输入）⇒ 梦训练营 runPcgWorld 重决策（现有 policyEngine 决策面
  *      + 离线哨兵 client + 宪法 + Θ-3 全套记账 —— 全是既有执法面，只读消费）；
  *   4. 分歧点之后双写：(a) kernel 证据 —— runPcgWorld 期间已按现有 lab 记账通道
- *      入账（世界真相对账四键），分歧结局另记 dream.counterfactual 一条（margin =
- *      分歧步序）；(b) evolutionEngine.ingest 带 bandit 标注（arm/prob 取自 EXP4
- *      greedy 的只读面 —— 重放不采样铁律）；
+ *      入账（世界真相对账四键），分歧结局另记 dream.cf:<桶> 一条（ΝΩ-34 分桶 +
+ *      margin 通道不装步序 —— divergenceStep 记梦侧注记 cfLedger）；(b)
+ *      evolutionEngine.ingest 带 bandit 标注（arm/prob 取自 EXP4 greedy 的只读面
+ *      —— 重放不采样铁律）；双写条目另注记 perWeight = p/mean(p)（ΝΩ-34 批内
+ *      归一的重要性采样权重 —— 为未来加权消费备账，本次不接消费面）；
  *   5. 重放成功且历史失败 ⇒ 反事实教训条目（晨报消费面）。
  * 确定性：世界 seed 冻结 + 梦训练营虚拟时钟 + 离线哨兵 client ⇒ 同轨迹同策略
  * 状态逐字节同重放。隔离：梦实验室独立自铸（Θ-3 律），生产 kernel 分毫不动。
@@ -215,10 +384,13 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
     if (trajectories.length === 0) {
       return { report: { ...base, note: '梦回放跳过：无失败轨迹（失败记忆为空或全部垃圾 —— 诚实缺席）' }, lab: null };
     }
-    const watermark = dreamBatchWatermark(trajectories);
+    // ΝΩ-34：水位线 = 失败集身份 × 策略指纹（策略显著进化 ⇒ 同失败集允许重梦；
+    // 同策略同失败集仍去重 —— 防重复回放的锚从「身份」升级为「身份×策略」）
+    const policyFp = dreamPolicyFingerprint(d);
+    const watermark = dreamBatchWatermark(trajectories, policyFp);
     if (typeof d.priorWatermark === 'string' && d.priorWatermark === watermark) {
       return {
-        report: { ...base, watermark, note: '梦回放水位线未动 —— 本轮零回放（同一失败集已梦过，防重复回放）' },
+        report: { ...base, watermark, note: '梦回放水位线未动 —— 本轮零回放（同一失败集×同一策略已梦过，防重复回放）' },
         lab: null,
       };
     }
@@ -226,15 +398,40 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
       return { report: { ...base, watermark, note: '梦回放预算 maxDreams=0 —— 关闭（申报在案）' }, lab: null };
     }
 
-    // PER 打分 + 确定性排序（p 降序；平票 id 升序）
+    // PER 打分 + 确定性排序（p 降序；ΑΩ-R40 平票时期望步数升者胜（同分短者胜）；
+    // 再平票 id 升序）
     const now = typeof d.now === 'function' ? d.now() : 0;
     const nowSafe = typeof now === 'number' && Number.isFinite(now) ? now : 0;
     const scored = trajectories.map(t => {
       const { p, factors } = computeDreamPriority(t, { spectrum: d.spectrum, now: nowSafe });
       return { t, p, factors };
     });
-    scored.sort((a, b) => b.p - a.p || String(a.t.id).localeCompare(String(b.t.id)));
-    const selected = scored.slice(0, budget.maxDreams);
+    scored.sort((a, b) =>
+      b.p - a.p
+      || dreamExpectedSteps(a.t, budget.maxStepsPerDream) - dreamExpectedSteps(b.t, budget.maxStepsPerDream)
+      || String(a.t.id).localeCompare(String(b.t.id)));
+
+    // ΝΩ-34：PER 重要性采样权重（批内归一 w = p/mean(p)，网格化 1e-6 与 p 同律 ——
+    // 批均值 1；全零批 ⇒ 均匀 1 的诚实退化）。为未来加权消费备账：本次只随分歧
+    // 双写注记（entry.perWeight），不接任何消费面。
+    const meanP = scored.reduce((acc, s) => acc + s.p, 0) / scored.length;
+    const perWeightOf = (p: number): number => {
+      if (!Number.isFinite(meanP) || meanP <= 0 || !Number.isFinite(p)) return 1;
+      return Math.round((p / meanP) * 1e6) / 1e6;
+    };
+
+    // ΑΩ-R40：剩余预算读数面（dep 显式优先，overBudget 闭包属性补位 —— sleep 集成
+    // 零改线）；无面 ⇒ null ⇒ 选梦回落纯 PER 序 + 布尔执法（既有行为逐字节保持）
+    const remainingBudgetMs = readRemainingBudgetMs(d);
+    const clockRead = (): number | null => {
+      if (typeof d.now !== 'function') return null;
+      try {
+        const v = d.now();
+        return typeof v === 'number' && Number.isFinite(v) ? v : null;
+      } catch {
+        return null;
+      }
+    };
 
     // 梦训练营：一批一馆（共享隔离实验室 —— 梦证据同本累积；虚拟时钟确定性；
     // runPcgWorld 不 ingest 馆内引擎 ⇒ 馆内进化面零扰动，双写只走显式 evolution dep）
@@ -251,21 +448,41 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
     let divergences = 0;
     let truncated = false;
     let reason: 'none' | 'count' | 'time' = 'none';
+    // ΑΩ-R40：预算停旗 —— 截断归因时 time 优先呈报，纯条数触顶才报 count
+    let budgetStopped = false;
 
-    for (const s of selected) {
+    // ΑΩ-R40：条间预算感知选梦 —— 候选池按 PER 序候场，逐条取梦前实读剩余预算：
+    // 队首装不下（按滑动估计）⇒ 选「装得下的最短梦」（一条短梦好过零条长梦）；
+    // 全装不下 ⇒ 诚实收场（现状语义：条目注记 + truncated/time）。取满 maxDreams 条止。
+    const pool: Array<{ t: DreamFailureTrajectory; p: number; factors: DreamPriorityFactors }> = [...scored];
+    while (entries.length < budget.maxDreams && pool.length > 0) {
       // 预算纪律：条间实读睡眠预算（safeNow(now) − startedAt > budgetMs 的既有执法面）
       if (d.overBudget()) {
         truncated = true;
         reason = 'time';
-        entries.push({
-          id: s.t.id, priority: s.p, factors: s.factors,
-          world: { master: -1, seed: -1, index: -1, difficulty: -1, fingerprint: '' },
-          replayed: false,
-          doubleWrite: { kernel: false, evolution: false },
-          note: '睡眠预算耗尽 —— 本条未回放（宁短勿挂）',
-        });
+        budgetStopped = true;
+        const head = pool.shift();
+        if (!head) break;
+        entries.push(starvedEntry(head, '睡眠预算耗尽 —— 本条未回放（宁短勿挂）'));
         continue;
       }
+      const rem = remainingBudgetMs();
+      const chosen = pickDreamByBudget(pool, rem, estimateDreamMs, budget.maxStepsPerDream);
+      if (rem !== null && chosen.index < 0) {
+        // 诚实收场：最短梦也装不下（估计 > 剩余）—— 逐条注记后收兵（宁短勿挂）
+        truncated = true;
+        reason = 'time';
+        budgetStopped = true;
+        const head = pool.shift();
+        if (!head) break;
+        const est = Math.round(estimateDreamMs(dreamExpectedSteps(head.t, budget.maxStepsPerDream)));
+        entries.push(
+          starvedEntry(head, `睡眠剩余预算不足以完成本条（估计 ${est}ms > 剩余 ${Math.round(rem)}ms）—— 未回放（宁短勿挂）`),
+        );
+        continue;
+      }
+      const s = pool.splice(Math.max(0, chosen.index), 1)[0];
+      if (!s) break;
       let picked: ReturnType<typeof pickIsomorphicWorld>;
       try {
         picked = pickIsomorphicWorld(s.t);
@@ -278,8 +495,11 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
         });
         continue;
       }
-      // 重放：现有闭环执法面（runPcgWorld 自带防弹壳 —— 内部异常收敛为失败轮）
+      // 重放：现有闭环执法面（runPcgWorld 自带防弹壳 —— 内部异常收敛为失败轮；
+      // ΑΩ-R40：前后实读注入时钟 —— 实测单梦耗时入滑动账本，恒时钟零差不入账）
+      const t0 = clockRead();
       const round = await gym.runPcgWorld(picked.world);
+      const t1 = clockRead();
       const strategies = Array.isArray(round.strategies) ? round.strategies : [];
       const divergence = locateDivergence(s.t.history, strategies);
       const replayView = {
@@ -289,10 +509,13 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
         strategies,
         divergence,
       };
+      // ΑΩ-R40：本梦实测耗时入账（供下一条梦的选梦估计 —— 每步均值随用随收敛）
+      if (t0 !== null && t1 !== null && t1 >= t0) observeDreamCost(t1 - t0, replayView.steps);
       const entry: DreamReplayEntry = {
         id: s.t.id,
         priority: s.p,
         factors: s.factors,
+        ...(chosen.mode === 'short' ? { pick: 'short' as const } : {}),
         world: {
           master: picked.master,
           seed: picked.world.seed,
@@ -312,15 +535,21 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
       if (divergence === null) {
         entry.note = '无分歧点（当前策略与历史前缀一致或无历史对照面）—— 不双写（重放结局无新信息）';
       } else {
+        // ΝΩ-34：重要性采样权重入记录注记（与 bandit prob 同位 —— 备账不接消费面）
+        entry.perWeight = perWeightOf(s.p);
         // (a) kernel 证据：现有 lab 记账通道（runPcgWorld 已记 Θ-3 四键 + pcg.truth.*；
-        //     分歧结局补记 dream.counterfactual，margin = 分歧步序）
+        //     分歧结局补记 dream.cf:<桶>）。ΝΩ-34 修法：① 单键 'dream.counterfactual'
+        //     滑窗混装所有参数场景 ⇒ 分桶（rootCause 病因桶优先，缺席回落世界指纹桶）；
+        //     ② margin 语义改名 divergenceStep —— 步序不是裕量，账本 margin 通道不再
+        //     装步序（防 calibrator 学到伪结构），步序记梦侧注记 cfLedger 备查
+        const cfKey = dreamCfKey(s.t.rootCause, entry.world.fingerprint);
         try {
           gym.lab?.ledger.record({
-            key: 'dream.counterfactual',
+            key: cfKey,
             success: replayView.success,
-            margin: divergence,
             ts: dreamClock,
           });
+          entry.cfLedger = { key: cfKey, divergenceStep: divergence };
           entry.doubleWrite.kernel = true;
         } catch {
           entry.doubleWrite.kernel = false; // 记账绝不炸梦
@@ -372,7 +601,9 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
       entries.push(entry);
     }
 
-    if (!truncated && selected.length < scored.length) {
+    // ΑΩ-R40：截断归因 —— 预算停（time）优先呈报；纯条数触顶（取满 maxDreams 而池
+    // 未空）才报 count；池自然取空 ⇒ 未截断
+    if (!budgetStopped && entries.length < scored.length) {
       truncated = true;
       reason = 'count';
     }
@@ -394,7 +625,7 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
     return {
       report: {
         watermark,
-        attempted: selected.length,
+        attempted: entries.length,
         replayed,
         successes,
         divergences,

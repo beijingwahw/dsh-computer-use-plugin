@@ -242,8 +242,9 @@ export interface SwitchWindowResult {
  * 真实实现见 `screenshotHandle.ts` 的 `ScreenshotHandle` 类（含 FinalizationRegistry 兜底）。
  * 本接口仅声明调用方需可见的最小表面：read / stream / transfer / release / meta / released。
  *
- * 注：未声明 `[Symbol.asyncDispose]`（需 TS 5.2+ 与 `using` 语法）；显式 release() 即可，
- * 升级 TS 版本后可补充 asyncDispose 实现（不破坏接口）。
+ * 注：未声明 `[Symbol.asyncDispose]`（`using` 语法需 TS 5.2+，现行 5.9.3 已满足）；
+ * 显式 release() 即可。ΑΩ-R34：旧注释「升级 TS 版本后可补充」的版本前提已过时 ——
+ * 是否补充 asyncDispose 属行为面决定，本接口维持未声明（零回归，不破坏接口）。
  */
 export interface ScreenshotHandleLike {
   readonly meta: Readonly<ScreenshotResult>;

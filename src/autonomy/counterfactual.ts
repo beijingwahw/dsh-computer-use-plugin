@@ -24,16 +24,47 @@
 //     （STEER_BIAS_UTILITY，见其注释的值即边界论证）；偏置只改选择，绝不
 //     进 rawU —— 效用账（rankTopK.utility / 岔路账 / 落选理由的原始数值）
 //     永远是未偏置的诚实预测。无偏置时本模块行为与既有测试逐字节一致。
+//
+// ΝΩ-46（model-based 反事实）增量：世界模型只读端口 WorldModelReadPort（结构
+// 端口，鸭子型；autonomy 不 import knowledge——生产读面由 index.ts 接线注入，
+// 经模块默认持有者 wireCounterfactualWorldModel 供未携带字段的决策面调用点
+// 兜底）。scoreAll 内 click 候选的 progress 乘转移置信因子
+// (0.5 + 0.5·top.prob)：predict(量化屏型, click@4×4格) 命中 ⇒ 历史证据加权、
+// 低置信衰减；no-model/端口缺席 ⇒ ×1.0 中性（零回归）。只读旁路——prophecy
+// 铁律禁的是回写与动作选择耦合的审计回路，决策面独立读模型不在禁列（立法
+// 边界见 WorldModelReadPort 注）。键方言与 prophecy 单源对齐（counterfactualUtil
+// 的同律小函数 quantizedScreenTypeOf / transitionActionKeyOf，不 import 跨层）。
 import type { PolicyAction } from './policyEngine';
 import type { SnapshotElement, WorldSnapshot } from './worldSnapshot';
 // W6-1（doctor 债清偿·smell.over-engineering）：内部纯函数工具区与配套常量
 // （分词/重合打分/风险映射/先验/效果推导/权重卫兵）逐字节搬至 ./counterfactualUtil —— 纯函数零状态，导入面不变。
 import {
   DEFAULT_WEIGHTS, RISK_SCORES, RISK_UNKNOWN, clamp01, deriveEffects, elementsOf,
-  normalizeText, progressPrior, resolveWeights, riskOf, round2, targetLabelRaw,
+  normalizeText, progressPrior, quantizedScreenTypeOf, resolveWeights, riskOf, round2,
+  targetLabelRaw, transitionActionKeyOf,
 } from './counterfactualUtil';
 
 // ─── 契约类型（Φ-9 行动沙盘词汇表） ───
+
+/**
+ * ΝΩ-46（前沿：model-based 反事实）：世界模型只读端口（结构端口，鸭子型）。
+ * autonomy 不 import knowledge——真实读面由 index.ts 接线层把 prophecy 同源的
+ * 世界模型单例适配注入（Result 方言在此收口为 {top} 方言）；测试桩只须实现
+ * 同名 predict 一面。
+ *
+ * 立法边界（prophecy 铁律的只读旁路）：prophecy 铁律「预言绝不影响动作选择」
+ * 禁的是**回写与动作选择耦合的审计回路**（铸预言→结算→observe 回灌的学习闭环
+ * 不得反向牵动当步裁决）；本端口是**决策面独立读模型**——评分按（量化屏型 ×
+ * 4×4 动作格）向既有转移表 predict 一次（只读，绝不 mint/observe/settle）。
+ * 读不算「影响预言」，写才算：prophecy 的账本与挂起预言分毫不因此端口而动。
+ */
+export interface WorldModelReadPort {
+  /**
+   * 读 (fromType, actionKey) 的转移分布首名。无证据 / 坏形状 / 端口故障 ⇒
+   * {top:null}（诚实无知——绝不把「没见过」伪装成任何置信）。
+   */
+  predict: (fromType: string, actionKey: string) => { top: { typeId: string; prob: number } | null };
+}
 
 /** 一个候选动作的反事实预演结果 —— 三围分 + 从快照推导的预期效果清单 */
 export interface CounterfactualOption {
@@ -60,6 +91,14 @@ export interface ScoringContext {
   snapshot: WorldSnapshot;
   /** 已试过动作签名清单（kind+target label 归一），重复者降权 */
   triedActionKeys?: string[];
+  /**
+   * ΝΩ-10（infoGain 新鲜度）：已试**且结局 no_effect** 的动作签名清单（与
+   * triedActionKeys 同律生成：actionSignature(history 中 outcome==='no_effect' 的
+   * 动作)）。在场 ⇒ click 的信息增益启用新鲜度计分（从未点过 +0.15 / 点过且
+   * no_effect −0.1，见 expectedInformationGain）；缺席 ⇒ 旧律逐字节不变
+   * （tried click 信息恒 0.1，未点过 click 恒 0.3/0.4 —— 既有调用方零漂移）。
+   */
+  noEffectActionKeys?: string[];
   /** 默认 0.5/0.3/0.2 */
   weights?: { progress?: number; info?: number; risk?: number };
   /** W3-6（H3 换支重放）：改选偏置注入缝 —— 命中签名的候选在**择优**中获得
@@ -67,6 +106,15 @@ export interface ScoringContext {
    *  经 withSteerBias 铸入此处）。偏置只改选择，不进 rawU（效用账保持诚实）；
    *  缺席/空 ⇒ 行为与既有语义逐字节一致（向后兼容）。 */
   preferredActionKeys?: string[];
+  /**
+   * ΝΩ-46：世界模型只读面（可选，逐调用注入优先）——在场时 click 候选的
+   * progress 乘转移置信因子 (0.5 + 0.5·top.prob)（历史证据支持该动作有转移 ⇒
+   * 加权，prob 低 ⇒ 接近 0.5 衰减）；无证据 / 端口缺席 / 非 click ⇒ 乘 1.0
+   * 中性（零回归）。字段缺席时回落模块默认接线（wireCounterfactualWorldModel
+   * —— buildAutonomyStack 注入生产读面；实验室/未接线进程 ⇒ null ⇒ 逐字节
+   * 旧路径）。键方言与 prophecy 单源对齐（counterfactualUtil 的同律小函数）。
+   */
+  worldModel?: WorldModelReadPort;
 }
 
 // ─── 常量 ───
@@ -105,6 +153,87 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
 };
 // ─── 导出纯函数 ───
 
+// ── ΝΩ-46（model-based 反事实）：世界模型只读面的模块默认接线 ──
+
+/**
+ * ΝΩ-46：进程级默认世界模型只读面（模块持有者）。为什么需要模块默认：
+ * 生产决策面（policyEngineUtil.breakTieBand / autoPilot 岔路账的 ScoringContext
+ * 铸造点）不携带 worldModel 字段——只读面经接线层（autonomy/index.ts 的
+ * buildAutonomyStack）一次性注入此处，评分内核 scoreAll 对缺席字段回落本默认
+ * ⇒ 真实转移分布进决策面而无需改动任何调用方。实验室 gym 不经 buildAutonomy
+ * 铸栈 ⇒ 本默认恒 null（确定性不变）；未接线进程同律（零回归红律）。
+ * 最新铸栈胜出：off 栈（enableProphecy=false）铸栈即清除旧接线。
+ */
+let wiredWorldModel: WorldModelReadPort | null = null;
+
+/**
+ * ΝΩ-46：注入（或清除）模块默认世界模型只读面（纯赋值，绝不抛）。
+ * 脏端口（null / 非对象 / 无 predict 函数）按清除记。测试隔离：传 null 复位。
+ */
+export function wireCounterfactualWorldModel(port: WorldModelReadPort | null | undefined): void {
+  wiredWorldModel =
+    port !== null && port !== undefined && typeof port === 'object' && typeof port.predict === 'function'
+      ? port
+      : null;
+}
+
+/** ΝΩ-46：模块默认只读面是否在场（接线开关的观察位 —— w4wire 两向断言用） */
+export function counterfactualWorldModelWired(): boolean {
+  return wiredWorldModel !== null;
+}
+
+/**
+ * ΝΩ-46：世界模型只读面解析 —— ctx 显式注入优先，缺席回落模块默认接线；
+ * 两层都缺席/脏形 ⇒ null（中性因子，逐字节旧路径）。
+ */
+function resolveWorldModelPort(explicit: unknown): WorldModelReadPort | null {
+  if (explicit !== null && explicit !== undefined && typeof explicit === 'object' &&
+      typeof (explicit as WorldModelReadPort).predict === 'function') {
+    return explicit as WorldModelReadPort;
+  }
+  return wiredWorldModel;
+}
+
+/**
+ * ΝΩ-46：转移置信因子（纯函数、绝不抛）—— model-based 反事实的乘子：
+ *   · 端口缺席 / 非 click 种类 / 盲屏（快照无 dhash）/ 无落点（动作键无 '@' 格）/
+ *     no-model（predict 返回 top:null）/ 端口抛错或坏形状 ⇒ 1.0 中性（零回归）；
+ *   · 命中 ⇒ 0.5 + 0.5·clamp01(top.prob)：历史证据支持该 (屏型, 动作格) 有转移
+ *     ⇒ 高置信逼近 ×1.0（纯加权不放大），低置信逼近 ×0.5（衰减）——**无证据
+ *     恒中性、有证据只折不加**，模型无知绝不惩罚新探索。
+ * 键方言：fromType = 量化屏型（快照 dhash 经 counterfactualUtil 的
+ * quantizedScreenTypeOf——与 prophecy 单源对齐）；actionKey = 4×4 格动作键
+ * （transitionActionKeyOf 同律，参考宽高取快照 width/height）——与 prophecy
+ * 结算回灌 observe 的写键同表同格（同屏同键，读的正是它学到的分布）。
+ */
+export function transitionConfidenceFactor(
+  port: WorldModelReadPort | null | undefined,
+  snapshot: WorldSnapshot | null | undefined,
+  action: PolicyAction | null | undefined,
+): number {
+  try {
+    if (port === null || port === undefined || typeof port.predict !== 'function') return 1;
+    const a = action as Partial<PolicyAction> | null | undefined;
+    if (a === null || a === undefined || typeof a !== 'object' || a.kind !== 'click') return 1;
+    const s = (snapshot ?? null) as Partial<WorldSnapshot> | null;
+    const dhash = s?.dhash;
+    if (typeof dhash !== 'string' || dhash === '') return 1; // 盲屏：无屏型身份不可对键
+    const width = s?.width;
+    const height = s?.height;
+    const actionKey = transitionActionKeyOf(a, width, height);
+    if (!actionKey.includes('@')) return 1; // 无落点/坏几何 ⇒ 无格不可对键
+    const out = port.predict(quantizedScreenTypeOf(dhash), actionKey);
+    if (out === null || out === undefined || typeof out !== 'object') return 1; // no-model 中性
+    const top = (out as { top?: unknown }).top;
+    if (top === null || top === undefined || typeof top !== 'object') return 1; // no-model 中性
+    const prob = (top as { prob?: unknown }).prob;
+    if (typeof prob !== 'number' || !Number.isFinite(prob)) return 1; // 无概率读数不可定价 ⇒ 中性
+    return 0.5 + 0.5 * clamp01(prob);
+  } catch {
+    return 1; // 读模型是旁路增益不是评分前提 —— 任何故障中性直通，绝不炸评分
+  }
+}
+
 // ── W3-6（H3）：评分内核与择优律的共享底座（scoreOptions / rankTopK 同源）──
 
 /** 评分内核的单条产出：诚实效用 rawU + 改选偏置标记 + 择优效用 utility */
@@ -124,6 +253,13 @@ interface ScoredEntry {
  * 评分内核（W3-6 从 scoreOptions 提取的共享底座，语义零变更）：
  * 三围计分律与原实现逐条相同（重复折价 / tried click 信息 0.1 / 风险映射），
  * 唯一增量是改选偏置 —— preferredActionKeys 命中者择优效用加 STEER_BIAS_UTILITY。
+ * ΝΩ-10（infoGain 新鲜度）：ctx.noEffectActionKeys 在场 ⇒ click 信息增益改走
+ * expectedInformationGain 的新鲜度计分（含从未点过 +0.15 / 点过且 no_effect −0.1），
+ * 旧律的「tried click 恒 0.1」只在该字段缺席时执法 —— 既有调用方逐字节零漂移。
+ * ΝΩ-46（model-based 反事实）：世界模型只读面（ctx.worldModel 显式优先、模块
+ * 默认接线兜底）在场且 click 候选的 (量化屏型 × 4×4 动作格) 在转移表有证据 ⇒
+ * progress 乘 (0.5 + 0.5·top.prob) 置信因子（transitionConfidenceFactor）；
+ * 无证据/缺席/非 click ⇒ 乘 1.0 中性 —— 未接线调用方逐字节零漂移。
  */
 function scoreAll(actions: PolicyAction[], c: Partial<ScoringContext>): ScoredEntry[] {
   const snapshot =
@@ -134,19 +270,35 @@ function scoreAll(actions: PolicyAction[], c: Partial<ScoringContext>): ScoredEn
   const tried = new Set(
     Array.isArray(c.triedActionKeys) ? (c.triedActionKeys.filter(k => typeof k === 'string') as string[]) : [],
   );
+  // ΝΩ-10：no_effect 签名集 —— 字段缺席（undefined）即旧律；在场（含空数组）即
+  // 新鲜度计分（空集 = 全部已试动作都不是 no_effect，点过即走「点过未失灵」臂）。
+  const noEffect = Array.isArray(c.noEffectActionKeys)
+    ? new Set((c.noEffectActionKeys.filter(k => typeof k === 'string') as string[]))
+    : undefined;
+  const freshness: ClickFreshness | undefined =
+    noEffect === undefined ? undefined : { triedClickKeys: tried, noEffectClickKeys: noEffect };
   // W3-6：改选偏置集合（空串剔除 —— 空签名会误伤无标签动作）
   const preferred = new Set(
     Array.isArray(c.preferredActionKeys)
       ? (c.preferredActionKeys.filter(k => typeof k === 'string' && k !== '') as string[])
       : [],
   );
+  // ΝΩ-46：世界模型只读面 —— 显式注入优先，缺席回落模块默认接线（均缺席 ⇒ null 中性）
+  const worldModel = resolveWorldModelPort(c.worldModel);
   const w = resolveWeights(c.weights);
 
   return actions.map((action, index) => {
     const isTried = tried.has(actionSignature(action));
-    const progress = clamp01(progressPrior(action, goalKeywords) * (isTried ? 0.6 : 1));
+    // ΝΩ-46：转移置信因子只乘 click 的 progress（其余种类 ×1.0 —— 模型只按
+    //（屏型 × 点击格）积累指针转移证据，先验族不受它辖制）。
+    const progress = clamp01(
+      progressPrior(action, goalKeywords) * (isTried ? 0.6 : 1) *
+        transitionConfidenceFactor(worldModel, snapshot, action),
+    );
     const informationGain =
-      action.kind === 'click' && isTried ? 0.1 : clamp01(expectedInformationGain(action, snapshot));
+      action.kind === 'click' && isTried && freshness === undefined
+        ? 0.1
+        : clamp01(expectedInformationGain(action, snapshot, freshness));
     const risk = riskOf(action.riskTier);
     const option: CounterfactualOption = {
       action,
@@ -192,6 +344,18 @@ export function actionSignature(action: PolicyAction): string {
 }
 
 /**
+ * ΝΩ-10（infoGain 新鲜度）：click 信息增益的行动史上下文（可选，由 scoreAll 从
+ * ScoringContext 透传）。缺席 ⇒ expectedInformationGain 保持纯快照先验（click
+ * 恒 0.3/0.4），行为与既有语义逐字节一致。
+ */
+export interface ClickFreshness {
+  /** 已点击过的动作签名集（ScoringContext.triedActionKeys 同律派生） */
+  triedClickKeys?: ReadonlySet<string>;
+  /** 点过且结局 no_effect 的动作签名集（ScoringContext.noEffectActionKeys 同律派生） */
+  noEffectClickKeys?: ReadonlySet<string>;
+}
+
+/**
  * 信息增益先验（纯函数、绝不抛异常）：该动作能让「未见过的东西」进入视野的概率。
  *   scroll ⇒ 0.8（新视野是最稳的信息源）；inspect ⇒ 0.7（放大细察现视野的盲区）；
  *   ask_vlm ⇒ 0.6（云脑整屏观察补盲）；
@@ -202,8 +366,23 @@ export function actionSignature(action: PolicyAction): string {
  *   其余种类（type/hotkey/drag/recall_skill）⇒ 0.2（中性先验）。
  * 「已试过」的折价（tried click ⇒ 0.1）由 scoreOptions 执法 —— 本函数只看动作与
  * 世界快照本身，不携带行动史。
+ *
+ * ΝΩ-10（infoGain 新鲜度）：freshness 在场（调用方自 ScoringContext 透传）时，
+ * click 的信息增益在快照陌生度基线（0.3/0.4）上叠新鲜度修正：
+ *   · 该落点从未被点击过（签名 ∉ triedClickKeys）⇒ +0.15 —— 带内候选此前只剩
+ *     「标签是否见于快照账本」一个单维（而带内候选全部来自快照 ⇒ 恒 0.3，并列
+ *     破平形同虚设），新鲜度让「没试过的落点」真正分出高下；
+ *   · 点过且结局 no_effect（签名 ∈ noEffectClickKeys）⇒ −0.1 —— 点了没动静的
+ *     地方，再见新物的概率应低于快照陌生度先验的估计；
+ *   · 点过但结局非 no_effect（有进展/退化等）⇒ 不修正 —— 旧路径已由 progress
+ *     侧的重复折价（×0.6）记账，信息侧不双重惩罚。
+ * freshness 缺席 ⇒ 本函数返回值与旧版逐字节相同（既有调用方零漂移）。
  */
-export function expectedInformationGain(action: PolicyAction, snapshot: WorldSnapshot): number {
+export function expectedInformationGain(
+  action: PolicyAction,
+  snapshot: WorldSnapshot,
+  freshness?: ClickFreshness,
+): number {
   const a = action as Partial<PolicyAction> | null | undefined;
   if (a === null || a === undefined || typeof a !== 'object') return 0;
   switch (a.kind) {
@@ -215,11 +394,23 @@ export function expectedInformationGain(action: PolicyAction, snapshot: WorldSna
       return 0.6;
     case 'click': {
       const label = normalizeText(targetLabelRaw(a));
-      if (label === '') return 0.3;
-      const known = elementsOf(snapshot).some(
-        el => normalizeText((el as Partial<SnapshotElement>)?.label) === label,
-      );
-      return known ? 0.3 : 0.4;
+      let base = 0.3;
+      if (label !== '') {
+        const known = elementsOf(snapshot).some(
+          el => normalizeText((el as Partial<SnapshotElement>)?.label) === label,
+        );
+        base = known ? 0.3 : 0.4;
+      }
+      if (freshness === null || freshness === undefined || typeof freshness !== 'object') return base;
+      // ΝΩ-10 新鲜度修正（次序：no_effect 臂优先于从未点过臂 —— no_effect 必已点过）
+      const sig = actionSignature(action);
+      if (freshness.noEffectClickKeys !== undefined && freshness.noEffectClickKeys.has(sig)) {
+        return clamp01(base - 0.1);
+      }
+      if (freshness.triedClickKeys === undefined || !freshness.triedClickKeys.has(sig)) {
+        return clamp01(base + 0.15);
+      }
+      return base;
     }
     case 'declare':
     case 'escalate':
@@ -242,10 +433,17 @@ export function expectedInformationGain(action: PolicyAction, snapshot: WorldSna
  *      escalate ⇒ 0.1；recall_skill ⇒ 0.5；
  *    - 其余种类（type/hotkey/drag/wait）⇒ 0.2（保守中性先验）；
  *    - 已试过（actionSignature ∈ triedActionKeys）⇒ progressProbability ×0.6
- *      （重复折价，对一切种类生效）。
+ *      （重复折价，对一切种类生效）；
+ *    - ΝΩ-46：ctx.worldModel（或模块默认接线）在场时，click 候选再乘转移置信
+ *      因子 (0.5 + 0.5·top.prob)——世界模型按（量化屏型 × 4×4 动作格）积累的
+ *      真实转移分布进效用评分（只读旁路，键方言与 prophecy 单源对齐）；无证据/
+ *      端口缺席 ⇒ ×1.0 中性（零回归）。
  *  · informationGain（让「未见过的东西」进入视野的概率，0..1）：先验见
  *    expectedInformationGain 的 JSDoc；scoreOptions 额外执法 —— 已试过的 click
  *    ⇒ 0.1（重复点同一处，再见新物的概率骤降；其余种类不因 tried 折信息分）。
+ *    ΝΩ-10：ctx.noEffectActionKeys 在场时 click 改走新鲜度计分（从未点过 +0.15 /
+ *    点过且 no_effect −0.1，见 expectedInformationGain），旧律仅在该字段缺席时
+ *    执法 —— 既有调用方逐字节零漂移。
  *  · risk（0..1）：按 riskTier 映射 benign=0.05 / sensitive=0.5 / destructive=1，
  *    未知分层按 0.5 保守记。
  *

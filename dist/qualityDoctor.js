@@ -79,6 +79,40 @@ function atomicWrite(filePath, data) {
     writeFileSync(tmp, data, 'utf8');
     renameSync(tmp, filePath);
 }
+/** 缓存容量上限（插入序 FIFO 驱逐 —— 容量护栏，非 LRU：可预测、零簿记） */
+const SOURCE_CACHE_MAX = 4096;
+const sourceContentCache = new Map();
+const sourceCacheStats = { hits: 0, misses: 0, evictions: 0 };
+/** 带缓存的源码读取：键未变 ⇒ 零重读（读故障上抛由调用方 catch —— 不缓存失败） */
+function readSourceCached(full, st) {
+    const hit = sourceContentCache.get(full);
+    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+        sourceCacheStats.hits++;
+        return hit.content;
+    }
+    sourceCacheStats.misses++;
+    const content = readFileSync(full, 'utf8');
+    if (sourceContentCache.size >= SOURCE_CACHE_MAX) {
+        const oldest = sourceContentCache.keys().next().value;
+        if (oldest !== undefined) {
+            sourceContentCache.delete(oldest);
+            sourceCacheStats.evictions++;
+        }
+    }
+    sourceContentCache.set(full, { mtimeMs: st.mtimeMs, size: st.size, content });
+    return content;
+}
+/** ΝΩ-22（测试/观测面）：源码缓存簿记 —— misses = 实际 readFileSync 次数 */
+export function doctorSourceCacheStats() {
+    return { entries: sourceContentCache.size, ...sourceCacheStats };
+}
+/** ΝΩ-22（测试面）：缓存整体失效 */
+export function resetDoctorSourceCache() {
+    sourceContentCache.clear();
+    sourceCacheStats.hits = 0;
+    sourceCacheStats.misses = 0;
+    sourceCacheStats.evictions = 0;
+}
 function emptyReport(warnings) {
     return {
         timestamp: Date.now(), incremental: false, score: 100, genesisVerdict: 'intact',
@@ -171,8 +205,10 @@ class Doctor {
                     walk(full);
                 else if (name.endsWith('.ts')) {
                     const rel = relative(root, full).split(sep).join('/');
+                    // ΝΩ-22：mtime 缓存读取 —— 未变文件零重读；读故障上抛由 catch 吞为
+                    // 空内容（旧行为），且不缓存失败（下次出诊重试真实读取）
                     try {
-                        out.push({ path: rel, content: readFileSync(full, 'utf8') });
+                        out.push({ path: rel, content: readSourceCached(full, st) });
                     }
                     catch (e) {
                         out.push({ path: rel, content: '' });

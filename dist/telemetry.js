@@ -110,6 +110,39 @@ export function hurstExponent(x) {
     const H = num / den;
     return Number.isFinite(H) ? Math.round(H * 1000) / 1000 : null;
 }
+/** ΝΩ-24：定长环形数组（头指针复用）—— 旧实现满员后每次 push 配一次 O(n)
+ *  的 shift 头删（512/64 元素的逐样本搬运算，高频观测流上的系统调用税）；
+ *  头指针写满员后原地覆写最旧样本，push 均摊 O(1)、缓冲定长复用零再分配。
+ *  toArray() 按时间序展开为新副本（读取频率远低于写入 —— 快照时一次性展开，
+ *  snapshot 的排序语义保持）。导出：环形原子的测试面（与旧 push/shift 实现
+ *  的逐值等价执法，统计原子的测试面同律）。 */
+export class Ring {
+    buf = [];
+    cap;
+    head = 0;
+    count = 0;
+    constructor(capacity) {
+        this.cap = Math.max(1, Math.floor(capacity));
+    }
+    get length() {
+        return this.count;
+    }
+    push(v) {
+        if (this.count < this.cap) {
+            this.buf.push(v);
+            this.count++;
+            return;
+        }
+        this.buf[this.head] = v; // 覆写最旧样本
+        this.head = (this.head + 1) % this.cap;
+    }
+    /** 时间序展开（新副本 —— 消费方可自由排序/变异） */
+    toArray() {
+        return this.count < this.cap
+            ? [...this.buf]
+            : [...this.buf.slice(this.head), ...this.buf.slice(0, this.head)];
+    }
+}
 /** 环形缓冲分位数：线性插入 O(1)，快照时一次性排序（读取频率远低于写入） */
 function percentile(sorted, p) {
     if (sorted.length === 0)
@@ -225,7 +258,7 @@ export class Telemetry {
     slot(tool) {
         let s = this.tools.get(tool);
         if (!s) {
-            s = { calls: 0, successes: 0, failures: 0, noops: 0, totalMs: 0, latencies: [], outcomeRing: [] };
+            s = { calls: 0, successes: 0, failures: 0, noops: 0, totalMs: 0, latencies: new Ring(LATENCY_RING), outcomeRing: new Ring(OUTCOME_RING) };
             this.tools.set(tool, s);
         }
         return s;
@@ -248,13 +281,9 @@ export class Telemetry {
         if (noop && status === 'SUCCESS')
             s.noops++;
         s.latencies.push(Math.round(ms));
-        if (s.latencies.length > LATENCY_RING)
-            s.latencies.shift();
         // G-2：失败指示入环（UNKNOWN 不入 —— 观测流只收确定结局，防稀释变点信号）
         if (status === 'SUCCESS' || status === 'FAILED') {
             s.outcomeRing.push(status === 'FAILED' ? 1 : 0);
-            if (s.outcomeRing.length > OUTCOME_RING)
-                s.outcomeRing.shift();
         }
     }
     /**
@@ -269,7 +298,7 @@ export class Telemetry {
     regimeShifts() {
         const out = [];
         for (const [name, s] of this.tools) {
-            const ring = s.outcomeRing;
+            const ring = s.outcomeRing.toArray(); // ΝΩ-24：环形展开（时间序与旧数组同构）
             if (ring.length < 8)
                 continue;
             // 环前终身基线（稳定锚）：终身计数器只增不减 ⇒ 基线不随环翻转
@@ -309,7 +338,7 @@ export class Telemetry {
     hurst() {
         const pooled = [];
         for (const s of this.tools.values())
-            pooled.push(...s.outcomeRing);
+            pooled.push(...s.outcomeRing.toArray());
         return hurstExponent(pooled);
     }
     // ─── H-3 Thompson 采样模态仲裁（创世纪）：后验抽样代替贪心 ───
@@ -411,7 +440,7 @@ export class Telemetry {
         // 全环池化（环形缓冲 512 上限即预算 —— 不做二次切片截尾）
         const pooled = [];
         for (const s of this.tools.values())
-            pooled.push(...s.latencies);
+            pooled.push(...s.latencies.toArray());
         const fit = fitGpdTail(pooled);
         if (!fit)
             return null;
@@ -558,7 +587,7 @@ export class Telemetry {
         const cands = [];
         for (const [name, s] of this.tools) {
             if (s.latencies.length >= minSamples)
-                cands.push({ tool: name, lat: s.latencies });
+                cands.push({ tool: name, lat: s.latencies.toArray() });
         }
         const out = [];
         for (let i = 0; i < cands.length; i++) {
@@ -596,7 +625,7 @@ export class Telemetry {
     /** 结构化快照：机器可读（checkpoint / 上报） */
     snapshot() {
         const tools = [...this.tools.entries()].map(([name, s]) => {
-            const sorted = [...s.latencies].sort((a, b) => a - b);
+            const sorted = s.latencies.toArray().sort((a, b) => a - b); // ΝΩ-24：环形展开后排序（排序语义保持）
             return {
                 tool: name,
                 calls: s.calls,

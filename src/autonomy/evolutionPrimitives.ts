@@ -3,7 +3,15 @@
 // 原语区 —— EXP4 特征/超参常量、哈希与 PRNG、向量数学、防御访问器、蒸馏门/失败签名
 // 与权重律纯函数（applyRun/deriveLessons/deriveSkills）。逐字节搬运（零逻辑/零数值
 // 变更）；类型经 type-only 反向引用 evolutionEngine（擦除后零运行时环）。
+// ΝΩ-11（闭环账本工单）：applyRun 的律 1/律 2 已自旧「末两步/去重全额」升级为
+// 全轨迹 HCA 折扣（γ=0.7 冻结），RECOVERY_MAP 扩生产方言——上述搬运声明对这两
+// 处自本工单起失效（有意的行为变更，测试同步手算更新）。
+// ΑΩ-R10（方言三重复制单源化）：mulberry32/fnv1a 本地副本已迁出至 ../dialects/random
+// 单源模块 —— 本文件改为 import + 原位再导出（mulberry32），种子流与散列值逐位一致。
 import type { BanditContext, DistilledSkill, RunRecord } from './evolutionEngine';
+import { fnv1a, mulberry32 } from '../dialects/random';
+
+export { mulberry32 };
 
 // ── 算法形状字面量（全部确定性常量） ──
 
@@ -20,12 +28,56 @@ export const RELIABILITY_INIT = 0.5;
 export const RELIABILITY_MAX = 0.95;
 export const RELIABILITY_STEP = 0.1;
 
-/** 失败根因关键词 → 对症恢复策略（确定性映射；大小写不敏感子串匹配） */
+/**
+ * 失败根因关键词 → 对症恢复策略（确定性映射；大小写不敏感子串匹配）。
+ * ΝΩ-11（恢复加成律方言断裂修复）：旧表只认 gym 方言（popup/focus/ocr）——
+ * 生产根因词是 autonomousRun 的 failureRootCause = escalateReason ?? 终局相位
+ * （'constitution-veto' / 'approval-required' / 'policy-escalate' /
+ * 'epistemic-gate' / 'steer-drift'，或 'failed' / 'aborted' / 'blocked'；
+ * gym 与 dream-replay 侧方言为 `phase=同词` / `dream-replay:phase=同词`），
+ * 旧表对生产流 +0.05 结构性不可达。扩表以子串覆盖两种载体（'failed' 同时命中
+ * 'failed' 与 'phase=failed'），gym 旧词全保留（零回归）；多关键词照旧叠加。
+ * autoPilot 现无 lastNoEffectKind 信号（ΝΩ-11 已核查）——无可透传；该信号
+ * 在场之日在此续接（no_effect 动作种类的对症行）。
+ */
 export const RECOVERY_MAP: ReadonlyArray<Readonly<{ keyword: string; strategy: string }>> = [
+  // —— gym 方言（旧表逐字节保留） ——
   { keyword: 'popup', strategy: 'inspect' },   // 弹窗遮蔽 ⇒ 先看清现场
   { keyword: 'focus', strategy: 'inspect' },   // 焦点丢失 ⇒ 先定位真实可交互面
   { keyword: 'ocr', strategy: 'ask_vlm' },     // 文字读不出 ⇒ 换视觉模型直读
+  // —— ΝΩ-11 生产方言：escalateReason（子串取词根，勿整词——根因串可能带前后缀） ——
+  { keyword: 'veto', strategy: 'inspect' },        // constitution-veto：现场危险词否决 ⇒ 先看清现场再选路
+  { keyword: 'approval', strategy: 'inspect' },    // approval-required：审批拦截 ⇒ 看清现场换良性路径
+  { keyword: 'escalate', strategy: 'ask_vlm' },    // policy-escalate：已知路全败 ⇒ 换视觉模型找新路
+  { keyword: 'epistemic', strategy: 'ask_vlm' },   // epistemic-gate：置信不足 ⇒ 云脑直读补证据
+  { keyword: 'steer-drift', strategy: 'inspect' }, // 活意图漂移 ⇒ 重看现场对齐意图
+  // —— ΝΩ-11 生产方言：终局相位名（escalateReason 缺席时的根因词） ——
+  { keyword: 'blocked', strategy: 'inspect' },      // 阻塞 ⇒ 看清阻塞现场找解除路径
+  { keyword: 'failed', strategy: 'inspect' },       // 判据未达 ⇒ 重试前先看清现场（与教训文案同律）
+  { keyword: 'aborted', strategy: 'recall_skill' }, // 步数熔断 ⇒ 复用蒸馏宏省步数（更短路径是预算的解药）
 ];
+
+/**
+ * ΝΩ-11：HCA（Hindsight Credit Assignment）全轨迹折扣因子 γ —— 冻结常量 0.7。
+ * 语义：距终局 k 步的策略贡献 ×γ^k（k=0 终局步全额、k=2 时 ≈0.49 即减半）。
+ * 取 0.7 的论证（冻结，勿动）：0.9 衰减过慢（近似无折扣 ⇒ 退回「全轨迹等罚」
+ * 的旧病——首步与终局步同罪，归因无梯度）；0.5 两步即斩至 1/4（长轨迹早期步
+ * 贡献被抹零，正则项失效）；0.7 ⇒ γ²≈0.49（两步外减半）、γ³≈0.34（三步外
+ * <1/3），与旧律「末两步位置语义」的近因偏重精神衔接最平滑，且为 RL 折扣
+ * 经验值。纯函数消费（hcaFactor），确定性保持。
+ */
+export const HCA_GAMMA = 0.7;
+
+/** ΝΩ-11：γ^k（纯函数；k 非法/负数防御归 γ^0=1 —— 不确定时不折价，归因从满） */
+export function hcaFactor(stepsFromEnd: number): number {
+  const k = typeof stepsFromEnd === 'number' && Number.isFinite(stepsFromEnd) ? Math.floor(stepsFromEnd) : 0;
+  return Math.pow(HCA_GAMMA, Math.max(0, k));
+}
+
+/** ΝΩ-11：折扣后的单步奖/罚幅度（千分位取整 —— 手算可对照、浮点不漂移） */
+export function hcaStepMagnitude(base: number, stepsFromEnd: number): number {
+  return r3(base * hcaFactor(stepsFromEnd));
+}
 
 export type WeightAdjustment = { heuristic: string; delta: number; reason: string };
 
@@ -71,32 +123,8 @@ const CLUSTER_BLOCK = FEATURE_LAYOUT.clusterWidth;
 const WORLD_BLOCK = FEATURE_LAYOUT.worldWidth;
 export const FEATURE_DIM = FEATURE_LAYOUT.dim;
 
-// ─── W1-5：确定性原语（本文件零 import——哈希与 PRNG 自带，绝不外借） ───
-
-/** FNV-1a 32 位字符串哈希（>>>0 归一）——类别标签进桶的确定性锚 */
-const fnv1a = (s: string): number => {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-};
-
-/**
- * W1-5：mulberry32——32 位确定性 PRNG（种子钉死 ⇒ 序列钉死；与 gym 的同名实现
- * 语义同源但互不 import：本模块零依赖铁律）。均匀输出 [0,1)。
- */
-export const mulberry32 = (seed: number): (() => number) => {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
+// ─── W1-5：确定性原语（ΑΩ-R10：哈希与 PRNG 本体已单源化至 ../dialects/random，
+//     经顶部 import 引入 —— mulberry32 原位再导出，fnv1a 供 contextFeatureVector 消费） ───
 
 /**
  * W1-5：上下文 → 特征向量（纯函数、维度恒 34、绝不产出 NaN/Inf）。
@@ -264,30 +292,52 @@ export function failureSignature(run: RunRecord): string {
 /**
  * 把一轮运行按权重律叠进权重表（就地修改），返回本轮产生的调整记录
  * （delta = 夹取后的**实际**增量——触顶/触底轮的 delta 为 0，夹取对读者可见）。
+ * ΝΩ-11（折扣归因）：律 1/律 2 的位置语义自「末两步/去重全额」升级为全轨迹
+ * HCA 折扣——第 i 步（1 基）的贡献 ×γ^(N−i)（γ=0.7 冻结，见 HCA_GAMMA）：
+ * 终局步全额、早期步衰减（成功奖励与失败惩罚同律，符号相反）。纯函数，
+ * 同输入同输出（千分位取整 —— 手算可对照）。
  */
 export function applyRun(weights: Record<string, number>, run: RunRecord | undefined | null): WeightAdjustment[] {
   const adj: WeightAdjustment[] = [];
   if (!run) return adj;
+  const traj = strategiesOf(run);
+  const n = traj.length;
   if (run.success === true) {
-    // 律 1：成功奖励——出现过的策略去重后各 +0.1（封顶 2.0）
-    const seen = new Set<string>();
-    for (const kind of strategiesOf(run)) {
-      if (!KNOWN.has(kind) || seen.has(kind)) continue;
-      seen.add(kind);
+    // 律 1（ΝΩ-11 折扣升级）：成功奖励——出现过的策略去重后按「最晚出现位」的
+    // 折扣 +0.1·γ^(N−1−i)（封顶 2.0；最晚位 = 折扣最满 = 事后归因信用最大的
+    // 那次出现——一次运行的证据量仍是 1，与旧去重律同精神）
+    const credited = new Map<string, number>();
+    for (let i = 0; i < n; i++) {
+      const kind = traj[i];
+      if (typeof kind === 'string' && KNOWN.has(kind)) credited.set(kind, i);
+    }
+    for (const [kind, i] of credited) {
+      const gain = hcaStepMagnitude(REWARD, n - 1 - i);
       const before = weights[kind];
-      const after = Math.min(W_MAX, r3(before + REWARD));
+      const after = Math.min(W_MAX, r3(before + gain));
       weights[kind] = after;
-      adj.push({ heuristic: kind, delta: r3(after - before), reason: `成功轨迹验证：${kind} 出现在成功运行中（+0.1，封顶 2.0）` });
+      adj.push({
+        heuristic: kind,
+        delta: r3(after - before),
+        reason: `成功轨迹验证：${kind} 出现在成功运行第 ${i + 1}/${n} 步（折扣 γ^${n - 1 - i} ⇒ +${gain}，封顶 2.0）`,
+      });
     }
     return adj;
   }
-  // 律 2：失败惩罚——末两步各 -0.15（位置语义：重复策略叠加计罚；下限 0.2）
-  for (const kind of strategiesOf(run).slice(-2)) {
-    if (!KNOWN.has(kind)) continue;
+  // 律 2（ΝΩ-11 折扣升级）：失败惩罚——全轨迹逐位按 γ^(N−1−i) 计罚
+  //（近因步全额、早期步衰减；重复策略叠加计罚同旧律；下限 0.2）
+  for (let i = 0; i < n; i++) {
+    const kind = traj[i];
+    if (typeof kind !== 'string' || !KNOWN.has(kind)) continue;
+    const loss = hcaStepMagnitude(PENALTY, n - 1 - i);
     const before = weights[kind];
-    const after = Math.max(W_MIN, r3(before - PENALTY));
+    const after = Math.max(W_MIN, r3(before - loss));
     weights[kind] = after;
-    adj.push({ heuristic: kind, delta: r3(after - before), reason: `失败归因：${kind} 是末两步之一（-0.15，下限 0.2）` });
+    adj.push({
+      heuristic: kind,
+      delta: r3(after - before),
+      reason: `失败归因：${kind} 位于第 ${i + 1}/${n} 步（折扣 γ^${n - 1 - i} ⇒ -${loss}，下限 0.2）`,
+    });
   }
   // 律 3：恢复加成——根因关键词 ⇒ 对症策略 +0.05（封顶 2.0；多关键词叠加）
   const cause = causeOf(run).toLowerCase();
@@ -330,7 +380,7 @@ export function deriveLessons(history: readonly RunRecord[], distillMaxSteps: nu
       lessons.set(sig, `${sig}｜重复失败模式（第 ${n} 次出现）：同一签名反复失败——升级处理优先级：该场景直接换策略或求助（escalate），勿原样重试。`);
     } else {
       const cause = causeOf(run) ? `（根因：${causeOf(run)}）` : '';
-      lessons.set(sig, `${sig}｜教训：目标「${run?.goal ?? '?'}」失败${cause}——末段策略嫌疑最大已降权；重试前先看清现场（inspect / ask_vlm）。`);
+      lessons.set(sig, `${sig}｜教训：目标「${run?.goal ?? '?'}」失败${cause}——轨迹已按近因折扣降权（ΝΩ-11：γ^(N−i)，末位最重）；重试前先看清现场（inspect / ask_vlm）。`);
     }
   }
   return { lessons: [...lessons.values()], failCounts };

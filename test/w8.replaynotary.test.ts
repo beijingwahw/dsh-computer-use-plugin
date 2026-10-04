@@ -10,10 +10,12 @@
 //   N-5 工具面接线：装配 ⇒ 回放完成铸锚（见证内容 = 步指纹序列 + 三态结局 + 成败）；
 //      公证缺席 ⇒ 降级标注（回放照常、锚链零增量）；halt 中止也照铸不讳；
 //      正常回放行为不受影响（物理派发计数与旧册同律）
+//   N-7（ΝΩ-21）：journalDisk 磁盘指纹旁链与见证同锚共存 —— 哈希域/JSONL 往返/
+//      复算注记/磁盘重写 drift 注记不翻章（驱逐盲区取证面接入回放铸证路径）
 // 全离线确定性：零真网络（fetch 全注入）、零真机（system 假件计数）。
 import { test, beforeEach, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -32,6 +34,7 @@ import {
   type ReplayTrajectoryWitness,
   type NotaryTarget,
 } from '../src/notary/index.ts';
+import { sandboxLog } from '../src/sandbox/log.ts';
 import { derRead, derChildren, derEncode } from '../src/notary/rfc3161.ts';
 import { createReplayActionsTool, replayStepExecuted } from '../src/tools/replayActions.ts';
 import { SAFETY_GATE_BLOCK } from '../src/tools/actionGate.ts';
@@ -382,4 +385,119 @@ test('N-5c: halt 中止也照铸不讳 —— 见证携 halt 事实与失败步�
     '链哈希缺席 ⇒ canonical 摘要兜底',
   );
   assert.equal(replayStepFingerprint(null), '', '垃圾记录 ⇒ 空指纹（绝不抛）');
+});
+
+// ─── N-6（ΑΩ-R42）：旁链快照与回放见证同锚共存 —— 双账覆盖的哈希域与水合往返 ───
+
+test('N-6: 旁链快照与见证同锚共存（哈希域覆盖）；JSONL 往返逐字段复活；复算注记在场', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w8-replaynotary-r42-'));
+  const trace = join(dir, 'anchors.jsonl');
+  try {
+    // 在场旁链播种：knowledge 学习史链上一条（ΑΩ-R42 双账覆盖的对象账本）
+    sandboxLog.reset();
+    await sandboxLog.append('knowledge-learned', { skill: 'menu-path' });
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: trace });
+    await seedJournal(2);
+    const r = await anchorReplayTrajectory(WITNESS);
+    assert.equal(r.status, 'anchored');
+    const anchor = notary.lastAnchor();
+    assert.ok(anchor?.witness && anchor.auxChains, 'D-G5 见证与 ΑΩ-R42 旁链快照同锚共存');
+    assert.deepEqual(anchor!.auxChains, [{ chainName: 'sandboxLog', seq: 1, chainTip: sandboxLog.tip }],
+      '三元组忠实映射（学习史链尖）');
+
+    // 哈希域覆盖：改旁链三元组一字节（tip 首字符）⇒ 锚 hash 失配
+    const tampered = {
+      ...anchor!,
+      auxChains: [{ ...anchor!.auxChains![0], chainTip: 'f' + anchor!.auxChains![0].chainTip.slice(1) }],
+    };
+    const tDomain = { ...tampered } as Partial<AnchorRecord>;
+    delete tDomain.hash;
+    assert.notEqual(anchorHash(tDomain as Omit<AnchorRecord, 'hash'>), tampered.hash, '改 auxChains 一字节 ⇒ 锚 hash 变');
+
+    // 四绿章不红（旁链复算一致 + 见证在册）；knowledge 段非排练 ⇒ 重放章诚实 n/a
+    const report = notary.verifyNotary();
+    assert.equal(report.badges['timestamp-anchor'].status, 'green');
+    assert.match(report.badges['timestamp-anchor'].detail, /aux chain sandboxLog re-walk over 1 entry reproduces/);
+    assert.equal(report.badges['replay-consistency'].status, 'n/a');
+    assert.equal(report.ok, true);
+
+    // JSONL 往返（水合路径）：auxChains 随锚行落盘、reload 后逐字段复活
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: trace });
+    const revived = notary.lastAnchor();
+    assert.ok(revived, '锚行铸回内存锚链');
+    assert.deepEqual(revived!.auxChains, [{ chainName: 'sandboxLog', seq: 1, chainTip: sandboxLog.tip }],
+      '旁链快照随 JSONL 往返复活');
+    assert.deepEqual(revived!.witness, WITNESS, '见证同律往返');
+    assert.equal(revived!.hash, anchor!.hash, '哈希往返一致');
+    const report2 = notary.verifyNotary();
+    assert.equal(report2.badges['timestamp-anchor'].status, 'green', '复活锚复核照常（旁链复算仍一致）');
+  } finally {
+    sandboxLog.reset();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── N-7（ΝΩ-21）：journalDisk 旁链与回放见证同锚共存 —— 回放铸证路径的磁盘取证面 ───
+
+test('N-7: journalDisk 与见证同锚共存（哈希域覆盖）；JSONL 往返复活；磁盘重写 ⇒ drift 注记不翻章', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'w8-replaynotary-n21-'));
+  const disk = join(dir, 'journal-disk.jsonl');
+  const trace = join(dir, 'anchors.jsonl');
+  try {
+    // 磁盘账本播种：2 行 JSONL（append-only 形态 —— journalDisk 旁链的登记对象）
+    const twoLines = '{"tool":"click_mouse","i":1}\n{"tool":"click_mouse","i":2}\n';
+    writeFileSync(disk, twoLines, 'utf8');
+    const expectedTip = sha256Hex(twoLines);
+    sandboxLog.reset(); // 旁链只留 journalDisk（沙箱缺席面 —— 断言确定性）
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: trace, journalDiskPath: disk });
+    await seedJournal(2);
+    const r = await anchorReplayTrajectory(WITNESS);
+    assert.equal(r.status, 'anchored');
+    const anchor = notary.lastAnchor();
+    assert.ok(anchor?.witness && anchor.auxChains, 'D-G5 见证与 ΝΩ-21 磁盘指纹旁链同锚共存');
+    assert.deepEqual(anchor!.auxChains,
+      [{ chainName: 'journalDisk', seq: 2, chainTip: expectedTip }],
+      '三元组 = (journalDisk, 完整行数, 行字节整体 sha256)');
+
+    // 哈希域覆盖：改旁链三元组一字节（chainTip 首字符）⇒ 锚 hash 失配
+    const tampered = {
+      ...anchor!,
+      auxChains: [{ ...anchor!.auxChains![0], chainTip: 'f' + anchor!.auxChains![0].chainTip.slice(1) }],
+    };
+    const tDomain = { ...tampered } as Partial<AnchorRecord>;
+    delete tDomain.hash;
+    assert.notEqual(anchorHash(tDomain as Omit<AnchorRecord, 'hash'>), tampered.hash, '改 journalDisk 三元组一字节 ⇒ 锚 hash 变');
+
+    // 复算一致 ⇒ 注记在场；四绿章不红（见证与磁盘指纹互不牵连）
+    const report = notary.verifyNotary();
+    assert.equal(report.badges['timestamp-anchor'].status, 'green');
+    assert.match(report.badges['timestamp-anchor'].detail,
+      /journalDisk re-hash over the sworn 2-line prefix reproduces its fingerprint/);
+    assert.equal(report.badges['replay-consistency'].status, 'n/a');
+    assert.equal(report.ok, true);
+
+    // JSONL 往返（水合路径）：journalDisk 快照随锚行落盘、reload 后逐字段复活
+    notary.reset();
+    notary.configure({ endpoint: '', tracePath: trace, journalDiskPath: disk });
+    const revived = notary.lastAnchor();
+    assert.ok(revived, '锚行铸回内存锚链');
+    assert.deepEqual(revived!.auxChains,
+      [{ chainName: 'journalDisk', seq: 2, chainTip: expectedTip }],
+      '磁盘指纹快照随 JSONL 往返复活');
+    assert.deepEqual(revived!.witness, WITNESS, '见证同律往返');
+    assert.equal(revived!.hash, anchor!.hash, '哈希往返一致');
+
+    // 磁盘史锚后被重写（第 2 行内容更换、行数不变）⇒ disk-chain-drift 注记在场、章不翻红
+    writeFileSync(disk, '{"tool":"click_mouse","i":1}\n{"tool":"click_mouse","i":"REWRITTEN"}\n', 'utf8');
+    const report2 = notary.verifyNotary();
+    assert.equal(report2.badges['timestamp-anchor'].status, 'green', '注记级核验不翻章（锚定 ≠ 内容为真）');
+    assert.match(report2.badges['timestamp-anchor'].detail, /disk-chain-drift/, '磁盘重写证词在场');
+    assert.equal(report2.ok, true);
+  } finally {
+    sandboxLog.reset();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

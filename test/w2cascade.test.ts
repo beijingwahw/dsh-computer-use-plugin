@@ -792,3 +792,64 @@ test('W2-8i: VlmCascade 经 glmClient 面全链贯通 —— 便宜过检直采/
     attachCascadeFace(null);
   }
 });
+
+// ─── ΝΩ-18（承接语义收窄）：primary 档空链/未拨号合成 degraded ⇒ 弃权 ───
+
+test('ΝΩ-18: 主力档空链（全脑标 cheap）⇒ 升级臂未拨号 ⇒ 弃权 null，台账零承接', async () => {
+  // 配置形态：用户把主力也标 cheap —— primary 档链空，chatTier('primary') 回合成
+  // degraded（未拨号）。旧行为：承接 ok:false（把单例主脑与 failover 池全短路）；
+  // 新行为：弃权 null 让主路径照走。
+  const cheapA = fakeBrain('brain-a', [{ ok: true, text: '{"point":{"x":500,"y":500}}' }], { tier: 'cheap' });
+  const cheapB = fakeBrain('brain-b', [{ ok: true }], { tier: 'cheap' });
+  const pool = new ProviderPool([cheapA, cheapB], { tiers: { 'brain-a': 'cheap', 'brain-b': 'cheap' } });
+  const cascade = new VlmCascade(pool, { validators: [withinBboxValidator(TARGET_BBOX)] });
+
+  const r = await cascade.runJson(req(), { factors: EASY_FACTORS });
+  assert.equal(r, null, '便宜臂校验不过 ⇒ 升级 ⇒ primary 空链未拨号 ⇒ 弃权（主路径照走）');
+  assert.equal(cheapA.calls, 1, '便宜臂照拨（承接判定前的真实事件）');
+  const s = cascade.stats;
+  assert.equal(s.escalated, 0, '未拨号 ⇒ 不虚记升级账');
+  assert.equal(s.eligible, 0);
+  assert.equal(s.spentUnits, 0, '主力未拨号 ⇒ 不虚记主力价');
+
+  // 全员未配置的 primary 档（被跳过 ⇒ 同为合成 degraded）同律弃权
+  const cheapC = fakeBrain('brain-c', [{ ok: true, text: '{"point":{"x":500,"y":500}}' }], { tier: 'cheap' });
+  const unconfigured = fakeBrain('brain-d', [{ ok: true }], { configured: false });
+  const pool2 = new ProviderPool([unconfigured, cheapC]);
+  const cascade2 = new VlmCascade(pool2, { validators: [withinBboxValidator(TARGET_BBOX)] });
+  assert.equal(await cascade2.runJson(req(), { factors: EASY_FACTORS }), null, 'primary 档全员未配置被跳 ⇒ 弃权');
+});
+
+test('ΝΩ-18: 空链弃权经 glmClient 面 —— 单例主路径照走（不被级联失败短路）', async () => {
+  try {
+    const { fetchImpl, calls } = fakeFetchFactory();
+    const client = new GlmClient({ apiKey: 'k', model: 'm', fetchImpl });
+    const cheap = fakeBrain('glm-flash', [{ ok: true, text: '{"point":{"x":500,"y":500}}' }], { tier: 'cheap' });
+    const alsoCheap = fakeBrain('glm-air', [{ ok: true }], { tier: 'cheap' });
+    const cascade = new VlmCascade(
+      new ProviderPool([cheap, alsoCheap], { tiers: { 'glm-flash': 'cheap', 'glm-air': 'cheap' } }),
+      { validators: [withinBboxValidator(TARGET_BBOX)] },
+    );
+    attachCascadeFace({ consultJson: r => cascade.runJson(r, { factors: EASY_FACTORS }) });
+    const r = await client.chatJson<{ answer: number }>(req());
+    assert.equal(r.ok, true);
+    assert.equal(r.value!.answer, 42, '级联弃权 ⇒ 单例主路径应答（空链不再短路主脑）');
+    assert.equal(calls(), 1, '单例拨号恰一次');
+  } finally {
+    attachCascadeFace(null);
+  }
+});
+
+test('ΝΩ-18: 真实拨号后的升级失败仍承接（承接收窄只针对未拨号）', async () => {
+  // primary 档在场且真实拨号后失败 ⇒ 旧承接语义逐字节保持（诚实失败 + 台账）
+  const primary = fakeBrain('glm-pro', [{ ok: false, error: 'pro http 503 after 1 attempt' }]);
+  const cheap = fakeBrain('glm-flash', [{ ok: true, text: '{"point":{"x":500,"y":500}}' }], { tier: 'cheap' });
+  const cascade = new VlmCascade(new ProviderPool([primary, cheap]), {
+    validators: [withinBboxValidator(TARGET_BBOX)],
+  });
+  const r = await cascade.runJson(req(), { factors: EASY_FACTORS });
+  assert.notEqual(r, null, '真实拨号失败 ⇒ 承接诚实失败');
+  assert.equal(r!.ok, false);
+  assert.equal(r!.error, 'pro http 503 after 1 attempt');
+  assert.equal(cascade.stats.escalated, 1, '升级账照记');
+});

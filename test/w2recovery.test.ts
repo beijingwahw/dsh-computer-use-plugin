@@ -10,6 +10,8 @@
 //   4. 持久化往返（tmp+fsync+rename 原子性、无 .tmp 残留）与垃圾格防御恢复
 //   5. (症候 × 根因 × 动作) 三元组独立记账
 //   6. circuitBreakerGuard 接线：失败/成功/熔断事件喂入 + 提示消费疗效排序
+//   7. ΝΩ-7：CUSUM 序贯漂移臂（慢漂移熔断 / 恢复臂提前解除 / 探针预算复熔）
+//      + 疗效账去污（拦截不计失败尝试的计数断言）
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -35,7 +37,7 @@ import {
   parseRootCause,
   ROOT_CAUSE_IDS,
 } from '../src/diagnosis.ts';
-import { registerCircuitBreakerGuard, RECOVERY_HINT_TEXT } from '../src/guards/circuitBreakerGuard.ts';
+import { registerCircuitBreakerGuard, RECOVERY_HINT_TEXT, posteriorTripProbability } from '../src/guards/circuitBreakerGuard.ts';
 import { failureMemory } from '../src/failureMemory.ts';
 
 // ─── 测试基建 ───
@@ -500,7 +502,7 @@ test('W2-5 接线: n≥5 后提示消费疗效排序（换模态跃居第 1 败�
   assert.equal(spy.consulted[1].order[1], 're-observe', '第 2 败提示取次序动作（先验 0.5 的梯子平手序）');
 });
 
-test('W2-5 接线: 熔断事件入疗效流（回合内尝试位）；未知结果消耗窗位不产观察', async () => {
+test('W2-5 接线: 拦截不入疗效流（ΝΩ-7 去污）；未知结果消耗窗位不产观察', async () => {
   const tracker = new RecoveryEfficacy();
   const ctx = fakeCtx();
   registerCircuitBreakerGuard(ctx, 1, tracker);
@@ -510,23 +512,24 @@ test('W2-5 接线: 熔断事件入疗效流（回合内尝试位）；未知结�
   // hooks 包装层把拦截字符串转译为 rc.6 PreToolDecision（deny + reason）
   assert.equal(blocked?.kind, 'deny', '熔断拦截（deny 决策）');
   assert.ok(String(blocked?.reason).includes('Guard Blocked'), '拦截理由随行');
-  // 熔断事件入流：失败已开回合 ⇒ 作为回合内事件消耗窗位（单角色律：不双开
-  // 回合 —— 从熔断事件独立起算的路径由 journal 回放覆盖，GUARD_BLOCKED
-  // 标记无配对 post，见回放测试）
+  // ΝΩ-7 疗效账去污：拦截不再 ingest failure —— 回合仍由原始真实失败界定
+  //（从熔断事件独立起算的路径由 journal 回放覆盖：GUARD_BLOCKED 标记无配对
+  // post，见回放测试；活账只记真实派发结局）
   assert.equal(tracker.currentEpisode()?.syndrome, 'no-world-effect', '回合仍由原始失败界定');
 
   // 未知结果（无 [Error]/[System]、非 JSON）⇒ unknown 事件：消耗窗位、不产生观察
   await drivePost(ctx, exec('click_element'), { isError: false, value: 'plain opaque text' });
   assert.equal(tracker.snapshot().totals.observations, 0);
 
-  // 成功闭合回合：hotkey 可记名 ⇒ 1 条成功观察；熔断/未知事件各占窗位（诚实申报）
+  // 成功闭合回合：hotkey 可记名 ⇒ 1 条成功观察；未知事件占一窗位（诚实申报）。
+  // ΝΩ-7 计数断言：拦截事件不占窗位（旧实现 = 2：拦截 + 未知各一席）
   await drivePost(ctx, exec('press_hotkey'), SUCCESS_RESULT);
   const snap = tracker.snapshot();
   assert.equal(snap.totals.recovered, 1);
   assert.deepEqual(snap.episodes[0].observations, [
     { tool: 'press_hotkey', action: 'switch-modality', success: true },
   ]);
-  assert.ok(snap.episodes[0].unclassifiedActions >= 2, '熔断事件 + 未知事件各占一窗位');
+  assert.equal(snap.episodes[0].unclassifiedActions, 1, '仅未知结果事件占一窗位（拦截零占位）');
 });
 
 test('W2-5 接线: 记忆库带回的病因随失败事件入账（根因轴有据）', async () => {
@@ -548,4 +551,123 @@ test('W2-5 接线: 记忆库带回的病因随失败事件入账（根因轴有�
   const u = tracker.cell('no-world-effect', 'unknown', 'switch-modality')!;
   assert.deepEqual({ s: b.successes, f: b.failures }, { s: 1, f: 0 });
   assert.deepEqual({ s: u.successes, f: u.failures }, { s: 1, f: 0 }, '两册各记各的');
+});
+
+// ─── 10. ΝΩ-7：CUSUM 序贯漂移臂 + 冷静期半开探针 + 疗效账去污 ───
+
+/** 判决形 drivePre：放行时 next 返回 accept 决策对象（拦截仍转译为 deny + reason）
+ *  —— w2recovery 既有 drivePre 的 next 回传字符串会被 toPreDecision 误译 deny。 */
+async function drivePreVerdict(ctx: any, e: any): Promise<any> {
+  const h = ctx.handlers.find((r: any) => r.event === 'tools/pre-execute')!;
+  return h.handler(e, async () => ({ kind: 'accept' }));
+}
+
+test('ΝΩ-7 CUSUM 臂: 55% 慢漂移 20 调用脚本触发熔断；同证据旧后验臂不触发', async () => {
+  const ctx = fakeCtx();
+  registerCircuitBreakerGuard(ctx, 6, new RecoveryEfficacy()); // 连续阈值 6 > 脚本最长败连 3：隔离 CUSUM 臂
+  // 慢漂移脚本（20 调用 11 败 = 55%）：前 5 调用健康全胜，后 15 调用渐入热区
+  //（11 败 4 胜 ≈ 73%）—— 恶化是渐变的，正是 20 样本后验窗（需 ≳68% 满窗
+  // 才够 0.95 线）的盲区段；CUSUM 跨窗累积 LLR，S⁺ 在第 19 次派发后越阈 4
+  const outcomes = [
+    'S', 'S', 'S', 'S', 'S',
+    'F', 'F', 'S', 'F', 'S', 'F', 'F', 'S', 'F', 'F', 'F', 'S', 'F', 'F', 'F',
+  ];
+  assert.equal(outcomes.length, 20);
+  assert.equal(outcomes.filter(o => o === 'F').length, 11, '55% 失败率（11/20）');
+  for (let i = 0; i < 19; i++) {
+    const v = await drivePreVerdict(ctx, exec('click_mouse'));
+    assert.equal(v.kind, 'accept', `第 ${i + 1} 调用放行（S⁺ 尚未越阈）`);
+    await drivePost(ctx, exec('click_mouse'), outcomes[i] === 'F' ? FAILED_RESULT : SUCCESS_RESULT);
+  }
+  const tripped = await drivePreVerdict(ctx, exec('click_mouse'));
+  assert.equal(tripped.kind, 'deny', '第 20 调用被 CUSUM 上行臂熔断');
+  assert.match(String(tripped.reason), /CUSUM/, '按 CUSUM 臂归因');
+  // 对照用例（旧法不触发）：被熔断时刻的真实证据 = 19 派发 10 败 9 胜 ——
+  // 旧后验判决 P(失败率>50% | Beta(11,10)) ≈ 0.59，远不够 0.95 线；
+  // 连续臂最长败连 3 < 6。任一旧臂都不触发，只有 CUSUM 臂看见这条慢坏路线。
+  assert.ok(posteriorTripProbability(10, 9) < 0.95, `旧后验臂不触发（${posteriorTripProbability(10, 9)}）`);
+});
+
+test('ΝΩ-7 恢复臂: S⁻ 越下阈提前解除冷静期（4 个探针胜局，早于 6 探针预算）', async () => {
+  const ctx = fakeCtx();
+  registerCircuitBreakerGuard(ctx, 2, new RecoveryEfficacy());
+  // 2 连败 ⇒ 连续臂熔断，进入冷静期（熔断本位拦截）
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'accept', `熔断前第 ${i + 1} 败放行`);
+    await drivePost(ctx, exec('click_mouse'), FAILED_RESULT);
+  }
+  assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'deny', '连续臂熔断');
+  // 冷静期半开探针制：探针位放行（真实派发）→ 拦截位 → 探针位 … 交替。
+  // 每个探针胜局 S⁻ -= ln(4/7) ≈ 0.560；第 4 个胜局后 S⁻ ≈ -2.238 ≤ -2.0
+  // ⇒ 提前解除（预算 6 未耗尽 —— 恢复证据先到）
+  for (let probe = 1; probe <= 4; probe++) {
+    assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'accept', `探针 ${probe} 放行`);
+    await drivePost(ctx, exec('click_mouse'), SUCCESS_RESULT);
+    if (probe < 4) {
+      assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'deny', `探针 ${probe} 后轮到拦截位`);
+    }
+  }
+  // 提前解除证明：第 4 个探针胜局后（预算仅耗 4 < 6），下一调用是常态放行
+  // —— 若只有预算路径，此处仍应是拦截位
+  assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'accept', 'S⁻ 提前解除 ⇒ 常态放行');
+  assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'accept', '解除后连续常态放行');
+});
+
+test('ΝΩ-7 冷静期预算: 无恢复证据 ⇒ 6 个探针结局耗尽才解除；仍坏 ⇒ 连续臂复熔', async () => {
+  const ctx = fakeCtx();
+  registerCircuitBreakerGuard(ctx, 2, new RecoveryEfficacy());
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'accept');
+    await drivePost(ctx, exec('click_mouse'), FAILED_RESULT);
+  }
+  assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'deny', '熔断');
+  // 探针全败：S⁻ 被败局推回 0（min(0,·) 界），永远够不着下阈 —— 只能等
+  // 探针预算（6 个真实派发结局）耗尽兜底解除（「非永久锁死」的边界承诺）
+  for (let probe = 1; probe <= 6; probe++) {
+    assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'accept', `探针 ${probe} 放行`);
+    await drivePost(ctx, exec('click_mouse'), FAILED_RESULT);
+    if (probe < 6) {
+      assert.equal((await drivePreVerdict(ctx, exec('click_mouse'))).kind, 'deny', `探针 ${probe} 后轮到拦截位`);
+    }
+  }
+  // 解除 ≠ 放水：探针全败 ⇒ 复合判据在下一个 pre 立即复熔（两臂同时越线：
+  // recentFailures=6 ≥ 2 连续臂 + 探针败局 S⁺ = 6·ln2 ≈ 4.16 ≥ 4 CUSUM 臂 ——
+  // 归因按判决链取首个越线臂；CUSUM 升级不削弱既有保护的反向验证）
+  const retrip = await drivePreVerdict(ctx, exec('click_mouse'));
+  assert.equal(retrip.kind, 'deny', '预算解除后仍坏路线立即复熔');
+  assert.match(String(retrip.reason), /CUSUM arm|consecutive failures/, '复熔按复合判据归因');
+});
+
+test('ΝΩ-7 疗效账去污: 拦截不计失败尝试 —— 不入格、不占窗位、不开幽灵回合', async () => {
+  // 场景 1：回合在场时被拦截的恢复动作（zoom_inspect）不得记成失败观察
+  //（旧实现：拦截 ingest failure + 工具可记名 ⇒ zoom-refine 记 1 败 —— 教坏处方排序）
+  const tracker = new RecoveryEfficacy();
+  const ctx = fakeCtx();
+  registerCircuitBreakerGuard(ctx, 1, tracker);
+  await drivePost(ctx, exec('click_mouse'), FAILED_RESULT); // 真实失败：开回合（no-world-effect）
+  const blocked = await drivePreVerdict(ctx, exec('zoom_inspect')); // 熔断拦截一个恢复动作
+  assert.equal(blocked.kind, 'deny', '恢复动作在熔断位被拦截（从未执行）');
+  await drivePost(ctx, exec('press_hotkey'), SUCCESS_RESULT); // 真实成功：闭合回合
+  const snap = tracker.snapshot();
+  assert.equal(snap.totals.recovered, 1);
+  assert.deepEqual(snap.episodes[0].observations, [
+    { tool: 'press_hotkey', action: 'switch-modality', success: true },
+  ], '被拦截的 zoom_inspect 不产生 zoom-refine 失败观察');
+  assert.equal(tracker.cell('no-world-effect', 'unknown', 'zoom-refine'), null, '拦截不进任何疗效格');
+  assert.equal(snap.episodes[0].unclassifiedActions, 0, '拦截不占回合窗位');
+
+  // 场景 2：回合不在场时的拦截不得开幽灵回合（旧实现：拦截是 failure 事件 ⇒
+  // 开幽灵回合，其后的常态成功被误记为一次「恢复」—— 计数断言）
+  const tracker2 = new RecoveryEfficacy();
+  const ctx2 = fakeCtx();
+  registerCircuitBreakerGuard(ctx2, 1, tracker2);
+  await drivePost(ctx2, exec('click_mouse'), FAILED_RESULT); // 真实失败：开回合
+  assert.equal((await drivePreVerdict(ctx2, exec('click_mouse'))).kind, 'deny', '熔断（本位拦截）');
+  assert.equal((await drivePreVerdict(ctx2, exec('click_mouse'))).kind, 'accept', '半开探针位放行');
+  await drivePost(ctx2, exec('click_mouse'), SUCCESS_RESULT); // 真实成功：闭合回合 1
+  assert.equal((await drivePreVerdict(ctx2, exec('click_mouse'))).kind, 'deny', '拦截位（此刻无回合在场）');
+  await drivePost(ctx2, exec('click_mouse'), SUCCESS_RESULT); // 常态成功：无回合 ⇒ 忽略
+  const snap2 = tracker2.snapshot();
+  assert.equal(snap2.totals.recovered, 1, '只有真实回合闭合一次（拦截不开幽灵回合）');
+  assert.equal(snap2.episodes.length, 1, '拦截风暴不膨胀回合册');
 });

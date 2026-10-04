@@ -8,18 +8,32 @@
 // 权重缺省与逐项覆盖、纪元 Δ 权重卫兵（负权重逐项夹 [0,1]、全零回退缺省、
 // 超 1 压回 1——三种脏值各有择优翻盘对照）、predictedEffects 从快照推导、
 // 脏输入防御与纯度（绝不抛）。
+// ΝΩ-10（决策面五合一）追加：infoGain 新鲜度两臂（从未点过 +0.15 / 点过且
+// no_effect −0.1 / 点过有进展不修正 / 缺席走旧值）、expectedInformationGain
+// 第三参直测、效用权重内核三键（policy.progressWeight/infoWeight/riskWeight
+// 入册零漂移 + set 翻盘 + 显式 weights 最高优先 + 越界夹回，对照 Θ-4 先例风格）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   scoreOptions,
+  rankTopK,
   expectedInformationGain,
   actionSignature,
+  transitionConfidenceFactor,
+  wireCounterfactualWorldModel,
+  counterfactualWorldModelWired,
+  type ClickFreshness,
   type CounterfactualPlan,
   type ScoringContext,
+  type WorldModelReadPort,
 } from '../src/autonomy/counterfactual.ts';
+import { quantizedScreenTypeOf, transitionActionKeyOf } from '../src/autonomy/counterfactualUtil.ts';
+import { quantizedScreenType, prophecyActionKey, PROPHECY_QUANT_KERNEL_KEY } from '../src/prophecy/index.ts';
 import type { AutonomyActionKind, PolicyAction } from '../src/autonomy/policyEngine.ts';
 import type { SnapshotElement, WorldSnapshot } from '../src/autonomy/worldSnapshot.ts';
+import { kernelRegistry, resetKernelRuntime } from '../src/kernel/registry.ts';
+import { registerProductionKernels } from '../src/kernel/index.ts';
 
 // ─── 假件与工厂（全部字面量，无任何真实感知/网络） ───
 
@@ -75,19 +89,56 @@ function act(kind: AutonomyActionKind, o: Partial<PolicyAction> = {}): PolicyAct
   }
 }
 
-/** 评分上下文工厂 —— goalKeywords/snapshot 缺省为空，tried/weights 按需注入 */
+/** 评分上下文工厂 —— goalKeywords/snapshot 缺省为空，tried/weights/noEffect 按需注入 */
 function ctx(o: {
   goalKeywords?: string[]
   snapshot?: WorldSnapshot
   triedActionKeys?: string[]
+  noEffectActionKeys?: string[]
   weights?: ScoringContext['weights']
+  worldModel?: WorldModelReadPort
 } = {}): ScoringContext {
   return {
     goalKeywords: o.goalKeywords ?? [],
     snapshot: o.snapshot ?? snap(),
     ...(o.triedActionKeys !== undefined ? { triedActionKeys: o.triedActionKeys } : {}),
+    ...(o.noEffectActionKeys !== undefined ? { noEffectActionKeys: o.noEffectActionKeys } : {}),
     ...(o.weights !== undefined ? { weights: o.weights } : {}),
+    ...(o.worldModel !== undefined ? { worldModel: o.worldModel } : {}),
   }
+}
+
+// ─── ΝΩ-46（model-based 反事实）：世界模型只读面工坊 ───
+
+/** 16 hex 闭环 dhash（量化屏型方言的合格公民 —— 低位 4 字恰是量化掩没带） */
+const WM_DHASH = '1234567890abcdef';
+
+/** 按表答话的只读端口桩：表键 `${fromType}|${actionKey}` → top.prob；缺席 ⇒ top:null */
+function portOf(table: Record<string, number>): WorldModelReadPort {
+  return {
+    predict: (fromType, actionKey) => {
+      const prob = table[`${fromType}|${actionKey}`];
+      return prob === undefined ? { top: null } : { top: { typeId: 'screen-dest', prob } };
+    },
+  };
+}
+
+/** ΝΩ-46 带断言消息的浮点对照（close 的第三参是容差 —— 消息版另铸，不混用） */
+const closeMsg = (actual: number, expected: number, msg: string): void =>
+  assert.ok(Math.abs(actual - expected) <= 1e-9, `${msg}（期望 ${actual} ≈ ${expected}）`)
+
+/** 指定格子的点击动作（中心点按 1920×1080 折算 ⇒ qx/qy 直接给定） */
+function clickAtCell(cell: string, label: string): PolicyAction {
+  const qx = Number.parseInt(cell[0], 10);
+  const qy = Number.parseInt(cell[1], 10);
+  const x = 1920 * (qx + 0.5) / 4;
+  const y = 1080 * (qy + 0.5) / 4;
+  return act('click', { target: { bbox: { x0: x - 10, y0: y - 10, x1: x + 10, y1: y + 10 }, center: { x, y }, label } });
+}
+
+/** ΝΩ-46 测试共用屏：16 hex dhash、1920×1080 几何（与闭环方言一致） */
+function wmSnap(elements: SnapshotElement[] = []): WorldSnapshot {
+  return snap({ dhash: WM_DHASH, width: 1920, height: 1080, elements });
 }
 
 // ─── Φ-9-1 效用手算对照 ───
@@ -408,3 +459,306 @@ test('Φ-9-11: 脏输入防御与纯度 —— 绝不抛异常、不改输入、
     assert.ok(r.why.length > 0 && /[\u4e00-\u9fff]/.test(r.why), `落选理由应含中文：${r.why}`)
   }
 })
+
+// ─── ΝΩ-10：infoGain 新鲜度两臂 + 效用权重内核三键 ───
+
+test('ΝΩ-10: infoGain 新鲜度两臂 —— noEffectActionKeys 在场时 从未点过 +0.15 / 点过且 no_effect −0.1；缺席走旧值', () => {
+  const s = snap({ elements: [elem('登录'), elem('设置')] })
+  const clickLogin = act('click', { target: tgt('登录') })
+  const clickSetting = act('click', { target: tgt('设置') })
+  // 臂一：从未点过（tried 空集 + noEffect 空集在场）⇒ 已见账本 0.3 + 0.15 = 0.45
+  const fresh = scoreOptions([clickLogin], ctx({ snapshot: s, noEffectActionKeys: [] }))
+  assert.ok(fresh)
+  close(fresh.chosen.informationGain, 0.45) // 从未点过的已见标签 ⇒ 0.3+0.15
+  // 从未点过的陌生标签 ⇒ 0.4 + 0.15 = 0.55
+  const stranger = scoreOptions(
+    [act('click', { target: tgt('神秘入口') })],
+    ctx({ snapshot: s, noEffectActionKeys: [] }),
+  )
+  assert.ok(stranger)
+  close(stranger.chosen.informationGain, 0.55)
+  // 臂二：点过且结局 no_effect ⇒ 0.3 − 0.1 = 0.2（progress 侧 ×0.6 折价另记账：0.2×… 不影响本断言）
+  const stale = scoreOptions(
+    [clickLogin],
+    ctx({ snapshot: s, triedActionKeys: ['click:登录'], noEffectActionKeys: ['click:登录'] }),
+  )
+  assert.ok(stale)
+  close(stale.chosen.informationGain, 0.2) // 点过且 no_effect ⇒ 0.3−0.1
+  // 点过但结局非 no_effect ⇒ 基线不修正（信息侧不与 progress 重复折价）
+  const triedOk = scoreOptions(
+    [clickSetting],
+    ctx({ snapshot: s, triedActionKeys: ['click:设置'], noEffectActionKeys: ['click:登录'] }),
+  )
+  assert.ok(triedOk)
+  close(triedOk.chosen.informationGain, 0.3) // 点过且有进展 ⇒ 基线 0.3
+  // 缺席走旧值：noEffectActionKeys 未给 ⇒ tried click 恒 0.1（Φ-9-2 旧律逐字节保留）
+  const legacy = scoreOptions(
+    [clickLogin],
+    ctx({ snapshot: s, triedActionKeys: ['click:登录'] }),
+  )
+  assert.ok(legacy)
+  assert.equal(legacy.chosen.informationGain, 0.1)
+  // 未给 noEffectActionKeys 的未点过 click ⇒ 旧值 0.3（零漂移）
+  const legacyFresh = scoreOptions([clickLogin], ctx({ snapshot: s }))
+  assert.ok(legacyFresh)
+  close(legacyFresh.chosen.informationGain, 0.3)
+})
+
+test('ΝΩ-10: expectedInformationGain 第三参 —— freshness 缺席旧值逐字节不变；在场两臂；非 click 种类不受影响', () => {
+  const s = snap({ elements: [elem('登录')] })
+  const clickLogin = act('click', { target: tgt('登录') })
+  const clickStranger = act('click', { target: tgt('神秘入口') })
+  // 缺席 ⇒ 旧值（Φ-9-7 已覆盖的基线在此复证：不抛、不漂）
+  assert.equal(expectedInformationGain(clickLogin, s), 0.3)
+  assert.equal(expectedInformationGain(clickStranger, s), 0.4)
+  assert.equal(expectedInformationGain(clickLogin, s, undefined), 0.3, '显式 undefined = 缺席')
+  // 在场两臂
+  const neverClicked: ClickFreshness = { triedClickKeys: new Set<string>(), noEffectClickKeys: new Set<string>() }
+  close(expectedInformationGain(clickLogin, s, neverClicked), 0.45)
+  close(expectedInformationGain(clickStranger, s, neverClicked), 0.55)
+  const clickedNoEffect: ClickFreshness = {
+    triedClickKeys: new Set([actionSignature(clickLogin)]),
+    noEffectClickKeys: new Set([actionSignature(clickLogin)]),
+  }
+  close(expectedInformationGain(clickLogin, s, clickedNoEffect), 0.2)
+  close(expectedInformationGain(clickStranger, s, clickedNoEffect), 0.55) // no_effect 只折自己，不殃及他人
+  const clickedProgressed: ClickFreshness = {
+    triedClickKeys: new Set([actionSignature(clickLogin)]),
+    noEffectClickKeys: new Set<string>(),
+  }
+  close(expectedInformationGain(clickLogin, s, clickedProgressed), 0.3)
+  // 非 click 种类不吃新鲜度
+  assert.equal(expectedInformationGain(act('scroll'), s, neverClicked), 0.8)
+  assert.equal(expectedInformationGain(act('hotkey'), s, clickedNoEffect), 0.2)
+  // 脏 freshness（null）按缺席记 —— 绝不抛
+  assert.equal(expectedInformationGain(clickLogin, s, null as unknown as ClickFreshness), 0.3)
+})
+
+test('ΝΩ-10: 效用权重内核三键 —— 入册缺省=现行字面量零漂移；set 覆写择优翻盘；ctx.weights 显式入参仍最高优先；越界夹回', () => {
+  resetKernelRuntime()
+  try {
+    const s = snap({ elements: [elem('打开设置面板确认')] })
+    const kw = ['打开', '设置', '面板', '确认']
+    const a = act('click', { target: tgt('打开设置面板确认') }) // 1.0 / 0.3 / 0.05
+    const b = act('scroll') // 0.25 / 0.8 / 0.05
+    // 未注册 ⇒ getOrDefault 回声字面量 ⇒ 与 Φ-9-9 缺省基准同判（click 胜）
+    const base = scoreOptions([a, b], ctx({ goalKeywords: kw, snapshot: s }))
+    assert.ok(base)
+    assert.equal(base.chosen.action.kind, 'click', '未注册 ⇒ 缺省 0.5/0.3/0.2 ⇒ click（零漂移）')
+
+    // 入册（与 policy.tieGap 同律；缺省 = DEFAULT_WEIGHTS 现行字面量）
+    registerProductionKernels()
+    assert.equal(kernelRegistry.getOrDefault('policy.progressWeight', -1), 0.5)
+    assert.equal(kernelRegistry.getOrDefault('policy.infoWeight', -1), 0.3)
+    assert.equal(kernelRegistry.getOrDefault('policy.riskWeight', -1), 0.2)
+    const unchanged = scoreOptions([a, b], ctx({ goalKeywords: kw, snapshot: s }))
+    assert.ok(unchanged)
+    assert.equal(unchanged.chosen.action.kind, 'click', '入册即缺省 ⇒ 判决仍与未注册逐字节同判')
+
+    // set 覆写 ⇒ 择优翻盘：progress 0.1 / info 0.8 ⇒ U_a 0.33 < U_b 0.655 ⇒ scroll
+    assert.equal(kernelRegistry.set('policy.progressWeight', 0.1).ok, true)
+    assert.equal(kernelRegistry.set('policy.infoWeight', 0.8).ok, true)
+    const flipped = scoreOptions([a, b], ctx({ goalKeywords: kw, snapshot: s }))
+    assert.ok(flipped)
+    assert.equal(flipped.chosen.action.kind, 'scroll', '内核键压低进展权重后择优随内核翻转')
+
+    // 调用方显式 weights 压过内核键（缺省缝不越权覆盖显式入参）
+    const explicit = scoreOptions(
+      [a, b],
+      ctx({ goalKeywords: kw, snapshot: s, weights: { progress: 0.9, info: 0.1, risk: 0.2 } }),
+    )
+    assert.ok(explicit)
+    assert.equal(explicit.chosen.action.kind, 'click', 'ctx.weights 显式入参最高优先')
+
+    // 越界夹回 [0,1]（set 是夹取不是失败）
+    assert.deepEqual(kernelRegistry.set('policy.infoWeight', 9), { ok: true, reason: 'clamped', clampedTo: 1 })
+  } finally {
+    resetKernelRuntime()
+  }
+})
+
+// ─── ΝΩ-46（model-based 反事实）：转移置信因子 + 只读端口 + 键方言对齐 ───
+
+test('ΝΩ-46: 转移置信因子 —— 高置信×1.0 加权、低置信×0.5 衰减、无证据×1.0 中性；缺席逐字节旧值', () => {
+  wireCounterfactualWorldModel(null) // 本测全走 ctx 显式注入（模块默认隔离前置）
+  const kw = ['甲乙', '丙丁'] // 2-gram 关键词（分词方言：中文连续段按 2-gram 切分）
+  const s = wmSnap([elem('甲乙丙丁')])
+  const key = (cell: string): string => `${quantizedScreenTypeOf(WM_DHASH)}|click@${cell}`
+  // 缺席（基准）：progress = 先验 1.0；U = 0.5 + 0.09 − 0.01 = 0.58（Φ-9-9 同律手算）
+  const absent = scoreOptions([clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s }))
+  assert.ok(absent)
+  close(absent.chosen.progressProbability, 1)
+  const absentRank = rankTopK([clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s }), 1)
+  assert.ok(absentRank)
+  closeMsg(absentRank[0].utility, 0.58, '端口缺席 ⇒ 效用逐字节旧值')
+  // 端口在场、三臂：命中高置信（prob 1 ⇒ ×1.0）/ 低置信（prob 0 ⇒ ×0.5）/ 无证据（⇒ ×1.0 中性）
+  const port = portOf({ [key('22')]: 0, [key('33')]: 1, [key('00')]: 0.5 })
+  const at = (cell: string): number => {
+    const plan = scoreOptions([clickAtCell(cell, '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s, worldModel: port }))
+    assert.ok(plan)
+    return plan.chosen.progressProbability
+  }
+  closeMsg(at('33'), 1, 'prob=1 ⇒ ×(0.5+0.5) = ×1.0（纯加权不放大）')
+  closeMsg(at('22'), 0.5, 'prob=0 ⇒ ×(0.5+0) = ×0.5（衰减）')
+  closeMsg(at('00'), 0.75, 'prob=0.5 ⇒ ×0.75')
+  closeMsg(at('11'), 1, '无证据（no-model）⇒ ×1.0 中性（模型无知不惩罚新探索）')
+  // 空表端口（在场但全无证据）⇒ 效用与缺席逐字节相同
+  const emptyPortRank = rankTopK(
+    [clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s, worldModel: portOf({}) }), 1,
+  )
+  assert.ok(emptyPortRank)
+  closeMsg(emptyPortRank[0].utility, 0.58, '端口在场而无证据 ⇒ 与缺席逐字节同值')
+})
+
+test('ΝΩ-46: 高置信加权改变排序 —— 低先验×高置信胜过高先验×低置信（效用翻盘）', () => {
+  wireCounterfactualWorldModel(null)
+  // 分词方言：kw 2-gram；「甲乙丙丁戊己」∩ 3/4 = 0.75（高先验）、「甲乙丙丁」∩ 2/4 = 0.5（低先验）
+  const kw = ['甲乙', '丙丁', '戊己', '庚辛']
+  const s = wmSnap([elem('甲乙丙丁戊己'), elem('甲乙丙丁')])
+  const key = (cell: string): string => `${quantizedScreenTypeOf(WM_DHASH)}|click@${cell}`
+  const fav = clickAtCell('22', '甲乙丙丁戊己') // 先验 3/4 = 0.75；格 22 低置信（prob 0）
+  const underdog = clickAtCell('33', '甲乙丙丁') // 先验 2/4 = 0.5；格 33 高置信（prob 1）
+  // 缺席：U_fav = 0.375+0.09−0.01 = 0.455 > U_underdog = 0.25+0.09−0.01 = 0.33 ⇒ fav 胜
+  const base = scoreOptions([fav, underdog], ctx({ goalKeywords: kw, snapshot: s }))
+  assert.ok(base)
+  assert.equal(base.chosen.action.target?.label, '甲乙丙丁戊己', '端口缺席 ⇒ 高先验者胜（旧律）')
+  // 端口在场：U_fav = 0.375×0.5+0.08 = 0.2675 < U_underdog = 0.33（差 0.0625 > 并列阈）⇒ 翻盘
+  const port = portOf({ [key('22')]: 0, [key('33')]: 1 })
+  const flipped = scoreOptions([fav, underdog], ctx({ goalKeywords: kw, snapshot: s, worldModel: port }))
+  assert.ok(flipped)
+  assert.equal(flipped.chosen.action.target?.label, '甲乙丙丁', '历史证据置信进评分 ⇒ 排序翻转')
+  closeMsg(flipped.chosen.progressProbability, 0.5, '胜者 progress = 先验 0.5 × 1.0（高置信不放大只保先验）')
+  closeMsg(flipped.rejected[0].option.progressProbability, 0.375, '落选者 progress = 先验 0.75 × 0.5（低置信衰减）')
+})
+
+test('ΝΩ-46: 辖制面 —— 非 click 种类 / 盲屏（无 dhash）/ 无落点 click 一律中性；脏端口绝不抛', () => {
+  wireCounterfactualWorldModel(null)
+  const kw = ['甲乙', '丙丁']
+  const key = (cell: string): string => `${quantizedScreenTypeOf(WM_DHASH)}|click@${cell}`
+  // 全零置信端口：若辖制越界会立刻改变读数 —— 逐项断言不动
+  const zeroPort = portOf({ [key('22')]: 0, scroll: 0, click: 0 })
+  // 非 click：scroll 先验 0.25 不受模型影响
+  const scroll = scoreOptions([act('scroll')], ctx({ snapshot: wmSnap(), worldModel: zeroPort }))
+  assert.ok(scroll)
+  closeMsg(scroll.chosen.progressProbability, 0.25, 'scroll 不受转移置信辖制')
+  // 盲屏（dhash 缺席）⇒ 无屏型身份不可对键 ⇒ 中性
+  const blind = scoreOptions(
+    [clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: snap(), worldModel: zeroPort }),
+  )
+  assert.ok(blind)
+  closeMsg(blind.chosen.progressProbability, 1, '盲屏 ⇒ ×1.0 中性')
+  // 无落点 click（无 target ⇒ 动作键无格）⇒ 中性
+  const noTarget = scoreOptions(
+    [act('click', { expectedEffect: '甲乙丙丁' })], ctx({ goalKeywords: kw, snapshot: wmSnap(), worldModel: zeroPort }),
+  )
+  assert.ok(noTarget)
+  closeMsg(noTarget.chosen.progressProbability, 1, '无落点 ⇒ 无格不可对键 ⇒ 中性')
+  // 脏端口（抛异常 / 坏形状 / 无概率读数）⇒ 中性且绝不抛
+  const bombs: WorldModelReadPort[] = [
+    { predict: () => { throw new Error('boom') } },
+    { predict: () => null as unknown as ReturnType<WorldModelReadPort['predict']> },
+    { predict: () => ({ top: null }) },
+    { predict: () => ({ top: { typeId: 'x' } as unknown as { typeId: string; prob: number } }) },
+    { predict: () => ({ top: { typeId: 'x', prob: Number.NaN } }) },
+  ]
+  for (const bomb of bombs) {
+    // 对象包裹赋值（Φ-9-11 同法）：闭包内赋值不被 TS 收窄为 null
+    const out: { plan: CounterfactualPlan | null } = { plan: null }
+    assert.doesNotThrow(() => {
+      out.plan = scoreOptions(
+        [clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: wmSnap(), worldModel: bomb }),
+      )
+    }, '脏端口绝不炸评分')
+    assert.ok(out.plan)
+    closeMsg(out.plan.chosen.progressProbability, 1, '端口故障 = 无知识 ⇒ 中性')
+  }
+})
+
+test('ΝΩ-46: 键方言与 prophecy 单源对齐 —— 同屏同键（量化屏型 × 4×4 动作格，含档位旋钮同格）', () => {
+  try {
+    // 屏型量化：两侧逐字节同律（hex 方言量化、非 hex 原样、空串/短串不炸）
+    for (const fp of [WM_DHASH, 'ffffffffffffffff', 'AAA', '', '1234567890abcde', 'feedface00112233']) {
+      assert.equal(quantizedScreenTypeOf(fp), quantizedScreenType(fp), `屏型方言对齐：${fp}`)
+    }
+    assert.equal(quantizedScreenTypeOf(WM_DHASH), '1234567890ab0000', '缺省档位 12 ⇒ 低位 4 字掩没')
+    // 动作键：两侧逐字节同律（格点 / 无落点 / 坏几何 / 垃圾动作）
+    const c = clickAtCell('00', '甲')
+    for (const [w, h] of [[1920, 1080], [3840, 2160], [0, 0]] as const) {
+      assert.equal(transitionActionKeyOf(c, w, h), prophecyActionKey(c, w, h), `动作键方言对齐：${w}×${h}`)
+    }
+    assert.equal(transitionActionKeyOf(null, 1920, 1080), prophecyActionKey(null, 1920, 1080), '垃圾动作同回退')
+    // 端到端：scoreAll 实际发出的 predict 键 === prophecy 方言铸出的（fromType|actionKey）
+    const seen: string[] = []
+    const spy: WorldModelReadPort = { predict: (f, k) => { seen.push(`${f}|${k}`); return { top: null } } }
+    scoreOptions([clickAtCell('00', '甲乙丙丁')], ctx({ snapshot: wmSnap(), worldModel: spy }))
+    assert.deepEqual(
+      seen,
+      [`${quantizedScreenType(WM_DHASH)}|${prophecyActionKey(clickAtCell('00', '甲乙丙丁'), 1920, 1080)}`],
+      '同屏同键：评分读键 === prophecy 写键方言（click@00）',
+    )
+    // 档位旋钮同格：内核键拧到 10 ⇒ 两侧同变（键域不漂 —— 同一内核键的单源对齐）
+    kernelRegistry.register({
+      key: PROPHECY_QUANT_KERNEL_KEY, organ: 'arbitration', defaultValue: 10, min: 8, max: 16,
+      note: 'ΝΩ-46 测试：量化档位同格断言',
+    })
+    assert.equal(quantizedScreenTypeOf(WM_DHASH), '1234567890000000', '档位 10 ⇒ 上 10 字保留')
+    assert.equal(quantizedScreenTypeOf(WM_DHASH), quantizedScreenType(WM_DHASH), '档位拧动后两侧仍同格')
+    seen.length = 0
+    scoreOptions([clickAtCell('00', '甲乙丙丁')], ctx({ snapshot: wmSnap(), worldModel: spy }))
+    assert.ok(seen[0].startsWith('1234567890000000|'), '评分读键随档位同变（与 prophecy 同键）')
+  } finally {
+    resetKernelRuntime()
+  }
+})
+
+test('ΝΩ-46: 模块默认接线 —— wire 注入对缺席字段兜底；显式 ctx.worldModel 压过默认；wire(null) 复位旧路', () => {
+  try {
+    const kw = ['甲乙', '丙丁']
+    const s = wmSnap([elem('甲乙丙丁')])
+    const key22 = `${quantizedScreenTypeOf(WM_DHASH)}|click@22`
+    // 前置：未接线 ⇒ 旧值（progress 1.0）
+    assert.equal(counterfactualWorldModelWired(), false, '前置未接线')
+    const base = scoreOptions([clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s }))
+    assert.ok(base)
+    close(base.chosen.progressProbability, 1)
+    // 模块默认：低置信注入 ⇒ 不带 ctx.worldModel 的调用也吃到因子
+    wireCounterfactualWorldModel(portOf({ [key22]: 0 }))
+    assert.equal(counterfactualWorldModelWired(), true, '接线后在册')
+    const viaDefault = scoreOptions([clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s }))
+    assert.ok(viaDefault)
+    closeMsg(viaDefault.chosen.progressProbability, 0.5, '模块默认对缺席字段兜底（决策面调用点由此吃到模型）')
+    // 显式注入压过默认：ctx.worldModel = 高置信 ⇒ ×1.0
+    const explicit = scoreOptions(
+      [clickAtCell('22', '甲乙丙丁')],
+      ctx({ goalKeywords: kw, snapshot: s, worldModel: portOf({ [key22]: 1 }) }),
+    )
+    assert.ok(explicit)
+    closeMsg(explicit.chosen.progressProbability, 1, '显式 ctx.worldModel 最高优先')
+    // 复位 ⇒ 逐字节旧路
+    wireCounterfactualWorldModel(null)
+    assert.equal(counterfactualWorldModelWired(), false, '复位后不在册')
+    const reset = scoreOptions([clickAtCell('22', '甲乙丙丁')], ctx({ goalKeywords: kw, snapshot: s }))
+    assert.ok(reset)
+    closeMsg(reset.chosen.progressProbability, 1, 'wire(null) ⇒ 逐字节旧路')
+    // 脏端口按清除记（防御式）
+    wireCounterfactualWorldModel({} as WorldModelReadPort)
+    assert.equal(counterfactualWorldModelWired(), false, '无 predict 面的脏端口按清除记')
+  } finally {
+    wireCounterfactualWorldModel(null)
+  }
+})
+
+test('ΝΩ-46: transitionConfidenceFactor 直测 —— 端口/快照/动作三缺席臂与因子数值', () => {
+  const key22 = `${quantizedScreenTypeOf(WM_DHASH)}|click@22`
+  const s = wmSnap()
+  assert.equal(transitionConfidenceFactor(null, s, clickAtCell('22', '甲')), 1, '端口缺席 ⇒ 1')
+  assert.equal(transitionConfidenceFactor(portOf({ [key22]: 0 }), null, clickAtCell('22', '甲')), 1, '快照缺席（盲屏）⇒ 1')
+  assert.equal(transitionConfidenceFactor(portOf({ scroll: 0 }), s, act('scroll')), 1, '非 click ⇒ 1')
+  assert.equal(transitionConfidenceFactor(portOf({ [key22]: 1 }), s, clickAtCell('22', '甲')), 1, 'prob=1 ⇒ 0.5+0.5')
+  closeMsg(transitionConfidenceFactor(portOf({ [key22]: 0.5 }), s, clickAtCell('22', '甲')), 0.75, 'prob=0.5 ⇒ 0.75')
+  closeMsg(transitionConfidenceFactor(portOf({ [key22]: 0 }), s, clickAtCell('22', '甲')), 0.5, 'prob=0 ⇒ 0.5')
+  closeMsg(transitionConfidenceFactor(portOf({ [key22]: 2 }), s, clickAtCell('22', '甲')), 1, '越界 prob 夹回 ⇒ 1')
+  closeMsg(transitionConfidenceFactor(portOf({ [key22]: -3 }), s, clickAtCell('22', '甲')), 0.5, '负 prob 夹回 ⇒ 0.5')
+  assert.equal(transitionConfidenceFactor(portOf({ [key22]: 0 }), s, null as unknown as PolicyAction), 1, '脏动作 ⇒ 1 不抛')
+})
+

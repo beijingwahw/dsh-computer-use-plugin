@@ -19,6 +19,11 @@ export const SANDBOX_ACTION_KINDS = new Set([
     'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
     'drag_mouse', 'switch_tab', 'switch_window', 'dismiss_popup', 'noop',
 ]);
+/** 预期效果 scale 词表运行时集合（ΑΩ-R19：与 SANDBOX_ACTION_KINDS 同方言 ——
+ *  解析边界执法的唯一事实源，防入参校验器复制第二份词表） */
+export const EXPECTED_EFFECT_SCALES = new Set([
+    'page-level', 'element-level', 'text-level',
+]);
 /**
  * 肌肉记忆可靠度 —— 唯一公式落点（锚定 skillLibrary.ts:182 既有事实）：
  *   reliability = (hostSuccessCount + 1) / (hostReplayCount + 2)   // 加一 Laplace，二值结局

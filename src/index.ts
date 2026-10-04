@@ -9,7 +9,7 @@ import { system } from './system';
 import { contextManager } from './contextManager';
 import { uiMemory } from './uiMemory';
 import { probeMemory } from './probeMemory';
-import { journal } from './journal';
+import { journal, flushJournal } from './journal';
 import { skillLibrary } from './skillLibrary';
 import { failureMemory } from './failureMemory';
 import { telemetry } from './telemetry';
@@ -37,7 +37,7 @@ import {
 import { configureIoTimeout } from './ioMutex';
 import { notary, notaryAutoAnchorIfConfigured } from './notary/index';
 import { stopBackend } from './physicalBackend';
-import { setImageDeliveryStore } from './imageDelivery';
+import { setImageDeliveryStore, imageDeliveryAvailable } from './imageDelivery';
 import { swarm } from './swarm';
 import { coordinator } from './subAgent';
 import { shaper } from './environmentShaper';
@@ -71,6 +71,13 @@ import { classifyResult } from './resultContract';
 // ChatFn 是纯类型 —— Node strip 型装载器下按值导入会链接炸（swarmDispatch
 // 同类地雷），拆为 import type（类型擦除后零运行时差）。
 import type { ChatFn as PlannerChatFn } from './orchestrator';
+// ΝΩ-3（P1×2 · Planner 通道看门狗物料）：流循环看门狗 + listModels 超时包裹。
+// 纯下游模块（零依赖单文件），入口静态引入零回路。
+import {
+  collectStreamWithWatchdog,
+  awaitWithTimeout,
+  PLANNER_LIST_MODELS_TIMEOUT_MS,
+} from './planner';
 import { GOAL_MAX_CHARS, SUCCESS_CRITERIA_MAX_CHARS } from './orchestration/contracts';
 import {
   emitCognitionPlanReady, mintIntentPlanReady, COGNITION_PLAN_READY_EVENT,
@@ -413,7 +420,9 @@ function resolvePlannerChat(ctx: Context): PlannerChatFn | undefined {
         for (const p of providers) {
           const pid = p?.id ?? p?.provider ?? (typeof p === 'string' ? p : null);
           if (!pid) continue;
-          const models = (await llm.listModels?.(pid)) ?? [];
+          // ΝΩ-3（c）：目录路由单次调用包超时 —— llm.listModels 挂死不再拖死
+          // 路由解析（超时/异常/缺席 ⇒ null ⇒ 该 provider 记零模型，解析继续）
+          const models = (await awaitWithTimeout(llm.listModels?.(pid), PLANNER_LIST_MODELS_TIMEOUT_MS)) ?? [];
           for (const m of models) {
             const mid = m?.id ?? (typeof m === 'string' ? m : null);
             if (mid) routes.push({ provider: pid, model: mid });
@@ -431,9 +440,12 @@ function resolvePlannerChat(ctx: Context): PlannerChatFn | undefined {
       const errors: string[] = [];
       for (const route of routes) {
         try {
-          let text = '';
-          let reasoningTail = '';
-          for await (const chunk of llm.stream({
+          // ΝΩ-3（P1×2 · a/b）：流循环由 collectStreamWithWatchdog 驱动 —— 无
+          // AbortSignal 的流不再能挂死调用方：静默超 idle 窗（缺省 30s）⇒ break
+          // 并诚实失败归因 stream-idle（换下一路由重试的既有节奏不变）；流自身
+          // 抛错照旧上抛给本路由 catch。聚合语义（text-delta 全收 + reasoning
+          // 尾部 4KB 兜底）与旧 for-await 循环逐字节一致。
+          const collected = await collectStreamWithWatchdog(llm.stream({
             provider: route.provider,
             model: route.model,
             system: systemPrompt,
@@ -442,15 +454,18 @@ function resolvePlannerChat(ctx: Context): PlannerChatFn | undefined {
             // 对支持它的模型关停思考；maxTokens 不设 —— 人为小预算会把输出全
             // 部烧在思考段（真机战果 #2：2048 全被 reasoning 吃掉，text 空）。
             reasoningEffort: 'off' as never,
-          })) {
-            if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
-            if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') {
-              reasoningTail = (reasoningTail + chunk.text).slice(-4000);
-            }
+          }));
+          if (!collected.ok) {
+            // 看门狗失败 ≠ 空输出：归因（stream-idle / planner-budget）与细节
+            // 随行入账 —— 诚实失败可诊断，绝不静默换路由装作无事
+            errors.push(`${route.model}: ${collected.failure} (${collected.detail})`);
+            continue;
           }
           // 兜底：个别 thinkingFormat 网关把最终内容留在 reasoning 流 —— text 空
           // 而思考尾部含 JSON 数组时取之（诚实回退，非模拟成功）
-          const finalText = text.trim() ? text : (reasoningTail.includes('[') ? reasoningTail : '');
+          const finalText = collected.text.trim()
+            ? collected.text
+            : (collected.reasoningTail.includes('[') ? collected.reasoningTail : '');
           if (finalText.trim()) return finalText;
           errors.push(`${route.model}: empty text`);
         } catch (e: any) {
@@ -471,6 +486,40 @@ function resolvePlannerChat(ctx: Context): PlannerChatFn | undefined {
     };
   }
   return undefined;
+}
+
+// ─── ΝΩ-45（启动并行化）：三腿并行编排器 ───
+
+/**
+ * ΝΩ-45：apply 启动段的三腿并行编排器 —— 墙钟 = max(腿) 而非 Σ(腿)。
+ * 三腿 thunk 按声明序同步唤起（environment → toolBarrel → restores：恢复腿的
+ * 同步段在数组构造期即完成，其内部自序与旧顺序执行逐字节同源），随后并行等待。
+ * 错误隔离与顺序版同语义：任一腿 rejection 经 Promise.all 首拒传播 ⇒ apply 整体
+ * 失败（恢复族自带绝不抛契约，故障面不变）。本函数同时是测试的假钟注入面 ——
+ * 慢初始化器 + 完成事件驱动的假钟断言墙钟 < 串线和（见 checkpoint.test.ts ΝΩ-45 册）。
+ */
+export async function runStartupLegs<A, B, C>(legs: {
+  /** 腿①：D-2 环境能力探测（shaper.initialize —— 唯一的真实异步探测面） */
+  environment: () => A | Promise<A>;
+  /** 腿②：工具桶动态装载（import('./tools/index') —— 纯模块图加载） */
+  toolBarrel: () => B | Promise<B>;
+  /** 腿③：持久化 restore 族（同步面 —— kernelStore 复载 + checkpoint/trust/efficacy） */
+  restores: () => C;
+}): Promise<[A, B, C]> {
+  // invoke：同步抛错折算为 rejection —— 后续腿的同步段抛错不得让先前腿的
+  // promise 失去 handler（unhandledRejection 防御；三腿声明序唤起保持不变）。
+  const invoke = <T>(fn: () => T | Promise<T>): Promise<T> => {
+    try {
+      return Promise.resolve(fn());
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+  return Promise.all([
+    invoke(legs.environment),
+    invoke(legs.toolBarrel),
+    invoke(legs.restores),
+  ]) as Promise<[A, B, C]>;
 }
 
 export async function apply(ctx: Context, config: Config) {
@@ -607,8 +656,11 @@ export async function apply(ctx: Context, config: Config) {
   //     ⇒ maybeTick 恒空 = 只记账不进化）。
   // 缺省行为零变化：kernelStatePath 空 ⇒ 纯内存存档（save no-op、load 恒 null）、
   // 开关关 ⇒ tick 恒空 —— 上一纪元的入册零行为承诺一字不破。
-  kernelStore = new KernelStore(config.kernelStatePath || undefined);
-  kernelStore.applyTo(kernelRegistry, evidenceLedger);
+  // ΝΩ-45（启动并行化）：kernelStore 的铸造+复载移入下方恢复腿（持久化 restore
+  // 族）；conductor 不依赖 store（只收 registry/ledger）原地先铸 —— 其消费者
+  //（回合钩子 maybeTick / 睡眠校准幕 / 卸载存档）均可空安全且在 apply 返回后
+  // 才可能触发。复腿与 maybeTick 的竞窗与旧序同源（钩子在 apply 开头注册，
+  // 旧序下 applyTo 完成前的消息同样只见缺省值 —— 进化缺省关，窗口无实害）。
   conductor = new EvolutionConductor({
     registry: kernelRegistry,
     ledger: evidenceLedger,
@@ -633,20 +685,9 @@ export async function apply(ctx: Context, config: Config) {
   // C-5 群体智能：本地经验晶体恒开；endpoint 配置时启动联邦定时同步（非阻塞旁路）
   swarm.configure(config.swarmEndpoint, config.swarmSyncIntervalMs, config.crystalCapacity);
   swarm.start();
-  // D-2 环境重塑：能力探测（永不抛错 —— 空能力集 = 诚实世界）+ 窗口委托注入。
-  // switch_window 的债务清偿在此闭环：探测出 raise_window 能力才注入委托，否则保留降级路径。
-  if (config.enableEnvironmentShaper) {
-    shaper.configure(config.shaperAllowSystemWide, config.dryRun);
-    await shaper.initialize();
-    if (shaper.capabilities().has('raise_window')) {
-      system.setWindowDelegate(async keyword => {
-        const r = await shaper.apply({ kind: 'raise_window', titleHint: keyword });
-        if (!r.ok) throw new Error(r.reason ?? 'raise_window failed');
-        // Y6：命中标题随行 —— focus_handoff 取证在委托路径同样在场
-        return { matched: r.matchedTitle ?? null };
-      });
-    }
-  }
+  // D-2 环境重塑：能力探测 + 窗口委托注入已移入下方 ΝΩ-45 环境腿（与工具桶装载、
+  // 持久化 restore 族三腿并行 —— 依赖图见该处注记）。switch_window 的债务清偿
+  // 在腿内闭环：探测出 raise_window 能力才注入委托，否则保留降级路径。
   // D-3 量子感知：验证连续失败 ⇒ 叠加态（白盒标注烧入截图，回归纯视觉闭环）。
   // 白盒源仅在元素 ID 模式可用（UiExtractor 基础设施复用）；无源时失败计数诚实累积但模式不动。
   if (config.enableQuantumSense) {
@@ -703,46 +744,87 @@ export async function apply(ctx: Context, config: Config) {
       }
     },
   });
-  // 认知快照恢复（第七轮）：UI 记忆/技能/失败记忆/日志链/指标 —— 崩溃后原地满血。
-  // 防御性恢复：逐子系统独立还原，单点损坏不拖垮整档。
-  if (config.checkpointPath) {
-    const cp = loadCheckpoint(config.checkpointPath);
-    if (cp.restored) {
-      console.log(`[Checkpoint] Restored: ${cp.report.join('; ')}`);
-    } else {
-      console.log(`[Checkpoint] Fresh start (${cp.report[0]}).`);
-    }
-  }
-
-  // W7-0（W6-4 接线收尾 · 联邦信任账生产接线）：信任账从纯内存升为可选持久化账 ——
-  // 档路径派生自 checkpoint 同目录（federation-trust.json —— 认知快照的联邦伴档：
-  // checkpointPath 空 ⇒ 不建端口不武装，纯内存零磁盘，行为与接线前逐字节一致；
-  // loadFederationTrust 防御恢复（档缺席/坏 JSON/版本错配 ⇒ 冷启动空账）+ 武装
-  // 突变计数节流落盘（每 8 次信任突变一次原子 tmp+fsync+rename）。两者自带
-  // 绝不抛契约，接线失败只影响持久化旁路，掺入闸执法零变化。
-  if (config.checkpointPath) {
-    const trustStore = createFederationTrustFileStore(
-      join(dirname(config.checkpointPath), 'federation-trust.json'),
-    );
-    const trustRestored = loadFederationTrust(trustStore);
-    const trustArmed = armFederationTrustPersistence(trustStore);
-    console.log(`[FederationTrust] ${trustRestored.restored > 0
-      ? `Restored ${trustRestored.restored} account(s)${trustRestored.skipped ? `, ${trustRestored.skipped} malformed skipped` : ''}.`
-      : `Fresh start (${trustRestored.note ?? 'no trust file'}).`} ` +
-      `Persistence ${trustArmed ? 'armed (atomic flush every 8 trust mutations)' : 'NOT armed — memory only.'}`);
-  }
-
-  // W3-0（W2-5 接线）：恢复疗效账本 —— 复载 + 自动持久化武装（checkpoint 同律：
-  // 启动 restore（防御性逐格校验、垃圾格弃置不连坐整档）+ setPersistence（回合
-  // 闭合 fire-and-forget 原子落盘）。空路径 ⇒ 纯内存（restore no-op、不武装），
-  // 行为与接线前一致。绝不抛（restore/setPersistence 自带绝不抛契约）。
-  if (config.recoveryEfficacyPath) {
-    const r = recoveryEfficacy.restore(config.recoveryEfficacyPath);
-    console.log(r.ok
-      ? `[RecoveryEfficacy] Restored ${r.restored} cell(s)${r.dropped ? `, ${r.dropped} malformed dropped` : ''}.`
-      : `[RecoveryEfficacy] Fresh start (${r.error ?? 'no efficacy file'}).`);
-    recoveryEfficacy.setPersistence(config.recoveryEfficacyPath);
-  }
+  // ── ΝΩ-45（启动并行化）：apply 内互不依赖的 await 段分三腿并行 ──
+  // 依赖图（先画依赖，再并行；单例铸造序必须在前的保持不动）：
+  //   腿① environment（D-2 shaper.initialize + raise_window 委托）—— 只读环境
+  //      能力探测（永不抛错，空能力集 = 诚实世界）；shaper.configure 腿内先行。
+  //      旧位与此位之间的同步脊（quantum/uiMemory/probeMemory/telemetry/
+  //      skillLibrary/联邦接线/可逆性注册）无 shaper 消费者 ⇒ 后移安全；
+  //      checkpoint 的 restoreUndoLog 只恢复数组，不依赖探测结果。
+  //   腿② toolBarrel（动态 import('./tools/index')）—— 纯模块图装载，桶内
+  //      工厂在 await 全腿后的 buildAllTools(config) 才消费 config ⇒ 与旧序等价。
+  //   腿③ restores（kernelStore 复载 + checkpoint/federationTrust/recoveryEfficacy）
+  //      —— 全同步面；依赖此前已完成的同步 configure 脊（skillLibrary.configure+load、
+  //      uiMemory/telemetry/contextManager/swarm/quantum configure、
+  //      registerProductionKernels），腿内自序保持旧相对序（kernelStore →
+  //      checkpoint → trust → efficacy）。kernelStore 铸造后移的唯一消费者
+  //      （回合钩子/睡眠/卸载）均可空安全且在 apply 返回后才可能触发 ⇒ 安全。
+  // 错误隔离语义与顺序版同：任一腿失败 ⇒ apply 整体失败（Promise.all 首拒传播，
+  // 对应顺序版的首抛传播）；恢复族自带绝不抛契约，故障面逐字节同源。
+  const [, toolsModule] = await runStartupLegs({
+    environment: async () => {
+      // D-2 环境重塑：能力探测（永不抛错 —— 空能力集 = 诚实世界）+ 窗口委托注入。
+      // switch_window 的债务清偿在此闭环：探测出 raise_window 能力才注入委托，
+      // 否则保留降级路径。
+      if (config.enableEnvironmentShaper) {
+        shaper.configure(config.shaperAllowSystemWide, config.dryRun);
+        await shaper.initialize();
+        if (shaper.capabilities().has('raise_window')) {
+          system.setWindowDelegate(async keyword => {
+            const r = await shaper.apply({ kind: 'raise_window', titleHint: keyword });
+            if (!r.ok) throw new Error(r.reason ?? 'raise_window failed');
+            // Y6：命中标题随行 —— focus_handoff 取证在委托路径同样在场
+            return { matched: r.matchedTitle ?? null };
+          });
+        }
+      }
+    },
+    toolBarrel: () => import('./tools/index'),
+    restores: () => {
+      // 纪元 Ξ（Ξ-A）：进化存档铸造 + 复载（值夹取回放 + 证据计数增量补 ——
+      // 只认已注册 key，残迹静默）；空路径 ⇒ 纯内存存档（save no-op、load 恒 null）。
+      kernelStore = new KernelStore(config.kernelStatePath || undefined);
+      kernelStore.applyTo(kernelRegistry, evidenceLedger);
+      // 认知快照恢复（第七轮）：UI 记忆/技能/失败记忆/日志链/指标 —— 崩溃后原地满血。
+      // 防御性恢复：逐子系统独立还原，单点损坏不拖垮整档。
+      if (config.checkpointPath) {
+        const cp = loadCheckpoint(config.checkpointPath);
+        if (cp.restored) {
+          console.log(`[Checkpoint] Restored: ${cp.report.join('; ')}`);
+        } else {
+          console.log(`[Checkpoint] Fresh start (${cp.report[0]}).`);
+        }
+      }
+      // W7-0（W6-4 接线收尾 · 联邦信任账生产接线）：信任账从纯内存升为可选持久化账 ——
+      // 档路径派生自 checkpoint 同目录（federation-trust.json —— 认知快照的联邦伴档：
+      // checkpointPath 空 ⇒ 不建端口不武装，纯内存零磁盘，行为与接线前逐字节一致；
+      // loadFederationTrust 防御恢复（档缺席/坏 JSON/版本错配 ⇒ 冷启动空账）+ 武装
+      // 突变计数节流落盘（每 8 次信任突变一次原子 tmp+fsync+rename）。两者自带
+      // 绝不抛契约，接线失败只影响持久化旁路，掺入闸执法零变化。
+      if (config.checkpointPath) {
+        const trustStore = createFederationTrustFileStore(
+          join(dirname(config.checkpointPath), 'federation-trust.json'),
+        );
+        const trustRestored = loadFederationTrust(trustStore);
+        const trustArmed = armFederationTrustPersistence(trustStore);
+        console.log(`[FederationTrust] ${trustRestored.restored > 0
+          ? `Restored ${trustRestored.restored} account(s)${trustRestored.skipped ? `, ${trustRestored.skipped} malformed skipped` : ''}.`
+          : `Fresh start (${trustRestored.note ?? 'no trust file'}).`} ` +
+          `Persistence ${trustArmed ? 'armed (atomic flush every 8 trust mutations)' : 'NOT armed — memory only.'}`);
+      }
+      // W3-0（W2-5 接线）：恢复疗效账本 —— 复载 + 自动持久化武装（checkpoint 同律：
+      // 启动 restore（防御性逐格校验、垃圾格弃置不连坐整档）+ setPersistence（回合
+      // 闭合 fire-and-forget 原子落盘）。空路径 ⇒ 纯内存（restore no-op、不武装），
+      // 行为与接线前一致。绝不抛（restore/setPersistence 自带绝不抛契约）。
+      if (config.recoveryEfficacyPath) {
+        const r = recoveryEfficacy.restore(config.recoveryEfficacyPath);
+        console.log(r.ok
+          ? `[RecoveryEfficacy] Restored ${r.restored} cell(s)${r.dropped ? `, ${r.dropped} malformed dropped` : ''}.`
+          : `[RecoveryEfficacy] Fresh start (${r.error ?? 'no efficacy file'}).`);
+        recoveryEfficacy.setPersistence(config.recoveryEfficacyPath);
+      }
+    },
+  });
 
   // W9-2（D-C1 落锤接线）：部署方外部补偿策略表 —— env 指路径则装载（两侧原子登记、
   // 坏表全拒保留内置表），未设 ⇒ 零变化。装载面独立于 arm（顺序无约束），供 escrow
@@ -762,9 +844,9 @@ export async function apply(ctx: Context, config: Config) {
   tryInjectPrompt(ctx, config);
 
   // 3. 工厂模式挂载工具（含条件启用的混合模式工具）
-  // 桶经动态 import 装载（见文件头 Λ-4 注释）：apply 本就 async，多一拍微任务
-  // 无语义差；宿主 bundler 视为普通分割点。
-  const { buildAllTools } = await import('./tools/index');
+  // 桶经动态 import 装载（见文件头 Λ-4 注释；ΝΩ-45 起装载与 shaper 探测/持久化
+  // restore 三腿并行 —— 模块装载在上方 runStartupLegs 腿②完成，此处只消费结果）。
+  const { buildAllTools } = toolsModule;
   const tools = buildAllTools(config);
   tools.forEach(tool => ctx.tools.register(tool));
   console.log(`[Vision Plugin] Loaded ${tools.length} tools.`);
@@ -995,7 +1077,16 @@ export async function apply(ctx: Context, config: Config) {
 
   // 6. 上下文注入接线（原版游离的「最后一块拼图」，至此闭环）：
   //    无论截了多少图，每次请求发给模型的永远是滑动窗口内的图片 + 旧图文字占位符
+  // ΝΩ-3（P1×2）：双图像投递通道互斥立法 —— 单源投递：新宿主走附件，旧宿主走滑窗。
+  //    rc.6 附件服务在场时，截图已由 imageDelivery 附件通道随工具结果直达
+  //    模型（图像附件 + 文本锚点同轮可见），滑窗在此再注入整条 managed 消息 =
+  //    同一截图双份投递（模型看到重像、上下文预算翻倍）。此前互斥只靠「rc.6
+  //    恰好不再发射 llm/pre-request」的宿主版本巧合 —— 现由附件在场性探测面
+  //    imageDeliveryAvailable()（imageDelivery 既有只读探测，单源复用）在注入
+  //    点立法：附件在场 ⇒ 零注入（文本锚点/墓志铭已由工具结果携带）；缺席 ⇒
+  //    旧宿主走滑窗注入旧路，行为逐字节不变。
   onLlmPreRequest(ctx, (payload) => {
+    if (imageDeliveryAvailable()) return; // 附件通道在场 ⇒ 滑窗注入闸门关闭（单源投递）
     const managed = contextManager.getContextForModel();
     const images = managed.filter(block => block.type === 'image');
     if (images.length === 0 || !Array.isArray(payload.messages)) return;
@@ -1045,8 +1136,9 @@ export async function apply(ctx: Context, config: Config) {
               // 段；convergeMemoryOps 自带绝不抛契约，旁路故障不炸睡眠。
               memoryOpsConverger: () => convergeMemoryOps({ seed: journalWatermarkSeed() }),
               // W8（D-B4 接线 · W5-2 梦回放）：梦回放失败源投喂 —— sleepTypes 集成
-              // 契约的 failures 腿兑现：失败记忆单例的 dump 面（「记录：手动
-              // remember_failure + 熔断触发时自动捕获」—— 本插件真实失败源）经
+              // 契约的 failures 腿兑现：失败记忆单例的 dump 面（「记录：熔断
+              // 触发时自动捕获」—— 本插件真实失败源；ΑΩ-R34：随 failureMemory
+              // 头注核正，幻影工具名 remember_failure 已除）经
               // createDreamDeps 适配为 SleepDeps.dream。evolution（EXP4 单例在
               // tools/autonomousRun 模块私有）/ spectrum（worldModel 在 D-7 知识
               // 插件内部）生产面不可及 ⇒ 诚实缺席：梦内注记「evolution 面缺席」、
@@ -1070,6 +1162,12 @@ export async function apply(ctx: Context, config: Config) {
             .catch(() => { /* 睡眠故障绝不炸卸载（runSleepCycle 永不 reject，双保险） */ });
         } catch { /* 同步触发面的任何异常一并吞（不抛铁律） */ }
       }
+      // ΝΩ-45（journal 组提交接入）：notary 磁盘旁链锚（若接线 journalDiskPath）
+      // 与下方 saveCheckpoint（collect 读内存链）都应看到与内存链一致的磁盘
+      // JSONL ⇒ 组提交缓冲在此显式冲刷 —— 先于 checkpoint collect、先于
+      // journal.reset 清理。同步 API（dispose 清理不能 await）；睡眠结算行是
+      // 异步旁路，其磁盘行由下一次会话收编（与 notary 锚同一诚实边界）。
+      try { flushJournal(); } catch { /* 冲刷是旁路义务：失败只丢窗口内取证副本 */ }
       // 纪元 Π（行为公证账本）：卸载自动锚 —— notaryAutoAnchor（缺省 false）为真时
       // 为 journal 铸一锚（链尖+MMR 根+时间戳），锚住本会话全部行为史。fire-and-forget
       // 双层吞错（RFC3161 失败自动本地回退，绝不炸卸载）；锚捕的是 dispose 时刻的

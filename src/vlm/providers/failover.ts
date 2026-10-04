@@ -135,6 +135,59 @@ interface PoolEntry {
   readonly tier: ProviderTier;
 }
 
+// ─── ΑΩ-R35（同源降位）：与主力同平台同端点的候选降一位 ───
+
+/** 基址归一：trim + 小写 + 剥尾斜杠（同源判定的端点因子；缺席 ⇒ ''） */
+function normPoolBaseUrl(v: unknown): string {
+  try {
+    return typeof v === 'string' ? v.trim().toLowerCase().replace(/\/+$/, '') : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 同源判定（ΑΩ-R35）：同 platform（线协议方言一致）**且**同 baseUrl（归一后
+ * 相等、双侧非空）才判同源 —— 池构造已按 id 去重，同源只可能是「不同 id、
+ * 同方言、同端点」的镜像脑（如经不同预设 id 接入的同一网关/同一云脑）。
+ * 任一侧 baseUrl 缺席 ⇒ 不同源（诚实不虚构比对材料，refute.ts 同律）。
+ */
+function isSamePoolSource(a: VisionProvider, b: VisionProvider): boolean {
+  try {
+    if (a.protocol !== b.protocol) return false;
+    const ua = normPoolBaseUrl(a.baseUrl);
+    const ub = normPoolBaseUrl(b.baseUrl);
+    return ua !== '' && ua === ub;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 同源降位（ΑΩ-R35）：主脑网络错时，与主力同平台同端点的次席大概率沿同一
+ * 网络路径再失败一次（DNS 污染/端点抖动对同源脑是共享故障域）—— 故把紧随
+ * 主力的同源候选降一位，让异构脑先顶上；**降序不删除**：同源脑仍留池内作
+ * 最后手段（异构脑也倒下时，同源脑的剩余价值大于空池）。每颗同源候选至多
+ * 降一位（与其后继交换一次，不连锁连降）；判定/交换全程 try 兜底，任何
+ * 故障保持原池序（不抛铁律）。返回降位数供观测面记账。
+ */
+function demoteSameSourceAsHead(entries: readonly PoolEntry[]): { order: PoolEntry[]; demoted: string[] } {
+  const out = [...entries];
+  const demoted: string[] = [];
+  if (out.length < 3) return { order: out, demoted }; // 无后继可换（单脑/双脑池）⇒ 原序
+  const head = out[0]!;
+  for (let i = 1; i + 1 < out.length; i++) {
+    if (!isSamePoolSource(head.provider, out[i]!.provider)) continue;
+    if (isSamePoolSource(head.provider, out[i + 1]!.provider)) continue; // 连续同源：让位后者等效
+    const next = out[i + 1]!;
+    out[i + 1] = out[i]!;
+    out[i] = next;
+    demoted.push(out[i + 1]!.provider.id);
+    i++; // 已降位者不再连降（至多一位）
+  }
+  return { order: out, demoted };
+}
+
 /**
  * 多脑故障切换池 —— 万脑战斗序列。
  *
@@ -161,7 +214,9 @@ export class ProviderPool {
 
   /**
    * @param providers 池序战斗序列（index 0 = 主力）；垃圾条目（非对象/无 chat
-   *        函数）与 id 重复者被安静剔除（不抛铁律在构造期即生效）
+   *        函数）与 id 重复者被安静剔除（不抛铁律在构造期即生效）。ΑΩ-R35：
+   *        构造期同源降位 —— 与主力同平台（同 protocol）且同 baseUrl 的候选
+   *        降一位（降序不删除，仍可作最后手段），理由见 demoteSameSourceAsHead。
    * @param options 熔断参数与时钟注入
    */
   constructor(providers: VisionProvider[], options?: ProviderPoolOptions) {
@@ -198,7 +253,17 @@ export class ProviderPool {
         entries.push({ provider: p, breaker: new VlmApiBreaker(breakerOpts), tier });
       } catch { /* 垃圾条目静默剔除 */ }
     }
-    this.entries = entries;
+    // ΑΩ-R35（同源降位）：与主力同平台同端点的候选降一位（降序不删除，仍作
+    // 最后手段）—— 论证见 demoteSameSourceAsHead；任何故障保持原池序（不抛）。
+    let ordered = entries;
+    try {
+      const demoted = demoteSameSourceAsHead(entries);
+      ordered = demoted.order;
+      if (demoted.demoted.length > 0) {
+        this.note(`同源降位：${demoted.demoted.join('、')} 与主力 ${entries[0]!.provider.id} 同平台同端点，降一位（异构脑先上，同源脑殿后作最后手段）`);
+      }
+    } catch { /* 降位面故障 —— 原池序兜底 */ }
+    this.entries = ordered;
   }
 
   /** 池内脑数（垃圾/重复条目已剔除后） */
@@ -240,7 +305,6 @@ export class ProviderPool {
     // W2-8：全池链 = 不筛 tier（chat 的池序切换语义逐字节保持，tier 正交不掺和）
     return this.runChain(req, this.entries);
   }
-
   /**
    * W2-8（C2 成本级联路由）：分档对话 —— 切换律与 chat() 完全同构（未配置跳过、
    * 熔断 open 跳行、失败切同档下一脑、首胜直传、全败传末败、无可用脑回合成
@@ -263,8 +327,26 @@ export class ProviderPool {
     return this.entries.map(e => ({ id: e.provider.id, tier: e.tier }));
   }
 
-  /** 切换律执行体 —— chat/chatTier 共用（entries 为本次战斗序列，语义见类 JSDoc） */
+  /**
+   * 切换律执行体 —— chat/chatTier 共用（entries 为本次战斗序列，语义见类 JSDoc）。
+   * ΝΩ-18（熔断剥壳半权）：runChain 的结构重构为「runChainEntry（不复核胜者
+   * 熔断账）+ 胜者 onSuccess 补账」—— 胜者记账从链内挪到链外，chatJson 才能
+   * 在「拨号成功但 JSON 剥壳失败」时改记半权失败（onExtractionFailure）而不被
+   * 先行的 onSuccess 清零。chat/chatTier 的可观测行为逐字节保持。
+   */
   private async runChain(req: VisionChatRequest, entries: readonly PoolEntry[]): Promise<VisionChatResult> {
+    const { res, entry } = await this.runChainEntry(req, entries);
+    if (res.ok === true && entry !== null) {
+      entry.breaker.onSuccess(this.clock());
+    }
+    return res;
+  }
+
+  /** 切换律执行体（胜者熔断账延迟面）—— 返回胜者条目（ok:true 时非 null）供调用方补账 */
+  private async runChainEntry(
+    req: VisionChatRequest,
+    entries: readonly PoolEntry[],
+  ): Promise<{ res: VisionChatResult; entry: PoolEntry | null }> {
     try {
       let lastFailed: VisionChatResult | undefined;
       for (const entry of entries) {
@@ -289,8 +371,7 @@ export class ProviderPool {
           };
         }
         if (res && res.ok === true) {
-          entry.breaker.onSuccess(this.clock());
-          return res; // 首胜直传 —— providerId/model 原样归因
+          return { res, entry }; // 首胜直传 —— providerId/model 原样归因；熔断账由调用方补
         }
         // 失败结果契约整形：ok:false 时 text 恒为 ''，error 必有
         const fail: VisionChatResult =
@@ -313,6 +394,7 @@ export class ProviderPool {
                 model: p.model, providerId: p.id,
                 error: sanitizeError('provider returned no result', p.id),
               };
+        // failureKind 区分面（ΝΩ-18）：真实拨号后的失败 = 全权 onFailure（既有律）
         entry.breaker.onFailure(this.clock());
         lastFailed = fail;
         const snippet = (fail.error ?? 'unknown error').slice(0, 80);
@@ -320,18 +402,24 @@ export class ProviderPool {
       }
       if (lastFailed !== undefined) {
         this.note(`全线失败 —— 回传最后一个失败结果（${lastFailed.providerId}）`);
-        return lastFailed;
+        return { res: lastFailed, entry: null };
       }
       this.note('无可用脑（空池或全员被跳过）—— 合成 degraded 结果');
       return {
-        ok: false, degraded: true, error: 'no provider available',
-        providerId: 'pool', model: '', text: '', latencyMs: 0,
+        res: {
+          ok: false, degraded: true, error: 'no provider available',
+          providerId: 'pool', model: '', text: '', latencyMs: 0,
+        },
+        entry: null,
       };
     } catch (e) {
       // 不抛铁律的最终兜底（理论不可达 —— 同步面故障也归约为合成 degraded）
       return {
-        ok: false, degraded: true, error: sanitizeError(e, 'pool'),
-        providerId: 'pool', model: '', text: '', latencyMs: 0,
+        res: {
+          ok: false, degraded: true, error: sanitizeError(e, 'pool'),
+          providerId: 'pool', model: '', text: '', latencyMs: 0,
+        },
+        entry: null,
       };
     }
   }
@@ -341,23 +429,33 @@ export class ProviderPool {
    * （extractProviderJson 同律：剥围栏 → 首个平衡 {...}/[...] → parse）。
    * 强制 jsonMode；成功：{ ok:true, value, raw }；失败：{ ok:false, error, raw }
    * —— raw 恒为模型回复原文（成功也是）。绝不抛异常。
+   *
+   * ΝΩ-18（熔断剥壳半权）：拨号成功但剥壳失败 = 「未拨号成功」语义的服务质量
+   * 劣化（脑可达、回复非 JSON）—— 胜者熔断账按 failureKind 区分：好 JSON ⇒
+   * onSuccess；剥壳失败 ⇒ onExtractionFailure（半权 0.5，论证见 metering.ts），
+   * 绝不与真实拨号失败的全权 onFailure 同速熔断（误熔断好脑防线）。
    */
   async chatJson<T = unknown>(
     req: VisionChatRequest,
   ): Promise<{ ok: boolean; value?: T; error?: string; raw: string }> {
     try {
-      const res = await this.chat({ ...req, jsonMode: true });
+      // 强制 jsonMode（原 this.chat({...req, jsonMode:true}) 同律 —— 池内适配器收到
+      // 结构化输出指令）；胜者熔断账按剥壳成败分流（onSuccess / 半权）。
+      const { res, entry } = await this.runChainEntry({ ...req, jsonMode: true }, this.entries);
       if (!res.ok) {
         return { ok: false, error: res.error, raw: res.text };
       }
       const value = extractProviderJson(res.text);
       if (value === undefined) {
+        // 剥壳失败半权 —— 胜者条目在此（runChainEntry 已延迟其成功账）
+        if (entry !== null) entry.breaker.onExtractionFailure(this.clock());
         return {
           ok: false,
           error: `pool json extraction failed: no balanced JSON object/array in reply (${res.text.length} chars)`,
           raw: res.text,
         };
       }
+      if (entry !== null) entry.breaker.onSuccess(this.clock());
       return { ok: true, value: value as T, raw: res.text };
     } catch (e) {
       return { ok: false, error: sanitizeError(e, 'pool'), raw: '' };

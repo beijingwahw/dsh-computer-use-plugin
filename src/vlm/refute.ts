@@ -13,7 +13,8 @@
 //   1. 永不抛异常 —— 一切失败收敛为 { verdict:'uncertain' }（缺席审判零行为：
 //      法院是旁路增益不是依赖，故障绝不炸点击主流程、绝不拦合法点击）；
 //   2. 单次不重试 —— 缺省 8s 硬止损（maxRetries:0 传脑 + 本模块竞速兜底：
-//      违约挂死的脑不能拖垮点击主流程）；
+//      违约挂死的脑不能拖垮点击主流程）；ΑΩ-R35 有限顺延：首席失败后最多再
+//      请 1 颗备选脑（换脑非重试），且只在剩余预算内发生（8s 硬帽语义不变）；
 //   3. 同源剔除 —— 与主脑同 providerId/baseUrl 的候选脑不请上证人席（用主脑
 //      反驳主脑是确认偏误的马戏，不是对抗核验）；剔除数诚实注记；
 //   4. 零依赖注入式 —— 本模块不 import 任何兄弟模块（叶子模块，杜绝环引）；
@@ -22,6 +23,13 @@
 //      天然结构满足 RefuteBrain 契约；
 //   5. 纯离线可测 —— 假脑注入 + 超时测试缝（_overrideRefuteTimeoutForTest）
 //      零网络零墙钟。
+//
+// ΝΩ-47（合议庭点亮 + 反驳置信带）两通道两执法：
+//   · 通道升级 —— RefuteFace.quorum（可选）在场时，反驳通道整体走合议庭
+//     askVerdict 多数票（庭员 ≥2 异构子庭，装配件负责剔除同源），census
+//     透传进判词；缺席 ⇒ 单脑路径（旧行为逐字节保持）；
+//   · 置信带 —— verdict+confidence 双阈值（两通道共用）：弱 upheld（<0.55）
+//     降级 uncertain 不背书；弱 refuted（<0.5）仍拦但注记（保守方向）。
 
 // ─── 协议类型 ───
 
@@ -53,6 +61,12 @@ export interface RefuteVerdict {
   excludedSameSource?: number;
   /** 缺席/失败注记（法院年报表的失败归因） */
   note?: string;
+  /**
+   * ΝΩ-47（合议庭点亮）：多脑裁决路径的庭员普查透传 —— 每颗陪审脑的成败
+   * 最小面（id/ok/error）。仅 quorum 通道在场；单脑路径缺席。census 透明律
+   * （与 EnsembleCourt.members 同源）：调用方永远知道每颗脑怎么了。
+   */
+  census?: Array<{ id: string; ok: boolean; error?: string }>;
 }
 
 /**
@@ -88,6 +102,39 @@ export interface RefuteFace {
   primaryBaseUrl?: string;
   /** 候选脑清单或其惰性求值器 */
   brains: RefuteBrain[] | (() => RefuteBrain[]);
+  /**
+   * ΝΩ-47（合议庭点亮）：多脑裁决面（可选）—— 在场且可用（askVerdict 为
+   * 函数）时，askRefutation 的反驳通道整体升级为合议庭多数票：庭员 ≥2 的
+   * 异构子庭并行作证、多数票定谳，替代单脑单票（装配方负责 ≥2 与同源剔除
+   * —— 见 vlm/index.ts buildRefuteQuorumFace）；缺席 ⇒ 单脑路径（旧行为）。
+   */
+  quorum?: RefuteQuorumFace;
+}
+
+/**
+ * ΝΩ-47：合议庭多脑裁决面（结构注入 —— 本模块保持叶子零兄弟 import）。
+ * EnsembleCourt.askVerdict 天然结构满足：verdict ∈ {confirmed, refuted,
+ * uncertain}（confirmed↔upheld 的方言映射在法院内完成 —— 合议庭票面用
+ * confirmed/refuted，法院判词用 upheld/refuted），members 即 census。
+ * 契约与 RefuteBrain 同律：永不抛（违约上抛由本法院收敛为缺席审判）。
+ */
+export interface RefuteQuorumFace {
+  /** 多脑裁决：一次发问换多数票判决 + 庭员普查（census 透传面） */
+  askVerdict(req: {
+    images: Array<{ base64: string; mime?: string }>;
+    system?: string;
+    prompt: string;
+    maxTokens?: number;
+    temperature?: number;
+    jsonMode?: boolean;
+    timeoutMs?: number;
+  }): Promise<{
+    verdict: 'confirmed' | 'refuted' | 'uncertain';
+    confidence: number;
+    dissents: string[];
+    /** census：庭员普查表（每颗陪审脑的成败最小面） */
+    members: Array<{ id: string; ok: boolean; error?: string }>;
+  }>;
 }
 
 /** askRefutation 的输入（证据面 —— 截图与目标描述由调用方取证） */
@@ -109,6 +156,11 @@ export interface RefuteAsk {
 /** 法定单次硬超时（毫秒）：8s —— 不可逆点击可以等一次认真反驳，不能等一纪元 */
 export const REFUTE_DEFAULT_TIMEOUT_MS = 8000;
 
+/** ΑΩ-R35（有限顺延）：首颗异构脑失败后最多再请 1 颗备选脑（bench 序次席）。
+ *  顺延只在剩余预算内发生（见 askRefutation 的 deadline 纪律）—— 首席超时
+ *  耗尽预算 ⇒ 维持缺席审判，8s 硬帽语义分毫不动。 */
+const REFUTE_MAX_BENCH = 2;
+
 /** 缺省请求参数：低温度（桌面自动化要确定性）、小预算（判决不需要长文） */
 const REFUTE_TEMPERATURE = 0.1;
 const REFUTE_MAX_TOKENS = 400;
@@ -116,6 +168,17 @@ const REFUTE_MAX_TOKENS = 400;
 const REASON_MAX = 240;
 /** 失败注记截断上限 */
 const NOTE_MAX = 200;
+/**
+ * ΝΩ-47（反驳置信带）：upheld 的弱背书下沿 —— 维持票置信低于此值时不背书
+ *（降级 uncertain「提示不背书」：不硬放行注记弱背书，法院弃权交主流程零行为）。
+ */
+const REFUTE_WEAK_UPHELD_AT = 0.55;
+/**
+ * ΝΩ-47（反驳置信带）：refuted 的弱反驳下沿 —— 反驳票置信低于此值时保守方向
+ * 取「弱反驳仍拦但注记」（拦错的代价是人工复核一次；放错的代价可能是不可逆
+ * 误操作 —— 不可逆闸门上失败安全方向恒为多拦）。
+ */
+const REFUTE_WEAK_REFUTED_AT = 0.5;
 
 // ─── 提示词构造（铁律风格随 som.ts：默认怀疑 / 找反驳而非确认 / 不臆造） ───
 
@@ -148,6 +211,20 @@ export function buildRefutationUserPrompt(description: string, region?: RefuteRe
     + '请以怀疑态度审视并找出任何反驳证据：该位置实际显示的文字或控件与描述不符、'
     + '按钮实为仿冒或钓鱼界面、目标并不在图中的该位置、或它是静态正文而非可交互控件。'
     + '只有认真寻找后确实找不到任何反驳证据，才允许输出 upheld。';
+}
+
+/**
+ * 纯函数（ΝΩ-47 合议庭点亮）：多脑裁决通道的系统提示词 —— 与单脑版同一套
+ * 怀疑铁律（默认怀疑 / 找反驳而非确认 / 不臆造），仅票面方言改随
+ * EnsembleCourt.askVerdict 的裁决协议（confirmed|refuted，confidence 0..1）：
+ * refuted=找到反驳证据；confirmed=认真寻找反驳证据后描述仍成立。
+ */
+export function buildRefutationQuorumSystemPrompt(): string {
+  return '你是对抗核验合议庭的陪审脑，默认持怀疑态度。你的职责不是确认陈述，而是找出反驳证据。'
+    + '只输出严格 JSON：{"verdict":"confirmed"|"refuted","confidence":0到1的小数}。'
+    + 'verdict 语义：refuted=你找到了反驳证据；confirmed=认真寻找反驳证据后描述仍然成立。'
+    + '与其他陪审脑独立判断，宁可低 confidence 也不附和确认。'
+    + '判断必须基于图像实际像素，不要臆造图上看不到的现象。';
 }
 
 // ─── 模块级注入面（照 P2a attachFailoverPool 的注入模式） ───
@@ -306,23 +383,110 @@ function noteOf(s: string): string {
   return s.replace(/\s+/g, ' ').trim().slice(0, NOTE_MAX);
 }
 
+// ─── ΝΩ-47（合议庭点亮 + 反驳置信带）：quorum 载荷整形与置信带（纯函数） ───
+
+/**
+ * quorum 裁决载荷的原始面（askVerdict 契约的法院侧别名 —— census 透传用）。
+ * 敌意面字段缺席/脏值由 sanitizeQuorum / sanitizeCensus 逐项消毒，绝不抛。
+ */
+interface QuorumOutcome {
+  verdict: 'confirmed' | 'refuted' | 'uncertain';
+  confidence: number;
+  dissents: string[];
+  members: Array<{ id: string; ok: boolean; error?: string }>;
+}
+
+/**
+ * 多脑裁决载荷消毒：verdict 非法（拼错/非字符串/缺席）⇒ null（缺席审判）；
+ * confidence 宽松转数后夹 [0,1]，非法记 0；dissents 剥非字符串项、字符串截
+ * 64；census 逐条消毒（id 必须字符串、ok 必须布尔、error 截 NOTE_MAX）。
+ */
+function sanitizeQuorum(raw: unknown): QuorumOutcome | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const q = raw as { verdict?: unknown; confidence?: unknown; dissents?: unknown; members?: unknown };
+  if (q.verdict !== 'confirmed' && q.verdict !== 'refuted' && q.verdict !== 'uncertain') return null;
+  const c = typeof q.confidence === 'number' ? q.confidence : Number(q.confidence);
+  const confidence = Number.isFinite(c) ? Math.min(Math.max(c, 0), 1) : 0;
+  const dissents = Array.isArray(q.dissents)
+    ? q.dissents.filter((d): d is string => typeof d === 'string' && d !== '').map(d => d.slice(0, 64))
+    : [];
+  const census: Array<{ id: string; ok: boolean; error?: string }> = [];
+  if (Array.isArray(q.members)) {
+    for (const m of q.members) {
+      if (m === null || typeof m !== 'object') continue;
+      const e = m as { id?: unknown; ok?: unknown; error?: unknown };
+      if (typeof e.id !== 'string' || typeof e.ok !== 'boolean') continue;
+      census.push({
+        id: e.id.slice(0, 64),
+        ok: e.ok,
+        ...(typeof e.error === 'string' && e.error !== '' ? { error: e.error.slice(0, NOTE_MAX) } : {}),
+      });
+    }
+  }
+  return { verdict: q.verdict, confidence, dissents, members: census };
+}
+
+/**
+ * ΝΩ-47（反驳置信带）：verdict + confidence 双阈值执法（单脑与多脑通道共用）：
+ *   · upheld 且 confidence < 0.55 ⇒ 降级 uncertain「提示不背书」—— 弱背书
+ *     不配写进锚点注记（不硬放行注记弱背书），法院弃权交主流程零行为；
+ *   · refuted 且 confidence < 0.5 ⇒ 弱反驳**仍拦**但注记（保守方向论证：
+ *     拦错 = 人工复核一次的可恢复代价；放错 = 不可逆误操作 —— 失败安全取多拦）；
+ *   · 带内（≥ 各自下沿）⇒ 原判原样（旧行为）。
+ */
+function applyConfidenceBand(p: {
+  verdict: 'refuted' | 'upheld';
+  confidence: number;
+  reason?: string;
+}): { verdict: 'refuted' | 'upheld' | 'uncertain'; confidence: number; reason?: string; note?: string } {
+  if (p.verdict === 'upheld' && p.confidence < REFUTE_WEAK_UPHELD_AT) {
+    return {
+      verdict: 'uncertain',
+      confidence: 0,
+      note: noteOf(
+        `weak-upheld (confidence ${p.confidence.toFixed(3)} < ${REFUTE_WEAK_UPHELD_AT}) — 弱背书不背书，法院弃权`,
+      ),
+    };
+  }
+  if (p.verdict === 'refuted' && p.confidence < REFUTE_WEAK_REFUTED_AT) {
+    return {
+      verdict: 'refuted',
+      confidence: p.confidence,
+      reason: p.reason,
+      note: noteOf(
+        `weak-refuted (confidence ${p.confidence.toFixed(3)} < ${REFUTE_WEAK_REFUTED_AT}) — 弱反驳仍拦（保守方向），建议人工复核`,
+      ),
+    };
+  }
+  return { verdict: p.verdict, confidence: p.confidence, reason: p.reason };
+}
+
 // ─── 法院：askRefutation ───
 
 /**
- * 反驳法院的开庭面（永不抛）：截图 + 目标描述 → 请首颗异构第二脑尝试反驳。
+ * 反驳法院的开庭面（永不抛）：截图 + 目标描述 → 请异构第二脑（单脑或合议庭）尝试反驳。
  *
  * 审判序（固定）：
  *   1) 面在场性：未装配反驳面 ⇒ uncertain 'no-refute-face'（缺席审判零行为）；
  *   2) 证据完整性：截图/描述缺席 ⇒ uncertain（法院不审无据之案）；
- *   3) 名册收口：候选脑解析（垃圾脑剔除、未配置脑零拨号跳过）+ 同源剔除
- *      （providerId/baseUrl 与主脑比对，剔除数诚实注记）；剔除后无脑 ⇒
+ *   3) ΝΩ-47（合议庭点亮）：quorum 面在场且可用 ⇒ 多脑多数票通道整体替代
+ *      单脑 —— 庭员 ≥2 的异构子庭并行作证（每颗脑单次不重试）、多数票定谳、
+ *      census 透传；任何故障（挂死/上抛/垃圾载荷/平票）收敛 uncertain
+ *      （多脑失败不回退单脑：时间预算已花在合议庭上，法院是旁路增益不是依赖）；
+ *   4) 名册收口（单脑通道）：候选脑解析（垃圾脑剔除、未配置脑零拨号跳过）+
+ *      同源剔除（providerId/baseUrl 与主脑比对，剔除数诚实注记）；剔除后无脑 ⇒
  *      uncertain 'no-heterogeneous-second-brain'（单脑部署的诚实形态）；
- *   4) 单脑单次：取首颗异构脑 chatJson（jsonMode + maxRetries:0 + timeoutMs
+ *   5) 单脑单次：取首颗异构脑 chatJson（jsonMode + maxRetries:0 + timeoutMs
  *      透传），外加本模块硬止损竞速兜底 —— 单次不重试，8s 缺省止损；
- *   5) 载荷规整：{verdict:'refuted'|'upheld', confidence, reason}；垃圾载荷 ⇒
- *      uncertain；refuted/upheld 附 secondOpinionId 归因。
+ *      ΑΩ-R35 有限顺延：首席失败（调用败/上抛/垃圾载荷）且剩余预算充裕时
+ *      最多再请 1 颗次席备选脑（每颗脑仍单次不重试；首席超时耗尽预算 ⇒
+ *      维持缺席审判，总 8s 硬帽语义不变）；
+ *   6) 载荷规整：{verdict:'refuted'|'upheld', confidence, reason}；垃圾载荷 ⇒
+ *      uncertain；refuted/upheld 附 secondOpinionId 归因；
+ *   7) ΝΩ-47（反驳置信带）：verdict+confidence 双阈值执法（两通道共用）——
+ *      弱 upheld（<0.55）降级 uncertain 不背书；弱 refuted（<0.5）仍拦但注记。
  *
- * 每次调用恰好记一案（tally 唯一出口）。绝不抛异常：一切内部故障（含敌意
+ * 每次调用恰好记一案（tally 唯一出口）。绝不抛异常：任何内部故障（含敌意
  * face/脑违约上抛/定时器故障）收敛为 uncertain。
  */
 export async function askRefutation(deps?: RefuteAsk): Promise<RefuteVerdict> {
@@ -338,6 +502,72 @@ export async function askRefutation(deps?: RefuteAsk): Promise<RefuteVerdict> {
     const desc = typeof deps?.description === 'string' ? deps.description.trim() : '';
     if (desc === '') {
       return tally({ verdict: 'uncertain', confidence: 0, note: 'no-target-description' });
+    }
+
+    // ── ΝΩ-47（合议庭点亮）：多脑裁决通道（可选升级，在场即替代单脑）───
+    // 不可逆动作的核验从单脑单票变多脑多数票：装配件（vlm/index.ts
+    // buildRefuteQuorumFace）已保证子庭 ≥2 且同源剔除完毕。硬止损竞速与
+    // 单脑通道同律（timeoutMs + 500ms 宽放）；违约上抛以 crash 哨兵区分于
+    // 超时 null（诚实归因，两态皆缺席审判）。
+    const quorum = face.quorum;
+    if (quorum !== null && typeof quorum === 'object' && typeof quorum.askVerdict === 'function') {
+      const timeoutMs = effectiveTimeout(deps);
+      const mime = typeof deps?.mime === 'string' && deps.mime !== '' ? deps.mime : 'image/jpeg';
+      const req = {
+        images: [{ base64: b64, mime }],
+        system: buildRefutationQuorumSystemPrompt(),
+        prompt: buildRefutationUserPrompt(desc, deps?.region),
+        maxTokens: REFUTE_MAX_TOKENS,
+        temperature: REFUTE_TEMPERATURE,
+        jsonMode: true,
+        timeoutMs,
+      };
+      const attempt = (async (): Promise<QuorumOutcome | { __courtCrash: string }> => {
+        try {
+          return (await quorum.askVerdict(req)) as QuorumOutcome;
+        } catch (e) {
+          return { __courtCrash: noteOf(e instanceof Error ? e.message : String(e)) };
+        }
+      })();
+      const raw = await withHardCap(attempt, timeoutMs + 500);
+      if (raw === null) {
+        return tally({ verdict: 'uncertain', confidence: 0, note: `quorum-timeout-after-${timeoutMs}ms` });
+      }
+      if (raw !== null && typeof raw === 'object' && '__courtCrash' in raw) {
+        return tally({ verdict: 'uncertain', confidence: 0, note: noteOf(`quorum-failed: ${raw.__courtCrash}`) });
+      }
+      const q = sanitizeQuorum(raw);
+      if (q === null) {
+        return tally({ verdict: 'uncertain', confidence: 0, note: 'quorum-payload-unusable' });
+      }
+      if (q.verdict === 'uncertain') {
+        // 平票/全垃圾 ⇒ 缺席审判：census 仍透传（每颗脑怎么了），异议点名入注记
+        return tally({
+          verdict: 'uncertain',
+          confidence: 0,
+          census: q.members,
+          note: q.dissents.length > 0 ? noteOf(`quorum-split (${q.dissents.join('、')})`) : 'quorum-no-valid-votes',
+        });
+      }
+      // 方言映射：合议庭票面 confirmed ⇒ 法院判词 upheld；refuted 直通。
+      // 多数票理由由异议面合成（票票点名，确定可审计），再过置信带。
+      const dis = q.dissents.length > 0 ? q.dissents.join('、') : '无';
+      const banded = applyConfidenceBand({
+        verdict: q.verdict === 'confirmed' ? 'upheld' : 'refuted',
+        confidence: q.confidence,
+        reason:
+          q.verdict === 'confirmed'
+            ? `合议庭多脑多数票维持（少数异议：${dis}）`
+            : `合议庭多脑多数票反驳（少数维持：${dis}）`,
+      });
+      return tally({
+        verdict: banded.verdict,
+        confidence: banded.confidence,
+        ...(banded.reason !== undefined ? { reason: banded.reason.slice(0, REASON_MAX) } : {}),
+        ...(banded.verdict !== 'uncertain' ? { secondOpinionId: 'ensemble-quorum' } : {}),
+        ...(banded.note !== undefined ? { note: banded.note } : {}),
+        census: q.members,
+      });
     }
 
     // 名册收口：垃圾剔除 + 未配置跳过 + 同源剔除（诚实注记剔除数）
@@ -363,8 +593,13 @@ export async function askRefutation(deps?: RefuteAsk): Promise<RefuteVerdict> {
       });
     }
 
-    const brain = bench[0]!;
+    let brain = bench[0]!;
+    const backup = REFUTE_MAX_BENCH > 1 ? bench[1] : undefined; // ΑΩ-R35：次席备选（至多 1 颗）
     const timeoutMs = effectiveTimeout(deps);
+    // ΑΩ-R35（有限顺延）：总预算锚点 —— 首席 8s 硬帽耗尽后 deadline 已过，
+    // 顺延不再发生（缺席审判语义不变）；只有首席快速失败/垃圾载荷才可能
+    // 在剩余时间内请次席备选脑。
+    const deadline = Date.now() + timeoutMs;
     const mime = typeof deps?.mime === 'string' && deps.mime !== '' ? deps.mime : 'image/jpeg';
     const req = {
       images: [{ base64: b64, mime }],
@@ -374,19 +609,38 @@ export async function askRefutation(deps?: RefuteAsk): Promise<RefuteVerdict> {
       temperature: REFUTE_TEMPERATURE,
       jsonMode: true,
       timeoutMs,
-      maxRetries: 0, // 单次不重试（法院铁律：缺席审判优于拖廷）
+      maxRetries: 0, // 单脑单次不重试（法院铁律：缺席审判优于拖廷；顺延≠重试——换的是另一颗脑）
     };
     // 同步/异步上抛都收敛为 ok:false 结果（区分于硬止损超时的 null）+ 硬止损
     // 竞速（+500ms 宽放）—— 违约挂死的脑不能拖垮点击主流程
-    const attempt = (async () => {
-      try {
-        return await brain.chatJson(req);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return { ok: false, error: noteOf(`second brain threw: ${msg}`), raw: '' };
+    const ask = (
+      brain: RefuteBrain,
+      capMs: number,
+    ): Promise<{ ok: boolean; value?: unknown; error?: string; raw: string } | null> => {
+      const attempt = (async () => {
+        try {
+          return await brain.chatJson(req);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { ok: false, error: noteOf(`second brain threw: ${msg}`), raw: '' };
+        }
+      })();
+      return withHardCap(attempt, capMs);
+    };
+    let res = await ask(brain, timeoutMs + 500);
+    // ΑΩ-R35（有限顺延）：首席失败（ok:false / 上抛收敛 / 超时 null / 垃圾载荷）
+    // 且席上还有备选 ⇒ 在剩余预算内再请次席（最多 1 颗）；预算耗尽（首席超时
+    // 即是）⇒ 维持缺席审判。
+    if (
+      (res === null || res.ok !== true || normalizeRefutePayload(res.value) === null)
+      && backup !== undefined
+    ) {
+      const remaining = deadline - Date.now();
+      if (remaining > 0) {
+        brain = backup;
+        res = await ask(brain, remaining + 500);
       }
-    })();
-    const res = await withHardCap(attempt, timeoutMs + 500);
+    }
     if (res === null) {
       return tally({
         verdict: 'uncertain',
@@ -413,12 +667,16 @@ export async function askRefutation(deps?: RefuteAsk): Promise<RefuteVerdict> {
         note: 'second-opinion-payload-unusable',
       });
     }
+    // ΝΩ-47（反驳置信带）：verdict+confidence 双阈值执法（弱 upheld 不背书降级
+    // uncertain / 弱 refuted 仍拦但注记 —— applyConfidenceBand 的保守方向论证）。
+    const banded = applyConfidenceBand({ verdict: p.verdict, confidence: p.confidence, reason: p.reason });
     return tally({
-      verdict: p.verdict,
-      confidence: p.confidence,
-      reason: p.reason,
-      secondOpinionId: brain.id,
+      verdict: banded.verdict,
+      confidence: banded.confidence,
+      ...(banded.reason !== undefined ? { reason: banded.reason } : {}),
+      ...(banded.verdict !== 'uncertain' ? { secondOpinionId: brain.id } : {}),
       excludedSameSource: excluded || undefined,
+      ...(banded.note !== undefined ? { note: banded.note } : {}),
     });
   } catch (e) {
     // 不抛铁律的最终兜底（理论不可达 —— 各步自兜底）
@@ -431,14 +689,18 @@ export async function askRefutation(deps?: RefuteAsk): Promise<RefuteVerdict> {
 
 /**
  * 反驳法院是否在本会话可开庭：已装配反驳面且名册内存在**已配置的异构脑**
- * （同源剔除后仍有席）。纯配置/纯在场判定 —— 零网络、零拨号、零副作用；
- * clickMouse 以此为窄门前置（无脑 ⇒ 连 askRefutation 都不叫，性能铁律）。
- * 敌意 face 读取故障 ⇒ false（不可开庭的诚实形态）。
+ *（同源剔除后仍有席），或 ΝΩ-47 多脑裁决面在场可用。纯配置/纯在场判定 ——
+ * 零网络、零拨号、零副作用；clickMouse 以此为窄门前置（无脑 ⇒ 连
+ * askRefutation 都不叫，性能铁律）。敌意 face 读取故障 ⇒ false（不可开庭的
+ * 诚实形态）。
  */
 export function refuteCourtInSession(): boolean {
   try {
     const face = refuteFace;
     if (!face) return false;
+    // ΝΩ-47：多脑裁决面可用即足以开庭（装配件已保证子庭 ≥2 异构）
+    const q = face.quorum;
+    if (q !== null && typeof q === 'object' && typeof q.askVerdict === 'function') return true;
     const primary = { id: face.primaryId, baseUrl: face.primaryBaseUrl };
     for (const b of resolveBrains(face)) {
       if (!b || typeof b !== 'object' || typeof b.id !== 'string' || typeof b.chatJson !== 'function') continue;

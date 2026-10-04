@@ -314,8 +314,8 @@ test('Φ-VI: buildAutonomyStack —— CSV→RiskTier[]、追加危险词、步�
     };
     const stack = buildAutonomyStack(config, deps);
 
-    // 快照槽就地补挂：同一 deps 对象上出现（后续 createExecute({...deps}) 共享）
-    assert.ok(deps.lastSnapshotRef, 'buildAutonomyStack 应就地补挂 lastSnapshotRef');
+    // 快照槽补挂回传（ΑΩ-R44 定谳最小变异面）：同一 deps 对象上出现（后续 createExecute({...deps}) 共享）
+    assert.ok(deps.lastSnapshotRef, 'buildAutonomyStack 应补挂回传 lastSnapshotRef');
     assert.equal(deps.lastSnapshotRef!.current, null);
 
     // 规则映射：非法词剔除（保序）、危险词去重、步数硬顶透传
@@ -334,6 +334,133 @@ test('Φ-VI: buildAutonomyStack —— CSV→RiskTier[]、追加危险词、步�
     assert.equal(snap.elements[0].source, 'local');
     assert.deepEqual(snap.elements[0].center, { x: 150, y: 120 });
     assert.equal(deps.lastSnapshotRef!.current, snap, '感知快照应写入共享槽');
+  } finally {
+    restoreEnv(savedEnv);
+    resetGlmClient();
+  }
+});
+
+// ─── ΑΩ-R44：buildAutonomyStack 入参纯化（浅拷贝铸栈 + 定谳最小变异面回写） ───
+
+test('ΑΩ-R44①: 铸栈变异面钉死 —— 原 deps 恰新增定谳补挂键（不多不少）、已注入字段零覆盖', async () => {
+  const savedEnv = snapshotEnv();
+  try {
+    clearEnvKeys();
+    resetGlmClient();
+    // 全注入向：六个可补挂位全部由调用方自带 ⇒ 铸栈后原对象零新增键、引用零覆盖
+    const ownSlot: NonNullable<RuntimeDeps['lastSnapshotRef']> = { current: null };
+    const ownObserver: NonNullable<RuntimeDeps['incrementalObserver']> = { current: null };
+    const ownDrag: NonNullable<RuntimeDeps['drag']> = async () => ({ ok: true });
+    const ownProbe: NonNullable<RuntimeDeps['probe']> = {
+      hitTestPoint: async () => null, cursorKind: async () => null,
+      sampleFrame: async () => null, frameDiff: async () => null, frameRowMeans: async () => null,
+    };
+    const ownFocus: NonNullable<RuntimeDeps['focus']> = {
+      predicted: () => ({ x: 1, y: 1, extrapolated: true }),
+      set: () => { /* 假件无操作 */ },
+    };
+    const ownW1: NonNullable<RuntimeDeps['w1']> = { steadyPollMs: 55 };
+    const full: RuntimeDeps = {
+      capture: async () => pngA,
+      readWords: async () => [],
+      groundVlm: async () => [],
+      now: () => 42,
+      sleep: async () => { /* 零真睡 */ },
+      lastSnapshotRef: ownSlot,
+      incrementalObserver: ownObserver,
+      drag: ownDrag,
+      probe: ownProbe,
+      focus: ownFocus,
+      w1: ownW1,
+    };
+    const keysFull = Object.keys(full).sort();
+    buildAutonomyStack(makeConfig({ autonomyW1SteadyPollMs: 77 }), full);
+    assert.deepEqual(Object.keys(full).sort(), keysFull, '全注入 ⇒ 原对象零新增键（副本承载、无补挂可回写）');
+    assert.equal(full.lastSnapshotRef, ownSlot, '已注入快照槽零覆盖');
+    assert.equal(full.incrementalObserver, ownObserver, '已注入观察槽零覆盖');
+    assert.equal(full.drag, ownDrag, '已注入 drag 零覆盖');
+    assert.equal(full.probe, ownProbe, '已注入 probe 零覆盖');
+    assert.equal(full.focus, ownFocus, '已注入 focus 零覆盖');
+    assert.equal(full.w1, ownW1, '已注入 w1 零覆盖（显式调参优先于 config 映射）');
+
+    // 缺省向：裸 deps ⇒ 恰补挂回传四键（w1 无调参覆盖不挂；incrementalObserver
+    // 总闸关不挂 —— 两向另由 w5wire 专证）
+    const bare: RuntimeDeps = { capture: async () => pngA };
+    const keysBare = new Set(Object.keys(bare));
+    buildAutonomyStack(makeConfig(), bare);
+    assert.deepEqual(
+      Object.keys(bare).filter(k => !keysBare.has(k)).sort(),
+      ['drag', 'focus', 'lastSnapshotRef', 'probe'],
+      '缺省铸栈 ⇒ 变异面恰为定谳四键（不多不少）',
+    );
+
+    // 调参向：config 带有效 W1 键 ⇒ w1 亦进回传面
+    const tuned: RuntimeDeps = { capture: async () => pngA };
+    buildAutonomyStack(makeConfig({ autonomyW1SteadyPollMs: 77 }), tuned);
+    assert.equal(tuned.w1?.steadyPollMs, 77, '调参键在场 ⇒ w1 补挂回传');
+
+    // 总闸关向：autonomyW1Exec=false ⇒ probe/focus/w1 三缺席（仅剩无条件两键）
+    const off: RuntimeDeps = { capture: async () => pngA };
+    const keysOff = new Set(Object.keys(off));
+    buildAutonomyStack(makeConfig({ autonomyW1Exec: false }), off);
+    assert.deepEqual(
+      Object.keys(off).filter(k => !keysOff.has(k)).sort(),
+      ['drag', 'lastSnapshotRef'],
+      'W1 总闸关 ⇒ 执行层三键缺席（零回归红律）',
+    );
+  } finally {
+    restoreEnv(savedEnv);
+    resetGlmClient();
+  }
+});
+
+test('ΑΩ-R44②: 同一 deps 两次铸栈 —— 补挂槽跨铸复用不重铸（互不污染）、两次产物行为等价', async () => {
+  const savedEnv = snapshotEnv();
+  try {
+    clearEnvKeys();
+    resetGlmClient();
+    const deps: RuntimeDeps = {
+      capture: async () => pngA,
+      readWords: async () => [{ label: '任务启动', bbox: { x0: 100, y0: 100, x1: 200, y1: 140 }, confidence: 0.9 }],
+      groundVlm: async () => [],
+      now: () => 42,
+      sleep: async () => { /* 零真睡 */ },
+    };
+    // 首铸：补挂回传在场，真感知管线产快照并写入共享槽
+    const stack1 = buildAutonomyStack(makeConfig(), deps);
+    const slot1 = deps.lastSnapshotRef;
+    const drag1 = deps.drag;
+    const probe1 = deps.probe;
+    const focus1 = deps.focus;
+    assert.ok(slot1 && drag1 && probe1 && focus1, '首铸补挂回传在场');
+    const snap1 = await stack1.perceive();
+    assert.equal(slot1.current, snap1, '首铸感知写入共享槽');
+
+    // 二铸（同一 deps）：只填缺席位 ⇒ 首铸补挂的槽/端口原样复用（引用恒等、
+    // 不被重铸顶掉 ⇒ 两栈共享同一只快照槽，零新增键 —— 互不污染）
+    const keysBefore2nd = new Set(Object.keys(deps));
+    const stack2 = buildAutonomyStack(makeConfig(), deps);
+    assert.equal(deps.lastSnapshotRef, slot1, '二铸复用首铸快照槽（不重铸）');
+    assert.equal(deps.drag, drag1, '二铸复用首铸 drag 端口');
+    assert.equal(deps.probe, probe1, '二铸复用首铸 probe 端口');
+    assert.equal(deps.focus, focus1, '二铸复用首铸 focus 端口');
+    assert.deepEqual(
+      Object.keys(deps).filter(k => !keysBefore2nd.has(k)),
+      [],
+      '二铸零新增键（首铸补挂面即稳态变异面）',
+    );
+
+    // 两次产物行为等价：宪法规则逐键同、感知同像同指纹同摘要、共享槽同步、
+    // 免看门控端口同图同指纹
+    const rules1 = (stack1.constitution as AutonomyConstitution).rules;
+    const rules2 = (stack2.constitution as AutonomyConstitution).rules;
+    assert.deepEqual(rules2, rules1, '两次铸栈的宪法规则逐键等价');
+    const snap2 = await stack2.perceive();
+    assert.equal(snap2.dhash, snap1.dhash, '同像 ⇒ 同指纹');
+    assert.equal(snap2.textDigest, snap1.textDigest, '同像 ⇒ 同文本摘要');
+    assert.equal(deps.lastSnapshotRef!.current, snap2, '二铸感知写同一只共享槽');
+    assert.equal(slot1.current, snap2, '首铸槽视角亦见（跨栈共享单例语义）');
+    assert.equal(await stack1.frameHash!(), await stack2.frameHash!(), '两栈 frameHash 同图同指纹（行为等价）');
   } finally {
     restoreEnv(savedEnv);
     resetGlmClient();

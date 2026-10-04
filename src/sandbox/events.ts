@@ -113,7 +113,26 @@ export function onDoctorVerdict(
 /** 宿主工具结果中可接受的指纹字段名（按宿主锚点方言增补，收口于此） */
 const FINGERPRINT_KEYS = ['scene_fingerprint', 'screen_dhash', 'dhash', 'scene_hash'] as const;
 
-/** 从任意宿主工具结果中嗅探 64 位指纹串；缺席返回 null（诚实，不伪造） */
+// ΝΩ-1：指纹位宽域常量（摄取侧与 engine.noteHostObservation 同一事实源）。
+// ΑΩ-R19 只修了比对侧（engine.fpSimilarity 不等宽前缀比对 + truncatedTo 注记），
+// 摄取侧仍硬编码 64 位 ⇒ truncatedTo 分支永不可达 —— 修复自相矛盾。位宽放宽为
+// [32,256]：现行 64 位串照常摄取（零回归），128 位等演进格式可入缓存，与
+// fpSimilarity 的公共前缀比对协同（摄取不再先于比对没收演进格式）。
+/** 指纹最小位宽（低于 = 证据量不足，保守拒绝摄取） */
+export const FINGERPRINT_MIN_BITS = 32;
+/** 指纹最大位宽（高于 = 非已知指纹方言，保守拒绝摄取） */
+export const FINGERPRINT_MAX_BITS = 256;
+
+/** 二进制指纹串判据（[01]{32,256} —— 摄取侧唯一正则事实源，两处消费共用） */
+const BINARY_FINGERPRINT_RE = new RegExp(`^[01]{${FINGERPRINT_MIN_BITS},${FINGERPRINT_MAX_BITS}}$`);
+
+/** ΝΩ-1：二进制指纹形状判定的单点导出（sniffFingerprint 与 engine 的
+ *  noteHostObservation 共用 —— 摄取纪律单源，漂移即测试可见）。纯函数。 */
+export function isBinaryFingerprint(v: string): boolean {
+  return BINARY_FINGERPRINT_RE.test(v);
+}
+
+/** 从任意宿主工具结果中嗅探 [01]{32,256} 位指纹串；缺席返回 null（诚实，不伪造） */
 export function sniffFingerprint(result: unknown): string | null {
   if (typeof result !== 'string') return null;
   // 宿主工具结果可能是 JSON 字符串或前缀协议文本 —— 只对 JSON 路径嗅探
@@ -126,7 +145,7 @@ export function sniffFingerprint(result: unknown): string | null {
       : parsed;
     for (const key of FINGERPRINT_KEYS) {
       const v = anchor[key];
-      if (typeof v === 'string' && /^[01]{64}$/.test(v)) return v;
+      if (typeof v === 'string' && isBinaryFingerprint(v)) return v;
     }
     return null;
   } catch {
