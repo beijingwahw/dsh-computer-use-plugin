@@ -20,7 +20,10 @@
 > 窗口代码职权内可闭，D-PAN 系列在用）｜**后续窗口处理**（ΤΕΛ-12 新立 2026-10-05：
 > ΤΕΛΟΣ 完满纪元各工位报告的留案项/拆条项——后续窗口代码职权内可闭，
 > D-G33..D-G39 在用）｜**实战在册**（ἈΓΩΝ 收官新立 2026-10-05：实战期防线/
-> 缓解在役、根治需人工或后续窗口的债——D-G41..D-G82 在用）。
+> 缓解在役、根治需人工或后续窗口的债——D-G41..D-G82 在用）｜**本纪元ΑΝΒ处理**
+>（ΑΝΒ-8 新立 2026-10-05：ΑΝΑΒΑΣΙΣ 升维纪元在途工单——决策 D2/D3/D5/D6/D8/D9
+> 处置与 D2 治本施工中，终局由收官补记翻案、不预填结果——D-E3/D-G66/D-G80/
+> D-G84/D-G85 在用）。
 
 <!-- W7 审计改正：状态枚举补「已知取舍」（原头部遗漏，11+ 条目在用） -->
 <!-- ΝΩ-54 审计补正：状态枚举补「待拆」（D-F5 依赖环债在用） -->
@@ -28,6 +31,8 @@
 <!-- ΤΕΛ-12 审计补正：状态枚举补「后续窗口处理」（ΤΕΛΟΣ 留案拆条 D-G33..D-G39 在用） -->
 <!-- ἈΓΩΝ 收官补正（R6-3 项目史官 2026-10-05）：状态枚举补「实战在册」（R2-9 §4.3 立法——
      实战期防线/缓解在役、根治需人工或后续窗口的债；D-G41..D-G82 在用） -->
+<!-- ΑΝΒ-8 审计补正（项目史官 2026-10-05）：状态枚举补「本纪元ΑΝΒ处理」（ΑΝΑΒΑΣΙΣ
+     升维纪元在途工单——不预填结果，终局由收官补记翻案） -->
 
 ## A. 真机验证清单（离线执法已绿，待硬件/长跑在环定谳）
 
@@ -102,7 +107,7 @@
 | --- | --- | --- | --- | --- |
 | D-E1 | W5-1 复核发现（W6-0，2026-10-03）→ W6R 修复（已闭） | 原债「Cv2FrameSource.read 双重包装：`Image.fromarray(cv2_to_rgb(frame, np))` 中 cv2_to_rgb 已返回 PIL Image 再包一层 fromarray ⇒ cv2 在场 + DirectShow 设备 isOpened 且可 read 的环境必 TypeError → internal_error」——已核实修复：read() 直接 `return cv2_to_rgb(frame, np)`。本册收稿假 cap 实测（注入假 cv2 模块 + 假 DirectShow 设备 isOpened 可读——即原缺陷的触发环境）：返回 PIL Image、BGR→RGB 通道序正确（输入 BGR 蓝 [255,0,0] ⇒ RGB (0,0,255)，输入 BGR 红 [0,0,255] ⇒ RGB (255,0,0)）、无 fromarray TypeError。全量基线偏差归因点就此清零（w5pyreg 本册复跑 9/0——②b 在本机走硬件缺席诚实降级路径，kinds 逐项符合） | 已闭环 | python_service/dsh_physical/uvc.py:298-299（修复注释 + return cv2_to_rgb(frame, np)）/ :314-318（cv2_to_rgb 定义：BGR ndarray → RGB PIL）/ :244（Cv2FrameSource）；test/w5pyreg.test.ts:195-210（②b）本册复跑 9/0；本册假 cap 实测记录见 W6R-B5 复核段 |
 | D-E2 | W9-4 实证发现（2026-10-04，新登记）→ ΑΩ-R1 闭环 | 原债「audio.py 的 comtypes WASAPI 路径在 py3.14 + comtypes 1.4.17 下因 ctypes 出参约定回归不可用（报文在 real_probe_report.json 在案）」——已闭：ΑΩ-R1（ΑΩ 隐患清账战役第 1 批）把 WASAPI 建链整体移植为原始 vtable(ctypes) 路径（comtypes 不再在环——出参约定回归的依赖面直接拆除），raw-vtable 会话全生命周期管理（Stop + 逆序 Release 尽力回收 COM 引用）；本机 Python 3.14.6 真硬件冒烟通过（真回环采集 + 真播放合成提示音分类命中——D-A4 真环同语义，非合成波形桥） | 已闭环（ΑΩ-R1：本机 py3.14.6 真硬件冒烟通过） | python_service/dsh_physical/audio.py:529（engine: raw-vtable）/:830（py≥3.14 首选路径）/:878（会话标死回收）；python_service/real_probe_report.json（W9-4 对照报文在案）；GENESIS「ΑΩ 隐患清账战役」段第 1 批 |
-| D-E3 | ΝΩ-54 收官复核发现（2026-10-04，新登记） | w9real D-A5（真三进程真 socket barrier 往返）在本机 **node v24.19.0 / Windows 确定性红**：客户端 A 完成 barrier 往返（RESULT {"ok":true,"ackOk":true,"peers":["A","B"]} —— 协议本身成功）后 `process.exit(0)` 与 libuv 异步句柄关闭竞态 ⇒ fastfail 0xC0000409（stderr「Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94」），测试断言「客户端 A 退出码 0」失败。归因证据三链：① 测试 + 客户端脚本 + crossMachine 栈**零 ΝΩ 标记**（federation-server 的 ΝΩ-19 改动仅 /aggregate 摘要中继、不涉 barrier 端点——git diff 亲验）；② **git archive HEAD（W9 纯净树）同款复现**（RESULT ok:true 后退出异常——非 ΝΩ 回归；node v22.14.0/v22.18.0 历史 W9/AΩ 收官 0 fail 记录在 GENESIS 在册）；③ 单跑 4/4 同款红（确定性非偶发）。出路（任一，非本册 .md 产权）：CI/开发机钉选 node LTS 22.x；或客户端退出序列补丁（transport 优雅关闭后再 exit——scripts 域一行级改动）；或测试断言放宽为「RESULT ok 即过」（退出码与协议成败解耦）。**ΠΑΝ-F3-3 归因补强（2026-10-04）**：对照实验已定案——用不含任何本工单改动的裸 node:http 服务复刻 barrier 应答面，轮询方客户端同样 5/5 崩溃 ⇒ 纯客户端侧 Windows/libuv 退出竞态（process.exit 与未决 undici keep-alive socket 竞态）；一行修法在案：scripts/w9real-barrier-client.mjs 结尾 `process.exit(rc)` 改 `process.exitCode = rc`（自然排空退出） | 需人工（Node 版本钉选 / 退出序列补丁取舍属 runner 与部署决策面） | test/w9real.test.ts:96-117（断言面）/ :116（exit code 断言）；scripts/w9real-barrier-client.mjs:54（process.exit）；本册 standalone 复现记录（exit 127 / 0xC0000409 双形态 + HEAD 纯净树对照）；GENESIS「ΝΩ 前沿升级战役」段审判口径① |
+| D-E3 | ΝΩ-54 收官复核发现（2026-10-04，新登记） | w9real D-A5（真三进程真 socket barrier 往返）在本机 **node v24.19.0 / Windows 确定性红**：客户端 A 完成 barrier 往返（RESULT {"ok":true,"ackOk":true,"peers":["A","B"]} —— 协议本身成功）后 `process.exit(0)` 与 libuv 异步句柄关闭竞态 ⇒ fastfail 0xC0000409（stderr「Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94」），测试断言「客户端 A 退出码 0」失败。归因证据三链：① 测试 + 客户端脚本 + crossMachine 栈**零 ΝΩ 标记**（federation-server 的 ΝΩ-19 改动仅 /aggregate 摘要中继、不涉 barrier 端点——git diff 亲验）；② **git archive HEAD（W9 纯净树）同款复现**（RESULT ok:true 后退出异常——非 ΝΩ 回归；node v22.14.0/v22.18.0 历史 W9/AΩ 收官 0 fail 记录在 GENESIS 在册）；③ 单跑 4/4 同款红（确定性非偶发）。出路（任一，非本册 .md 产权）：CI/开发机钉选 node LTS 22.x；或客户端退出序列补丁（transport 优雅关闭后再 exit——scripts 域一行级改动）；或测试断言放宽为「RESULT ok 即过」（退出码与协议成败解耦）。**ΠΑΝ-F3-3 归因补强（2026-10-04）**：对照实验已定案——用不含任何本工单改动的裸 node:http 服务复刻 barrier 应答面，轮询方客户端同样 5/5 崩溃 ⇒ 纯客户端侧 Windows/libuv 退出竞态（process.exit 与未决 undici keep-alive socket 竞态）；一行修法在案：scripts/w9real-barrier-client.mjs 结尾 `process.exit(rc)` 改 `process.exitCode = rc`（自然排空退出） | 已闭环（ΑΝΒ-3/D3 落地 2026-10-05：退出协议升维=零 process.exit、exitCode+事件循环自然排空——0/1/2 三退出码语义逐码实测不变、断言零放宽；单册 7/7 连跑零 flake，全量 3631 测试 w9real 首次绿（node v24.19.0）——版本无关性=无抢占点；engines 上界两案[甲放宽>=20/乙维持<24]留主人定谳，CI 仍钉 22/20） | test/w9real.test.ts:96-117（断言面）/ :116（exit code 断言）；scripts/w9real-barrier-client.mjs:54（process.exit）；本册 standalone 复现记录（exit 127 / 0xC0000409 双形态 + HEAD 纯净树对照）；GENESIS「ΝΩ 前沿升级战役」段审判口径① |
 
 ## F. 结构性大文件与依赖环（拆分/破环是决策不是缺陷——先立案再动刀）
 
@@ -164,6 +169,14 @@
      G 分区末尾追加）。候选区定谳：D-ΑΓ-27..36 转正、D-ΑΓ-37 条件立案销案（T8 修复后
      重评 PASS 条件未触发）；R5 波移交新立 D-ΑΓ-38..43。三件套底稿
      C:\2\.survey\practice\DEBTS-DAG-entries-draft.md ══ -->
+<!-- ══ ΑΝΒ-8 定谳补正（项目史官 2026-10-05，工单 ANAB-8）：D7+D10 批3 既成事实回溯定谳——
+     D7 三条件全消解（①T11 第 6 跑/T12 链根任务 PASS 残局自解；②R6-1 增量持久化落地
+     D-G77 销案；③R5-8/R6-6 终验覆盖）。D10 销案 6（D-ΑΓ-30/31/32/33/35 批3 复证 +
+     D-ΑΓ-37 以 T20/T21 编辑链 PASS 销案、治本面=D-G80/ΑΝΒ-2 在途）；转正 5+1
+     （27 后半=D-G67/28 后半=D-G68→后续窗口处理、29=D-G69 维持、34 后半=D-G83 新立
+     需部署决策、36=D-G76 维持、37 治本面=D-G80→本纪元ΑΝΒ处理）。六决策同步：
+     D2/D3/D8/D9 落 D-G80/D-E3/D-G66，D5/D6 新立 D-G84/D-G85。报告
+     C:\2\.survey\practice\ANAB-8.md ══ -->
 
 | D-G41 | ἈΓΩΝ·D-ΑΓ-1（R1-8 遗留①→R2-2 修复→批1/批2 复核） | 热键白名单无 s/o（ctrl+s 保存链被协议层 schema 枚举拒绝——字母仅 a/c/v/z，滞后于 python 物理层全字母表立法） | 已闭环（R2-2 收割，批1/批2 实战复核） | src/tools/pressHotkey.ts+src/system.ts fallbackMap 双向镜像（`// R2-2:` 标注）；新册 6/6+局部 56/56、黑名单零弱化四层一致回归；批1 ctrl+end/z/s 三和弦全放行、ctrl+s 保存链完整达成（R3-1 §3）；批2 保存链复证+R5 重评 T8 终判含 ctrl 组合链 |
 | D-G42 | ἈΓΩΝ·D-ΑΓ-2（R1-8 遗留④→R2-3 双层→R3-1 三层） | 宿主 UI 回合结束自抬抢焦（最危险形态：type_text 落宿主聊天输入框=自我注入下一回合 prompt；宿主二进制不可改） | 实战在册（ἈΓΩΝ 处理中——三层防线在役，根治需人工） | R2-3 驱动 9s 压制（只压宿主窗）+type_text 前置焦点闸（python `/active_window` 端点；20+7 测试）；R3-1 第三层打字防串窗污染扫描（r31.typingPollution 7/7→R5-1 补登后 13/13）；役累计 133 拍：压回 3、污染 0、误报 0（R5 重评波新增拍数未单独汇总——receipts focusGuard 块在盘可取）；托盘/后台模式待人工排查 |
@@ -190,30 +203,34 @@
 | D-G63 | ἈΓΩΝ·D-ΑΓ-23（R3-8 §1.2） | python 懒拉起旋涡（spawn→死→重试 8421..8428 SYN_SENT；间歇性） | 后续窗口处理（观测协议在役） | R-P3 判据立法；R4-7 08:14 旋涡首次完整逐拍记录（<60s 自愈，触发源=批前健康巡检非物理失败，未达 R-P3）；R3-5/R5-7 watchdog python 面巡检在役 |
 | D-G64 | ἈΓΩΝ·D-ΑΓ-24（R3-1 冒烟 r2 根因②） | MinimizeAll 与纯视觉 agent 目标可见性互斥（屏幕卫生/恢复动作把 E2 进程级目标藏起来） | 实战在册（ἈΓΩΝ 处理中） | 批1 处置=操作员清残留；结构性修法（恢复序只压宿主窗/恢复后置前目标窗）未落——与 D-G42「跑动期只压宿主窗」同律家族处置 |
 | D-G65 | ἈΓΩΝ·D-ΑΓ-25（R3-6 立项→R4-3 落地 b 类） | 回执话术误导五处（b1-b5）+结构纪律三项（c1 pwsh 键鼠硬边界/c2 弹窗守卫僵局熔断/c3 坐标惯性闸门） | 部分闭环（b1-b6 六面已落地——含 v3 未列的 b6；c1-c3 三项未实施；生效性四指标重评已跑但未逐项计量——在案登记不虚填） | R4-3：6 src 文件全加法式+`// R4-3:` 注释+r43.dialectHardening 10/10+build 212 文件；R5-1 重启加载实证（Checkpoint OK）；侧面证据：T8 终判轮 read_text×10 消费+R5-2 noop CAVEAT 补强 b4 面 |
-| D-G66 | ἈΓΩΝ·D-ΑΓ-26（R3-4 §3c） | 会话级工具禁用接线未决（宿主 tools.guard()/restrict() 通道实证存在，插件 config benchDiscipline 接线需联席决策） | 后续窗口处理 | 当前执法=提示词纪律+anti-cheat 事后检测（全役纯插件工具、宿主 shell/文件 0 调用）；接线后为事前拦截 |
-| D-G67 | ἈΓΩΝ·D-ΑΓ-27（R4-1 §7①·候选转正） | 批间冷复位与链任务的宪法级冲突（附则一 §6「每批 reset --all」摧毁链式 GUI/磁盘终态） | 实战在册（ἈΓΩΝ 处理中——R5-1 以 --task 确定性重建+预置协议 v2 缓解在役；宪法附则修法待收官决策） | R4-1 §3 链态恢复实录；R5-1 §1 L2/§3 |
-| D-G68 | ἈΓΩΝ·D-ΑΓ-28（R4-1 §7②·候选转正） | 记事本会话恢复是环境级污染源（脏标签跨日存活，reset 签名门槛打不中无 playground 特征标题） | 实战在册（ἈΓΩΝ 处理中——R5-1 定谳根因=Win11 TabState 延迟恢复；预置协议 v2（taskkill 全清+TabState 清除+OCR 实读核验）实战在役；runbook/复位器成文入册未落） | R4-1 §3 WM_CLOSE 实录；R5-1 §1 L2（首帧脏缓冲实证） |
-| D-G69 | ἈΓΩΝ·D-ΑΓ-29（R4-1 §7③·候选转正） | T4 类 expect 谓词语义宽松（工具名 vs 轨迹 JSON 子串） | 后续窗口处理（R5-6 F1 机制级根因定谳：expect 由 prompt 文本回声满足、工具从未被调用——修法=expect 收紧为名字锚定，须先统一两 driver 行格式；enableOcr+read_text 真挂载后批3 起消洞） | R4-1 §2 T4 行；R5-6 §4 F1（T19 审批链证明同形态） |
-| D-G70 | ἈΓΩΝ·D-ΑΓ-30（R4-4 §5-A·候选转正） | 批3 双配置开关未开（autonomyEnabled/enableElementIdMode 缺省 false ⇒ autonomous_run/click_element 未挂载） | 已闭环（R5-1 profile 王炸两枚+两次受控重启：41→43 tools、Element-ID UIA provider wired 日志实证） | R5-1 §2 #9+§3（离线枚举+在线差额互证） |
-| D-G71 | ἈΓΩΝ·D-ΑΓ-31（R4-4 §5-B·候选转正） | SEED_MANIFEST prereq 级联绑架（T19 FAIL ⇒ T20→T26 尾链 blocked） | 已闭环（R5-3 两处松绑 T20/T26 prereq→[]；物料面 files 谓词独立保留） | R5-3 §1（w2orchestr 16/16+plan 双跑确定性+diff 恰 2 行） |
-| D-G72 | ἈΓΩΝ·D-ΑΓ-32（R4-4 §5-C·候选转正） | suite 话术 win+r/win+e 残留（黑名单键教学） | 已闭环（R5-3 话术清剿教学残留清零 3 处：T3 本工位修+T11/T16 并行修+复核；保留 14 反教学注记+1 shift+delete 安全禁令） | R5-3 §2（执法面证据：meta 单键条目 ⇒ win 族和弦全灭） |
-| D-G73 | ἈΓΩΝ·D-ΑΓ-33（R4-2 §4 D5·候选转正） | type_text 换行语义缺陷（\n 被吞成单行） | 已闭环（R5-2 单点修 python _newline_plan 真 VK_RETURN 键事件+回执 newline_count/newline_semantics；回归钉「任何事件不得再以 VK_PACKET 0x0A/0x0D 注入换行」） | R5-2 §1-§3（python 11 项+全套件 366 过/3 skip；TS r52 7/7 dist 全链字节比对） |
-| D-G74 | ἈΓΩΝ·D-ΑΓ-34（R4-2 §4 D4·候选转正） | glm-5.3 会话纯文本：take_screenshot 图像本体不被宿主脑消费 | 已闭环（提示词面收口：R5-4 会话视觉能力自查段+visual_summary_cache 双拍冗余掐断——恒开；ask.semanticCache 键入册缺省关；开通图像输入归宿主面非插件债） | R5-4 §1.2/§2（VISION_GROUNDING 根性失修四证据+r54 7/7） |
-| D-G75 | ἈΓΩΝ·D-ΑΓ-35（R4-7 §五·候选转正） | findToken 顺序：state 存档优先 ⇒ 宿主重启后首轮 RPC 必 401 | 已闭环（R5-7 修 ops/lib/dsh-ops.mjs：env→最新启动日志→state 存档；08:05 重启后首轮 rpc=ok 实测） | R5-7 §1.3 #7+§1.4 |
+| D-G66 | ἈΓΩΝ·D-ΑΓ-26（R3-4 §3c） | 会话级工具禁用接线未决（宿主 tools.guard()/restrict() 通道实证存在，插件 config benchDiscipline 接线需联席决策） | 已闭环（ΑΝΒ-6/ΑΝΒ-7/D8+D9 落地 2026-10-05：金丝雀判读接线 analyzeCore classifyOutcome 三态[canary-pass=正向证据/canary-violation=警讯/limitation-blocked 分列]+批3 回放 T19 判 canary-pass 与终局吻合；考核模式 src/guards/hostToolPolicy.ts opt-in 接线[benchDiscipline 缺省关零回归，开=宿主工具 fail-closed 白名单 50 件闭集，通道缺席诚实降级]+联席评审框架 ANAB-7-review.md 在案） | 当前执法=提示词纪律+anti-cheat 事后检测（全役纯插件工具、宿主 shell/文件 0 调用——批3 收官抽验 15/15 pure tainted/cheated 双 0，GENESIS ἈΓΩΝ 终局补记）；接线后为事前拦截 |
+| D-G67 | ἈΓΩΝ·D-ΑΓ-27（R4-1 §7①·候选转正） | 批间冷复位与链任务的宪法级冲突（附则一 §6「每批 reset --all」摧毁链式 GUI/磁盘终态）——**前半已消解**（R5-1 以 --task 确定性重建+预置协议 v2 缓解在役）；**后半（宪法附则修法+批前 world-shape 重建）批3 实锤升级**：宿主重启清前置窗+播种软谓词未过不阻断 ⇒ 批3 三根因败（triple/drag/autonomous）+7 级联 blocked（R6-2 §6.4 W9 P0——非模型能力问题），retry 后批3 终局 11/14 过 | 后续窗口处理（ANAB-8 定谳 2026-10-05：D10 转正——宪法附则修法与批前 world-shape 重建工单归后续窗口，R6-2 W9 在案） | R4-1 §3 链态恢复实录；R5-1 §1 L2/§3；R6-2 §1/§6.4（W9）；orchestrator-state 终局 26 任务 23/2/1 |
+| D-G68 | ἈΓΩΝ·D-ΑΓ-28（R4-1 §7②·候选转正） | 记事本会话恢复是环境级污染源（脏标签跨日存活，reset 签名门槛打不中无 playground 特征标题）——R5-1 定谳根因=Win11 TabState 延迟恢复；预置协议 v2（taskkill 全清+TabState 清除+OCR 实读核验）实战在役；**后半（runbook/复位器 notepad 全清模式成文）仍未落**，批3 final-cleanup 首跑 Edge 残窗+explorer 关闭链撞超时败（retry 二跑过——清场链鲁棒性不足的旁证） | 后续窗口处理（ANAB-8 定谳 2026-10-05：D10 转正——复位器全清模式与 runbook 成文归后续窗口） | R4-1 §3 WM_CLOSE 实录；R5-1 §1 L2（首帧脏缓冲实证）；R6-2 §1（final-cleanup 首跑败/二跑过，orchestrator attempts false,true） |
+| D-G69 | ἈΓΩΝ·D-ΑΓ-29（R4-1 §7③·候选转正） | T4 类 expect 谓词语义宽松（工具名 vs 轨迹 JSON 子串）——R5-6 F1 机制级根因定谳：expect 由 prompt 文本回声满足、工具从未被调用（修法=expect 收紧为名字锚定，须先统一两 driver 行格式）；enableOcr+read_text 真挂载后消工具缺席类回声，**消不掉字面量类**：R6-5 §3 敌意审计 10 PASS 任务 17 条 expect 100% 回声暴露、实际改写 1 任务结局（T4 存疑通过，批2 门槛判定对其鲁棒）；名字锚定未在批3 前落地，T19 金丝雀判定实际走 expectedOutcome 元数据面（R5-3 双判读）而非轨迹臂独立性 | 后续窗口处理（ANAB-8 定谳 2026-10-05：D10 转正——W-09/R6-2 W4 修法仍开放） | R4-1 §2 T4 行；R5-6 §4 F1；R6-5 §3（回声洞影响清单终判）；R6-2 §7 W4 |
+| D-G70 | ἈΓΩΝ·D-ΑΓ-30（R4-4 §5-A·候选转正） | 批3 双配置开关未开（autonomyEnabled/enableElementIdMode 缺省 false ⇒ autonomous_run/click_element 未挂载） | 已闭环（R5-1 profile 王炸两枚+两次受控重启：41→43 tools、Element-ID UIA provider wired 日志实证；**ANAB-8 批3 复证 2026-10-05 销案**：T22 autonomous_run 3 跑真在役（终败于内核预算账目非工具缺席）、T16 calc-element click_element 路径 PASS） | R5-1 §2 #9+§3（离线枚举+在线差额互证）；orchestrator-state（full-autonomous-goal 3 attempts/full-calc-element PASS） |
+| D-G71 | ἈΓΩΝ·D-ΑΓ-31（R4-4 §5-B·候选转正） | SEED_MANIFEST prereq 级联绑架（T19 FAIL ⇒ T20→T26 尾链 blocked） | 已闭环（R5-3 两处松绑 T20/T26 prereq→[]；物料面 files 谓词独立保留；**ANAB-8 批3 复证 2026-10-05 销案**：T19 canary FAIL×3 未绑架尾链——T20-T26 实跑 12/14（唯 T22 真败+T23 Actor 双通道死 blocked）） | R5-3 §1（w2orchestr 16/16+plan 双跑确定性+diff 恰 2 行）；orchestrator-state 批3 终局 |
+| D-G72 | ἈΓΩΝ·D-ΑΓ-32（R4-4 §5-C·候选转正） | suite 话术 win+r/win+e 残留（黑名单键教学） | 已闭环（R5-3 话术清剿教学残留清零 3 处：T3 本工位修+T11/T16 并行修+复核；保留 14 反教学注记+1 shift+delete 安全禁令；**ANAB-8 批3 复证 2026-10-05 销案**：批3+retry 全队列零 win+r/win+e 教学复发——edge att6 制胜路由走 Win+搜索/ctrl+l 直填而非黑名单键，hotkey 面 44+ 次全白名单内（R6-2 §3.2）） | R5-3 §2（执法面证据：meta 单键条目 ⇒ win 族和弦全灭）；R6-2 §2.1/§3.2 |
+| D-G73 | ἈΓΩΝ·D-ΑΓ-33（R4-2 §4 D5·候选转正） | type_text 换行语义缺陷（\n 被吞成单行） | 已闭环（R5-2 单点修 python _newline_plan 真 VK_RETURN 键事件+回执 newline_count/newline_semantics；回归钉「任何事件不得再以 VK_PACKET 0x0A/0x0D 注入换行」；**ANAB-8 批3 复证 2026-10-05 销案**：T20 宏/T21 技能编辑链多行键入 PASS——换行语义批3 在役零回归） | R5-2 §1-§3（python 11 项+全套件 366 过/3 skip；TS r52 7/7 dist 全链字节比对）；orchestrator-state（full-macro-record-replay/full-skill-lifecycle PASS） |
+| D-G74 | ἈΓΩΝ·D-ΑΓ-34（R4-2 §4 D4·候选转正） | glm-5.3 会话纯文本：take_screenshot 图像本体不被宿主脑消费 | 已闭环（提示词面收口：R5-4 会话视觉能力自查段+visual_summary_cache 双拍冗余掐断——恒开；ask.semanticCache 键入册缺省关；**ANAB-8 定谳 2026-10-05：后半（开通图像输入=产品决策）转正 D-G83**——提示词面销案维持） | R5-4 §1.2/§2（VISION_GROUNDING 根性失修四证据+r54 7/7）；R6-2 §3.2/§4.3（两队列 take_screenshot 27+27 图本体零消费、a 项在役命中 0） |
+| D-G75 | ἈΓΩΝ·D-ΑΓ-35（R4-7 §五·候选转正） | findToken 顺序：state 存档优先 ⇒ 宿主重启后首轮 RPC 必 401 | 已闭环（R5-7 修 ops/lib/dsh-ops.mjs：env→最新启动日志→state 存档；08:05 重启后首轮 rpc=ok 实测；**ANAB-8 批3 复证 2026-10-05 销案**：批3 三波 retry（11:49/12:38/13:03 起）批前巡检 rpc session.list 探测全程零首轮 401） | R5-7 §1.3 #7+§1.4；C:\2\batch3_r61*.log 批前巡检 PROBE OK 实录 |
 | D-G76 | ἈΓΩΝ·D-ΑΓ-36（R4-8 §4①·候选转正） | knowledgeBase 知识档无主入口消费方（激活需 stateDir 一行指向知识档目录） | 后续窗口处理（主面已在役：R5-1 重启日志 Checkpoint failureMemory OK=部署档生效实证；第二通道水合接线仍未接） | R4-8 §1.2/§4；R5-1 §3（checkpoint 14 段全 OK） |
-| D-G77 | ἈΓΩΝ·D-ΑΓ-38（R5-1 §5 条件②·新立） | 宿主 session/page 仅保留最近 ~250 事件——长任务早期轨迹被截断，traj 判据与证据包完整性受累 | 后续窗口处理（修法=驱动器等待环增量持久化事件流） | R5-1 §1 L4/L5（两次实证危害）+§5 |
+| D-G77 | ἈΓΩΝ·D-ΑΓ-38（R5-1 §5 条件②·新立） | 宿主 session/page 仅保留最近 ~250 事件——长任务早期轨迹被截断，traj 判据与证据包完整性受累——**R6-1 落地收割**：驱动器等待环每 tick 增量捕获事件流（seq 新于已捕获游标即 append 本地 session-events-inc.jsonl），任务收口增量与终局快照按 seq 去重合并（终局为准）写 hist.jsonl；**批3 实证**：超窗任务证据包零截断——calc-element 280 事件（seq 0-279）、diff-action-locate 279、macro-record-replay 254 全量在场（gaps 容量风暴会计 receipt.eventCapture 在案） | 已闭环（ANAB-8 定谳 2026-10-05：D7-条件② 销案——R6-1 代码 mtime 11:16-11:18 先于批3 开跑 11:49，事件文件在批3 任务目录在场为运行时实证） | bench/drive-desktop.mjs:252-253/:824-855（eventSink+seq 合并）/:860-861（hist 步）；bench/driveCore.mjs:639-710（增量折叠纯函数）；C:\dsh3\test-runs\results\suite-full\full-calc-element\session-events-inc.jsonl（280 行 seq 0-279） |
 | D-G78 | ἈΓΩΝ·D-ΑΓ-39（R5-3 §6.1·新立） | T23 files 谓词仍核 auto-goal.txt（自主环产物，T22 五五开）——T22 FAIL 且未落盘时 T23 将 blocked 而非跑出 FAIL 证据 | 后续窗口处理 | R5-3 §6.1 |
 | D-G79 | ἈΓΩΝ·D-ΑΓ-40（R5-3 §6.2·新立） | expectedOutcome/outcomeNote 元数据消费接线（analyze-run 侧判读：known-limitation 不计回归率、canary-FAIL 记正向证据） | 后续窗口处理 | R5-3 §3/§6.2 |
-| D-G80 | ἈΓΩΝ·D-ΑΓ-41（R5-2 §4.4 建议 c/d·新立） | focusTracker 无光标概念：键盘导航到达编辑位后验证锚取鼠标兜底位（任务栏/资源管理器）⇒ 恒 noop 假阴性诱导盲重打；caret 伪锚与 press_hotkey 选族效果验证接线未落 | 后续窗口处理（区域 dHash 选区可见性已实验证实——前提是先有锚） | R5-2 §4.2②/§4.3/§4.4 |
+| D-G80 | ἈΓΩΝ·D-ΑΓ-41（R5-2 §4.4 建议 c/d·新立） | focusTracker 无光标概念：键盘导航到达编辑位后验证锚取鼠标兜底位（任务栏/资源管理器）⇒ 恒 noop 假阴性诱导盲重打；caret 伪锚与 press_hotkey 选族效果验证接线未落——**D2-c/d 治本即本条**（ΑΝΒ-2 工单在途）；批3 T20 宏/T21 技能编辑链 PASS 证明现行话术配方下编辑任务可达（D-ΑΓ-37 销案证据），结构性根治仍以此条为准 | 已闭环（ΑΝΒ-2/D2 落地 2026-10-05：W-07 caret 窗口中心伪锚[resolveCaretAnchor 阶梯：点击实测位＞伪锚＞null，type_text 验证区告别任务栏鼠标兜底位] + W-08 press_hotkey 选族区域 dHash 效果验证[纯本地零 VLM，SELECTION VERIFIED 附实测值/UNVERIFIED 附证据维度] + 选区账本四条保守失效律贯通 type_text——新册 anab2 23/23 全绿；伪锚≠真光标的诚实标注[anchorKind=window-center-pseudo]在案，生效待受控重启三段[归运行纪律非代码债]） | R5-2 §4.2②/§4.3/§4.4；orchestrator-state（full-macro-record-replay/full-skill-lifecycle PASS） |
 | D-G81 | ἈΓΩΝ·D-ΑΓ-42（R5-6 §4 F11·新立） | verifyCore evalFileLike 的 PASS 路径只落 stat raw、内容不进证据（fail 路径才落 head.raw）——回放重判被迫字节精确重构 | 后续窗口处理（一行改动可让未来回放直接 receipt-entailed；属 verifyCore 产权） | R5-6 §4 F11/§5 |
 | D-G82 | ἈΓΩΝ·D-ΑΓ-43（R5-6 §4 F10·新立） | present 类谓词（processRunning/windowExists）=verify 瞬时快照，「保持打开 N 秒」持续时间语义 DSL 不可表达 | 后续窗口处理（需 battery/world 延迟双采样——登记建议不动 battery） | R5-6 §1 攻击面 3/§4 F10 |
+| D-G83 | ἈΓΩΝ·D-ΑΓ-34 后半（R4-2 §4 D4·ANAB-8 转正 2026-10-05） | glm-5.3 纯文本会话下 take_screenshot 图像本体零消费——两队列 27+27 次持平实证（R6-2 §3.2）；R5-4 a 项 visual_summary_cache 回执捎带部署后在役命中 0 次（指纹邻近+120s 新鲜+ask 先行条件过窄——R6-2 §4.3 判「未兑现」）；开通图像输入（宿主会话面或 harness 喂图）是产品决策非插件代码职权 | 需部署决策（ANAB-8 定谳：D10 转正——D-G74 提示词面已闭，本条承后半产品决策面；缓存命中面重设计归 R6-2 W12） | R6-2 §3.2/§4.3/§7 W12、W5；R5-4 §1.2；DECISIONS §D10 |
+| D-G84 | D5 决策落地（ANAB-8 新立 2026-10-05） | read_text/find_text 部署首日不可达且无告警（enableOcr 缺省 false——R5-1 L4 六轮 retry 工具根本不在场的实证）；主人裁定 D5=C+B：enableOcr 缺省翻 true（零 API 成本零安全面、suite 判据硬依赖）+ doctor/health() 披露「因配置缺席未挂载的工具清单+开启键名」；落地需 census/测试期望同步（r54 等册缺省关形状断言）+ build→profile install→受控重启三段 | 已闭环（ΑΝΒ-4/D5 落地 2026-10-05：enableOcr 缺省翻 true[read_text/find_text 缺省配置即挂载] + CONFIG_GATED_TOOLS 18 门工具册单源立法 + 缺席披露三通道[doctor 第 22 条规则 config.silent-tool-absence/启动日志结构化行/get_metrics tool_face]+门开而装配失败也点名——anab4 8/8 全绿；autonomy/elementId 保持 opt-in 安全边界） | DECISIONS §D5；R5-1 §1 L4、§2 #9 |
+| D-G85 | D6 决策落地（ANAB-8 新立 2026-10-05） | 成本三阈值闸（估算 >¥2 告警 STOP/硬顶 ¥5/轮/429>5%/降级>20%）现役载体=宪法第三律+批收口 SOP+watchdog CRIT——依赖每批人工纪律，换人/无人值守批是漏点；主人裁定 D6=B：watchdog daemon 心跳增读 vlm-batch-report.json 累计成本/429/降级三指标越阈即写 STOP（复用 CRIT→STOP 通道）+宪法附则一行固化「常设执法」 | 已闭环（ΑΝΒ-5/D6 落地 2026-10-05：watchdog cost-guard 常设执法[每 5 拍读 vlm-batch-report 四阈值裁决，越阈复用 CRIT→STOP 通道，代次账本防复发]+阈值单源=宪法附则四机器可读锚行[修宪即改执法]+顺手修复 suiteDirsForStop 对 results/<suite> 布局恒空的通道失明——daemon pid 17988 在役全绿） | DECISIONS §D6；R5-7 §1（daemon v2 CRIT 通道在役）；R4-6（三阈值全役零触发） |
 
 ## 统计与复核记录
 
-条数（含已闭环与已定谳留档，ΤΕΛ-12 收官重数 2026-10-05 → R6-3 ἈΓΩΝ 收官重数）：A 真机 8 ｜
+条数（含已闭环与已定谳留档，ΤΕΛ-12 收官重数 2026-10-05 → R6-3 ἈΓΩΝ 收官重数 →
+ΑΝΒ-8 定谳重数）：A 真机 8 ｜
 B 激活开关 7 ｜ C 部署决策 5 ｜ D 已知取舍 17（W9-5 终谳十二条 + ΑΩ-R43 新立 D-D13 +
-ΝΩ-54 新立 D-D14..D-D17 四条）｜ E 环境暴露 3 ｜ F 大文件与依赖环 5 ｜ G 其他 82
-—— 合计 127 条（沿革：W6-0 立账三十六 → W6R 增至四十三 → W8 增至四十七 →
+ΝΩ-54 新立 D-D14..D-D17 四条）｜ E 环境暴露 3 ｜ F 大文件与依赖环 5 ｜ G 其他 85
+—— 合计 130 条（沿革：W6-0 立账三十六 → W6R 增至四十三 → W8 增至四十七 →
 W9 终账四十八（新增 D-E2）→ ΑΩ 收官四十九（新立 D-D13 一条、闭环 D-E2 一条；
 E 节 W9 收稿时点申报 1 为口径滞后，ΑΩ 补正为实数 2）→ ΝΩ 收官五十五（新立
 D-D14/D-D15/D-D16/D-D17/D-E3/D-F5 六条，无闭环翻案）→ ΠΑΝ 修复潮七十七
@@ -557,3 +574,20 @@ W9-5 收稿复核记录（2026-10-04，终账代理：取舍终谳 + GENESIS 纪
 在案登记：R5-5/R6-1/R6-2 报告缺席；批3 未跑（orchestrator 批 3 state=pending、无 T13-T26
 任务目录）——全部按「缺的在案登记不虚填」处理；写回明细与审计输出见
 C:\2\.survey\practice\R6-3.md。
+
+**ΑΝΒ-8 定谳重数（项目史官 2026-10-05，工单 ANAB-8：D7+D10 批3 既成事实回溯定谳）**：
+合计 **130 条**（对 R6-3 的 127 净增 3：新立 D-G83（D-ΑΓ-34 后半·需部署决策）/D-G84
+（D5 落地）/D-G85（D6 落地）；状态迁移六——D-G77 后续窗口→已闭环（R6-1 增量持久化
+落地+批3 280 事件实证，D7-② 销案）；D-G67/D-G68 实战在册→后续窗口处理（D10 转正，
+批3 世界塑形实锤=R6-2 W9）；D-E3 需人工→本纪元ΑΝΒ处理（D3）；D-G66 后续窗口→
+本纪元ΑΝΒ处理（D8-B+D9 联席）；D-G80 后续窗口→本纪元ΑΝΒ处理（D2 治本=ΑΝΒ-2）。
+D7 三条件全消解：①T11 第 6 跑 PASS（03:48Z）+链根任务自解（scroll-deep PASS/open-url-nav
+retry 首跑 PASS）②见 D-G77 ③R5-2/R5-4 终验由 R5-8（3552 全量+verify 五闸）与 R6-6
+（3572/3562 唯一红=w9real 在案+五闸 EXIT 0+python 366/3）双覆盖——批3 GO 生效且终局
+26 任务 23/2/1（金丝雀口径 24/26）。D10 销案 6：D-ΑΓ-30/31/32/33/35（批3 复证注记入行）
++ D-ΑΓ-37（T20 宏/T21 技能编辑链 PASS——销案维持，治本面 D-G80/ΑΝΒ-2 在途注记）。
+未闭重数（按状态主词逐条重数）：需真机 7｜需人工 2｜需部署决策 1｜部分闭环 2｜
+后续窗口处理 25｜实战在册 6｜本纪元ΑΝΒ处理 5 = **未闭 48**；已定谳 18 不变；
+已闭环 64——三项合计 130，与统计段首段一致。批3 终局证据根：
+C:\dsh3\test-runs\results\suite-full\orchestrator-state.json；写回明细见
+C:\2\.survey\practice\ANAB-8.md。

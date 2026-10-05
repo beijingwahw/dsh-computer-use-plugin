@@ -996,3 +996,22 @@ R6-3 台账写回时批3 state=pending 为当时快照；其后编排器/驱动�
 计量可见 ~320 调用（enrich 覆盖缺口在案）· 估算总成本 ≤¥0.9 · 三阈值全程零告警 ·
 纯净度收官抽验 15/15 pure（tainted/cheated 双 0）。R6-6 收官回归四绿一在案 + 本补记
 后 tsc exit 0（r25 三错已修 20/20）。
+
+### ΑΝΑΒΑΣΙΣ 升维纪元（决策十全收口 · 集成者终验 2026-10-05）
+
+主人令「十条决策以世界性最前沿创世的创新完美升维解决」——超越 D1-D10 的选项二选一，
+每条以下限更优解落地：D1 提交考古（549 路径→12 条主题提交 0338836..a47e24b，文件级
+纪元标记归属零虚构，密钥双扫零命中）；D2 选区治本双组件（ΑΝΒ-2：caret 窗口中心伪锚 +
+press_hotkey 选族区域 dHash 效果验证——SELECTION VERIFIED 从此有证据面，anab2 23/23）；
+D3 环境债源头消红（ΑΝΒ-3：退出协议升维零 process.exit——**全量 3631 测试首次零已知红**，
+node 版本无关）；D5 静默缺席终结者（ΑΝΒ-4：enableOcr 缺省 true + CONFIG_GATED_TOOLS
+18 门册单源 + doctor/日志/metrics 三通道披露）；D6 成本护栏系统化（ΑΝΒ-5：watchdog
+cost-guard 常设执法 + 宪法附则四机器可读锚行）；D8 金丝雀判读接线（ΑΝΒ-6：canary-pass=
+正向证据/canary-violation=警讯三态语义，批3 回放吻合）；D9 考核模式 opt-in（ΑΝΒ-7：
+benchDiscipline 缺省关 fail-closed 白名单接线——能力即得语义零变）；D7/D10 台账定谳
+（ΑΝΒ-8：三条件全消解 + 销 6 转正 6，127→130 条）。附役：ΑΝΒ-11 基准门根因修复
+（ΠΑΝ-45 亚秒衰减×ΠΑΝ-46 停用词的真实语义交互——decay 整秒量化+firstRoundSerialKnowledge
+通道，bench_gate 新基线 29 册/159 指标 exit 0）+ CI 报告器冲突一行修 + K-5 部署档守卫
+血统不变量修正（空洞=合法宿主多段分配）。终验五面：tsc 0 ｜ npm test 3631/3630/0 红
+/9 skip ｜ verify 五闸 exit 0 ｜ census 631/631 ｜ build+dist 301 件。DEBTS 六条翻案
+闭环（D-E3/D-G66/D-G80/D-G84/D-G85 + D-G77）。
