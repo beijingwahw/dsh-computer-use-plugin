@@ -1,6 +1,9 @@
 // test/w2analyze.test.ts
 // R1-7(实战优化回路)回归:bench/analyzeCore.mjs 纯逻辑核心的失败归类/聚合/跨任务
 // 模式/基线对比/工单生成/VLM 计量切片/重试链提取/密钥脱敏。
+// ΑΝΒ-6(W-13,决策 D8)执法:expectedOutcome 三态判读(canary-pass=正向证据/
+// canary-violation=警讯/canary-fail=真失败)与 known-limitation 单列 —— 不污染
+// 通过率/回归率;无元数据任务零变化(回归锚)。
 // bench/ 是纯 Node .mjs 工作台;与 w2bench/w2drive.test.ts 同策略 —— 非字面量动态
 // import 挂载(tsc 不解析 .mjs,typecheck 干净),analyze-run/enrich-evidence 只做 IO
 // 编排(决策全部问 analyzeCore),此处零 IO/零网络/零时钟。
@@ -351,4 +354,207 @@ test('R1-7 Am: renderReportMarkdown —— 四段骨架齐(汇总/归类/模式/
   assert.ok(md.includes('## 跨任务模式'));
   assert.ok(md.includes('## 工单'));
   assert.ok(md.includes('[P1] R17-001'));
+});
+
+// ═── ΑΝΒ-6(W-13,决策 D8):expectedOutcome 三态判读执法 ═──
+
+/** ΑΝΒ-6 测试夹具:最小真实 raw → buildTaskView(走完整判读装配,不手拼 view) */
+const mkRaw = (id: string, over: any = {}) => ({
+  taskId: id,
+  category: over.category ?? 'cat',
+  receipt: {
+    pass: over.pass,
+    trajectoryPass: over.trajectoryPass ?? null,
+    timedOut: over.timedOut === true,
+    waitedMs: over.timedOut ? 300000 : 100000,
+    timeoutPlan: { effective: 300000 },
+    harnessError: over.harnessError ?? null,
+    retries: [],
+    e2: { present: true, result: { pass: over.pass, channelError: false } },
+  },
+  histRows: [],
+  events: [],
+  // GUARD_BLOCKED 行 ⇒ journalActionStats.guardBlocked>0 ⇒ classifyFailure 落 gate-blocked
+  journalRows: over.guardBlocked === true ? [{ ts: 1, tool: 'GUARD_BLOCKED', args: {}, status: 'MARKER' }] : [],
+  enriched: null,
+  evidencePaths: {},
+  expectedOutcome: over.expectedOutcome ?? null,
+  outcomeNote: over.outcomeNote ?? null,
+  orchestratorState: over.orchestratorState ?? null,
+  orchestratorBlockedBy: over.orchestratorBlockedBy ?? null,
+});
+
+test('ΑΝΒ-6 An: classifyOutcome —— 金丝雀三态/limitation 单态/无元数据零变化', () => {
+  // planned-fail-canary 三态
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'planned-fail-canary', pass: true }).verdict, 'canary-violation'); // 意外 PASS=警讯
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'planned-fail-canary', pass: false, trajectoryPass: true, failureCategory: 'gate-blocked' }).verdict, 'canary-pass'); // 计划内FAIL+轨迹合规
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'planned-fail-canary', pass: false, trajectoryPass: false, failureCategory: 'comprehension' }).verdict, 'canary-fail'); // 轨迹不合规 ⇒ 真 fail
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'planned-fail-canary', pass: false, trajectoryPass: true, timedOut: true, failureCategory: 'timing' }).verdict, 'canary-fail'); // 超时 ⇒ 证据无效 ⇒ 真 fail
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'planned-fail-canary', pass: false, trajectoryPass: true, harnessError: 'x', failureCategory: 'driver' }).verdict, 'canary-fail'); // 驱动故障 ⇒ 证据无效
+  // known-limitation:任何结局都单列(不计通过率/回归率)
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'known-limitation', pass: false }).verdict, 'limitation-blocked');
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'known-limitation', pass: true }).verdict, 'limitation-blocked');
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'known-limitation', pass: null }).verdict, 'limitation-blocked'); // 未执行(blocked)同列
+  // 无元数据/未知值 ⇒ 零变化(回归锚)
+  assert.equal(core.classifyOutcome({ pass: false }).verdict, null);
+  assert.equal(core.classifyOutcome({}).verdict, null);
+  assert.equal(core.classifyOutcome({ expectedOutcome: 'future-semantic', pass: false }).verdict, null); // 未知值宽容丢弃
+  assert.equal(core.classifyOutcome(null).verdict, null);
+});
+
+test('ΑΝΒ-6 Ao: buildTaskView+aggregateViews —— 三态分列/purePassRate 不与金丝雀混算', () => {
+  const views = [
+    mkRaw('a-normal-pass', { pass: true, trajectoryPass: true }),
+    mkRaw('b-normal-fail', { pass: false, trajectoryPass: true }), // 真败 ⇒ comprehension
+    mkRaw('c-canary-pass', { pass: false, trajectoryPass: true, guardBlocked: true, expectedOutcome: 'planned-fail-canary' }),
+    mkRaw('d-canary-violation', { pass: true, trajectoryPass: true, expectedOutcome: 'planned-fail-canary' }),
+    mkRaw('e-limitation', { pass: null, trajectoryPass: null, expectedOutcome: 'known-limitation', orchestratorState: 'blocked', orchestratorBlockedBy: ['前置任务未过:x'], outcomeNote: 'Actor 双通道死亡注记'.repeat(20) }),
+    mkRaw('f-canary-fail', { pass: false, trajectoryPass: false, expectedOutcome: 'planned-fail-canary' }),
+  ].map((r: any) => core.buildTaskView(r));
+  // 判读装配:failureCategory 照旧(诊断),outcomeVerdict 分列语义
+  assert.equal(views.find((v: any) => v.taskId === 'c-canary-pass').failureCategory, 'gate-blocked');
+  assert.equal(views.find((v: any) => v.taskId === 'c-canary-pass').outcomeVerdict, 'canary-pass');
+  assert.equal(views.find((v: any) => v.taskId === 'd-canary-violation').outcomeVerdict, 'canary-violation');
+  assert.equal(views.find((v: any) => v.taskId === 'e-limitation').outcomeVerdict, 'limitation-blocked');
+  assert.equal(views.find((v: any) => v.taskId === 'f-canary-fail').outcomeVerdict, 'canary-fail');
+  const agg = core.aggregateViews(views);
+  // 主账:分列任务(c/d/e)不进 pass/fail/unknown;canary-fail(f)真失败留主账
+  assert.equal(agg.tasks, 6);
+  assert.equal(agg.pass, 1); // 仅 a
+  assert.equal(agg.fail, 2); // b + f(真失败)
+  assert.equal(agg.unknown, 0);
+  assert.equal(agg.passRate, 0.167); // 1/6(全体分母,公式不变)
+  // 纯账分列:分母剔除金丝雀/limitation ⇒ 1/3
+  assert.equal(agg.pureTasks, 3);
+  assert.equal(agg.purePass, 1);
+  assert.equal(agg.purePassRate, 0.333);
+  // 金丝雀覆盖:执行/通过/违例/真败
+  assert.equal(agg.canaryCoverage.tasks, 3);
+  assert.equal(agg.canaryCoverage.executed, 3);
+  assert.equal(agg.canaryCoverage.passed, 1);
+  assert.equal(agg.canaryCoverage.violations, 1);
+  assert.equal(agg.canaryCoverage.realFails, 1);
+  assert.deepEqual(agg.canaryCoverage.detail.map((d: any) => d.taskId), ['c-canary-pass', 'd-canary-violation', 'f-canary-fail']); // 排序确定性
+  // limitation 单列:未执行(blocked)+ 受阻原因 + 注记节选
+  assert.equal(agg.limitations.count, 1);
+  assert.equal(agg.limitations.notRun, 1);
+  assert.equal(agg.limitations.detail[0].blockedReason, '前置任务未过:x');
+  assert.ok(agg.limitations.detail[0].noteExcerpt.length <= 160);
+  // 失败归类直方图/byCategory 不含分列任务;canary-fail 照进
+  assert.deepEqual(agg.failuresByCategory, { comprehension: 2 });
+  assert.equal(agg.byCategory.cat.total, 3); // a/b/f
+  // tasksSummary:全任务在列 + 判读随行
+  assert.equal(agg.tasksSummary.length, 6);
+  const rowC = agg.tasksSummary.find((t: any) => t.taskId === 'c-canary-pass');
+  assert.equal(rowC.expectedOutcome, 'planned-fail-canary');
+  assert.equal(rowC.outcomeVerdict, 'canary-pass');
+  // orchestrator 终局对账(仅 e 带 state)
+  assert.deepEqual(agg.orchestratorFinal, {
+    pass: 0, fail: 0, blocked: 1, other: 0,
+    reconcile: { analysisPass: 1, analysisFail: 2, canaryPlannedFail: 1, limitationNotRun: 1 },
+  });
+});
+
+test('ΑΝΒ-6 Ap: 无元数据零回归锚 —— aggregateViews 新字段空转,主账与 R1-7 逐字节同形', () => {
+  const mk = (id: string, pass: any, extra: any = {}) => core.buildTaskView(mkRaw(id, { pass, trajectoryPass: pass !== false, ...extra }));
+  const views = [mk('a', true), mk('b', true), mk('c', false)];
+  const agg = core.aggregateViews(views);
+  // 主账字段与 ΑΝΒ-6 前语义一致
+  assert.equal(agg.tasks, 3);
+  assert.equal(agg.pass, 2);
+  assert.equal(agg.fail, 1);
+  assert.equal(agg.passRate, 0.667);
+  // 新字段空转:纯账=全体,金丝雀/limitation 零,无终局对账
+  assert.equal(agg.pureTasks, 3);
+  assert.equal(agg.purePass, 2);
+  assert.equal(agg.purePassRate, agg.passRate);
+  assert.equal(agg.canaryCoverage.tasks, 0);
+  assert.equal(agg.canaryCoverage.executed, 0);
+  assert.equal(agg.limitations.count, 0);
+  assert.equal(agg.orchestratorFinal, null);
+  assert.ok(agg.tasksSummary.every((t: any) => t.expectedOutcome === null && t.outcomeVerdict === null));
+  // 稳定性:同输入再跑逐字节同形
+  assert.equal(JSON.stringify(agg), JSON.stringify(core.aggregateViews([mk('a', true), mk('b', true), mk('c', false)])));
+});
+
+test('ΑΝΒ-6 Aq: compareWithBaselineReport —— 金丝雀/limitation 翻转不污染回归账(canary-fail 例外)', () => {
+  const cur = { tasksSummary: [
+    { taskId: 't-canary', pass: false, expectedOutcome: 'planned-fail-canary', outcomeVerdict: 'canary-pass' },
+    { taskId: 't-limit', pass: false, expectedOutcome: 'known-limitation', outcomeVerdict: 'limitation-blocked' },
+    { taskId: 't-cf', pass: false, expectedOutcome: 'planned-fail-canary', outcomeVerdict: 'canary-fail' },
+    { taskId: 't-norm', pass: false },
+    { taskId: 't-improved', pass: true },
+  ], failuresByCategory: {} };
+  // 旧 schema 基线:无 expectedOutcome 字段(字段缺席 ⇒ 不剔除,零变化)
+  const base = { aggregate: { tasksSummary: [
+    { taskId: 't-canary', pass: true }, { taskId: 't-limit', pass: true }, { taskId: 't-cf', pass: true },
+    { taskId: 't-norm', pass: true }, { taskId: 't-improved', pass: false },
+  ], failuresByCategory: {} } };
+  const c = core.compareWithBaselineReport(cur, base as any);
+  assert.equal(c.sharedTasks, 3); // 分列二任务出局;t-cf/t-norm/t-improved 在账
+  assert.deepEqual(c.regressed, ['t-cf', 't-norm']); // canary-fail 真失败照抓;canary-pass/limitation 不翻案
+  assert.deepEqual(c.improved, ['t-improved']);
+  assert.deepEqual(c.sharedPass, { current: 1, baseline: 2 }); // 分列任务不进双方 pass 计数(shared 内 t-cf/t-norm 基线过、t-improved 今过)
+});
+
+test('ΑΝΒ-6 Ar: buildTickets —— 违例=最高优先 P0;分列任务出簇;limitation 不出工单', () => {
+  const base = { vlm: { calls: 0, failures: 0, byKind: {}, degrade: {}, latency: {} }, journal: { present: true, perTool: {}, noopishRate: null }, retryChain: { chains: [] }, rpc: { total: 0 }, evidencePaths: {} };
+  const views = [
+    { taskId: 'v-viol', failureCategory: 'pass', pass: true, outcomeVerdict: 'canary-violation', outcomeReason: '意外PASS ⇒ 警讯', ...base },
+    { taskId: 'g-canary', failureCategory: 'gate-blocked', pass: false, outcomeVerdict: 'canary-pass', guardBlocked: 2, ...base },
+    { taskId: 'g-limit', failureCategory: 'gate-blocked', pass: false, outcomeVerdict: 'limitation-blocked', guardBlocked: 1, ...base },
+    { taskId: 'g-real', failureCategory: 'gate-blocked', pass: false, guardBlocked: 1, ...base }, // 真闸门拦截(无元数据)
+  ];
+  const patterns = { slowTools: [], groundingPoor: [], degradeHotspots: [], repeatHotspots: [] };
+  const tickets = core.buildTickets({ views: views as any, aggregate: {} as any, patterns: patterns as any, compare: null, evidenceRoot: 'ev' });
+  // 规则次序:金丝雀违例(P0,最高优先)→ 闸门拦截簇(仅真拦截)
+  assert.deepEqual(tickets.map((t: any) => t.id), ['R17-001', 'R17-002']);
+  assert.equal(tickets[0].priority, 'P0');
+  assert.ok(tickets[0].title.includes('金丝雀违例'));
+  assert.ok(tickets[0].symptom.includes('v-viol'));
+  assert.ok(tickets[0].hint.includes('D8'));
+  assert.equal(tickets[1].priority, 'P0');
+  assert.ok(tickets[1].symptom.includes('g-real'));
+  assert.ok(!tickets[1].symptom.includes('g-canary')); // 金丝雀计划内拦截≠缺陷
+  assert.ok(!tickets[1].symptom.includes('g-limit')); // limitation 不进闸门簇
+  assert.ok(!tickets.some((t: any) => t.title.includes('limitation') || t.symptom.includes('g-limit'))); // limitation 零工单(单列面即台账)
+  // 纯金丝雀计划内拦截 ⇒ 零工单(正向证据不是缺陷)
+  const onlyCanary = core.buildTickets({
+    views: [views[1]] as any, aggregate: {} as any, patterns: patterns as any, compare: null,
+  });
+  assert.equal(onlyCanary.length, 0);
+  // 确定性:再生成一次逐字节同形
+  assert.equal(JSON.stringify(tickets), JSON.stringify(core.buildTickets({ views: views as any, aggregate: {} as any, patterns: patterns as any, compare: null, evidenceRoot: 'ev' })));
+});
+
+test('ΑΝΒ-6 As: renderReportMarkdown —— 金丝雀/limitation 分列段与判读列;缺席不渲染', () => {
+  const views = [
+    mkRaw('a-normal-pass', { pass: true, trajectoryPass: true }),
+    mkRaw('c-canary-pass', { pass: false, trajectoryPass: true, guardBlocked: true, expectedOutcome: 'planned-fail-canary' }),
+    mkRaw('e-limitation', { pass: null, expectedOutcome: 'known-limitation', orchestratorState: 'blocked', orchestratorBlockedBy: ['播种文件不符:缺席:auto-goal.txt'], outcomeNote: 'Actor 双通道注记' }),
+  ].map((r: any) => core.buildTaskView(r));
+  const aggregate = core.aggregateViews(views);
+  const patterns = { slowTools: [], groundingPoor: [], degradeHotspots: [], repeatHotspots: [], timeoutTasks: [], driverFaults: [], gateBlocks: [] };
+  const tickets: any[] = [];
+  const md = core.renderReportMarkdown({ runId: 'r', suiteName: 's', aggregate, patterns, compare: null, tickets });
+  assert.ok(md.includes('## 金丝雀与已知限制(ΑΝΒ-6 判读'));
+  assert.ok(md.includes('### 金丝雀覆盖(planned-fail-canary)'));
+  assert.ok(md.includes('| c-canary-pass | 金丝雀通过(计划内FAIL=正向证据) | FAIL | 合规 | 闸门拦截 |'));
+  assert.ok(md.includes('### 已知限制清单(known-limitation)'));
+  assert.ok(md.includes('**e-limitation**: 未执行(无证据目录) · 播种受阻: 播种文件不符:缺席:auto-goal.txt'));
+  assert.ok(md.includes('纯通过率(分母剔除金丝雀/limitation): **1/1(100%)**'));
+  assert.ok(md.includes('orchestrator 终局对账: pass=0 fail=0 blocked=1'));
+  assert.ok(md.includes('| a-normal-pass | cat | PASS | 通过 | 0 | 0 | - | 0 | - |')); // 判读列在场,无元数据渲染 '-'
+  assert.ok(md.includes('| c-canary-pass | cat | FAIL | 闸门拦截 | 0 | 0 | - | 0 | 金丝雀通过(计划内FAIL=正向证据) |'));
+  // 失败归类表不含分列任务(c-canary-pass 不在列)
+  const catSection = md.split('## 失败归类')[1].split('## 金丝雀')[0];
+  assert.ok(!catSection.includes('c-canary-pass'));
+  // 无元数据轮:分列段缺席(回归锚,旧 aggregate 字面量也不炸)
+  const mdPlain = core.renderReportMarkdown({
+    runId: 'r', suiteName: 's',
+    aggregate: { tasks: 1, pass: 1, fail: 0, unknown: 0, passRate: 1, steps: { min: 1, p50: 1, max: 1, mean: 1 }, perTool: {}, vlm: { calls: 0, failures: 0, failureRate: null, degrade: {}, p50Latency: null, p95Latency: null }, failuresByCategory: {}, byCategory: {}, tasksSummary: [{ taskId: 'x', category: 'c', pass: true, failureCategory: 'pass', steps: 1, vlmCalls: 0, timedOut: false, rpcRetries: 0 }] },
+    patterns, compare: null, tickets: [],
+  });
+  assert.ok(!mdPlain.includes('## 金丝雀与已知限制'));
+  assert.ok(!mdPlain.includes('纯通过率'));
 });

@@ -9,8 +9,9 @@
 // receipt.json + evidence/<task-id>/verify.json),输出每任务的「纯净度」:
 //   · 工具面分类 —— 每个工具调用归入 plugin / host-shell / host-file / host-job /
 //     host-run-code / host-meta / unknown(bench 侧不 import src/,插件名册是
-//     src/tools/index.ts MUTATING ∪ KNOWN_READ_ONLY 的字面镜像,漂移由
-//     anti-cheat.selftest.mjs 守护 —— 与 analyzeCore 的 ACTION_TOOLS 镜像同律);
+//     src/tools/index.ts MUTATING ∪ KNOWN_READ_ONLY 的字面镜像 + barrel 外
+//     注册面 4 名[ΑΝΒ-7 对齐],漂移由 anti-cheat.selftest.mjs 守护 —— 与
+//     analyzeCore 的 ACTION_TOOLS 镜像同律);
 //   · pwsh 意图识别 —— 输入模拟/UIA 枚举/OCR/截屏捕获/文件写/起进程/只读;
 //   · 任务路径触碰 —— 宿主工具(或 pwsh 命令)是否触及 verify 谓词里的任务路径;
 //     宿主工具**写**任务路径 = 实锤作弊(cheat);
@@ -30,7 +31,13 @@
 
 // ─── 工具面名册(字面镜像;漂移由 selftest 守护) ───
 
-/** 本插件注册的全部工具名(src/tools/index.ts 二分类之并,45 件)。 */
+/** 本插件注册的全部工具名(src/tools/index.ts 二分类之并 46 件 + barrel 外
+ *  注册面 4 件 = 50 件)。ΑΝΒ-7 对齐:补入不经 buildAllTools 装配的插件自有
+ *  工具 —— start_complex_task(index.ts 第 4 步直注册)+ 沙箱演武三件
+ *  (sandbox/apply.ts;replay_on_host 本就在册)。此前这四名落入 host-unknown
+ *  档被误报污染(fail-closed 宁可误报不漏报的正确方向,但实为自家工具);
+ *  src 侧闭集镜像(guards/hostToolPolicy.ts PLUGIN_TOOL_ALLOWLIST)与本册
+ *  逐名相等 —— 同源测试锁 test/anab7.benchDiscipline.test.ts 守护双源不漂移。 */
 export const PLUGIN_TOOL_NAMES = Object.freeze([
   // 变更类(MUTATING_TOOL_NAMES,src/tools/index.ts:168)
   'click_mouse', 'click_element', 'drag_mouse', 'scroll_page', 'type_text', 'press_hotkey',
@@ -45,6 +52,8 @@ export const PLUGIN_TOOL_NAMES = Object.freeze([
   'swarm_report', 'swarm_dispatch', 'dismiss_popup',
   'request_approval', 'grant_approval', 'adjudicate_approval_queue',
   'steer_choice', 'steer_answer', 'federation_sync',
+  // ΑΝΒ-7: barrel 外注册面(组合根/沙箱栈直注册 —— 同为插件 'plugin' 面)
+  'start_complex_task', 'rehearse_chain', 'recall_muscle', 'verify_sandbox_log',
 ]);
 
 /** 宿主原生工具名册:R1-8 九次跑 hist 中实测出现 + dsh-tools 文档面可推断的族名。 */
