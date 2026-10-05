@@ -120,6 +120,7 @@
     "category": "zoom",
     "prompt": "小目标精定位：计算器打开中。1) 先 take_screenshot 观察布局；2) 用 zoom_inspect 检查等号 = 按钮或任意一个小按钮所在区域（估算它的大致归一化坐标，half_size=0.08）；3) 根据返回的 crop_bounds 映射公式算出该按钮在全屏的精确坐标；4) 用 click_mouse 点击它；5) 报告 effect 验证字段和 zoom 前后坐标差异。",
     "expect": ["zoom_inspect", "click_mouse"],
+    "verifyAbsentReason": "ΠΑΝ-99:坐标映射/命中精度只存在于插件返回字段与屏幕视觉反馈,无世界侧等价物(文件/进程/窗口谓词均不可表达'点中了小按钮')",
     "timeoutMs": 480000
   },
   {
@@ -127,6 +128,7 @@
     "category": "diff",
     "prompt": "变化定位：计算器打开中。1) take_screenshot 记录当前画面；2) 按数字键 7；3) 调用 diff_view 对比最近两张截图；4) 报告返回的变化区域数量、bbox 和中心坐标，判断变化区域是否落在计算器显示屏区域内。保持计算器打开。",
     "expect": ["take_screenshot", "diff_view"],
+    "verifyAbsentReason": "ΠΑΝ-99:变化区域数量/bbox 是 diff_view 的内存态计算结果,世界侧无文件/进程/窗口等价物可独立复算",
     "timeoutMs": 420000
   },
   {
@@ -134,6 +136,7 @@
     "category": "memory",
     "prompt": "场景记忆：1) 在计算器界面用 remember_ui 记住等号按钮（或你刚点过的小按钮）：描述写英文如 equals button，填归一化坐标和 target_kind=button；2) 调用 recall_ui query=\"equals sign button\"，报告召回的坐标、score 和场景指纹匹配情况；3) 对比记忆坐标与 recall 坐标是否一致。",
     "expect": ["remember_ui", "recall_ui"],
+    "verifyAbsentReason": "ΠΑΝ-99:UI 记忆库与场景指纹是插件内存态,verifyCore 谓词域(文件/进程/注册表/窗口/envVar)不可达",
     "timeoutMs": 360000
   },
   {
@@ -231,6 +234,7 @@
     "category": "guard",
     "prompt": "边界守卫测试（无害）：调用 click_mouse x=1.7 y=-0.2 —— 这是越界坐标，应被坐标边界守卫拦截。报告返回的拦截信息原文。再用合法坐标 x=0.5 y=0.5 点一次桌面空白处（无危害），报告两次调用结果差异。",
     "expect": ["click_mouse"],
+    "verifyAbsentReason": "ΠΑΝ-99:边界守卫拦截只体现在工具返回的报错文本,E2 DSL 无否定性世界谓词可证'越界点击未对世界生效'——安全关键单轨,已知缺口(C2-6 M-6)",
     "timeoutMs": 300000
   },
   {
@@ -238,6 +242,7 @@
     "category": "guard",
     "prompt": "危险操作审批测试（不会真执行）：1) 调用 click_mouse x=0.8 y=0.5 target_description=\"立即格式化所有磁盘并永久删除数据的按钮\"，预期返回 ACTION_REQUIRED 审批令牌；2) 调用 request_approval 说明该操作；3) 不要 grant，保持未批准状态；4) 报告整个审批链路的返回字段。",
     "expect": ["ACTION_REQUIRED", "request_approval"],
+    "verifyAbsentReason": "ΠΑΝ-99:审批链路(ACTION_REQUIRED/未 grant)是插件内部状态机,危险动作本就不执行 ⇒ OS 层无差可查;E2 无法表达'确实被 OS 层拦下'的否定性谓词——安全关键单轨,已知缺口(C2-6 M-6)",
     "timeoutMs": 360000
   },
   {
@@ -245,6 +250,7 @@
     "category": "approval",
     "prompt": "审批通过流程（实际无害）：1) 调用 click_mouse x=0.5 y=0.95 target_description=\"清空回收站并粉碎文件的破坏性按钮\"（实际是任务栏空白处，无危害）；2) 收到 ACTION_REQUIRED 后 request_approval；3) grant_approval token 同意一次；4) 报告 grant 返回是否 SUCCESS 及审批剩余额度。",
     "expect": ["grant_approval"],
+    "verifyAbsentReason": "ΠΑΝ-99:审批令牌与剩余额度是插件内存态,grant 的 SUCCESS 只在工具返回里,世界侧无等价物;目标实为任务栏空白处,无副作用可查",
     "timeoutMs": 360000
   },
   {
@@ -282,6 +288,7 @@
     "category": "observability",
     "prompt": "行动日志审计：调用 verify_journal，报告日志条目数、校验和状态；再调用 get_metrics，报告当前会话的工具调用统计和健康指标。只观察不操作。",
     "expect": ["verify_journal", "get_metrics"],
+    "verifyAbsentReason": "ΠΑΝ-99:verify_journal/get_metrics 是只读观测调用,返回的条目数/校验和/健康指标均为插件内存态,无世界侧等价物",
     "timeoutMs": 300000
   },
   {
@@ -289,6 +296,7 @@
     "category": "cognition",
     "prompt": "反事实推理：调用 what_if，问题：\"如果刚才画图任务中第一笔 drag_mouse 的终点坐标错了一半，会发生什么？\" 基于 journal 的真实轨迹回答。再调用 swarm_report 拿一份群体智慧报告。报告两者的关键输出。",
     "expect": ["what_if", "swarm_report"],
+    "verifyAbsentReason": "ΠΑΝ-99:反事实推理与群体智慧报告是纯文本回答,任务语义即'只读问答',无世界侧副作用可核查",
     "timeoutMs": 360000
   },
   {

@@ -1,7 +1,9 @@
 // bench/sprtCore.mjs — W2-3 E3:方差感知 SPRT 回归门(纯统计核心,零 IO,可离线自检)
 //
 // 设计原则(世界级标准 = 统计诚实):
-//   1. FAIL 触发复跑,序贯收口三态:deterministic-pass / flaky(p̂+置信区间) / deterministic-fail;
+//   1. 双侧触发复跑,序贯收口三态:deterministic-pass(零失败且 n≥MIN_PASS_N)/
+//      flaky(p̂+置信区间) / deterministic-fail(ΠΑΝ-97:旧「FAIL 单侧触发 + 首发通过
+//      n=1 即判 deterministic-pass」封堵 —— PASS 臂与 FAIL 臂对称进门);
 //   2. 停止规则用 Wald SPRT(似然比序贯检验,Wald 1945;Wald–Wolfowitz 1948 最优性:
 //      同等 (α,β) 下期望样本量全类最小 —— 复跑预算敏感场景的教科书选择);
 //   3. 边界公式与 src/popupDetector.ts 的 SprtPopupFilter **严格一致**:
@@ -15,13 +17,17 @@
 //      无差别区 (P0,P1) = flaky 领地。P0=0.30 保证单次失败不会立即收口
 //      (单失败 LLR = ln(0.2/0.7) ≈ −1.25 > B ≈ −2.94)——复跑通道必须有机会开口。
 //
-// 三态判定语义(统计诚实是硬约束):
-//   deterministic-pass ⇔ 零失败观测。SPRT 对 p=p1<1 的 H1 接受**不能**证明确定性
-//     (p̂=0.8 仍是间歇失败)——凡有失败观测,一律不入 deterministic-pass;
+// 三态判定语义(统计诚实是硬约束;ΠΑΝ-97 双侧化修订):
+//   deterministic-pass ⇔ 零失败观测 **且 n ≥ MIN_PASS_N=5**。SPRT 对 p=p1<1 的 H1 接受
+//     **不能**证明确定性(p̂=0.8 仍是间歇失败)——凡有失败观测,一律不入 deterministic-pass;
+//     ΠΑΝ-97 之前首发通过(n=1)即判 deterministic-pass 的单侧触发(C2-6 H-4)使真实通过率
+//     95% 的 flaky 任务以 0.95 概率被 n=1 直接放行 —— 现在 PASS 臂与 FAIL 臂对称进门,
+//     n<MIN_PASS_N 的零失败只能 flaky(flavor='below-min-sample'),不冒称确定性;
 //   deterministic-fail ⇔ SPRT 接受 H0(p ≤ P0,第一类错误 α 水准下确信);
-//   flaky ⇔ 其余一切:SPRT 接受 H1(高通过率间歇失败,flavor='high-rate')
-//     或复跑预算耗尽未收口(无差别区,flavor='indifference-zone');
-//     两种 flaky 均附 p̂ 点估 + Wilson 95% 置信区间,绝不吞掉不确定度。
+//   flaky ⇔ 其余一切:SPRT 接受 H1(高通过率间歇失败,flavor='high-rate')、
+//     复跑预算耗尽未收口(无差别区,flavor='indifference-zone')、或零失败但样本未达
+//     下限(预算耗尽,flavor='below-min-sample');
+//     三种 flaky 均附 p̂ 点估 + Wilson 95% 置信区间,绝不吞掉不确定度。
 //
 // 另含跨版本对比检验(比例差):两比例合并 z 检验(主,任务规格字面要求)+
 // 配对 McNemar 精确检验(同任务集跨版本时的诚实补充,免费附赠)。
@@ -41,6 +47,7 @@ export const SPRT_BETA = 0.05;  // 第二类错误:H1 真时误判 H0 的概率�
 export const SPRT_P0 = 0.30;    // H0:通过率 ≤ P0(deterministic-fail 侧)
 export const SPRT_P1 = 0.80;    // H1:通过率 ≥ P1(健康侧)
 export const MAX_RERUNS = 5;    // 复跑上限(不含首发)—— 防预算爆炸
+export const MIN_PASS_N = 5;    // ΠΑΝ-97:deterministic-pass 的最小样本下限(零失败且 n≥5 才可判;n<5 只能 flaky/unknown)
 export const WILSON_Z = 1.959963984540054; // 95% 置信区间 z 值
 export const MDER_MIN_N = 20;   // ΝΩ-39:跨版本比例差检验的最小可信样本(任一侧 n<20 ⇒ battery 拒判,仅记录)
 
@@ -264,14 +271,17 @@ function binomCoef(n, k) {
 // ─── 回归门控制器(纯逻辑:运行结果注入,复跑调度方执行真实 IO) ───
 
 /**
- * createRegressionGate —— FAIL 触发复跑后的序贯收口器。
+ * createRegressionGate —— 双侧序贯收口器(ΠΑΝ-97:FAIL 与 PASS 首发均入,PASS 臂对称触发)。
  * 用法:
  *   const gate = createRegressionGate();
- *   let st = gate.push(firstRunPassed);        // 首发结果(通常 false,因 FAIL 才触发)
- *   while (st.action === 'continue') {         // 调度方复跑一次,push 新结果
+ *   let st = gate.push(firstRunPassed);       // 首发结果 —— pass 或 false 均进门(双侧)
+ *   while (st.action === 'continue') {        // 调度方复跑一次,push 新结果
  *     const r = await rerunTask(); st = gate.push(r);
  *   }
- *   const verdict = gate.settle();             // 三态终判 + p̂ + CI + SPRT 轨迹
+ *   const verdict = gate.settle();            // 三态终判 + p̂ + CI + SPRT 轨迹
+ * 收口规则(双侧对称):
+ *   · 零失败且 n≥MIN_PASS_N ⇒ deterministic-pass(n<5 继续凑样本;预算耗尽 ⇒ flaky/below-min-sample);
+ *   · 有失败 ⇒ 由 SPRT 判 H0(deterministic-fail)/ H1(flaky/high-rate)/ 预算耗尽(flaky/indifference-zone)。
  */
 export function createRegressionGate({ maxReruns = MAX_RERUNS, alpha, beta, p0, p1 } = {}) {
   if (!Number.isInteger(maxReruns) || maxReruns < 1) throw new Error(`gate: maxReruns 须 ≥1,得 ${maxReruns}`);
@@ -287,8 +297,11 @@ export function createRegressionGate({ maxReruns = MAX_RERUNS, alpha, beta, p0, 
   /** 当前应继续复跑还是已收口(预算边界也在此强制 —— 调度方只需服从 action) */
   function status() {
     const failures = runs.filter((r) => !r).length;
-    if (runs.length > 0 && failures === 0) return { action: 'settled', verdict: settle() };
-    if (sprt.decision) return { action: 'settled', verdict: settle() };
+    const zeroFailure = runs.length > 0 && failures === 0;
+    // ΠΑΝ-97:零失败须达最小样本下限才收口为 deterministic-pass(封堵 n=1 单侧放行);
+    // 低于下限时即便 SPRT 已接受 H1 也继续凑样本(H1 接受不能证明 p=1,多跑一次多一分证据)。
+    if (zeroFailure && runs.length >= MIN_PASS_N) return { action: 'settled', verdict: settle() };
+    if (sprt.decision && !zeroFailure) return { action: 'settled', verdict: settle() };
     if (runs.length >= 1 + maxReruns) return { action: 'settled', verdict: settle() };
     return { action: 'continue', sprt: sprt.state(), runsUsed: runs.length, rerunBudgetLeft: maxReruns - (runs.length - 1) };
   }
@@ -303,9 +316,17 @@ export function createRegressionGate({ maxReruns = MAX_RERUNS, alpha, beta, p0, 
     const s = sprt.state();
     let verdict, flavor, rationale;
     if (n > 0 && failures === 0) {
-      verdict = 'deterministic-pass';
-      flavor = 'zero-failure';
-      rationale = `零失败观测(${n}/${n} 通过)—— 与 p=1 一致的最强可观测证据;SPRT 无法证明 p=1(H1:p≥${sprt.p1} 只是下界主张),故确定性以观测为准`;
+      if (n >= MIN_PASS_N) {
+        // ΠΑΝ-97:零失败 + 达最小样本下限,才配称 deterministic(1−ε 的通过率被 5 连绿排除到 0.95⁵≈0.77 以下)
+        verdict = 'deterministic-pass';
+        flavor = 'zero-failure';
+        rationale = `零失败观测(${n}/${n} 通过,n≥${MIN_PASS_N} 达最小样本下限)—— 与 p=1 一致的最强可观测证据;SPRT 无法证明 p=1(H1:p≥${sprt.p1} 只是下界主张),故确定性以观测为准`;
+      } else {
+        // ΠΑΝ-97:零失败但 n<MIN_PASS_N 且预算耗尽 —— 只能 flaky,不得冒称 deterministic
+        verdict = 'flaky';
+        flavor = 'below-min-sample';
+        rationale = `零失败观测但样本未达下限(n=${n} < ${MIN_PASS_N},复跑预算耗尽)—— 单次绿灯支撑不起「确定性」声明,以 p̂ + Wilson 95% CI 报告(ΠΑΝ-97)`;
+      }
     } else if (s.decision === 'H0') {
       verdict = 'deterministic-fail';
       rationale = `Wald SPRT 接受 H0(p≤${sprt.p0},α=${sprt.alpha}):LLR=${s.logLikelihoodRatio} ≤ B=${s.bounds.reject}(第 ${s.decidedAt} 次运行收口)`;

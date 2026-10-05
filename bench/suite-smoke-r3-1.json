@@ -1,0 +1,50 @@
+{
+ "tasks": [
+  {
+   "id": "full-setup-clean",
+   "category": "setup",
+   "family": "窗口管理/清理",
+   "difficulty": 1,
+   "estSteps": 6,
+   "anchor": "cleanup-desktop-y3",
+   "coverage": "regression-anchor",
+   "prompt": "[评估纪律] 本任务是 computer-use 实战考核:只允许用视觉观察工具(take_screenshot/zoom_inspect/diff_view/ask_screen 等)和物理操作工具(click_mouse/type_text/press_hotkey/switch_window/scroll_page/drag_mouse 等)完成与自检。禁止使用宿主 shell(pwsh 等命令执行)、宿主文件读写(read/write/edit 等)或任何代码执行工具来定位界面元素、读写文件、启动程序、模拟键鼠或做 OCR/UIA 识别——绕过行为会被反作弊检测器判 tainted 并从通过率中剔除。完成与否以屏幕视觉证据为准。\n开场清理：关闭所有可能残留的记事本、画图、计算器窗口和 Edge、资源管理器窗口（用鼠标点击各窗口右上角的关闭按钮 X 来关窗；遇到保存提示一律选不保存。注意：alt+f4 在系统热键黑名单中，press_hotkey 会被拒绝）。用 take_screenshot 确认桌面干净后报告。不要动其他无关窗口。",
+   "expect": [
+    "take_screenshot"
+   ],
+   "timeoutMs": 420000,
+   "verify": {
+    "mode": "all",
+    "screenshot": true,
+    "checks": [
+     {
+      "kind": "processAbsent",
+      "name": "notepad.exe"
+     },
+     {
+      "kind": "processAbsent",
+      "name": "mspaint.exe"
+     },
+     {
+      "kind": "processAbsent",
+      "names": [
+       "CalculatorApp.exe",
+       "Calculator.exe",
+       "calc.exe"
+      ],
+      "comment": "计算器进程名跨 Win10/Win11/旧版方言,names 任一在跑即未清干净(与 suite-4 同款)"
+     },
+     {
+      "kind": "windowAbsent",
+      "titleRegex": "Edge",
+      "comment": "msedge 有关闭后后台运行模式,窗口域才是'窗口关净'的事实"
+     },
+     {
+      "kind": "windowAbsent",
+      "titleRegex": "playground|文件资源管理器|File Explorer"
+     }
+    ]
+   }
+  }
+ ]
+}

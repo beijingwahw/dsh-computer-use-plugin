@@ -160,12 +160,68 @@ export function createWindowsWorld({ timeoutMs = CHANNEL_TIMEOUT_MS } = {}) {
       return { ok: true, items, raw: trunc(stdout) };
     },
     async listWindowTitles() {
-      const { stdout } = await osCmd('powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command',
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.MainWindowTitle }"],
-        'windows');
-      const titles = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      return { ok: true, titles, raw: titles.join('\n') };
+      // R6-1:窗口枚举通道改 EnumWindows(全量可见顶层标题窗)。旧通道 Get-Process
+      // MainWindowTitle 每进程只报一个标题:①多窗共进程(Win11 explorer 外壳与全部
+      // 文件窗同进程)只报其一;②进程主窗被无标题窗顶替(explorer 上打开的右键菜单
+      // 是 explorer.exe 的无标题顶层窗)⇒ explorer 从枚举中整体消失 —— AGON 批2
+      // T11 三败同签名实证(verify 时刻截图 explorer 在前台、Get-Process 清单缺)。
+      // EnumWindows 通道失败(Add-Type 受限等)⇒ 回退旧通道(诚实降级,回执注明)。
+      const enumScript = [
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8',
+        "Add-Type -TypeDefinition 'using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;",
+        'public static class WinEnum {',
+        '  public delegate bool EnumCb(IntPtr h, IntPtr l);',
+        '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool EnumWindows(EnumCb d, IntPtr l);',
+        '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
+        '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);',
+        '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr h);',
+        '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+        '  public static List<string> ListVisibleTitles() {',
+        '    var outList = new List<string>();',
+        '    EnumCb cb = (h, l) => {',
+        '      if (IsWindowVisible(h)) {',
+        '        int len = GetWindowTextLength(h);',
+        '        if (len > 0) {',
+        '          var sb = new StringBuilder(len + 1);',
+        '          GetWindowText(h, sb, sb.Capacity);',
+        '          string t = sb.ToString();',
+        '          if (!String.IsNullOrWhiteSpace(t)) {',
+        '            uint pid; GetWindowThreadProcessId(h, out pid);',
+        '            outList.Add(pid.ToString() + "\\t" + t);',
+        '          }',
+        '        }',
+        '      }',
+        '      return true;',
+        '    };',
+        '    EnumWindows(cb, IntPtr.Zero);',
+        '    return outList;',
+        '  }',
+        "}'",
+        '[WinEnum]::ListVisibleTitles() | ForEach-Object { Write-Output $_ }',
+      ].join('\n');
+      // C# 源含双引号/换行 —— 走 -EncodedCommand(UTF-16LE base64),命令行上不存在
+      // 任何 PS 语法解析点(W6R-A8/hostFocusGuardTick 同病灶同修法)。
+      const encoded = Buffer.from(enumScript, 'utf16le').toString('base64');
+      let titles = null;
+      let channel = 'enumwindows';
+      let fallbackNote = null;
+      try {
+        const { stdout } = await osCmd('powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], 'windows');
+        titles = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+          .map((l) => { const i = l.indexOf('\t'); return i >= 0 ? l.slice(i + 1) : l; });
+        if (titles.length === 0) throw new Error('EnumWindows 通道零标题(疑似脚本失败)');
+      } catch (e) {
+        channel = 'get-process-fallback';
+        fallbackNote = String(e.message ?? e).slice(0, 120);
+        const { stdout } = await osCmd('powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command',
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.MainWindowTitle }"],
+          'windows');
+        titles = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      }
+      const raw = titles.join('\n') + (fallbackNote ? `\n[通道回退:${channel} ${fallbackNote}]` : '');
+      return { ok: true, titles, raw, channel };
     },
     async queryRegistry(hive, key, value) {
       const root = `${hive}\\${String(key).replace(/^[\\/]+/, '')}`;

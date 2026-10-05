@@ -10,6 +10,8 @@
 //   E. suite-*.json 的 verify 块结构合法 + doctor 规则候选草稿字段
 //   F. ΝΩ-39 统计功效:MDER/normalInv/Beta 共轭后验已知数值、flaky 后验一行、
 //      suite sprt:{p0,p1} 覆写装载、n<20 拒判、bench_gate glob 白名单与计数硬门接线
+//   G. ΠΑΝ-97/98/99:SPRT 双侧触发与最小样本(MIN_PASS_N)、compareWithBaseline 同总体
+//      (共有子集)口径与无共有任务诚显拒绝、E2 盲区显性化(降格与 e2Coverage)
 // 期望 exit 0;任一断言失败 exit 1 并列出全部失败项。
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -199,13 +201,26 @@ console.log(`# W2-3 离线自检  tmp=${tmp}  platform=${process.platform}`);
   ok(st.verdict.ci.low <= st.verdict.pHat && st.verdict.pHat <= st.verdict.ci.high, 'C2 CI 包含 p̂');
   eq(st.verdict.posterior, undefined, 'C2 deterministic-fail 不附 Beta 后验');
 
-  // 首发即过(现实中不触发门,但语义上):零失败 ⇒ deterministic-pass
+  // ΠΑΝ-97:首发通过不再 n=1 放行 —— 双侧触发,零失败须凑满 MIN_PASS_N=5 才收口
   const g2 = createRegressionGate();
   st = g2.push(true);
-  eq(st.action, 'settled', 'C2 零失败即收口');
-  eq(st.verdict.verdict, 'deterministic-pass', 'C2 deterministic-pass ⇔ 零失败观测');
+  eq(st.action, 'continue', 'C2 首发通过不收口(ΠΑΝ-97 双侧化:n=1 不得判 deterministic-pass)');
+  st = g2.push(true); st = g2.push(true); st = g2.push(true);
+  eq(st.action, 'continue', 'C2 四连过仍不收口(n=4 < MIN_PASS_N=5)');
+  st = g2.push(true);
+  eq(st.action, 'settled', 'C2 五连过收口(n=5 达最小样本下限)');
+  eq(st.verdict.verdict, 'deterministic-pass', 'C2 deterministic-pass ⇔ 零失败且 n≥MIN_PASS_N');
+  eq(st.verdict.runs, 5, 'C2 deterministic-pass 最小样本 n=5');
   eq(st.verdict.flavor, 'zero-failure', 'C2 flavor=zero-failure');
   eq(st.verdict.posterior, undefined, 'C2 deterministic-pass 不附 Beta 后验(零失败无比例可言)');
+  ok(st.verdict.ci && st.verdict.ci.n === 5, 'C2 收口报告附 Wilson CI(n=5)');
+
+  // ΠΑΝ-97:零失败但复跑预算凑不满下限 ⇒ flaky(below-min-sample),不得冒称确定性
+  const g2b = createRegressionGate({ maxReruns: 2 }); // 最多 1+2=3 跑 < 5
+  st = g2b.push(true); st = g2b.push(true); st = g2b.push(true);
+  eq(st.action, 'settled', 'C2 预算耗尽强制收口(零失败也不例外)');
+  eq(st.verdict.verdict, 'flaky', 'C2 零失败 n=3 < 5 ⇒ 只能 flaky(ΠΑΝ-97)');
+  eq(st.verdict.flavor, 'below-min-sample', 'C2 flavor=below-min-sample');
 
   // 1 败 + 连过 ⇒ SPRT 接受 H1 但有失败 ⇒ flaky(high-rate),不冒充 deterministic-pass
   const g3 = createRegressionGate();
@@ -413,7 +428,7 @@ if (process.platform === 'win32') {
 }
 function exvidenceExists(files) { return Array.isArray(files) && files.length >= 1; }
 
-// ─── E4. battery.compareWithBaseline:跨版本比例差检验(离线喂假报告) ───
+// ─── E4. battery.compareWithBaseline:跨版本比例差检验(离线喂假报告;ΠΑΝ-98 同总体) ───
 {
   const { compareWithBaseline } = await import('./battery.mjs'); // import 守卫:不触发 main
   const prevPath = path.join(tmp, 'prev-report.json');
@@ -422,36 +437,81 @@ function exvidenceExists(files) { return Array.isArray(files) && files.length >=
   ] }), 'utf8');
   const cur = [
     { id: 'alpha', gate: { verdict: 'deterministic-pass' } },
-    { id: 'beta', gate: { verdict: 'deterministic-fail' } },
-    { id: 'fresh', gate: { verdict: 'deterministic-pass' } },
+    { id: 'beta', gate: { verdict: 'deterministic-pass' } }, // ΠΑΝ-98 夹具:共有任务上真实改善
+    { id: 'fresh', gate: { verdict: 'deterministic-pass' } }, // 当前新增,无配对对象
   ];
   const cmp = compareWithBaseline(cur, prevPath);
   eq(cmp.baseline.tasks, 2, 'E4 基线仅统计共享任务(alpha/beta;vanished 不入)');
   eq(cmp.baseline.pass, 1, 'E4 基线共享任务通过数=1');
-  eq(cmp.current.tasks, 3, 'E4 当前全部任务入分母');
-  eq(cmp.current.pass, 2, 'E4 当前 deterministic-pass=2');
+  eq(cmp.current.tasks, 3, 'E4 当前总任务数(总览,不进检验)');
+  eq(cmp.current.pass, 3, 'E4 当前 deterministic-pass 总数=3(总览,含 fresh;检验不用此数)');
+  eq(cmp.shared.tasks, 2, 'E4 ΠΑΝ-98:共有子集=2(同总体口径,z/McNemar/Wilson/MDER 全用此口径)');
+  eq(cmp.shared.currentPass, 2, 'E4 共有子集当前过=2');
+  eq(cmp.shared.baselinePass, 1, 'E4 共有子集基线过=1');
+  eq(cmp.current.currentOnlyTasks.length, 1, 'E4 当前新增任务单列');
+  eq(cmp.current.currentOnlyTasks[0], 'fresh', 'E4 currentOnly=fresh(不进检验,无配对对象)');
+  eq(cmp.current.baselineOnlyTasks[0], 'vanished', 'E4 baselineOnly=vanished(退役任务单列)');
   ok(typeof cmp.twoProportionZ.p === 'number' && cmp.twoProportionZ.p >= 0 && cmp.twoProportionZ.p <= 1, 'E4 比例差 p 值 ∈ [0,1]');
   ok(typeof cmp.mcNemar.p === 'number', 'E4 McNemar p 在场');
+  eq(cmp.mcNemar.b, 0, 'E4 配对 b=0(旧过新败:无)');
+  eq(cmp.mcNemar.c, 1, 'E4 配对 c=1(beta:旧败新过)');
   ok(typeof cmp.verdictHint === 'string' && cmp.verdictHint.length > 0, 'E4 结论提示非空');
-  // 手算:2/3 vs 1/2 ⇒ pooled=3/5,z=(0.6667−0.5)/sqrt(0.6·0.4·(1/3+1/2))=0.1667/0.4472≈0.3727,p≈0.7094
-  near(cmp.twoProportionZ.z, 0.3727, 0.001, 'E4 z 手算值');
-  near(cmp.twoProportionZ.p, 0.7094, 0.001, 'E4 p 手算值');
+  // 手算(ΠΑΝ-98 同总体:共有子集 2/2 vs 1/2):pooled=3/4,z=(1−0.5)/sqrt(0.75·0.25·(1/2+1/2))=0.5/0.4330≈1.1547,p≈0.2482
+  // (旧口径 3/3 vs 1/2 会得 z≈1.3693 —— 不同总体相比的伪口径,已被 ΠΑΝ-98 废止)
+  near(cmp.twoProportionZ.z, 1.1547, 0.001, 'E4 z 手算值(共有子集口径)');
+  near(cmp.twoProportionZ.p, 0.2482, 0.001, 'E4 p 手算值(共有子集口径)');
+  eq(cmp.twoProportionZ.p1Hat, 1, 'E4 p1̂=2/2(共有子集,非全量 3/3)');
+  eq(cmp.twoProportionZ.p2Hat, 0.5, 'E4 p2̂=1/2');
   // ΝΩ-39:n<20 ⇒ 拒判 verdictHint(诚实降级「样本不足,仅记录」),MDER/Wilson 仍在场
   ok(cmp.verdictHint.includes('样本不足') && cmp.verdictHint.includes('仅记录'), 'E4 n<20 ⇒ verdictHint 诚实降级(拒下显著性结论)');
   eq(cmp.mder.sufficientN, false, 'E4 小 suite 标记功效不足');
-  eq(cmp.mder.value, 1, 'E4 n=3 vs 2 ⇒ MDER 夹上限 1(只有全过/全表可见)');
+  eq(cmp.mder.value, 1, 'E4 n=2 vs 2 ⇒ MDER 夹上限 1(只有全过/全表可见)');
   ok(cmp.wilson && typeof cmp.wilson.current.low === 'number' && typeof cmp.wilson.baseline.low === 'number',
-    'E4 对比输出附两侧通过率 Wilson 95% CI');
-  // n≥20(26 vs 26):恢复判定通道,MDER=0.3885 在场
+    'E4 对比输出附两侧(共有子集)通过率 Wilson 95% CI');
+  eq(cmp.wilson.current.n, 2, 'E4 Wilson CI 的 n 也是共有子集口径');
+  // n≥20(26 vs 26 全共有):恢复判定通道,MDER=0.3885 在场
   const big = Array.from({ length: 26 }, (_, i) => ({ id: 't' + i, pass: i < 20 }));
   const bigPath = path.join(tmp, 'prev-big.json');
   writeFileSync(bigPath, JSON.stringify({ results: big }));
   const curBig = big.map((t) => ({ id: t.id, gate: { verdict: t.pass ? 'deterministic-pass' : 'flaky' } }));
   const cmp2 = compareWithBaseline(curBig, bigPath);
   eq(cmp2.mder.sufficientN, true, 'E4 26 vs 26 ⇒ 样本充足,不拒判');
+  eq(cmp2.shared.tasks, 26, 'E4 全共有 ⇒ shared=26');
+  eq(cmp2.current.currentOnlyTasks.length, 0, 'E4 无新增任务 ⇒ currentOnly 空');
   near(cmp2.mder.value, 0.3885, 1e-9, 'E4 MDER(26,26) 在对比报告在场');
   ok(!cmp2.verdictHint.includes('样本不足'), 'E4 样本充足时无降级话术');
   ok(cmp2.verdictHint.includes('MDER=0.3885'), 'E4 充足时 verdictHint 亦附 MDER(差异<MDER 时「不显著」与「功效不足」不可区分)');
+  // ΠΑΝ-98 边界:两版本无共有任务 ⇒ 一切比例检验诚显拒绝,不造数
+  const disjointPath = path.join(tmp, 'prev-disjoint.json');
+  writeFileSync(disjointPath, JSON.stringify({ results: [{ id: 'old1', pass: true }] }));
+  const cmp3 = compareWithBaseline([{ id: 'new1', gate: { verdict: 'deterministic-pass' } }], disjointPath);
+  eq(cmp3.twoProportionZ, null, 'E4 无共有任务 ⇒ z 检验不适用(返回 null 不造数)');
+  eq(cmp3.mcNemar, null, 'E4 无共有任务 ⇒ McNemar 不适用');
+  ok(cmp3.verdictHint.includes('无共有任务'), 'E4 无共有任务 ⇒ 拒判话术');
+}
+
+// ─── E5. ΠΑΝ-99:E2 盲区显性化(capUnverifiableVerdict / buildE2Coverage 纯函数) ───
+{
+  const { capUnverifiableVerdict, buildE2Coverage } = await import('./battery.mjs');
+  const detPass = { schema: 'w2bench-gate-verdict/1', verdict: 'deterministic-pass', flavor: 'zero-failure', runs: 5, passes: 5, failures: 0, pHat: 1, ci: { low: 0.5655, high: 1 } };
+  const detFail = { ...detPass, verdict: 'deterministic-fail', flavor: null, runs: 3, passes: 0, failures: 3, pHat: 0 };
+  const withVerify = { id: 'v1', verify: { checks: [{ kind: 'dirExists', path: 'C:\\x' }] } };
+  const noVerify = { id: 'u1', verifyAbsentReason: '内存态,谓词域不可达' };
+  eq(capUnverifiableVerdict(detPass, withVerify), detPass, 'E5 有 verify 块 ⇒ 判定原样(不降格)');
+  eq(capUnverifiableVerdict(detPass, noVerify).verdict, 'self-reported-pass', 'E5 无 verify ⇒ deterministic-pass 降格 self-reported-pass');
+  eq(capUnverifiableVerdict(detPass, noVerify).downgradedFrom, 'deterministic-pass', 'E5 降格留痕 downgradedFrom');
+  eq(capUnverifiableVerdict(detFail, noVerify).verdict, 'self-reported-fail', 'E5 无 verify ⇒ deterministic-fail 降格 self-reported-fail(保守方向,命名诚实)');
+  eq(capUnverifiableVerdict(detFail, noVerify).failures, 3, 'E5 降格不改动统计字段');
+  eq(capUnverifiableVerdict({ ...detPass, verdict: 'flaky', flavor: 'high-rate' }, noVerify).verdict, 'flaky', 'E5 flaky 不降格');
+  eq(capUnverifiableVerdict(detPass, noVerify).e2Absent, true, 'E5 降格对象附 e2Absent=true');
+  const cov = buildE2Coverage([withVerify, noVerify, { id: 'u2' }]);
+  eq(cov.schema, 'w2bench-e2-coverage/1', 'E5 e2Coverage schema');
+  eq(cov.tasksTotal, 3, 'E5 总数=3');
+  eq(cov.verified.count, 1, 'E5 有核查=1');
+  eq(cov.unverifiable.count, 2, 'E5 unverifiable=2');
+  eq(cov.unverifiable.tasks[0].reason, '内存态,谓词域不可达', 'E5 已登记缺因透传');
+  eq(cov.unverifiable.tasks[1].reason, null, 'E5 未登记缺因 ⇒ null(如实,不编造)');
+  near(cov.coverage, 1 / 3, 1e-4, 'E5 coverage=1/3');
 }
 
 // ─── F. ΝΩ-39:bench_gate glob 白名单扩容与计数类硬门接线(纯函数区,离线) ───

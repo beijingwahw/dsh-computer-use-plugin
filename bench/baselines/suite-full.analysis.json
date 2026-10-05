@@ -1,0 +1,70 @@
+{
+ "schema": "r17-analysis-baseline/1",
+ "runId": "drive-desktop-20261004235556-7fb3",
+ "suiteName": "suite-full",
+ "savedAt": "2026-10-04T23:56:51.084Z",
+ "aggregate": {
+  "schema": "r17-aggregate/1",
+  "tasks": 3,
+  "pass": 3,
+  "fail": 0,
+  "unknown": 0,
+  "passRate": 1,
+  "steps": {
+   "min": 13,
+   "p50": 15,
+   "max": 37,
+   "mean": 21.667
+  },
+  "perTool": {},
+  "vlm": {
+   "calls": 24,
+   "failures": 0,
+   "failureRate": 0,
+   "degrade": {},
+   "p50Latency": null,
+   "p95Latency": null
+  },
+  "failuresByCategory": {},
+  "byCategory": {
+   "uncategorized": {
+    "total": 3,
+    "pass": 3,
+    "fail": 0,
+    "unknown": 0
+   }
+  },
+  "tasksSummary": [
+   {
+    "taskId": "full-hotkey-undo-save",
+    "category": null,
+    "pass": true,
+    "failureCategory": "pass",
+    "steps": 13,
+    "vlmCalls": 5,
+    "timedOut": false,
+    "rpcRetries": 0
+   },
+   {
+    "taskId": "full-seed-report",
+    "category": null,
+    "pass": true,
+    "failureCategory": "pass",
+    "steps": 37,
+    "vlmCalls": 11,
+    "timedOut": false,
+    "rpcRetries": 0
+   },
+   {
+    "taskId": "full-setup-clean",
+    "category": null,
+    "pass": true,
+    "failureCategory": "pass",
+    "steps": 15,
+    "vlmCalls": 8,
+    "timedOut": false,
+    "rpcRetries": 0
+   }
+  ]
+ }
+}
