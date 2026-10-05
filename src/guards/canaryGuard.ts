@@ -59,6 +59,11 @@ import { approval } from '../approval';
 import { telemetry } from '../telemetry';
 import { focusTracker } from '../focusTracker';
 import * as physicalBackend from '../physicalBackend';
+// ΠΑΝ-77（多源证据）：生产 OCR 通道 —— 落点邻域实读（textReader 是叶子工具件，
+// popupDetector/contextManager 已同律静态依赖；读失败/服务缺席由包装层收敛）
+import { readTextAny } from '../textReader';
+// ΠΑΝ-76（洪泛防护）：探针预算账换分保护区统一件
+import { SessionLruCache } from './sessionLru';
 // ΝΩ-2（物理探针互斥）：试演探针与用户/其他会话动作在同一 D-1 躯体队列排队
 //（ioMutex 只读引入 —— 探针步/复位步/帧通道不再与并发物理派发交错，三帧
 // 取证证据 h0→h1→h2 的每次派发原子串行，不再被并发动作污染）
@@ -336,6 +341,27 @@ export function productionCanaryPorts(config: Config, io: CanaryProbeIo = { seri
       });
       return (focus !== null ? cap.regionDhash : cap.dhash) ?? null;
     }),
+    // ΠΑΝ-77（多源证据）：落点邻域 OCR 实读 —— 分类面的独立证据源。零孵化/
+    // dry-run 同律（无后端不读）；读故障 ⇒ null（通道缺席，回自述单源零回归）。
+    readRegionText: async (p, r) => io.serialize(async () => {
+      if (physicalBackend.healthSnapshot() === null) return null; // 零孵化：OCR 通道诚实缺席
+      const focus = p ?? focusTracker.get(config.focusMaxAgeMs);
+      const cx = focus !== null ? focus.x : 0.5;
+      const cy = focus !== null ? focus.y : 0.5;
+      const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
+      const region = {
+        x: clamp01(cx - r),
+        y: clamp01(cy - r),
+        width: Math.min(2 * r, 1 - clamp01(cx - r)),
+        height: Math.min(2 * r, 1 - clamp01(cy - r)),
+      };
+      try {
+        const { text } = await readTextAny(region);
+        return typeof text === 'string' ? text : null;
+      } catch {
+        return null; // OCR 故障 = 通道缺席（不伪造证据，不炸主流程）
+      }
+    }),
   };
 }
 
@@ -343,21 +369,35 @@ export function productionCanaryPorts(config: Config, io: CanaryProbeIo = { seri
 
 const RECENT_LIMIT = 16;
 const recentEvents: CanaryEvent[] = [];
-/** 探针预算账本：会话键 → 已试演次数（有界 128 会话，防缓慢泄漏） */
-const probeBudget = new Map<string, number>();
-const BUDGET_SESSIONS_MAX = 128;
+/**
+ * 探针预算账本（ΠΑΝ-76 洪泛防护）：会话键 → 已试演次数。
+ * 旧 Map 插入序淘汰可被会话洪泛重置目标会话的预算（6 次/会话上限被绕）；
+ * 换分保护区统一件：已消耗（used>0）的账是安全态不参与普通逐出；全局上界
+ * 128；每窗新键 ≤8，超限新键的 charge 返回 false（调用方按预算耗尽处理 ——
+ * 探针花的是真实物理动作，限流期不给洪泛者无限量的临时预算）。
+ */
+const probeBudget = new SessionLruCache<number>({
+  capacity: 128,
+  isProtected: used => used > 0,
+  maxNewKeysPerWindow: 8,
+  windowMs: 60_000,
+  protectedIdleMs: 30 * 60_000,
+  onNewKeyLimited: () => { try { telemetry.note('canary:budget-new-session-limited', false); } catch { /* 记账面故障：吞 */ } },
+});
 
 function recordEvent(ev: CanaryEvent): void {
   recentEvents.unshift(ev);
   if (recentEvents.length > RECENT_LIMIT) recentEvents.length = RECENT_LIMIT;
 }
 
-function chargeBudget(sessionKey: string): void {
-  probeBudget.set(sessionKey, (probeBudget.get(sessionKey) ?? 0) + 1);
-  if (probeBudget.size > BUDGET_SESSIONS_MAX) {
-    const first = probeBudget.keys().next().value; // 插入序淘汰最旧会话
-    if (first !== undefined) probeBudget.delete(first);
-  }
+/** 预算读取（命中刷热度 —— F10 修正） */
+function budgetUsed(sessionKey: string): number {
+  return probeBudget.get(sessionKey) ?? 0;
+}
+
+/** 预算记账：返回 false = 新键被洪泛限流（不试演 —— 见 chargeBudget 调用面） */
+function chargeBudget(sessionKey: string): boolean {
+  return probeBudget.update(sessionKey, v => (v ?? 0) + 1);
 }
 
 /** W2-7：最近的试演事件（时间降序；诊断面板/测试观察面） */
@@ -367,7 +407,7 @@ export function recentCanaryEvents(): readonly CanaryEvent[] {
 
 /** W2-7：探针预算账本只读快照（会话键 → 已用次数；可观测面） */
 export function canaryBudgetSnapshot(): ReadonlyMap<string, number> {
-  return new Map(probeBudget);
+  return new Map(probeBudget.entries());
 }
 
 /** W2-7：生命周期归零（插件卸载 / 测试隔离） */
@@ -379,24 +419,129 @@ export function resetCanaryGuard(): void {
 // ─── 守卫注册 ───
 
 /**
+ * ΠΑΝ-80：裁决调用是否携带带外确认码证据（在场性检查 —— 码真伪由队列侧
+ * ΠΑΝ-1 的哈希消费执法，本守卫不重复校验）。形态与队列契约同律：
+ * confirm_code 为非空 string（单条目人体工学形态）或 Record<条目id, 非空码>
+ * （批量逐条各交各码）。脏类型一律按无证据（fail-closed 方向）。
+ */
+function adjudicateCarriesConfirmEvidence(args: Record<string, any>): boolean {
+  try {
+    const cc = args?.confirm_code;
+    if (typeof cc === 'string' && cc.trim() !== '') return true;
+    if (cc !== null && typeof cc === 'object' && !Array.isArray(cc)) {
+      for (const v of Object.values(cc as Record<string, unknown>)) {
+        if (typeof v === 'string' && v.trim() !== '') return true;
+      }
+    }
+    return false;
+  } catch {
+    return false; // 防御式：证据面故障 ⇒ 按无证据（拒绝方向）
+  }
+}
+
+/**
  * 注册金丝雀试演守卫（W2-7）。ports 参数是注入缝 —— 测试注入假物理端口/
  * 假帧哈希（离线确定性）；缺省用生产端口（后端不在场时自动全降级，行为
  * 等价于纯旁路放行）。W6R 例外：携带审批令牌的调用（审批域活口）在探针
  * 缺席/失败时 fail-closed 拦截，除非逃生门 allowUnverifiedDangerous=true。
+ * ΠΑΝ-77：ports.readRegionText 在场时，试演准入前对落点邻域做 OCR 实读交叉
+ *（自述判 rehearse 后才采集 —— 让位分支零额外读屏成本）。ΠΑΝ-80：裁决面
+ *（adjudicate_approval_queue 的 grant 臂）同过金丝雀 —— 无确认码证据的自述
+ * 同意主张被 fail-closed 拦截。
  */
 export function registerCanaryGuard(ctx: Context, config: Config, ports?: CanaryProbePorts): void {
   onToolPre(ctx, async (call, next) => {
     // 防御式铁律：守卫的一切都在 try 内；任何异常的成本是「这一次不试演」，
     // 绝不是工具调用被吞 / 被拦截 / 被延迟到异常路径。
     try {
+      // ── ΠΑΝ-80：金丝雀锚扩展到裁决面（adjudicate 路径也过 canary）──
+      // C1-1 H1 / F1-1 对接点：队列裁决是同意的第二入口 —— 模型自述「用户
+      // 已批准」与自述 target_description 同为被审计对象的证词（C2-1 F14 的
+      // 信任基座错位在裁决面原样存在）。执法：grant 主张必须携带**带外确认码
+      // 证据**（入队时锚定的码哈希由队列侧 ΠΑΝ-1 消费 —— 本守卫只查证据
+      // 「在场性」，不重复校验码本身）；无码 grant ⇒ fail-closed 拦截并指明
+      // 出路（deny 永远可行，不需要人证）。审批闸关闭时队列本就不活跃，跳过。
+      if (call.name === 'adjudicate_approval_queue' && config.enableApprovalGate !== false) {
+        if (call.args?.grant === true && !adjudicateCarriesConfirmEvidence(call.args)) {
+          recordEvent({
+            at: Date.now(), tool: call.name, action: 'blocked',
+            why: '裁决面金丝雀（ΠΑΝ-80）：grant 主张无带外确认码人证 —— 模型自述单源，拒绝（队列侧 ΠΑΝ-1 同律 fail-closed）',
+          });
+          telemetry.note('canary:blocked', true);
+          return (
+            `[Guard Blocked][Canary]: adjudicate_approval_queue(grant=true) 携带的同意主张没有人类证据 —— ` +
+            `grant 必须附带用户从带外通道（晨报/确认码投递）读给你的 confirm_code（单条目 string 或逐条目 map）。\n` +
+            `  这是防自批闸（与队列侧 ΠΑΝ-1 的码校验同律）：模型转述「用户同意了」不构成同意。\n` +
+            `  出路：① 向用户转达待批清单并索取每条目的确认码后携 confirm_code 重试；` +
+            `② 用户明确拒绝 ⇒ adjudicate(grant=false)（拒绝不需要码）；③ 条目过期 ⇒ 重新 request_approval 走带外铸造。`
+          );
+        }
+        return next(); // 携码 grant（队列侧执法真伪）/ deny —— 金丝雀让位
+      }
+
       const sessionKey = typeof call.sessionId === 'string' && call.sessionId !== ''
         ? call.sessionId
         : '_anon';
-      const trigger = classifyCanaryTrigger(call.name, call.args, {
+      let trigger = classifyCanaryTrigger(call.name, call.args, {
         dangerPatterns: config.dangerPatterns,
-        probeBudgetUsed: probeBudget.get(sessionKey) ?? 0,
+        probeBudgetUsed: budgetUsed(sessionKey),
         probeBudgetCap: CANARY_PROBE_BUDGET_DEFAULT,
       });
+
+      // ── ΠΑΝ-77（多源证据）：自述判「可试演」后，采集独立证据再交叉一次 ──
+      // 采集时机刻意放在自述分类命中 rehearse 之后：OCR 是真实读屏往返，只对
+      // 「即将按自述试演」的少数调用付费（proceed×high 且幂等标签命中的窄面），
+      // 一切让位分支（低危/非 proceed/预算尽/已裁决）零额外成本。通道缺席/
+      // 读失败 ⇒ 不重分类（自述单源行为，与 ΠΑΝ-77 前逐字节一致）。
+      if (trigger.kind === 'rehearse' && typeof ports?.readRegionText === 'function') {
+        let regionText: string | undefined;
+        try {
+          const t = await ports.readRegionText(trigger.probe.point, config.probeRegionRadius);
+          regionText = typeof t === 'string' ? t : undefined;
+        } catch {
+          regionText = undefined; // OCR 故障 = 通道缺席（不伪造证据）
+        }
+        if (regionText !== undefined) {
+          trigger = classifyCanaryTrigger(call.name, call.args, {
+            dangerPatterns: config.dangerPatterns,
+            probeBudgetUsed: budgetUsed(sessionKey),
+            probeBudgetCap: CANARY_PROBE_BUDGET_DEFAULT,
+            regionText,
+          });
+        }
+      }
+
+      // ΠΑΝ-77（任一危险即拦）：自述无害而 OCR 实读报危 —— 拦截 + 降级问人
+      //（只读 approval.request，同分歧路径；不试演带矛盾证据的调用）。
+      if (trigger.kind === 'danger-cross') {
+        let token: string | null = null;
+        try {
+          const pa = approval.request(
+            `[金丝雀多源交叉] ${call.name} 自述无害但落点实读报危 —— 请人工裁决是否放行`,
+            { actionShape: { tool: call.name } },
+          );
+          token = pa.token;
+        } catch {
+          token = null; // 审批通道异常：拦截仍生效，令牌缺席如实记注
+        }
+        recordEvent({
+          at: Date.now(), tool: call.name, action: 'blocked',
+          why: trigger.note,
+          probe: undefined, point: undefined,
+          approvalToken: token,
+        });
+        telemetry.note('canary:blocked', true);
+        return (
+          `[Guard Blocked][Canary]: 多源证据交叉报危 —— 模型自述该目标无害，但落点邻域 OCR 实读` +
+          `命中危险词，原动作已被拦截并降级为人工审批。\n` +
+          `  action: ${call.name}\n` +
+          `  evidence: ${trigger.note}\n` +
+          (token !== null
+            ? `  approval token minted: ${token} — 请用户经 grant_approval 裁决后携 approval_token 重试；` +
+              `若目标是误标（自述与实读不一致），请先重新定位（find_text/zoom_inspect）核实真实控件。`
+            : `  审批通道铸造失败 —— 请直接向用户说明证据矛盾并等待人工指示，勿强行执行。`)
+        );
+      }
 
       if (trigger.kind === 'skip') {
         // 噪声纪律：not-action-tool 每次无关调用都发生，不打点；其余让位
@@ -414,7 +559,17 @@ export function registerCanaryGuard(ctx: Context, config: Config, ports?: Canary
       }
 
       // ── rehearse：金丝雀试演 ──
-      chargeBudget(sessionKey); // 计数先于探针（并发/失败皆不超支）
+      // ΠΑΝ-76：预算记账（计数先于探针 —— 并发/失败皆不超支）。新键被洪泛
+      // 限流 ⇒ 记账未驻留：按「预算不可论证」处理，不试演、让位放行 + 诚实
+      // 记注（绝不给限流期的新会话发无限量临时预算 —— 探针花的是真实物理动作）。
+      if (!chargeBudget(sessionKey)) {
+        recordEvent({
+          at: Date.now(), tool: call.name, action: 'degraded',
+          why: '新会话的探针预算账被洪泛限流（ΠΑΝ-76 分保护区）—— 本次不试演，让位放行（不驱逐既有会话账）',
+        });
+        telemetry.note('canary:degraded', false);
+        return next();
+      }
       const epistemics = `advise=${trigger.report.advise} 有效置信=${trigger.report.confidence.toFixed(3)}`;
       recordEvent({
         at: Date.now(),

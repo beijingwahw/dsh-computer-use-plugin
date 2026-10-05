@@ -23,6 +23,14 @@ function centerRegionNorm(fraction = 0.4) {
     const inset = (1 - fraction) / 2;
     return { x: inset, y: inset, width: fraction, height: fraction };
 }
+/**
+ * ΤΕΛ-5 D-G22：弹窗栖息地中央带（归一域 {x,y,width,height}）—— 几何/语义检测
+ * 通道与 autonomy 策略面的「弹窗确认点击限定」共用同一「弹窗通常居于屏中央」
+ * 假设（单源方言：变更此函数须两侧同步语义）。归一域乘屏宽高即像素域。
+ */
+export function popupHabitatNorm(fraction = 0.4) {
+    return centerRegionNorm(fraction);
+}
 function centerRegion(w, h, fraction = 0.4) {
     const r = centerRegionNorm(fraction);
     return {
@@ -94,6 +102,31 @@ export async function detectPopupHeuristic(frameId, buffer) {
 //   双清洁 −1.5 —— 单帧强证据仍立即触发 ON（与旧行为一致），但单帧清洁
 //   不再立即放行：须累积至 OFF 线）。先验 0.05（世界大多数时刻没有弹窗）。
 //   迟滞带 [0.35, 0.6]：进入需 ≥0.6，退出需 ≤0.35 —— 一帧噪声不再翻转状态。
+//
+// ΠΑΝ-122（五键窗口参数 vs 真机弹窗时序的适配复查 —— 参数依据成文）：
+// 本滤波器的喂食节奏 = take_screenshot 的模型节奏（秒级，非视频帧率）；
+// 真机弹窗的时序形态与五键缺省值的推导对照如下（全部可由 LOGIT/SIGMOID
+// 闭式复算，pan122 测试锁定数值）：
+//   · 单帧几何 +4.0 nats：先验 logit(0.05)=−2.944 → 1.056 ⇒ belief≈0.743
+//     ≥ ON 0.6 —— 弹窗出现后的**下一次截图**即拦截（零漏帧窗口，与旧
+//     OR 行为逐字节对齐 —— 「宁可误报拦截」使命的执法面）；
+//   · 单帧语义 +5.0 nats：belief≈0.786 ≥ ON —— 词表命中（cookie/accept）
+//     同帧立即拦截；
+//   · ON 态单帧清洁 −1.5 nats：0.743 → 0.390 落入迟滞带 [0.35,0.6] 保持
+//     ON —— 弹窗真关后的第一帧漏检（OCR 抖动/关键词漏读）不放行；
+//   · 双清洁帧：0.390 → 0.125 ≤ OFF 0.35 —— 连续两帧无证据才放行。真机
+//     适配论证：模型节奏下两帧 ≈ 两个动作步（秒级）；弹窗「已关」的确认
+//     成本 = 1 个额外动作步的守卫开销 —— 有界且方向正确（漏拦盲操作直接
+//     失败的代价 ≫ 多拦一步）；
+//   · 迟滞结构不变量（对数域）：单帧触发态 log-odds ≈ +1.06，OFF 线
+//     logit(0.35) ≈ −0.62，距离 1.68 nats > 单帧清洁幅度 1.5 nats ——
+//     单帧清洁只能把信念送进迟滞带（≈0.39，∈(0.35,0.6)），数学上不可能
+//     从触发态直通放行（结构保证，非调参运气）。
+// 已知边界（如实）：① 转瞬弹窗（toast 存活 < 1 个截图间隔）对任何帧采样
+// 检测器都不可见 —— 非本滤波器参数可解；② 弹窗关闭后立刻重弹（cookie 横幅
+// 复现）走 OFF→ON 的单帧强证据路径，无死区；③ SPRT 旁路（Q-3）双帧即锁
+// clean 的锁死面是其停止语义（判过即停），消费面以 Schmitt 为准（SPRT
+// 判决无生产消费方 —— 在案事实，非本工单范围）。
 // 诚实边界：证据强度是算法形状字面量（「几何启发式比 OCR 词证弱」的先验序），
 // epochF.test 守护三态行为：单帧触发 / 迟滞保持 / 双清洁退出。
 const POPUP_PRIOR = 0.05;
@@ -154,10 +187,56 @@ export class SchmittPopupFilter {
         this.active = false;
     }
 }
-/** 模块级滤波器单例（take_screenshot 每帧喂数；插件卸载经 resetPopupBelief 归零） */
-const popupFilter = new SchmittPopupFilter();
+const DEFAULT_FILTER_KEY = 'default';
+const MAX_TRACKED_FILTER_SESSIONS = 32;
+const POPUP_FILTER_STALE_MS = 10 * 60 * 1000;
+const popupFilters = new Map();
+function filterCellFor(key, now) {
+    // 惰性清过期（popupGuard.writeCell 同律;只清带会话键,default 免清）
+    for (const [k, cell] of popupFilters) {
+        if (k !== DEFAULT_FILTER_KEY && now - cell.updatedAt > POPUP_FILTER_STALE_MS)
+            popupFilters.delete(k);
+    }
+    // LRU：新会话键入场且已满 ⇒ 按插入序逐出最旧会话（default 免逐）
+    if (key !== DEFAULT_FILTER_KEY && !popupFilters.has(key)) {
+        let sessions = 0;
+        for (const k of popupFilters.keys())
+            if (k !== DEFAULT_FILTER_KEY)
+                sessions++;
+        if (sessions >= MAX_TRACKED_FILTER_SESSIONS) {
+            for (const k of popupFilters.keys()) {
+                if (k === DEFAULT_FILTER_KEY)
+                    continue;
+                popupFilters.delete(k);
+                break;
+            }
+        }
+    }
+    let cell = popupFilters.get(key);
+    if (!cell) {
+        cell = { filter: new SchmittPopupFilter(), updatedAt: now };
+        popupFilters.set(key, cell);
+    }
+    return cell;
+}
+function popupFilterSessionKey(sessionId) {
+    return typeof sessionId === 'string' && sessionId !== '' ? sessionId : DEFAULT_FILTER_KEY;
+}
+/** 喂帧：按会话分滤波器消费证据;带会话键镜像喂 default 一帧（全局最新视图） */
+function feedPopupFilter(ev, sessionId) {
+    const key = popupFilterSessionKey(sessionId);
+    const cell = filterCellFor(key, Date.now());
+    const r = cell.filter.update(ev);
+    cell.updatedAt = Date.now();
+    if (key !== DEFAULT_FILTER_KEY) {
+        const d = filterCellFor(DEFAULT_FILTER_KEY, Date.now());
+        d.filter.update(ev); // 镜像写：default 键与 popupGuard 的镜像规则同律
+        d.updatedAt = Date.now();
+    }
+    return r;
+}
 export function resetPopupBelief() {
-    popupFilter.reset();
+    popupFilters.clear();
 }
 /**
  * 语义证据：OCR 中央带，词表命中任一即确认。
@@ -226,8 +305,9 @@ async function detectPopupSemantic(frameId, buffer, keywords, ocrLang) {
         return [];
     }
 }
-/** 双模融合检测 + F-3 贝叶斯迟滞滤波：take_screenshot 的唯一传感入口 */
-export async function detectPopup(buffer, opts = {}, frameId = null) {
+/** 双模融合检测 + F-3 贝叶斯迟滞滤波：take_screenshot 的唯一传感入口
+ * （sessionId 可选 —— 滤波器按会话分键,缺席回落 'default';R1-8 会话隔离补全） */
+export async function detectPopup(buffer, opts = {}, frameId = null, sessionId) {
     const geometric = await detectPopupHeuristic(frameId, buffer);
     const keywords = (opts.popupKeywords ?? '')
         .split(',')
@@ -237,10 +317,11 @@ export async function detectPopup(buffer, opts = {}, frameId = null) {
         ? await detectPopupSemantic(frameId, buffer, keywords, opts.ocrLang || 'eng')
         : [];
     // F-3：帧证据喂入施密特滤波 —— 单帧强证据立即 ON（旧行为），单帧噪声不再翻转
-    const { belief, active } = popupFilter.update({
+    // （R1-8：按会话分滤波器消费 —— 会话 A 的误报不再污染会话 B 的迟滞态）
+    const { belief, active } = feedPopupFilter({
         geometric,
         semantic: matchedKeywords.length > 0,
-    });
+    }, sessionId);
     // Q 纪元（Q-3）：同一帧证据并行喂 SPRT（旁路 —— 信息论最优停止的第二意见）
     popupSprt.update({ geometric, semantic: matchedKeywords.length > 0 });
     return {
@@ -311,10 +392,6 @@ export class SprtPopupFilter {
 const popupSprt = new SprtPopupFilter();
 export function resetPopupSprt() {
     popupSprt.reset();
-}
-/** SPRT 当前判决（终判锁定；null = 继续观察） */
-export function getPopupSprt() {
-    return popupSprt.state();
 }
 // W6-2（doctor smell.over-engineering 清偿）：W2-2（S3）接地新鲜度探针已分区提取至
 // popupDetector.freshness.ts（行为零变化）；导入面不变 —— export * 再分发，既有消费方零改动。

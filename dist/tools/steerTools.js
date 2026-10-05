@@ -473,7 +473,33 @@ export function createSteerSession(deps) {
             }
             pendingChoice = null;
             if (letter === 'A') {
-                return { status: 'answered', choice: 'A', question };
+                // ΤΕΛ-1（C2-9 主题1 A 级 · clearBlockers 生产接线）：A 继续 = 人工显式
+                // 确认放行 —— goalState 构造律明文「由调用方人工确认后 clearBlockers()
+                // 放行」，steer_answer 的 A 应答就是那个人工确认通道（C 终止在同会话
+                // 目标机上铸下的运行期阻塞，用户改主意答 A 时理应可逆 —— 否则「终止」
+                // 成了会话内不可撤销的单向门）。只清本会话绑定的目标机（那台机的阻塞
+                // 账只有本会话的 C 在写）；ΠΑΝ-59 的窄类放行律不破（环内 preVerdict 的
+                // 构造降级清账与本处的人工确认放行各管各面）。防御式：目标机缺席/
+                // 异常 ⇒ 吞掉照常应答（放行是旁路义务，绝不炸应答面）。
+                let released = [];
+                try {
+                    const p = goal?.progress;
+                    if (goal && Array.isArray(p?.blockers) && p.blockers.length > 0) {
+                        goal.clearBlockers();
+                        released = [...p.blockers];
+                    }
+                }
+                catch {
+                    released = []; // 放行失败不阻断应答 —— 阻塞照旧留给人工处置
+                }
+                return {
+                    status: 'answered',
+                    choice: 'A',
+                    question,
+                    hint: released.length > 0
+                        ? `已按「继续」放行：清除目标机阻塞 ${released.length} 项（${released.join('；')}）—— blocked 相由此自动回归 acting（判定律纯推导）`
+                        : '已确认继续（目标机无阻塞须放行）',
+                };
             }
             if (letter === 'B') {
                 // 写回判据修正（goalState 现有 API 风格：amendCriterion 防御式绝不抛）

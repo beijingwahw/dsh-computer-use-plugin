@@ -13,7 +13,7 @@ import { matchesRiskPatterns, reversibilityRegistry, dispatchLaneFor } from '../
 import { approval } from '../approval.js';
 import { uiMemory } from '../uiMemory.js';
 import { regionDhash, similarity, normalizeHash } from '../perceptualHash.js';
-import { parseExpectation } from '../intent.js';
+import { parseExpectation, menuItemSemantics } from '../intent.js';
 import { quantum } from '../quantumSense.js';
 import { probePoints, gateTextClick } from '../interactivityProbe.js';
 import { extractUrls } from '../urlSense.js';
@@ -23,7 +23,7 @@ import * as physicalBackend from '../physicalBackend.js';
 import { encodeForVlm } from '../vlm/codec.js';
 import { askRefutation, refuteCourtInSession } from '../vlm/refute.js';
 import { probeGroundingFreshness } from '../popupDetector.js';
-import { assertActionAllowed } from './actionGate.js';
+import { assertActionAllowed, notaryEvidenceStale } from './actionGate.js';
 import { reversalEscrow } from '../reversalEscrow.js';
 /** W2-2：派发前消费批注 patch（clickMouse/clickElement/dragMouse 共用原语）。 */
 export function consumeApprovalAmendment(token, plan) {
@@ -73,6 +73,58 @@ export function consumeApprovalAmendment(token, plan) {
     catch {
         return {}; // 旁路宪法：批注读取失败 = 无批注（不炸派发主流程）
     }
+}
+// ─── R2-4：菜单两段式协议话术（纯函数 —— 测试的确定性事实源）───
+//
+// 实战病灶（R1-8 冒烟 9 连败的确定性根因层）：
+//   ① menu_expand 背叛（菜单没开）时通用 INTENT MISMATCH 文案被无视，模型径直
+//      点菜单项坐标三连（attempt9 seq53/68/153 全部 below-click zone static）；
+//   ② 菜单项点击被交互性闸门以 I-beam 拦下时，通用 STATIC CONTENT 文案没有
+//      告诉模型「下拉没开，回第一阶段」（attempt9 seq59 ACTION_REQUIRED 后仍
+//      原地重试）。
+// 两段式协议：先点菜单栏条目（expected_effect menu_expand，satisfied=true 才算
+// 开）→ 再按展开后截图读坐标点菜单项。菜单未开 = 第二阶段结构性不可行，话术
+// 明令禁止并给出回退路径。纯字符串铸造，零物理调用。
+/** R2-4：menu_expand 背叛（含未检出变化）的下一步指引 */
+export function menuExpandBetrayedHint(evidence) {
+    return `MENU DID NOT OPEN — the zone below your click is unchanged (${evidence}). ` +
+        "Your click missed the menu bar entry (these are small targets: full-screen estimates are systematically " +
+        "off; also re-check the window state — restore/maximize moves the menu bar). Do NOT click any menu item " +
+        "next: menu items only exist while the dropdown is expanded. Call 'zoom_inspect' around the menu bar to " +
+        "read precise coordinates, then retry this click still declaring expected_effect '{\"kind\":\"menu_expand\"}' " +
+        'and proceed to the item only when intent.satisfied=true.';
+}
+/** R2-4：菜单项点击被交互性闸门拦下（I-beam/text）时的下一步指引 */
+export function menuNotOpenGateHint() {
+    return 'MENU NOT OPEN: this point currently reads as document text (I-beam cursor) — the dropdown ' +
+        'menu you are targeting is NOT expanded, so the menu item does not exist on screen right now. ' +
+        'Do NOT retry these item coordinates. Go back to stage 1 of the two-stage menu protocol: ' +
+        "re-open the menu by clicking its bar entry (declare expected_effect '{\"kind\":\"menu_expand\"}' " +
+        'and proceed only when the result reports intent.satisfied=true), then take a fresh screenshot ' +
+        'of the expanded dropdown and read the item coordinates from THAT screenshot before clicking.';
+}
+// ─── ΠΑΝ-12（令牌-目标绑定的执行侧预留接线）───
+//
+// 批判报告 C1-5 H1：审批令牌是不记名能力 —— approval.ledger 的 consume 旧签名
+// 只收 token，不比对被授权目标（「发送邮件给 Alice」的令牌在 TTL 内可授权
+// 任何命中危险词的点击）。修复分两波：ledger 侧为 validate/beginAttempt/consume
+// 增加可选 targetHint（ΠΑΝ-5 macaroon 式目标绑定 —— TargetHint = RawActionShape，
+// 坐标千分位量化 = 抖动容忍带）；本波在全部消费点**统一接线** —— 一律经本原语
+// 消费，携带 {tool, x, y, target_description} 的完整提示形状。
+// 兼容律（ΠΑΝ-5 立法）：未携带绑定的令牌对 hint 免疫（既有行为零变化）；
+// 携带绑定的令牌按摘要强制比对（不匹配 ⇒ 拒绝且不焚毁）。
+// ΠΑΝ-36（F1-4 移交收尾）：提示形状自描述级升级为**坐标级** —— clickMouse 的
+// 两个消费点补齐 x/y（与铸造面 computeTargetDigest 的规范化管道同域）；
+// beginAttempt 的派发预留同样携带 escrow planId（ΠΑΝ-34 dispatchGate 命脉的
+// 工具侧接线）与坐标级 target。dragMouse/pressHotkey 的消费点维持描述级
+//（各自文件领地，形状兼容零破坏 —— hint 可选字段）。
+/**
+ * ΠΑΝ-12/36：验收式消费的统一落点（clickMouse/dragMouse/pressHotkey 共用）。
+ * hint = 本次派发实际作用的目标（token-目标绑定的执行侧证据；clickMouse 携
+ * 坐标级完整形状，drag/pressHotkey 携描述级最小形状 —— 兼容面）。
+ */
+export function consumeApprovalWithHint(token, hint) {
+    return approval.consume(token, hint);
 }
 // ─── 纪元 Ρ（双钥公证锁）：公证取证面 ───
 //
@@ -528,6 +580,11 @@ export function createClickMouseTool(config) {
             // 携证据重审 —— 任一通道见危险 ⇒ 审批域执法；OCR 实读与模型自述不符 ⇒
             // notary-mismatch（注入谎报目标的根除点）。取证失败一律 null（诚实降级），
             // 绝不因公证取证失败而阻塞正常点击：锁只在「通道在场且见危险/不符」时收紧。
+            // ΤΕΛ-6（D-G32·M3）：notaryEvidenceAt 记录取证成功时刻（至少一条通道
+            // 读了东西才算在场证据）；派发前的 freshnessStage 据此判「证据过期作废」
+            //（C1-5 M3：取证到派发可隔 10s+ —— 反驳法院最坏 8s + 预验 + 探针 + 截屏，
+            // 帧票据 2s 新鲜度只管截屏复用，不管公证证据）。
+            let notaryEvidenceAt = null;
             const notaryStage = async () => {
                 let gate2 = gate;
                 let notarization;
@@ -540,6 +597,10 @@ export function createClickMouseTool(config) {
                                 ocrLabel: avail.ocr ? await notaryEvidence.readOcrLabel(config, x, y) : null,
                                 structuralName: avail.structural ? await notaryEvidence.readStructuralName(config, x, y) : null,
                             };
+                            // ΤΕΛ-6（D-G32·M3）：证据在场（任一通道读到非空）⇒ 记取证时刻
+                            if (evidence.ocrLabel !== null || evidence.structuralName !== null) {
+                                notaryEvidenceAt = Date.now();
+                            }
                             gate2 = assertActionAllowed('click_mouse', { target_description, expected_text, approval_token }, config, evidence);
                         }
                         catch {
@@ -820,13 +881,20 @@ export function createClickMouseTool(config) {
                                         note: probe?.note,
                                     },
                                 },
-                                next_step: 'This point is STATIC CONTENT (chat message / document text), not a clickable control — the text merely ' +
-                                    'MENTIONS the label you are looking for. Do NOT retry the same coordinates. ' +
-                                    "Re-locate the real control: call 'find_text' with the label keyword and click ONLY a match with " +
-                                    'interactivity=control; or take_screenshot and search visually; the entry may need scroll_page or a ' +
-                                    'menu to be opened first. ' +
-                                    'If you DELIBERATELY want to click static text (place a caret in a document, select a span), ' +
-                                    're-invoke click_mouse with allow_text_click: true.' + jumpHint,
+                                next_step: 
+                                // R2-4：菜单项语义 ⇒ 两段式话术。实战病灶：下拉未开时点菜单项
+                                // 坐标落在正文（I-beam），模型把拦截当噪声原地重试同一坐标
+                                // （R1-8 attempt9 三连）。菜单项只在菜单展开期间存在 —— 拦截
+                                // 本身就是「菜单没开」的确定性证据，直接给出回到第一阶段的路径。
+                                menuItemSemantics(target_description, expected_text)
+                                    ? menuNotOpenGateHint()
+                                    : 'This point is STATIC CONTENT (chat message / document text), not a clickable control — the text merely ' +
+                                        'MENTIONS the label you are looking for. Do NOT retry the same coordinates. ' +
+                                        "Re-locate the real control: call 'find_text' with the label keyword and click ONLY a match with " +
+                                        'interactivity=control; or take_screenshot and search visually; the entry may need scroll_page or a ' +
+                                        'menu to be opened first. ' +
+                                        'If you DELIBERATELY want to click static text (place a caret in a document, select a span), ' +
+                                        're-invoke click_mouse with allow_text_click: true.' + jumpHint,
                             }, null, 2);
                         }
                     }
@@ -887,6 +955,35 @@ export function createClickMouseTool(config) {
                 // 缺席。非令牌动作不进入本块（叠加防御只挂危险令牌面，旧行为不变）。
                 const freshnessStage = async () => {
                     if (dangerous && approval_token && !config.dryRun) {
+                        // ΤΕΛ-6（D-G32·M3）：公证证据时效 —— 取证到「现在」超过立法阈
+                        //（NOTARY_EVIDENCE_MAX_AGE_MS=10s）⇒ 证据过期作废，拒绝派发（fail-closed，
+                        // 与 freshness 探针同执法点族：叠加防御只挂危险令牌面，非令牌动作零行为）。
+                        // 过期证据是「新鲜度阳性的失效发现」（同 drifted 律）：不受
+                        // allowUnverifiedDangerous 逃生门豁免 —— 重试即重新取证，成本一次点击。
+                        // 令牌未烧（阻断在预留/派发之前 —— 与 freshness 拦截同位）。
+                        if (notaryEvidenceStale(notaryEvidenceAt, Date.now())) {
+                            void journal.appendMarker({
+                                kind: 'GUARD_BLOCKED',
+                                guard: 'notary-lock',
+                                reason: `notary-evidence-stale: evidence age ${Date.now() - (notaryEvidenceAt ?? 0)}ms > ${10_000}ms`,
+                            }).catch(() => { });
+                            return {
+                                stamp: undefined,
+                                blocked: JSON.stringify({
+                                    status: 'ACTION_REQUIRED',
+                                    state_anchor: {
+                                        target: target_description ?? expected_text ?? '(undescribed target)',
+                                        reason: 'notary-evidence-stale',
+                                        note: 'The OCR/whitebox evidence proving this irreversible target was captured too long before '
+                                            + 'dispatch (refutation court, probes and screenshots may have intervened) — the screen may no '
+                                            + 'longer read the same. The notarized guarantee has EXPIRED, not merely degraded.',
+                                    },
+                                    next_step: 'STALE NOTARY EVIDENCE — do NOT force this click. Simply RETRY the same click_mouse call: '
+                                        + 'the retry re-collects fresh evidence at the point (the approval token is still valid — no '
+                                        + 'attempt was spent). If retries keep expiring, reduce intervening steps between approval and click.',
+                                }, null, 2),
+                            };
+                        }
                         const fresh = await probeGroundingFreshness();
                         if (fresh.verdict === 'drifted') {
                             // 审计留痕：新鲜度拦截入防篡改链（GUARD_BLOCKED 方言，notary-lock 同律）
@@ -1005,7 +1102,22 @@ export function createClickMouseTool(config) {
                 // 预算耗尽在派发前焚毁（旧实现第 maxAttempts+1 次点击仍会落到物理世界）。
                 const attemptReservationStage = () => {
                     if (dangerous && approval_token) {
-                        if (!approval.beginAttempt(approval_token)) {
+                        // ΠΑΝ-34（C1-2 H1）：escrow 预案 id 随预留携带 —— laneGate 已在托管道
+                        // 铸得 planId（mintPlan），此前却从未传入 beginAttempt，dispatchGate
+                        // 武装后（index.ts 的 armReversalEscrow）「没有预案就绝无派发预留」
+                        // 的执法链在此闭合。ΠΑΝ-36：target = 坐标级完整形状（绑定令牌的
+                        // 兑换面比对；未绑定令牌零行为 —— 兼容律）。
+                        if (!approval.beginAttempt(approval_token, {
+                            ...(laneGate.applied && laneGate.escrowPlanId !== undefined
+                                ? { escrow: { planId: laneGate.escrowPlanId, semantics: laneGate.verdict.semantics } }
+                                : {}),
+                            target: {
+                                tool: 'click_mouse', x, y,
+                                ...(target_description !== undefined || expected_text !== undefined
+                                    ? { target_description: target_description ?? expected_text }
+                                    : {}),
+                            },
+                        })) {
                             approval.sweep();
                             return {
                                 reserved: false,
@@ -1101,7 +1213,15 @@ export function createClickMouseTool(config) {
                     const intentBetrayed = effect?.intent && !effect.intent.satisfied && effect.detected;
                     const lowConfidence = typeof confidence === 'number' && confidence < 0.6;
                     let nextStep = "MANDATORY: Call 'take_screenshot' to verify the UI state change.";
-                    if (intentBetrayed) {
+                    if (expectation?.kind === 'menu_expand' && effect?.intent && !effect.intent.satisfied) {
+                        // R2-4：menu_expand 背叛的专项话术。实战病灶（R1-8 attempt9 三连）：
+                        // 通用 INTENT MISMATCH 文案被无视，模型径直点菜单项坐标（菜单没开，
+                        // 全部落空）。菜单未开 = 第二阶段（点菜单项）结构性不可行 —— 明令
+                        // 禁止后续菜单项点击，并给出小目标 zoom 复核路径（菜单栏词形小、
+                        // 全屏估坐标系统性偏移）。
+                        nextStep = menuExpandBetrayedHint(effect.intent.evidence);
+                    }
+                    else if (intentBetrayed) {
                         nextStep = `INTENT MISMATCH: the screen changed but NOT in the expected way (${effect.intent.evidence}). ` +
                             'The click probably landed on the wrong element — treat as partial failure and re-examine.';
                     }
@@ -1114,6 +1234,17 @@ export function createClickMouseTool(config) {
                     }
                     if (!noopSuspected && expected_change) {
                         nextStep += ` Then CONFIRM your expectation: "${expected_change}" — if it did NOT happen, treat this as a partial failure.`;
+                    }
+                    // R4-3（b5，证据：R1-8 a9 seq74/134）：回执 SUCCESS + effect scale=
+                    // page-level 实况菜单根本未展开 —— 全屏指纹变了（环境噪声/别处动画）
+                    // 而点击点邻域纹丝不动（region 未检出变化），模型一律读成「意图达成」
+                    // 径直链下一步。page-level-only（region 未证实）时追加防误读注记
+                    // （加法式）：页级变化可能是环境性的，链式动作前必须截图确认。
+                    if (effect && effect.detected && effect.scale === 'page-level'
+                        && effect.region?.effect_detected !== true) {
+                        nextStep += ' CAUTION: the change was detected only at PAGE level — the clicked region itself did NOT change, ' +
+                            'so this may be ambient change (animation/clock/focus ring) rather than your click taking effect. ' +
+                            "Confirm the expected UI is actually present (take_screenshot) BEFORE chaining the next action.";
                     }
                     if (semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed) {
                         nextStep = `SEMANTIC MISMATCH: expected text "${expected_text}" was NOT found near the click point. ` +
@@ -1148,7 +1279,8 @@ export function createClickMouseTool(config) {
                         const semanticMismatched = !!(semantic && semantic !== 'ocr-unavailable' && !semantic.confirmed);
                         if (!effect) {
                             // 验证通道关闭（dry-run 或双重逃生门）：无从验收，维持旧方言（派发即消费，用后即焚）
-                            approval.consume(approval_token);
+                            // ΠΑΝ-36：坐标级 targetHint（绑定令牌的兑换面比对 —— 与 beginAttempt 同一形状）
+                            consumeApprovalWithHint(approval_token, { tool: 'click_mouse', x, y, target_description: target_description ?? expected_text });
                             acceptance = {
                                 verdict: 'unverified-dispatch-consumed',
                                 detail: 'Effect verification unavailable (dry-run, or verifyActions=false + ' +
@@ -1188,7 +1320,8 @@ export function createClickMouseTool(config) {
                         }
                         else {
                             // 验收通过：世界出现了变化且与预期一致（或无更严苛的期望可核对）
-                            approval.consume(approval_token);
+                            // ΠΑΝ-36：坐标级 targetHint（绑定令牌的兑换面比对 —— 与 beginAttempt 同一形状）
+                            consumeApprovalWithHint(approval_token, { tool: 'click_mouse', x, y, target_description: target_description ?? expected_text });
                             acceptance = {
                                 verdict: 'verified',
                                 detail: 'Verified world change consistent with the expectation — user consent consumed by this irreversible effect. ' +

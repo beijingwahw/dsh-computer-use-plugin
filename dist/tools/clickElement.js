@@ -45,7 +45,7 @@ import { assertActionAllowed } from './actionGate.js';
 import { notaryEvidence, notaryAnchorOf } from './clickMouse.js';
 import { approval } from '../approval.js';
 import { captureBefore, settleAndVerify } from '../actionVerifier.js';
-import { consumeApprovalAmendment, gateByReversibility, laneAnchorOf } from './clickMouse.js';
+import { consumeApprovalAmendment, gateByReversibility, laneAnchorOf, consumeApprovalWithHint } from './clickMouse.js';
 import { probeGroundingFreshness } from '../popupDetector.js';
 // ── P2b-3：验收取证面（notaryEvidence 同律的模块级可注入缝）──
 // 生产路径恒等委托 actionVerifier 的既有导出（captureBefore / settleAndVerify
@@ -305,7 +305,15 @@ export function createClickElementTool(config) {
                 // 派发预留：与 system.clickMouse 之间零 await（并发双花在落到物理
                 // 世界之前即被拒）；预算耗尽在派发前焚毁。
                 if (dangerous && approval_token) {
-                    if (!approval.beginAttempt(approval_token)) {
+                    // ΤΕΛ-3b：预留面补齐 targetHint（此前 beginAttempt/consume 全部裸调 ——
+                    // 绑定令牌在 click_element 通道上没有任何能通过比对的兑换点）。ID 寻址
+                    // 的绑定粒度是**描述级**：{tool:'click_element', target_description:元素名}
+                    //（模型铸造时无从知道元素中心的精确坐标 —— 坐标由 UI 树在运行时解析；
+                    // effTargetName 已是批注修正后的名字，与消费点同源同值）。未绑定令牌
+                    // 对 hint 免疫（ΠΑΝ-5 兼容律 —— 行为零变化）。
+                    if (!approval.beginAttempt(approval_token, {
+                        target: { tool: 'click_element', target_description: effTargetName },
+                    })) {
                         approval.sweep();
                         return JSON.stringify({
                             status: 'ACTION_REQUIRED',
@@ -343,7 +351,9 @@ export function createClickElementTool(config) {
                 let acceptance;
                 if (dangerous && approval_token) {
                     if (!effect) {
-                        approval.consume(approval_token);
+                        // ΤΕΛ-3b：验收式消费统一落点 + 描述级 targetHint（与 beginAttempt 的
+                        // 预留形状严格一致 —— 绑定令牌全链路同一标准比对）
+                        consumeApprovalWithHint(approval_token, { tool: 'click_element', target_description: effTargetName });
                         acceptance = {
                             verdict: 'unverified-dispatch-consumed',
                             detail: 'Effect verification unavailable (verifyActions off / dry-run); token consumed on dispatch.',
@@ -365,7 +375,9 @@ export function createClickElementTool(config) {
                             };
                     }
                     else {
-                        approval.consume(approval_token);
+                        // ΤΕΛ-3b：验收式消费统一落点 + 描述级 targetHint（与 beginAttempt 的
+                        // 预留形状严格一致 —— 绑定令牌全链路同一标准比对）
+                        consumeApprovalWithHint(approval_token, { tool: 'click_element', target_description: effTargetName });
                         acceptance = {
                             verdict: 'verified',
                             detail: 'Verified world change — user consent consumed by this irreversible effect. ' +

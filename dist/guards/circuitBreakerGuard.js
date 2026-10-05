@@ -2,6 +2,8 @@ import { onToolPre, onToolPost } from './hooks.js';
 import { failureMemory } from '../failureMemory.js';
 import { journal } from '../journal.js';
 import { contextManager } from '../contextManager.js';
+import { telemetry } from '../telemetry.js';
+import { SessionLruCache } from './sessionLru.js';
 import { classifyResult, isFailure, isSuccess } from '../resultContract.js';
 import { recoveryEfficacy, classifySyndromeSignature } from '../recoveryEfficacy.js'; // W2-5（R5）：恢复疗效账
 /** 把恢复提示附加到结果字符串：锚点 JSON 注入 recovery_hint 字段；非 JSON 则换行追加 */
@@ -180,23 +182,30 @@ export function registerCircuitBreakerGuard(ctx, maxFailures,
 /** W2-5（R5）：恢复疗效账的注入缝 —— 缺省进程级单例（guards/index.ts 零改动接线）；
  *  测试注入隔离实例（离线确定性）。账本绝不抛，喂入/查询失败的成本是
  *  「这一笔没记上 / 用固定梯子」，绝不是熔断路径异常。 */
-efficacy = recoveryEfficacy) {
+efficacy = recoveryEfficacy, 
+/** ΠΑΝ-76：注入钟（缺省真钟；测试离线确定性驱动翻窗/陈旧清扫） */
+clock = Date.now) {
     const MAX_TRACKED_SESSIONS = 16;
-    const bySession = new Map();
-    const stateFor = (sessionId) => {
-        const key = sessionId ?? '_anon';
-        let s = bySession.get(key);
-        if (!s) {
-            if (bySession.size >= MAX_TRACKED_SESSIONS) {
-                const oldest = bySession.keys().next().value;
-                if (oldest !== undefined)
-                    bySession.delete(oldest);
-            }
-            s = { recentFailures: 0, window: [], cusumUp: 0, cusumDown: 0, paused: false, probeSkip: false, probeOutcomes: 0 };
-            bySession.set(key, s);
+    // ΠΑΝ-76（C2-1 F10）：会话 LRU 换用分保护区统一件 —— 旧 Map 插入序淘汰可被
+    // 会话洪泛静默逐出：攻者批量新建会话即可冲掉目标会话的熔断冷静期（paused）
+    // 与失败证据（熔断被绕过）。新件三律：安全态键（冷静期在场/失败证据在册/
+    // CUSUM 漂移在途）不参与普通逐出；全局上界 16；每窗新键接纳上限 8，超限新
+    // 键降级为「无历史」临时态（不驱逐任何旧键——可用性优先，只是不计账）。
+    const bySession = new SessionLruCache({
+        capacity: MAX_TRACKED_SESSIONS,
+        isProtected: s => s.paused || s.recentFailures > 0 || s.window.length > 0 || s.cusumUp > 0 || s.probeOutcomes > 0,
+        maxNewKeysPerWindow: 8,
+        windowMs: 60_000,
+        protectedIdleMs: 30 * 60_000,
+        now: clock,
+        onNewKeyLimited: () => { try {
+            telemetry.note('circuit-breaker:new-session-limited', false);
         }
-        return s;
-    };
+        catch { /* 记账面故障：吞 */ } },
+    });
+    const stateFor = (sessionId) => bySession.admit(sessionId ?? '_anon', () => ({
+        recentFailures: 0, window: [], cusumUp: 0, cusumDown: 0, paused: false, probeSkip: false, probeOutcomes: 0,
+    })).value;
     // 1. 执行前：三臂复合判决（连续 / 后验 / ΝΩ-7 CUSUM 上行）任一越线 -> 熔断。
     //    ΝΩ-7：熔断不再是「一拦即全复位」—— 进入冷静期（半开探针制）：本位拦截后，
     //    拦截位与半开探针位交替。探针是真实派发（其结局走 post 面喂双侧 CUSUM）：

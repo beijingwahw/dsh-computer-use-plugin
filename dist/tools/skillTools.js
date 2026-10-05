@@ -337,6 +337,11 @@ export function createRunSkillTool(config) {
             if (resolved.source.kind !== 'template' && !skill) {
                 return `[Error]: Skill #${args.id} not found. Call match_skill to list available skills.`;
             }
+            // ΠΑΝ-17（模板指纹铸造）：模板路径的离场指纹载体 —— 模板对象上的
+            // exitFingerprint（首次成功执行时铸造，见下方后置条件验收段）。
+            const tpl = resolved.source.kind === 'template'
+                ? skillLibrary.getTemplate(resolved.source.id)
+                : undefined;
             if (args.confirm !== true) {
                 const anchorSkill = skill ?? {
                     id: resolved.source.id, name: resolved.source.name,
@@ -394,6 +399,13 @@ export function createRunSkillTool(config) {
             }
             const log = [];
             let failed = 0;
+            // ΠΑΝ-16（open_url 重放契约）：SKIPPED 与 failed 分账 —— 旧实现把 SKIPPED
+            // 一并计入 failed，而 open_url 步（journal ACTION_TOOLS 立法可重放）在安检
+            // 拒绝时诚实降级为 SKIPPED（verified-absent）⇒ 以 open_url 开头的技能结构
+            // 性永远失败、可靠度单调衰减直至被排练门禁永久封死。修法：跳过 = 未执行
+            // 且非失败（不惩罚可靠度），单独计数并在锚点诚实标注 —— 模型仍能看见
+            // 「有步没跑」，但账本不再把结构性缺席记成世界级失败。
+            let skipped = 0;
             // D-G5（W8-C1 收口 · run_skill 公证）：轨迹见证采集 —— 步指纹序列 + 三态
             // 结局（replay_actions 循环同款接线），重放完成时铸入 notary 锚。
             const witnessSteps = [];
@@ -414,8 +426,12 @@ export function createRunSkillTool(config) {
                     : step;
                 const outcome = await replayOneTraced(effective, config);
                 const line = outcome.line;
-                if (line.startsWith('FAILED') || line.startsWith('SKIPPED'))
+                // ΠΑΝ-16：SKIPPED（安检拒绝的 open_url 重发 / 未知工具 / 运行时缓存依赖
+                // 步）= 未执行且非失败 —— 不计 failed、不惩罚可靠度，单独入 skipped 账。
+                if (line.startsWith('FAILED'))
                     failed++;
+                else if (line.startsWith('SKIPPED'))
+                    skipped++;
                 log.push(`  ${step.tool}: ${line}`);
                 witnessSteps.push({
                     index: i,
@@ -427,7 +443,9 @@ export function createRunSkillTool(config) {
                 // 结算 —— run_skill 无死步观测面（失败步只计数不中止）⇒ 判决 = FAILED
                 // 与否：失败 ⇒ attemptFailed 续期（令牌保留可重试），成功 ⇒ consume
                 // 验收式（世界已承接不可逆效果）。
-                settleReservedApproval(outcome.reservedApprovalToken, line.startsWith('FAILED:'), 'skill-step-failure');
+                // ΤΕΛ-3b：reservedTargetHint 随行（绑定令牌 consume 的比对凭据 ——
+                // 与 replayOneTraced 预留时的形状同源同值）。
+                settleReservedApproval(outcome.reservedApprovalToken, line.startsWith('FAILED:'), 'skill-step-failure', outcome.reservedTargetHint);
                 await sleep(150);
             }
             const success = failed === 0;
@@ -454,7 +472,24 @@ export function createRunSkillTool(config) {
             let post = { verified: false, similarity: null, reason: 'hash-unavailable' };
             try {
                 const cap = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
-                post = judgePostcondition(skill?.exitFingerprint, cap.dhash ?? null);
+                // ΠΑΝ-17（模板指纹铸造）：模板无 save 时刻 ⇒ 离场基准来自首次全部步
+                // 成功的真实执行（世界盖戳路径 = 此处既有 captureProcessed 终帧取证，
+                // 与 run_skill 验收同源）。铸造时点在 recordTemplateOutcome 回写之前 ⇒
+                // 紧随的防抖落盘把指纹随模板对象一并持久化（不重蹈 save_skill 的
+                // 「铸后不落盘」竞态）。基准一旦在册，后续执行走与字面量技能完全
+                // 相同的 judgePostcondition 相似度验收。
+                const exitFp = resolved.source.kind === 'template'
+                    ? tpl?.exitFingerprint
+                    : skill?.exitFingerprint;
+                if (resolved.source.kind === 'template' && success && !exitFp && tpl && cap.dhash) {
+                    tpl.exitFingerprint = cap.dhash;
+                    // 相似度缺席（null）= 诚实：本次是基准铸造，无对照可言（自证 1.0
+                    // 是伪精度）；verified=true 的语义 = 「本帧即离场基准帧」。
+                    post = { verified: true, similarity: null, reason: 'baseline-minted' };
+                }
+                else {
+                    post = judgePostcondition(exitFp, cap.dhash ?? null);
+                }
             }
             catch { /* 指纹不可得：reason 已是 hash-unavailable */ }
             // 回写策略：verified 成功才入 successCount（世界盖戳）；未验证只记尝试。
@@ -474,6 +509,9 @@ export function createRunSkillTool(config) {
                     skill: `#${resolved.source.id} "${resolved.source.name}"`,
                     steps_total: resolved.steps.length,
                     steps_failed: failed,
+                    // ΠΑΝ-16：跳过步单独申报（未执行且非失败 —— 不惩罚可靠度）；
+                    // 零跳过运行不添键（既有锚点字节形状零回归）。
+                    ...(skipped > 0 ? { steps_skipped: skipped } : {}),
                     reliability_now: skill
                         ? `${skill.successCount}/${skill.attemptCount}`
                         : `${skillLibrary.getTemplate(resolved.source.id)?.successCount ?? 0}/${skillLibrary.getTemplate(resolved.source.id)?.attemptCount ?? 0} (template)`,
@@ -481,9 +519,13 @@ export function createRunSkillTool(config) {
                         verified: post.verified,
                         final_scene_similarity: post.similarity,
                         reason: post.reason,
-                        note: post.verified
-                            ? 'final scene matches the exit fingerprint recorded at skill-creation time'
-                            : 'reliability NOT credited — the final scene diverges from the recorded exit state (UI may have changed, or the macro ran in a different context)',
+                        note: post.reason === 'baseline-minted'
+                            // ΠΑΝ-17：首次成功执行的终帧铸造为离场基准（世界盖戳）—— 本帧
+                            // 即基准，非「与历史基准相符」；后续执行将按相似度验收。
+                            ? 'first fully-successful template run — the final frame was minted as the exit-fingerprint baseline (world-stamped); future runs verify against it'
+                            : post.verified
+                                ? 'final scene matches the exit fingerprint recorded at skill-creation time'
+                                : 'reliability NOT credited — the final scene diverges from the recorded exit state (UI may have changed, or the macro ran in a different context)',
                     },
                     // D-G5（W8-C1）：重放公证事实字段（anchored 带锚哈希/时间背书源；
                     // degraded 带降级归因 —— 公证缺席诚实申报，绝不伪造）
@@ -492,7 +534,13 @@ export function createRunSkillTool(config) {
                 macro_trace: macroGateTrace(resolved, gateVerdict),
                 execution_log: log.join('\n'),
                 next_step: success
-                    ? "MANDATORY: Call 'take_screenshot' to verify the final state matches the skill's intent."
+                    ? (skipped > 0
+                        // ΠΑΝ-16：跳过步诚实申报 —— 未执行且非失败（如 open_url 重发被安检
+                        // 拒绝、运行时缓存依赖步）；不惩罚可靠度但模型必须知道有步没跑。
+                        ? `MANDATORY: Call 'take_screenshot' to verify the final state matches the skill's intent. ` +
+                            `NOTE: ${skipped} step(s) were SKIPPED (not executed, not failed — see execution_log); ` +
+                            'perform them manually if needed.'
+                        : "MANDATORY: Call 'take_screenshot' to verify the final state matches the skill's intent.")
                     : `${failed} step(s) failed — the UI may have changed since this skill was learned. ` +
                         'Verify with take_screenshot, fix manually, and save_skill to update the library.',
             }, null, 2);

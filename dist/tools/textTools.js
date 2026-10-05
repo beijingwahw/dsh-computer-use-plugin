@@ -34,14 +34,18 @@ export function createReadTextTool(config) {
                 // J 纪元修正：单坐标（只传 x 或只传 y）不再被静默忽略 —— 参数语义
                 // 是"区域中心"，半指定即无意义；诚实报错好过全屏兜底（调用方以为
                 // 读的是局部，拿到的是全屏）。
+                // ΠΑΝ-111（NaN 卫兵）：typeof number 放行 NaN（NaN 与任何数比较均
+                // false，域检查全部穿透）⇒ NaN 区域一路流进服务端/裁剪。非有限值
+                // 与域外值同判：诚实报错。
+                const finiteNum = (v) => typeof v === 'number' && Number.isFinite(v);
                 if ((args.x !== undefined || args.y !== undefined) &&
-                    !(typeof args.x === 'number' && typeof args.y === 'number')) {
-                    return `[Error]: Region requires BOTH x and y (got x=${JSON.stringify(args.x)}, y=${JSON.stringify(args.y)}). Omit both for a full-screen read.`;
+                    !(finiteNum(args.x) && finiteNum(args.y))) {
+                    return `[Error]: Region requires BOTH x and y as finite numbers (got x=${JSON.stringify(args.x)}, y=${JSON.stringify(args.y)}). Omit both for a full-screen read.`;
                 }
                 let region;
                 let cropNote = 'full_screen';
-                if (typeof args.x === 'number' && typeof args.y === 'number') {
-                    const half = args.half_size ?? 0.25;
+                if (finiteNum(args.x) && finiteNum(args.y)) {
+                    const half = finiteNum(args.half_size) ? args.half_size : 0.25;
                     if (args.x < 0 || args.x > 1 || args.y < 0 || args.y > 1 || half <= 0 || half > 0.5) {
                         return `[Error]: Invalid region. x/y in 0.0-1.0, half_size in (0, 0.5].`;
                     }
@@ -77,7 +81,12 @@ export function createReadTextTool(config) {
                     : 'Use the text content for your reasoning. Call find_text when you need clickable coordinates for any label.');
             }
             catch (error) {
-                return `[Error]: OCR failed (${error.message}). The OCR engine may be unavailable (rapidocr for the service path, tesseract.js for the legacy path); fall back to take_screenshot.`;
+                // R4-3（b6，证据：R1-8 九跑文字通道 0 次消费）：降级指引可执行化 ——
+                // 指定替代动作与参数形状，并熔断对 read_text 的重试。加法式保留
+                // 「fall back to take_screenshot」锚（tools.textTools.test.ts 钉形状）。
+                return `[Error]: OCR failed (${error.message}). The OCR engine may be unavailable (rapidocr for the service path, ` +
+                    `tesseract.js for the legacy path); fall back to take_screenshot and read the screen yourself — and for a ` +
+                    `specific small target call zoom_inspect on its region instead of retrying read_text.`;
             }
         },
     });
@@ -104,6 +113,12 @@ export function createFindTextTool(config) {
         },
         async execute(args) {
             try {
+                // ΠΑΝ-111（空 keyword 拒绝）：`''.includes('')` 恒真 —— 空 keyword 会
+                // 让全部 OCR 词命中（全词命中），清单爆炸且毫无信息量。诚实报错
+                // 好过静默全命中（与 read_text 的单坐标拒绝同方言）。
+                if (typeof args.keyword !== 'string' || args.keyword.trim() === '') {
+                    return '[Error]: keyword must be a non-empty string. Empty keyword would match every word on screen.';
+                }
                 const { words } = await readTextAny(undefined, config.ocrLang);
                 const needle = args.keyword.toLowerCase().trim();
                 const hits = words.filter(w => w.text.toLowerCase().includes(needle));
@@ -116,6 +131,10 @@ export function createFindTextTool(config) {
                 //（宽行=正文/紧凑=控件的几何判据不花预算）；探针候选池维持前 8 个命中
                 //（探针排序/截断语义不动 —— 零回归）。第 9+ 命中不再从清单消失，至少
                 // 携带 wordShape 几何标注。
+                // ΠΑΝ-111（结果上限）：短 keyword 在密集文本屏可命中数百词 —— 清单
+                // 无上界会让回执 Token 失控。locations 列出上限 FIND_TEXT_MAX_LOCATIONS
+                // 条（截断如实标注），matches 计数保持全量真值。
+                const FIND_TEXT_MAX_LOCATIONS = 50;
                 const shaped = hits.map(w => ({ word: w, shape: classifyWordShape(w) }));
                 const probePool = shaped.slice(0, 8);
                 const probeOrder = { 'ambiguous': 0, 'content-like': 1, 'control-like': 2 };
@@ -154,13 +173,22 @@ export function createFindTextTool(config) {
                     }
                     return `- "${w.text}" center=(${w.center_normalized.x.toFixed(3)}, ${w.center_normalized.y.toFixed(3)}) confidence=${Math.round(w.confidence)} ${tag}`;
                 });
+                // ΠΑΝ-111：清单截断（matches 全量真值 + 截断注记 —— 诚实降级不装全量）
+                const locationsTruncated = lines.length > FIND_TEXT_MAX_LOCATIONS;
+                const listedLines = locationsTruncated ? lines.slice(0, FIND_TEXT_MAX_LOCATIONS) : lines;
                 const anyControl = [...probes.values()].some(p => p.verdict === 'control');
                 const anyText = [...probes.values()].some(p => p.verdict === 'text');
+                // R4-3（b2，证据：R1-8 a5/a7）：anyControl 尾注「A control match exists」
+                // 单独出现会被读成「目标入口已验证」。追加与 probe_interactivity 回执
+                // 同源的 control 语义限定（加法式）。
                 return toolOkNoAction({
                     keyword: args.keyword,
                     matches: hits.length,
                     probed: probes.size,
-                    locations: lines,
+                    locations: listedLines,
+                    ...(locationsTruncated
+                        ? { locations_truncated: true, locations_listed: FIND_TEXT_MAX_LOCATIONS }
+                        : {}),
                 }, 'ONLY click a match with interactivity=control (OS-confirmed clickable). ' +
                     'Matches with interactivity=text are static content — chat messages or document ' +
                     'text that merely MENTIONS the keyword; clicking them is always a mistake. ' +
@@ -168,7 +196,7 @@ export function createFindTextTool(config) {
                     'compact labels are likely controls) and verify with zoom_inspect or ' +
                     'probe_interactivity before clicking. If NO match is a control, the real entry ' +
                     'is elsewhere: scroll_page, open the right menu, or take_screenshot and search visually.' +
-                    (anyControl ? ' A control match exists in this result.' : anyText ? ' WARNING: only text matches were found — do not click any of them.' : ''));
+                    (anyControl ? ' A control match exists in this result (control = some interactive control responded — it does NOT identify WHICH control; verify visually before clicking).' : anyText ? ' WARNING: only text matches were found — do not click any of them.' : ''));
             }
             catch (error) {
                 return `[Error]: OCR failed (${error.message}). Fall back to visual grounding via take_screenshot + zoom_inspect.`;

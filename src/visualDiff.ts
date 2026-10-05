@@ -9,7 +9,7 @@
 // codec 的补丁几何（三系坐标换算的收口面 —— 单一权威源）。
 import { getSharp } from './_legacyDeps';
 import { kernelRegistry } from './kernel/registry';
-import { estimateRowShift, type RowShiftEstimate } from './motionEstimator';
+import { estimateRowShift, estimateColShift, stillTranslating, type RowShiftEstimate } from './motionEstimator';
 import { normalizedToPatchRect, type PatchRect } from './vlm/codec';
 
 export interface DiffRegion {
@@ -23,6 +23,189 @@ export interface DiffResult {
   regions: DiffRegion[];            // 按面积降序
   changed_fraction_pct: number;     // 全屏变化像素占比
   identical: boolean;
+  /**
+   * ΠΑΝ-121：全局位移配准报告（滚动失效缓解）。在场且 applied ⇒ regions 已按
+   * 位移配准后再差分（新增内容条带 + 真实残余变化），changed_fraction_pct
+   * 仍是**未配准**的原始占比（像素层面的诚实读数）。缺席 = 无相干全局位移。
+   */
+  registration?: DiffRegistration | null;
+  /**
+   * ΠΑΝ-121：差分可靠性标注。'diff-unreliable' = 持续大面积帧差且无全局
+   * 位移解释（动画/视频/全屏刷新类）—— 区域清单不可靠，消费方应如实标注
+   * 而非把「整屏都在变」当作结构变化上报。缺席 = 'ok'（向后兼容）。
+   */
+  reliability?: 'ok' | 'diff-unreliable';
+  /** ΠΑΝ-121：reliability='diff-unreliable' 时的归因（缺席 = 可靠） */
+  reliabilityNote?: string;
+}
+
+// ─── ΠΑΝ-121：全局位移估计前置（滚动场景的增量差分失效缓解 · C1-3 病灶） ───
+//
+// 病灶：滚动是「同一内容整体平移 + 少量新入条带」—— 朴素逐像素差分把整个
+// 滚动路径全屏判「变化」，区域清单被平移噪声淹没（增量编码的滚动分支只在
+// 严格窗口内接住：changedPct ≥ 15 且残差 < 0.25 且纵向 —— 残差 0.25..0.5
+// 的真滚动（含吸顶栏/轻微动画）与小面积滚动全落空，退化为全屏关键帧/补丁
+// 轰炸）。动画场景（视频/闪烁）则相反：帧差持续大面积但无任何平移结构 ——
+// 旧引擎自信地报「整屏变化」，是误报。
+//
+// 缓解律（对齐视频编码的经典前置）：差分前先做**全局位移估计**（复用
+// motionEstimator 的一维相位相关：行亮度纵向 + 列亮度横向），相干平移成立
+// ⇒ 先配准再差分 —— 滚动帧的「变化」收敛为条带 + 残余；不成立且帧差大面积
+// 弥散 ⇒ 诚实标注 diff-unreliable（不伪装成结构变化）。
+//
+// 位移判别三闸（防伪配准 —— 均匀画面对任意位移残差都 ≈0，纯残差门拦不住）：
+//   ① 相干门：|shift| ≥ 1 且 residual < 0.5（stillTranslating 同律）；
+//   ② 增益门：最优位移的残差 ≤ 0.6 × 零位移残差（配准必须真的解释了 ≥40%
+//     的行/列差异 —— 半屏反色这类「碰巧有一段对得上」的形态被拒）；
+//   ③ 幅度门：零位移残差 ≥ 0.05（两帧沿该轴本就无差异 ⇒ 配准无意义）。
+
+/** ΠΑΝ-121：配准增益门 —— 最优位移残差相对零位移残差的上限（0.6 = 至少解释 40%） */
+const DISPLACEMENT_GAIN_MAX = 0.6;
+/** ΠΑΝ-121：幅度门下限 —— 零位移残差低于此值时该轴不参与配准（无差异即无配准） */
+const DISPLACEMENT_ZERO_MIN = 0.05;
+
+/** ΠΑΝ-121：全局位移估计结果（差分分辨率的整数位移 + 各轴残差） */
+export interface GlobalDisplacement {
+  /** 纵向位移（差分行；>0 = after 内容相对 before 下移 —— estimateRowShift 同律） */
+  dyRows: number;
+  /** 横向位移（差分列；>0 = after 内容相对 before 右移 —— estimateColShift 同律） */
+  dxCols: number;
+  rowResidual: number;
+  colResidual: number;
+  axis: 'vertical' | 'horizontal' | 'both';
+}
+
+/** ΠΑΝ-121：零位移残差（对齐平均绝对差 / 亮度尺度 —— 与 phaseCorrelate1D 的残差同尺） */
+function zeroShiftResidual(a: number[], b: number[]): number {
+  let err = 0, n = 0;
+  for (let y = 0; y < Math.min(a.length, b.length); y++) { err += Math.abs(a[y]! - b[y]!); n++; }
+  const mean = (avgOf(a) + avgOf(b)) / 2 || 1;
+  return n > 0 ? Math.min(1, (err / n) / mean) : 1;
+}
+
+function avgOf(xs: number[]): number {
+  let s = 0;
+  for (const x of xs) s += x;
+  return s / (xs.length || 1);
+}
+
+/**
+ * ΠΑΝ-121：全局位移估计前置（纯函数，确定性 —— 复用 motionEstimator 相位相关）。
+ * 行亮度（纵向）与列亮度（横向）独立估计；每轴过三闸（相干/增益/幅度）。
+ * 任一轴成立 ⇒ 返回该轴整数位移（两轴都成立 ⇒ both，dy/dx 同时有效）；
+ * 都不成立 ⇒ null（无相干全局位移 —— 差分按原样，动画面走 unreliable 标注）。
+ * 导出：配准原子的测试面。
+ */
+export function estimateGlobalDisplacement(
+  lumA: number[], lumB: number[], colA: number[], colB: number[],
+): GlobalDisplacement | null {
+  const rowSearch = Math.max(16, Math.round(Math.min(lumA.length, lumB.length) / 6));
+  const colSearch = Math.max(16, Math.round(Math.min(colA.length, colB.length) / 6));
+  const rowShift = estimateRowShift(lumA, lumB, rowSearch);
+  const colShift = estimateColShift(colA, colB, colSearch);
+  const rowZero = zeroShiftResidual(lumA, lumB);
+  const colZero = zeroShiftResidual(colA, colB);
+  const rowOk = stillTranslating(rowShift) &&
+    rowZero >= DISPLACEMENT_ZERO_MIN &&
+    rowShift.residual <= DISPLACEMENT_GAIN_MAX * rowZero;
+  const colOk = stillTranslating(colShift) &&
+    colZero >= DISPLACEMENT_ZERO_MIN &&
+    colShift.residual <= DISPLACEMENT_GAIN_MAX * colZero;
+  if (!rowOk && !colOk) return null;
+  return {
+    dyRows: rowOk ? rowShift.bestInteger : 0,
+    dxCols: colOk ? colShift.bestInteger : 0,
+    rowResidual: rowShift.residual,
+    colResidual: colShift.residual,
+    axis: rowOk && colOk ? 'both' : rowOk ? 'vertical' : 'horizontal',
+  };
+}
+
+/** ΠΑΝ-121：配准差分报告（computeDiffRegions / LedgerAnalysis 共用的元数据面） */
+export interface DiffRegistration {
+  /** 估计所得的全局位移（差分分辨率） */
+  displacement: GlobalDisplacement;
+  /** 配准后（交集归一）的残余变化占比 0..100 —— 平移解释不掉的真实变化 */
+  registeredChangedPct: number;
+  /** 新入内容条带的归一化 bbox（b 帧无对应物的区域；无条带 ⇒ null） */
+  stripNorm: { x0: number; y0: number; x1: number; y1: number } | null;
+}
+
+/**
+ * ΠΑΝ-121：配准后差分（纯函数核 —— a/b 为同尺寸 raw RGBA）。
+ * b[y+dy][x+dx] 与 a[y][x] 对齐（dy>0 = b 内容下移 ⇒ b 顶部条带无对应物）。
+ * 返回：交集坐标系下的区域清单（已映射回全画幅归一化坐标）+ 残余占比 +
+ * 条带 bbox。交集外的 b 区域即新入内容条带（单独报告，不混入残余区域）。
+ */
+function registeredDiff(
+  a: Buffer, b: Buffer, W: number, H: number,
+  tileCols: number, rows: number,
+  disp: GlobalDisplacement,
+): { regions: DiffRegion[]; registeredChangedPct: number; stripNorm: DiffRegistration['stripNorm'] } {
+  const dy = disp.dyRows, dx = disp.dxCols;
+  const y0 = Math.max(0, -dy), y1 = H - Math.max(0, dy);   // a 的比较窗（行）
+  const x0 = Math.max(0, -dx), x1 = W - Math.max(0, dx);   // a 的比较窗（列）
+  const cw = Math.max(0, x1 - x0), ch = Math.max(0, y1 - y0);
+  if (cw < 1 || ch < 1) {
+    return { regions: [], registeredChangedPct: 100, stripNorm: { x0: 0, y0: 0, x1: 1, y1: 1 } };
+  }
+  // 交集裁剪出配准对（a 窗 vs b 平移窗）—— 复用 diffRegionsFromRaw 判决核心
+  const cropA = Buffer.alloc(cw * ch * 4);
+  const cropB = Buffer.alloc(cw * ch * 4);
+  for (let y = 0; y < ch; y++) {
+    const aRow = ((y0 + y) * W + x0) * 4;
+    const bRow = ((y0 + y + dy) * W + x0 + dx) * 4;
+    a.copy(cropA, y * cw * 4, aRow, aRow + cw * 4);
+    b.copy(cropB, y * cw * 4, bRow, bRow + cw * 4);
+  }
+  const regRows = Math.max(6, Math.round(tileCols * ch / cw));
+  const { regions: cropRegions, changedFraction } = diffRegionsFromRaw(cropA, cropB, cw, ch, tileCols, regRows);
+  // 交集坐标 → 全画幅归一化（裁剪框左上角平移回 + 尺度还原）
+  const regions: DiffRegion[] = cropRegions.map(r => ({
+    index: r.index,
+    bbox_normalized: {
+      x0: (r.bbox_normalized.x0 * cw + x0) / W,
+      y0: (r.bbox_normalized.y0 * ch + y0) / H,
+      x1: (r.bbox_normalized.x1 * cw + x0) / W,
+      y1: (r.bbox_normalized.y1 * ch + y0) / H,
+    },
+    center: {
+      x: (r.center.x * cw + x0) / W,
+      y: (r.center.y * ch + y0) / H,
+    },
+    tiles_changed: r.tiles_changed,
+  }));
+  // 新入内容条带：b 帧在交集外的区域。符号律（与 estimateRow/ColShift 同律）：
+  //   dy>0（内容下移）⇒ b 顶部 [0,dy) 无对应物；dy<0（上移）⇒ 底部 [H-|dy|,H)
+  //   dx>0（右移）⇒ b 左缘 [0,dx)；dx<0 ⇒ 右缘 [W-|dx|,W)
+  // 该轴无位移 ⇒ 该轴条带区间取全幅 [0,1]（退化为另一轴的单向条带）。
+  let stripNorm: DiffRegistration['stripNorm'] = null;
+  if (dy !== 0 || dx !== 0) {
+    stripNorm = {
+      x0: dx > 0 ? 0 : dx < 0 ? 1 + dx / W : 0,
+      x1: dx > 0 ? dx / W : 1,
+      y0: dy > 0 ? 0 : dy < 0 ? 1 + dy / H : 0,
+      y1: dy > 0 ? dy / H : 1,
+    };
+  }
+  return {
+    regions,
+    registeredChangedPct: Math.round(changedFraction * 1000) / 10,
+    stripNorm,
+  };
+}
+
+/**
+ * ΠΑΝ-121：弥散判定 —— 大面积帧差且区域**碎片化**（≥5 个区域且无单区域
+ * ≥25% 画幅）＝ 动画/视频/散点刷新的典型形态（结构变化通常是 1~3 个连贯
+ * 区域；整屏重绘虽大但单区域连贯 —— 那是合法的关键帧，不标不可靠）。
+ * 纯函数；保守信号（漏标动画不致命，误标结构变化才是）。
+ */
+function diffuseFrameDiff(regions: readonly DiffRegion[], changedFraction: number): boolean {
+  if (changedFraction < 0.55) return false;
+  if (regions.length < 5) return false;
+  return !regions.some(r =>
+    (r.bbox_normalized.x1 - r.bbox_normalized.x0) * (r.bbox_normalized.y1 - r.bbox_normalized.y0) >= 0.25);
 }
 
 const DIFF_WIDTH = 480; // 差分分辨率：够定位，无需高清
@@ -66,10 +249,59 @@ export async function computeDiffRegions(
   const rows = Math.max(6, Math.round(tileCols * H / W));
   const { regions, changedFraction } = diffRegionsFromRaw(a, b, W, H, tileCols, rows);
 
+  // ΠΑΝ-121：全局位移估计前置 —— 相干平移成立 ⇒ 先配准再差分（滚动帧的
+  // 「变化」收敛为条带 + 真实残余，而非整屏平移噪声）；不成立且弥散大面积
+  // 帧差 ⇒ 诚实标注 diff-unreliable（动画/视频不是结构变化）。
+  let registration: DiffRegistration | null = null;
+  let regionsOut = regions;
+  let reliability: 'ok' | 'diff-unreliable' = 'ok';
+  let reliabilityNote: string | undefined;
+  if (!identicalResult(changedFraction)) {
+    const disp = estimateGlobalDisplacement(
+      rowLuminance(a, W, H), rowLuminance(b, W, H),
+      columnLuminance(a, W, H), columnLuminance(b, W, H));
+    if (disp) {
+      const reg = registeredDiff(a, b, W, H, tileCols, rows, disp);
+      registration = { displacement: disp, registeredChangedPct: reg.registeredChangedPct, stripNorm: reg.stripNorm };
+      // 区域清单 = 新入内容条带（若有）+ 配准后残余（面积降序统一重排）
+      const stripRegion = reg.stripNorm ? stripAsRegion(reg.stripNorm, W, H, tileCols, rows) : null;
+      regionsOut = [...(stripRegion ? [stripRegion] : []), ...reg.regions]
+        .sort((r1, r2) => r2.tiles_changed - r1.tiles_changed);
+      regionsOut.forEach((r, i) => { r.index = i + 1; });
+    } else if (diffuseFrameDiff(regions, changedFraction)) {
+      reliability = 'diff-unreliable';
+      reliabilityNote = 'persistent diffuse frame difference with no coherent global displacement ' +
+        `(changed ${(Math.round(changedFraction * 1000) / 10).toFixed(1)}%, no region >= 25% of frame) — ` +
+        'likely animation/video/full-screen repaint; region list is NOT a structural change report';
+    }
+  }
+
   return {
-    regions,
+    regions: regionsOut,
     changed_fraction_pct: Math.round(changedFraction * 1000) / 10,
     identical: changedFraction < 0.001,
+    registration,
+    reliability,
+    ...(reliabilityNote ? { reliabilityNote } : {}),
+  };
+}
+
+/** ΠΑΝ-121：identical 帧免配准（无差异即无位移可言 —— 幅度门的早出口） */
+function identicalResult(changedFraction: number): boolean {
+  return changedFraction < 0.001;
+}
+
+/** ΠΑΝ-121：条带 bbox → DiffRegion（面积代理 = 条带覆盖的块数） */
+function stripAsRegion(
+  strip: { x0: number; y0: number; x1: number; y1: number },
+  W: number, H: number, tileCols: number, rows: number,
+): DiffRegion {
+  const areaFrac = Math.max(0, strip.x1 - strip.x0) * Math.max(0, strip.y1 - strip.y0);
+  return {
+    index: 0,
+    bbox_normalized: { x0: strip.x0, y0: strip.y0, x1: strip.x1, y1: strip.y1 },
+    center: { x: (strip.x0 + strip.x1) / 2, y: (strip.y0 + strip.y1) / 2 },
+    tiles_changed: Math.max(1, Math.round(areaFrac * tileCols * rows)),
   };
 }
 
@@ -467,6 +699,13 @@ export interface ScrollReport {
   shiftRows: number;
   /** 归一化残差（0=完美平移 —— 平移假设的成立程度） */
   residual: number;
+  /**
+   * ΠΑΝ-121：源图像素系列移（横向滚动 —— 软配准分支的产物）。>0 = 内容
+   * 右移（新内容从左侧进入）；纵向滚动时 0。缺席 = 纵向语义（向后兼容）。
+   */
+  dxPx?: number;
+  /** ΠΑΝ-121：差分分辨率下的整数列位移（横向滚动时在场） */
+  shiftCols?: number;
 }
 
 /** W3-3：账本判决 —— ingest 的返回值（投递协议的直接输入） */
@@ -486,6 +725,12 @@ export interface LedgerVerdict {
   reason: string;
   /** 降级注记（端口缺席/抛错时的诚实申报；正常路径 null） */
   degraded: string | null;
+  /**
+   * ΠΑΝ-121：差分可靠性标注。'diff-unreliable' = 大面积弥散帧差且无全局
+   * 位移解释（动画/视频形态）—— 本帧的区域证据不可靠，消费方应如实转述。
+   * 缺席 = 'ok'（向后兼容）。
+   */
+  reliability?: 'ok' | 'diff-unreliable';
 }
 
 /** W3-3：帧分析结果 —— 分析端口的契约（默认实现 = sharp 480px 差分 + 行移估计） */
@@ -509,6 +754,12 @@ export interface LedgerAnalysis {
    * 可选字段：注入端口不填 ⇒ 缺席（消费方守卫式降级，账本判决零变化 —— 纯增量）。
    */
   colLuminance?: { before: number[]; after: number[]; cols: number } | null;
+  /**
+   * ΠΑΝ-121：全局位移配准报告（在场且 displacement 非零 ⇒ regions 已是
+   * 配准后的「条带 + 残余」清单）。缺席 ⇒ regions 为朴素差分（注入端口的
+   * 旧契约零变化）。registeredChangedPct = 配准后残余占比（交集归一）。
+   */
+  registration?: DiffRegistration | null;
 }
 
 /** W3-3：注入端口 —— 分析（diff+行移）/ 帧哈希（快路径静默判定）/ 墙钟（TTL） */
@@ -669,15 +920,18 @@ export function regionsToPatchRects(
 export async function defaultAnalyze(before: Buffer, after: Buffer): Promise<LedgerAnalysis> {
   const sharp = await getSharp();
   const afterMeta = await sharp(after).metadata();
+  const dims = usableImageDims(afterMeta);
   const W = DIFF_WIDTH;
-  const H = Math.max(1, Math.round(W * (afterMeta.height! / afterMeta.width!)));
+  const H = dims
+    ? Math.max(1, Math.round(W * (dims.height / dims.width)))
+    : Math.max(1, Math.round(W * ((afterMeta.height ?? 1) / (afterMeta.width ?? 1))));
   const [a, b] = await Promise.all([
     sharp(before).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
     sharp(after).resize(W, H, { fit: 'fill' }).ensureAlpha().raw().toBuffer(),
   ]);
   const tileCols = 16;
   const rows = Math.max(6, Math.round(tileCols * H / W));
-  const { regions, changedFraction } = diffRegionsFromRaw(a, b, W, H, tileCols, rows);
+  const { regions: rawRegions, changedFraction } = diffRegionsFromRaw(a, b, W, H, tileCols, rows);
   // 行亮度序列（行平均亮度 —— 行移估计的输入方言）
   const lumA = rowLuminance(a, W, H), lumB = rowLuminance(b, W, H);
   // 行移搜索窗自适应：max(16, H/6) —— 480px 差分行下 16:9 屏一行差分行 ≈ 4
@@ -685,6 +939,25 @@ export async function defaultAnalyze(before: Buffer, after: Buffer): Promise<Led
   // （1080p 下 ~180 源行）覆盖常见滚动距离，残差闸门防宽窗伪匹配。
   const searchRange = Math.max(16, Math.round(H / 6));
   const rowShift = before.equals(after) ? { shift: 0, residual: 1, bestInteger: 0 } : estimateRowShift(lumA, lumB, searchRange);
+
+  // ΠΑΝ-121：全局位移估计前置 —— 相干平移成立 ⇒ 配准后差分（regions 换为
+  // 「新入条带 + 真实残余」；scroll 判决仍由账本按 rowShift/registration 铸造，
+  // 这里只产出物理事实）。注入端口的旧契约（无 registration 字段）零变化。
+  let registration: DiffRegistration | null = null;
+  let regions = rawRegions;
+  if (changedFraction >= 0.001) {
+    const disp = estimateGlobalDisplacement(
+      lumA, lumB, columnLuminance(a, W, H), columnLuminance(b, W, H));
+    if (disp) {
+      const reg = registeredDiff(a, b, W, H, tileCols, rows, disp);
+      registration = { displacement: disp, registeredChangedPct: reg.registeredChangedPct, stripNorm: reg.stripNorm };
+      const stripRegion = reg.stripNorm ? stripAsRegion(reg.stripNorm, W, H, tileCols, rows) : null;
+      regions = [...(stripRegion ? [stripRegion] : []), ...reg.regions]
+        .sort((r1, r2) => r2.tiles_changed - r1.tiles_changed);
+      regions.forEach((r, i) => { r.index = i + 1; });
+    }
+  }
+
   return {
     width: afterMeta.width ?? 0,
     height: afterMeta.height ?? 0,
@@ -695,6 +968,8 @@ export async function defaultAnalyze(before: Buffer, after: Buffer): Promise<Led
     diffRows: H,
     // W7-0：列亮度（W7 列，差分分辨率 —— 与行亮度同一缓冲同一尺度）
     colLuminance: { before: columnLuminance(a, W, H), after: columnLuminance(b, W, H), cols: W },
+    // ΠΑΝ-121：配准报告（相干平移缺席 ⇒ null —— 账本按旧路径分诊）
+    registration,
   };
 }
 
@@ -916,10 +1191,75 @@ export class ScreenStateLedger {
       }
     }
 
+    // ΠΑΝ-121：滚动失效缓解 —— 软配准分支。严格滚动窗（changedPct ≥ 15 且
+    // 残差 < 0.25 且纵向）接不住的真平移帧：残差 0.25..0.5 带（吸顶栏/轻微
+    // 动画叠加的滚动）、小面积滚动（< 15%）、水平滚动。全局位移估计（相位
+    // 相关 + 增益门）成立且配准后残余 < patchDirtyPct ⇒ 平移解释成立：
+    // 判 scroll（向量 + 新入条带 + 残余补丁），不再退化为全屏关键帧/补丁轰炸。
+    // registration 缺席（注入端口旧契约 / 位移不相干）⇒ 分支静默不接 —— 后续
+    // 分诊与旧行为逐字节一致（零回归）。
+    const reg121 = a.registration ?? null;
+    if (reg121 && (reg121.displacement.dyRows !== 0 || reg121.displacement.dxCols !== 0) &&
+        reg121.registeredChangedPct < this.tuning.patchDirtyPct) {
+      const scale = srcH / Math.max(1, a.diffRows);   // 差分行 → 源图像素（行列同尺）
+      const dyPx = Math.round(reg121.displacement.dyRows * scale);
+      const dxPx = Math.round(reg121.displacement.dxCols * scale);
+      const maxAbs = Math.max(Math.abs(dyPx), Math.abs(dxPx));
+      if (maxAbs >= this.tuning.scrollMinDyPx && maxAbs <= this.tuning.scrollMaxDyFrac * srcH) {
+        const verticalBand = Math.abs(dyPx) >= Math.abs(dxPx);
+        const band: PatchRect = verticalBand
+          ? (dyPx > 0
+            ? { x: 0, y: 0, w: srcW, h: Math.abs(dyPx) }
+            : { x: 0, y: srcH - Math.abs(dyPx), w: srcW, h: Math.abs(dyPx) })
+          : (dxPx > 0
+            ? { x: 0, y: 0, w: Math.abs(dxPx), h: srcH }
+            : { x: srcW - Math.abs(dxPx), y: 0, w: Math.abs(dxPx), h: srcH });
+        // 残余补丁：配准后 regions 铸补丁，剔除与条带重叠过半者（条带区域
+        // 外扩后常溢出条带几像素 —— 用重叠占比判，不用包含判，不重复投递）
+        const overlap = (p: PatchRect): number =>
+          Math.max(0, Math.min(p.x + p.w, band.x + band.w) - Math.max(p.x, band.x)) *
+          Math.max(0, Math.min(p.y + p.h, band.y + band.h) - Math.max(p.y, band.y));
+        const extras = regionsToPatchRects(a.regions, srcW, srcH, this.tuning)
+          .filter(p => overlap(p) * 2 <= p.w * p.h)
+          .slice(0, this.tuning.maxPatches);
+        this.markRects([band, ...extras]);
+        if (this.maskPct() > this.tuning.cumulativeDirtyPct) {
+          return this.adoptKeyframe(frame, a, now,
+            `soft-registered scroll of ${verticalBand ? `${dyPx}px vertical` : `${dxPx}px horizontal`} pushed ` +
+            `cumulative dirty ${this.maskPct().toFixed(1)}% > ${this.tuning.cumulativeDirtyPct}% — keyframe reset`);
+        }
+        this.advancePrev(frame, hash, srcW, srcH);
+        return this.verdict('scroll', [band, ...extras], {
+          dyPx: verticalBand ? dyPx : 0,
+          shiftRows: reg121.displacement.dyRows,
+          residual: verticalBand ? reg121.displacement.rowResidual : reg121.displacement.colResidual,
+          ...(verticalBand ? {} : { dxPx, shiftCols: reg121.displacement.dxCols }),
+        }, a.changedPct,
+          `soft-registered ${verticalBand ? `vertical scroll ${dyPx}px` : `horizontal scroll ${dxPx}px`} ` +
+          `(phase-correlation displacement, registered residual ${reg121.registeredChangedPct}% ` +
+          `< ${this.tuning.patchDirtyPct}%); band = newly revealed strip` +
+          (verticalBand ? (dyPx > 0 ? ' at top' : ' at bottom') : (dxPx > 0 ? ' at left' : ' at right')) +
+          (extras.length ? ` + ${extras.length} residual patch(es)` : ''), null);
+      }
+    }
+
     // 大变分诊：单帧脏面积 ≥ patchDirtyPct ⇒ 关键帧（补丁的经济性下限）
     if (a.changedPct >= this.tuning.patchDirtyPct) {
-      return this.adoptKeyframe(frame, a, now,
-        `single-frame dirty area ${a.changedPct}% >= ${this.tuning.patchDirtyPct}% — too big to patch`);
+      // ΠΑН-121：大面积弥散帧差且无全局位移解释（动画/视频/全屏刷新形态）
+      // ⇒ 诚实标注 diff-unreliable（关键帧本身照旧 —— 全帧重置是正确动作，
+      // 不可靠的是「区域清单当作结构变化」的解读，消费方按标注转述）。
+      const diffuse = !(a.registration ?? null) && diffuseFrameDiff(a.regions, a.changedPct / 100);
+      return {
+        ...this.adoptKeyframe(frame, a, now,
+          `single-frame dirty area ${a.changedPct}% >= ${this.tuning.patchDirtyPct}% — too big to patch`),
+        ...(diffuse
+          ? {
+            reliability: 'diff-unreliable' as const,
+            reason: `single-frame dirty area ${a.changedPct}% >= ${this.tuning.patchDirtyPct}% — too big to patch ` +
+              `[diff-unreliable: diffuse frame difference with no coherent global displacement — likely animation/video]`,
+          }
+          : {}),
+      };
     }
 
     // 静默分诊：逐像素无变化

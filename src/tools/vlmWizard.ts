@@ -67,13 +67,19 @@ export function createVlmWizardTool(_config: Config, deps: VlmWizardDeps = {}) {
         const opener = deps.opener ?? ((url: string) => system.openUrl(url));
         const { method } = await opener(handle.url);
         const note = method === 'dry-run'
-          ? '浏览器已打开连接向导；若未弹出请手动访问该地址（当前 dry-run：dryRun 守卫生效，浏览器实际未被唤起）'
-          : '浏览器已打开连接向导；若未弹出请手动访问该地址';
+          ? '浏览器已打开连接向导；若未弹出请从宿主控制台日志中的向导地址手动访问（当前 dry-run：dryRun 守卫生效，浏览器实际未被唤起）'
+          : '浏览器已打开连接向导；若未弹出请从宿主控制台日志中的向导地址手动访问';
+        // ΠΑΝ-20 卫生（F 终验抽查修复）：nonce fragment 绝不进模型上下文 ——
+        // handle.url 携 `#<nonce>`，直接回显会把会话凭据交给被提示注入的模型
+        // （配合任何宿主侧原始 HTTP 面即可静默重路由视觉流）。向导地址的
+        // 模型可见面剥离 fragment；人类手动访问的完整地址在宿主控制台日志
+        // （index.ts lightUpVision，带外面）与浏览器地址栏（自动打开时）。
+        const publicUrl = handle.url.replace(/#.*$/, '');
 
         return toolOk(
-          `vlm_wizard: connection wizard is up at ${handle.url} (browser opened via ${method}).`,
+          `vlm_wizard: connection wizard is up at ${publicUrl} (browser opened via ${method}).`,
           {
-            url: handle.url,
+            url: publicUrl,
             port: handle.port,
             note,
           },

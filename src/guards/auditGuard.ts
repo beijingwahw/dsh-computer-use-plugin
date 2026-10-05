@@ -60,8 +60,9 @@ export { MUTATING_TOOL_NAMES };
  *  src/tools/shapeEnvironment.ts 的 action 枚举（capabilities | apply |
  *  restore | undo_log）。仅 capabilities（能力申报，纯查询）与 undo_log
  *  （复原账本视图，纯查询）不触达桌面状态；apply（raise_window /
- *  maximize_window / move_window / set_zoom / set_contrast 五 kind 全是
- *  窗口整形）与 restore（LIFO 重放复原配方 = 再次物理整形）是变更子动作。
+ *  maximize_window / move_window / set_zoom / set_contrast / launch_app
+ *  （R2-5 GUI 直启）六 kind 全是变更整形）与 restore（LIFO 重放复原配方 =
+ *  再次物理整形）是变更子动作。
  *  闭集立法：只豁免显式列名的只读子动作 —— 未知/缺席 action 不可证明只读
  *  ⇒ 仍按变更类审计（fail-closed 语义在分流面上原样保持）。 */
 const SHAPE_ENV_READ_ONLY_ACTIONS = new Set(['capabilities', 'undo_log']);

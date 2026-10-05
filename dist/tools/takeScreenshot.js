@@ -26,6 +26,11 @@ import { journal } from '../journal.js';
 import { trackElements } from '../elementTracker.js';
 import * as backend from '../physicalBackend.js';
 import { saveScreenshotAttachment, imageBlockFromValue } from '../imageDelivery.js';
+// R5-4（a · 视觉摘要缓存）：读 ask_screen 的最近问答单槽 —— 本帧指纹与之间域
+// 近似（汉明 ≤ stableScreenDistance，与变化门/ΝΩ-31 复用闸同阈）⇒ 回执捎带。
+// 依据：R4-2 D4 —— 宿主纯文本，take_screenshot 的图像本体不被消费，8 次冗余
+// 双拍的本体是「模型无眼睛可用」；捎带上一次问答摘要 = 同屏不重问的第一道闸。
+import { peekAskSummary } from './askScreen.js';
 export function createTakeScreenshotTool(config) {
     return defineTool({
         name: 'take_screenshot',
@@ -111,21 +116,36 @@ export function createTakeScreenshotTool(config) {
                         x: crosshairPx.x / size.width,
                         y: crosshairPx.y / size.height,
                     };
-                // Σ-5：像素域（uiExtractor 契约）→ 归一化。目标显示器在场时换算到该
-                // 显示器域（(px*size - origin) / monitorSize），整框在屏外的元素丢弃。
-                const toNorm = (r) => target
-                    ? {
-                        x: (r.x * size.width - target.x) / target.width,
-                        y: (r.y * size.height - target.y) / target.height,
-                        width: (r.width * size.width) / target.width,
-                        height: (r.height * size.height) / target.height,
+                // Σ-5：像素域（uiExtractor 契约：rect 是原始像素边界框）→ 归一化。
+                // 目标显示器在场时换算到该显示器域 —— 纯像素算术（(px − origin) /
+                // monitorSize，与上方准星换算同式）。
+                // ΠΑΝ-18（多屏坐标单位）：旧 target 分支按归一化输入的公式套在像素输入
+                //   上（r.x * size.width —— 多乘一个屏幕宽度）⇒ 跨屏捕获时元素框坐标
+                //   远超 [0,1]、全被 onTarget 静默过滤 —— 元素框/标签/quantum 注解在
+                //   display 模式下无声消失（对照 interactive_elements 的纯像素算术
+                //   即见矛盾）。修正为像素域直读（与同文件 :295 中心换算同律）。
+                // NaN/负值卫兵（ΝΩ-31 立法）：非有限数或负尺寸 ⇒ 返回 null，该框丢弃
+                //   —— 脏几何绝不静默送进叠加层（NaN 与任何比较皆 false 会绕过值域闸）。
+                const toNorm = (r) => {
+                    if (!Number.isFinite(r.x) || !Number.isFinite(r.y)
+                        || !Number.isFinite(r.width) || !Number.isFinite(r.height)
+                        || r.width < 0 || r.height < 0) {
+                        return null;
                     }
-                    : {
-                        x: r.x / size.width,
-                        y: r.y / size.height,
-                        width: r.width / size.width,
-                        height: r.height / size.height,
-                    };
+                    return target
+                        ? {
+                            x: (r.x - target.x) / target.width,
+                            y: (r.y - target.y) / target.height,
+                            width: r.width / target.width,
+                            height: r.height / target.height,
+                        }
+                        : {
+                            x: r.x / size.width,
+                            y: r.y / size.height,
+                            width: r.width / size.width,
+                            height: r.height / size.height,
+                        };
+                };
                 const onTarget = (n) => !target || (n.x < 1 && n.y < 1 && n.x + n.width > 0 && n.y + n.height > 0);
                 // 2. 混合模式（可选）：提取元素以启用 ID 寻址；失败则静默降级回纯视觉
                 let elements = [];
@@ -156,8 +176,13 @@ export function createTakeScreenshotTool(config) {
                         ...elements.map((el, i) => ({ label: String(stableLabels[i] ?? el.id), rect: el.rect })),
                         ...quantumOverlays.map(o => ({ label: o.label, rect: o.rect })),
                     ]
-                        .map(b => ({ ...toNorm(b.rect), label: b.label }))
-                        .filter(b => onTarget(b)),
+                        // ΠΑΝ-18：toNorm 的 null（NaN/负值卫兵拒收）⇒ 该框丢弃（type 收口
+                        // 后再过 onTarget —— 屏外框同律过滤）
+                        .map(b => {
+                        const n = toNorm(b.rect);
+                        return n === null ? null : { ...n, label: b.label };
+                    })
+                        .filter((b) => b !== null && onTarget(b)),
                     wantHashes: true,
                     keepFrame: true,
                     ...(displayIndex !== undefined ? { display: displayIndex } : {}),
@@ -172,6 +197,12 @@ export function createTakeScreenshotTool(config) {
                         : {}),
                 });
                 const rawHash = cap.dhash ? normalizeHash(cap.dhash) : '';
+                // R5-4（a）：unchanged 路径 —— 屏与 #last.id 同指纹，而摘要问屏若也是这帧
+                // （汉明 ≤ stableScreenDistance 同阈判定）⇒ 上一次 ask_screen 的答案对
+                // 本屏依然成立，回执直接捎带（纯文本宿主的 verify 去重闸，零 VLM）。
+                const askSummaryUnchanged = last?.hash
+                    ? peekAskSummary(last.hash, config.stableScreenDistance)
+                    : null;
                 if (cap.unchanged && last) {
                     return JSON.stringify({
                         status: 'SUCCESS',
@@ -181,6 +212,18 @@ export function createTakeScreenshotTool(config) {
                             popup_detected: getPopupState(sessionId), // ΑΩ-R24: 按会话读（缺席回落全局视图）
                             context_images: `${contextManager.imageCount()}/${config.maxImageCount}`,
                             change_gate: `screen identical to #${last.id} (dHash distance <= ${config.stableScreenDistance})`,
+                            // R5-4（a）：同屏视觉摘要捎带（见块首注释；缺席 = 无近邻问答记录）
+                            ...(askSummaryUnchanged
+                                ? {
+                                    visual_summary_cache: {
+                                        question: askSummaryUnchanged.question,
+                                        answer: askSummaryUnchanged.answer,
+                                        age_seconds: Math.round(askSummaryUnchanged.age_ms / 1000),
+                                        note: 'screen fingerprint MATCHES the last ask_screen capture — the answer above still applies. ' +
+                                            'Do NOT re-ask the same question; ask_screen again only for NEW semantic information.',
+                                    },
+                                }
+                                : {}),
                         },
                         next_step: 'Screen is UNCHANGED since the referenced screenshot. Reuse it for grounding; ' +
                             'do NOT re-capture. If you expected a change, the previous action had no effect — see its effect report.',
@@ -197,11 +240,12 @@ export function createTakeScreenshotTool(config) {
                 // 4.5 图像投递（rc.6 事件面）：附件服务保存 → 工具结果携带 image 块
                 const attachment = await saveScreenshotAttachment(cap.buffer, `screenshot-${currentId}.jpg`);
                 // 5. 弹窗传感（B-8 双模）：几何（服务端帧统计）+ 语义（OCR）证据融合
+                // （R1-8：sessionId 透传 —— 信念滤波器与守卫同按会话分键）
                 const popup = await detectPopup(cap.buffer, {
                     enableOcr: config.enableOcr,
                     popupKeywords: config.popupKeywords,
                     ocrLang: config.ocrLang,
-                }, cap.frameId);
+                }, cap.frameId, sessionId);
                 // ΑΩ-R24：按会话写弹窗态（缺席回落 'default'；镜像规则见 popupGuard 头注）
                 updatePopupState(popup.popup, sessionId);
                 // 6. C-3 观察登记：截图锚点喂给因果链
@@ -233,6 +277,25 @@ export function createTakeScreenshotTool(config) {
                         compressed_resolution: `${cap.width}x${cap.height}`,
                         format: `JPEG (quality: ${config.jpegQuality})`,
                         region,
+                        // R5-4（a）：新帧路径同捎带 —— 本帧指纹 vs 最近 ask_screen 问屏指纹
+                        // （汉明 ≤ stableScreenDistance 同阈；跨 clean/overlaid 域容差先例 =
+                        // ΝΩ-31 复用闸）。在场即告知纯文本宿主：该问答对当前屏成立，勿重问。
+                        ...(rawHash
+                            ? (() => {
+                                const s = peekAskSummary(rawHash, config.stableScreenDistance);
+                                return s
+                                    ? {
+                                        visual_summary_cache: {
+                                            question: s.question,
+                                            answer: s.answer,
+                                            age_seconds: Math.round(s.age_ms / 1000),
+                                            note: 'screen fingerprint MATCHES the last ask_screen capture — the answer above still applies. ' +
+                                                'Do NOT re-ask the same question; ask_screen again only for NEW semantic information.',
+                                        },
+                                    }
+                                    : {};
+                            })()
+                            : {}),
                         visual_overlay: `${config.gridDivisions}x${config.gridDivisions} SoM Grid` +
                             (crosshair !== undefined ? ' + Crosshair' : '') +
                             (elements.length ? ' + Element Boxes' : '') +

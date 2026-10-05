@@ -5,13 +5,17 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { shaper } from '../environmentShaper';
 import type { ShaperActionKind } from '../environmentShaper';
 import { toolOk, toolErr } from '../toolResult';
+// R2-3（焦点保卫）：raise/maximize 置前成功 ⇒ 记账目标窗 —— 宿主自抬抢焦后
+// type_text 前置校验的复焦依据来源之二（来源之一是 switch_window）。
+import { recordTargetWindow } from '../windowFocusGuard';
 
 export function createShapeEnvironmentTool() {
   return defineTool({
     name: 'shape_environment',
     description:
       'Reshapes the physical workspace before/during operation (bring window to front, maximize it, ' +
-      'move it, adjust browser zoom) — with a strict LIFO undo log so every change can be restored. ' +
+      'move it, adjust browser zoom, launch a whitelisted GUI app) — with a strict LIFO undo log so ' +
+      'every change can be restored. ' +
       'ALWAYS call action="capabilities" first: it reports what this machine can honestly do. ' +
       'After finishing the task, call action="restore" to leave the desktop as you found it.',
     parameters: {
@@ -21,11 +25,20 @@ export function createShapeEnvironmentTool() {
       },
       kind: {
         type: 'string',
-        description: 'apply only: raise_window | maximize_window | move_window | set_zoom | set_contrast',
+        description: 'apply only: raise_window | maximize_window | move_window | set_zoom | set_contrast | launch_app',
       },
       title_hint: {
         type: 'string',
         description: 'apply only (window-level): keyword of the target window title, e.g. "Chrome".',
+      },
+      app: {
+        type: 'string',
+        // R2-5：沙箱预置应用窗口的唯一可靠通道（pwsh Start-Process 在沙箱秒死——
+        // job 连坐 + 受限 token 打断 Shell 激活；直启通道绕开两机制，见
+        // environmentShaper.ts 模块头 R2-5 注释）
+        description: 'launch_app only: whitelisted GUI app name — notepad | calc | mspaint. ' +
+          'Launched via a direct no-shell spawn that survives the tool call and the host process ' +
+          '(do NOT use shell tools to open GUI apps in the sandbox — they die instantly).',
       },
       x: { type: 'number', description: 'apply only (move_window): target x in pixels.' },
       y: { type: 'number', description: 'apply only (move_window): target y in pixels.' },
@@ -67,9 +80,10 @@ function handleCapabilities(): string {
 }
 
 async function handleApply(args: {
-  kind?: string; title_hint?: string; x?: number; y?: number; level?: number;
+  kind?: string; title_hint?: string; app?: string; x?: number; y?: number; level?: number;
 }): Promise<string> {
-  const kinds: ShaperActionKind[] = ['raise_window', 'maximize_window', 'move_window', 'set_zoom', 'set_contrast'];
+  // R2-5：kinds 面收编 launch_app（其余五 kind 语义零回归）
+  const kinds: ShaperActionKind[] = ['raise_window', 'maximize_window', 'move_window', 'set_zoom', 'set_contrast', 'launch_app'];
   if (!args.kind || !kinds.includes(args.kind as ShaperActionKind)) {
     return toolErr(
       'shape_environment apply failed.',
@@ -80,6 +94,8 @@ async function handleApply(args: {
   const r = await shaper.apply({
     kind: args.kind as ShaperActionKind,
     titleHint: args.title_hint,
+    // R2-5：launch_app 的白名单目标（缺席不携带键 —— action 形状最小化）
+    ...(args.app !== undefined ? { app: args.app } : {}),
     x: args.x, y: args.y, level: args.level,
   });
   if (!r.ok) {
@@ -87,6 +103,19 @@ async function handleApply(args: {
       `shape_environment "${args.kind}" failed.`,
       r.reason ?? 'unknown reason',
       'Call action="capabilities" to see what this machine can do, then retry or proceed with pure-vision interaction.',
+    );
+  }
+  // R2-3：窗口级置前动作成功 ⇒ 记账目标窗（复焦依据；纯旁路，零失败面）
+  if (args.kind === 'raise_window' || args.kind === 'maximize_window') {
+    if (args.title_hint) recordTargetWindow({ keyword: args.title_hint, matchedTitle: r.matchedTitle });
+  }
+  // R2-5：直启成功 ⇒ pid 随行（对账事实源）+ 预置指引（驱动/冒烟的下一步话术）
+  if (args.kind === 'launch_app') {
+    return toolOk(
+      `Launched "${args.app}" (pid ${r.pid ?? 'unknown'}). Undo token: ${r.token}.`,
+      { kind: args.kind, app: args.app, pid: r.pid, undo_token: r.token },
+      'The app was spawned detached (no shell) — it survives this tool call and the host process. '
+      + 'Call take_screenshot to see the window; action="restore" will terminate it (taskkill by pid).',
     );
   }
   return toolOk(

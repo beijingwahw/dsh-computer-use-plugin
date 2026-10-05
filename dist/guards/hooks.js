@@ -53,17 +53,55 @@ function toPostDecision(out) {
     }
     return out;
 }
+// ── ΠΑΝ-79（C2-1 F11）：守卫总兜底（fault wall）──
+//
+// 病灶：适配层裸调 `await handler(...)`，无 try/catch —— 守卫的「绝不抛」
+// 纪律全靠各文件自觉（bounds/popup/repeatAction/circuitBreaker 的主体没有
+// 内层 try，如 repeatActionGuard 的 JSON.stringify(args) 对病态 args 可抛）。
+// 一旦抛出，异常进入宿主事件链：放行/拒绝语义取决于宿主兜底 —— 不可论证
+// （「守卫挂了谁守卫」没有答案）。
+//
+// 修法：pre/post 两包装各设总 catch —— 守卫 handler 异常**绝不阻断主流程**
+// （可用性优先的 fail-open：一个守卫的 bug 不能瘫痪整个 Agent 的工具面），
+// 但必须**记账 + 计数告警，绝不静默**（遥测计数器 guard:handler-crash +
+// 控制台告警行；记账面自身故障则到此为止，绝不抛）。
+//
+// next 单次闸（双重驱动防线）：守卫可能已内部调用 next()（瀑布已续行）之后
+// 才抛错 —— 此时若在 catch 里再驱动 next()，下游守卫/宿主执行体会双跑。
+// 故 onceNext 标记消费事实：next 已被消费 ⇒ 异常属下游自身故障（经 handler
+// 帧上抛），如实重抛交宿主处置（不吞、不双驱）；next 未消费 ⇒ 守卫自身
+// 故障，fail-open 放行。
+function guardFaultAccounted(phase, call, e) {
+    try {
+        const msg = e instanceof Error ? e.message : String(e);
+        telemetry.note('guard:handler-crash', false); // 计数告警（Σ-7 语义：false = 未放行守卫面）
+        console.warn(`[Guards] handler crash (${phase}, tool=${call.name || '?'}) — fail-open, main flow NOT blocked: ${msg}`);
+    }
+    catch { /* 记账面故障：吞（放行主流程优先，绝不抛） */ }
+}
 export function onToolPre(ctx, handler) {
     ctx.on('tools/pre-execute', async (exec, next) => {
         const call = normalizeExec(exec);
-        const out = await handler(call, () => next());
-        // 纪元 Σ（Σ-7 遥测仪表盘）：deny 分支守卫拦截打点 —— 守卫返回字符串即拦截
-        // （与下方 toPreDecision 的 deny 转译同判）。counter 键 'guard:<工具名>'，
-        // note(counter, hit=false) 的语义即「未放行」；纯旁路：note 绝不抛、不改写
-        // 转译结果（metrics_dashboard 守卫区消费此计数）。
-        if (typeof out === 'string' && call.name !== '')
-            telemetry.note('guard:' + call.name, false);
-        return toPreDecision(out);
+        let nextUsed = false; // ΠΑΝ-79：next 单次闸（见 guardFaultAccounted 头注）
+        // 形参兼容（value 收而不用）：PreExecuteHandler.next 的签名是 (value?) => any，
+        // rc.6 pre 宿主 next 不收参（现有 pre 守卫全部无参调用 —— 遍历验证过）。
+        const onceNext = (_value) => { nextUsed = true; return next(); };
+        try {
+            const out = await handler(call, onceNext);
+            // 纪元 Σ（Σ-7 遥测仪表盘）：deny 分支守卫拦截打点 —— 守卫返回字符串即拦截
+            // （与下方 toPreDecision 的 deny 转译同判）。counter 键 'guard:<工具名>'，
+            // note(counter, hit=false) 的语义即「未放行」；纯旁路：note 绝不抛、不改写
+            // 转译结果（metrics_dashboard 守卫区消费此计数）。
+            if (typeof out === 'string' && call.name !== '')
+                telemetry.note('guard:' + call.name, false);
+            return toPreDecision(out);
+        }
+        catch (e) {
+            if (nextUsed)
+                throw e; // 下游异常归下游（经 handler 帧上抛：不吞不双驱）
+            guardFaultAccounted('pre', call, e);
+            return toPreDecision(await onceNext()); // ΠΑΝ-79：守卫故障 fail-open 放行主流程
+        }
     });
 }
 export function onToolPost(ctx, handler) {
@@ -75,8 +113,19 @@ export function onToolPost(ctx, handler) {
         // 守卫 next(v) ⇒ 宿主 next(v)；守卫无参 next() ⇒ 宿主收 undefined
         // （诚实缺省，零伪造）。pre 包装维持原样：现有 pre 守卫全部无参调用 next
         // （bounds/popup/audit/canary/repeatAction 遍历验证），不构成实害，最小变更。
-        const out = await handler(call, extractResultValue(result), (value) => next(value));
-        return toPostDecision(out);
+        const value = extractResultValue(result);
+        let nextUsed = false; // ΠΑΝ-79：next 单次闸（见 guardFaultAccounted 头注）
+        const onceNext = (v) => { nextUsed = true; return next(v); };
+        try {
+            const out = await handler(call, value, onceNext);
+            return toPostDecision(out);
+        }
+        catch (e) {
+            if (nextUsed)
+                throw e; // 下游异常归下游（经 handler 帧上抛：不吞不双驱）
+            guardFaultAccounted('post', call, e);
+            return toPostDecision(await onceNext(value)); // ΠΑΝ-79：守卫故障 ⇒ 原结果透传（零伪造）
+        }
     });
 }
 /**

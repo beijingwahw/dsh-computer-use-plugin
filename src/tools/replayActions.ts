@@ -54,6 +54,10 @@ import { sleep } from '../actionVerifier';
 import { toolOk, toolErr, toolActionRequired } from '../toolResult';
 import { assertActionAllowed, SAFETY_GATE_BLOCK, type ActionGateConfig } from './actionGate';
 import { approval } from '../approval';
+// ΠΑΝ-16（open_url 重放契约）：重放 open_url = 安全重发 —— 与 open_url 工具
+// 走同一条 urlSense 安检阶梯（scheme 白名单/包裹剥离/歧义拒绝），过闸后经
+// system.openUrl 派发。
+import { normalizeUrlCandidate, extractUrls } from '../urlSense';
 import {
   anchorReplayTrajectory,
   replayStepFingerprint,
@@ -156,68 +160,109 @@ export function createReplayActionsTool(config: Config) {
       // D-G5（重放公证）：轨迹见证采集 —— 步指纹序列 + 三态结局，回放完成时铸锚
       const witnessSteps: ReplayStepWitness[] = [];
       let halted: { index: number; tool: string } | null = null;
-      let haltGate: 'dead-step' | 'safety-gate' | 'step-failure' = 'dead-step';
+      let haltGate: 'dead-step' | 'safety-gate' | 'step-failure' | 'forensic-failure' = 'dead-step';
       const gated = config.verifyActions && !config.dryRun;
-      for (let i = 0; i < steps.length; i++) {
-        const entry = steps[i];
-        // Y-6 场景门控：动作步前取指纹（观察型步骤无副作用，免门控开销）
-        const isActionStep = ['click_mouse', 'type_text', 'scroll_page', 'press_hotkey', 'drag_mouse'].includes(entry.tool);
-        const before = gated && isActionStep
-          ? await backend.captureProcessed({ metaOnly: true, wantHashes: true })
-          : null;
-        // ΝΩ-5：replayOneTraced 携带预留标记（reservedApprovalToken）—— 步终
-        // 按世界判决结算（见下方三处 settleReservedApproval）。
-        const outcome = await replayOneTraced(entry, config);
-        const line = outcome.line;
-        log.push(`#${entry.ts} ${entry.tool}: ${line}`);
-        witnessSteps.push({
-          index: i,
-          tool: entry.tool,
-          fingerprint: replayStepFingerprint(entry),
-          executed: replayStepExecuted(line),
-        });
-        await sleep(150); // 步间微歇，给 UI 响应时间
-        // Δ 纪元（审计#1）：安全闸门拦截 ⇒ fail-fast 中止 —— 宏的后续步骤建立在
-        // 被拦截的不可逆步骤之上，继续只会制造半途而废的世界状态（与 Y-6 死步
-        // 即停同律：诚实中止并报告分叉点）。
-        if (line.includes(SAFETY_GATE_BLOCK)) {
-          // ΝΩ-5：拦截步无预留（拦截在预留之前）—— 结算幂等防御
-          settleReservedApproval(outcome.reservedApprovalToken, true, 'safety-gate');
-          halted = { index: i, tool: entry.tool };
-          haltGate = 'safety-gate';
-          log.push(`  [GATE] step ${i} 重放被安全闸门拦截 — replay halted (dangerous/gated step was NOT executed)`);
-          break;
+      // ΠΑΝ-15（崩溃窗口封堵）：步循环整体包防御式兜底 —— 此前循环内的取证
+      // await（backend.captureProcessed：D-5 后端崩溃/网络抖动时 unwrapK 抛
+      // PhysicalBackendError）落在 beginAttempt 预留与 settleReservedApproval
+      // 结算**之间**，异常直接炸穿 execute：① 预留令牌永不结算 ⇒ 永久 in-flight
+      //（ΝΩ-5 声称已修复的缺陷在崩溃窗口内原样复活）；② execution_log 全丢，
+      // 模型拿到未结构化裸错误。修法：在途预留随手登记（pendingReservation），
+      // 任何一环抛错 ⇒ 兜底 catch 先按 attemptFailed 结算（世界判决不可得 ⇒
+      // 绝不 consume；令牌保留可重试，绝不悬账），再收敛为 PARTIAL_FAILURE
+      // 结构化回执 —— 恢复「运行层绝不抛」宪法。
+      let pendingReservation: string | undefined;
+      // ΤΕΛ-3b：崩溃兜底结算的 hint 随行（预留形状与令牌同生命周期携带）
+      let pendingReservationHint: ReplayStepResult['reservedTargetHint'];
+      let crashedAt: { index: number; tool: string } | null = null;
+      try {
+        for (let i = 0; i < steps.length; i++) {
+          const entry = steps[i];
+          crashedAt = { index: i, tool: entry.tool }; // 兜底归因面：当前步（未到结算的异常归属）
+          // Y-6 场景门控：动作步前取指纹（观察型步骤无副作用，免门控开销）
+          const isActionStep = ['click_mouse', 'type_text', 'scroll_page', 'press_hotkey', 'drag_mouse'].includes(entry.tool);
+          const before = gated && isActionStep
+            ? await backend.captureProcessed({ metaOnly: true, wantHashes: true })
+            : null;
+          // ΝΩ-5：replayOneTraced 携带预留标记（reservedApprovalToken）—— 步终
+          // 按世界判决结算（见下方三处 settleReservedApproval）。ΤΕΛ-3b：
+          // reservedTargetHint 同行携带（绑定令牌 consume 的比对凭据）。
+          const outcome = await replayOneTraced(entry, config);
+          pendingReservation = outcome.reservedApprovalToken;
+          pendingReservationHint = outcome.reservedTargetHint;
+          const line = outcome.line;
+          log.push(`#${entry.ts} ${entry.tool}: ${line}`);
+          witnessSteps.push({
+            index: i,
+            tool: entry.tool,
+            fingerprint: replayStepFingerprint(entry),
+            executed: replayStepExecuted(line),
+          });
+          await sleep(150); // 步间微歇，给 UI 响应时间
+          // Δ 纪元（审计#1）：安全闸门拦截 ⇒ fail-fast 中止 —— 宏的后续步骤建立在
+          // 被拦截的不可逆步骤之上，继续只会制造半途而废的世界状态（与 Y-6 死步
+          // 即停同律：诚实中止并报告分叉点）。
+          if (line.includes(SAFETY_GATE_BLOCK)) {
+            // ΝΩ-5：拦截步无预留（拦截在预留之前）—— 结算幂等防御
+            settleReservedApproval(outcome.reservedApprovalToken, true, 'safety-gate', outcome.reservedTargetHint);
+            pendingReservation = undefined;
+            pendingReservationHint = undefined;
+            halted = { index: i, tool: entry.tool };
+            haltGate = 'safety-gate';
+            log.push(`  [GATE] step ${i} 重放被安全闸门拦截 — replay halted (dangerous/gated step was NOT executed)`);
+            break;
+          }
+          // 派发失败即停：FAILED 步 = 物理动作根本没执行（system 层异常）—— 比
+          // 死步（执行了但无效）更强的事实，后续步骤的前提同样已崩塌，继续只会
+          // 制造连锁错误（与 Y-6 死步即停 / Δ 纪元闸门即停同律）
+          if (line.startsWith('FAILED:')) {
+            // ΝΩ-5：失败步的预留按 attemptFailed 结算（异常续期语义 —— 令牌
+            // 保留、预留释放，绝不悬账为永久 in-flight）
+            settleReservedApproval(outcome.reservedApprovalToken, true, 'step-failure', outcome.reservedTargetHint);
+            pendingReservation = undefined;
+            pendingReservationHint = undefined;
+            halted = { index: i, tool: entry.tool };
+            haltGate = 'step-failure';
+            log.push(`  [GATE] step ${i} dispatch FAILED — replay halted (the step did NOT execute)`);
+            break;
+          }
+          let deadStep = false;
+          if (before?.dhash) {
+            const after = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
+            deadStep = isDeadStep(before.dhash, after.dhash ?? null);
+          }
+          // ΝΩ-5（审批悬账结算）：危险重放步的 beginAttempt 预留在步终按世界判决
+          // 结算 —— 死步（执行了但世界未动）/ 失败 ⇒ attemptFailed 续期（同一
+          // 授权内重试不再打扰用户）；成功 ⇒ consume 验收式（世界已承接不可逆
+          // 效果，用户的同意兑现）。重放层无 clickMouse 的取证链 ⇒ 步循环就是
+          // 验收面。
+          settleReservedApproval(
+            outcome.reservedApprovalToken, deadStep, deadStep ? 'dead-step' : 'replay-step-verified',
+            outcome.reservedTargetHint);
+          pendingReservation = undefined;
+          pendingReservationHint = undefined;
+          if (deadStep) {
+            halted = { index: i, tool: entry.tool };
+            haltGate = 'dead-step';
+            log.push(`  [GATE] step ${i} produced NO screen change — replay halted (the UI has diverged from the recorded scene)`);
+            break;
+          }
         }
-        // 派发失败即停：FAILED 步 = 物理动作根本没执行（system 层异常）—— 比
-        // 死步（执行了但无效）更强的事实，后续步骤的前提同样已崩塌，继续只会
-        // 制造连锁错误（与 Y-6 死步即停 / Δ 纪元闸门即停同律）
-        if (line.startsWith('FAILED:')) {
-          // ΝΩ-5：失败步的预留按 attemptFailed 结算（异常续期语义 —— 令牌
-          // 保留、预留释放，绝不悬账为永久 in-flight）
-          settleReservedApproval(outcome.reservedApprovalToken, true, 'step-failure');
-          halted = { index: i, tool: entry.tool };
-          haltGate = 'step-failure';
-          log.push(`  [GATE] step ${i} dispatch FAILED — replay halted (the step did NOT execute)`);
-          break;
-        }
-        let deadStep = false;
-        if (before?.dhash) {
-          const after = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
-          deadStep = isDeadStep(before.dhash, after.dhash ?? null);
-        }
-        // ΝΩ-5（审批悬账结算）：危险重放步的 beginAttempt 预留在步终按世界判决
-        // 结算 —— 死步（执行了但世界未动）/ 失败 ⇒ attemptFailed 续期（同一
-        // 授权内重试不再打扰用户）；成功 ⇒ consume 验收式（世界已承接不可逆
-        // 效果，用户的同意兑现）。重放层无 clickMouse 的取证链 ⇒ 步循环就是
-        // 验收面。
+      } catch (e: any) {
+        // ΠΑΝ-15（崩溃窗口封堵）：取证/验证基础设施抛错 ⇒ 结算恒可达 —— 在途
+        // 预留即使取证失败也按 attemptFailed 结算（世界效果不可知 ⇒ 保守续期
+        // 而非验收式 consume，绝不悬账为永久 in-flight），随后诚实中止并申报
+        // 归因（forensic-failure 与死步/闸门/派发失败三路同律的第四路）。
         settleReservedApproval(
-          outcome.reservedApprovalToken, deadStep, deadStep ? 'dead-step' : 'replay-step-verified');
-        if (deadStep) {
-          halted = { index: i, tool: entry.tool };
-          haltGate = 'dead-step';
-          log.push(`  [GATE] step ${i} produced NO screen change — replay halted (the UI has diverged from the recorded scene)`);
-          break;
-        }
+          pendingReservation, true,
+          'forensic-failure (replay evidence capture threw before settlement)',
+          pendingReservationHint);
+        pendingReservation = undefined;
+        pendingReservationHint = undefined;
+        halted = crashedAt;
+        haltGate = 'forensic-failure';
+        log.push(`  [GATE] step ${crashedAt?.index ?? '?'} forensic failure — replay halted ` +
+          `(evidence capture threw: ${String(e?.message ?? e)}; the step MAY have executed but its world effect is unverified)`);
       }
 
       // D-G5（重放公证接线）：回放完成（走完或 halt 诚实中止 —— 中止也是结局，
@@ -249,7 +294,11 @@ export function createReplayActionsTool(config: Config) {
               ? 'pre-dispatch safety gate (approval/risk) — 重放被安全闸门拦截'
               : haltGate === 'step-failure'
                 ? 'step dispatch failure (system-layer exception) — 该步未执行即失败'
-                : 'per-step scene hash (dHash dead-step detection)',
+                : haltGate === 'forensic-failure'
+                  // ΠΑΝ-15：取证基础设施故障（D-5 后端崩溃/传输抖动）—— 与世界分
+                  // 叉、派发失败、闸门拦截并列的第四路诚实归因，绝不误报为任一旧因
+                  ? 'forensic failure (evidence capture threw after dispatch) — 取证链断裂，步效果未经世界判决'
+                  : 'per-step scene hash (dHash dead-step detection)',
             notarization: replayNotarization,
           },
           execution_log: log.join('\n'),
@@ -261,8 +310,14 @@ export function createReplayActionsTool(config: Config) {
               ? 'REPLAY HALTED: a step FAILED to dispatch (system-layer exception — the action did NOT execute; ' +
                 'see execution_log for the error). take_screenshot to inspect the current state, re-run the failed ' +
                 'step live, then continue the remaining steps.'
-              : 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
-                'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
+              : haltGate === 'forensic-failure'
+                // ΠΑΝ-15：取证故障 ≠ 世界分叉 —— 指引先查 D-5 服务健康再核世界态，
+                // 绝不诱导模型按「UI 已分叉」误诊
+                ? 'REPLAY HALTED: the evidence-capture chain threw (physical backend / transport failure) — the ' +
+                  'step MAY have executed but its effect is UNVERIFIED. Check the D-5 physical service health, ' +
+                  'then take_screenshot to inspect the actual world state before re-running anything.'
+                : 'REPLAY HALTED: a step produced zero screen change — the current UI no longer matches the scene ' +
+                  'where this macro was recorded. take_screenshot, re-record the affected steps (save_skill), and replay the rest.',
         }, null, 2);
       }
       return toolOk(
@@ -286,19 +341,49 @@ export function createReplayActionsTool(config: Config) {
  *  判决结算的令牌。重放层无 clickMouse 的验收取证链 ⇒ 结算权在步循环
  *  （settleReservedApproval）：死步/失败 ⇒ attemptFailed 续期，成功 ⇒
  *  consume 验收式 —— 预留绝不悬账为永久 in-flight（旧缺陷：beginAttempt
- *  后派发即返回，循环内无结算 ⇒ 令牌永久在途，同令牌重放结构性死锁）。 */
+ *  后派发即返回，循环内无结算 ⇒ 令牌永久在途，同令牌重放结构性死锁）。
+ *  ΤΕΛ-3b：reservedTargetHint = 预留时携带的兑换形状（click_mouse 步的坐标级
+ *  hint）——步终 consume 必须以**同一形状**结算（绑定令牌的比对两侧一致；
+ *  缺席 ⇒ 无预留的步零行为）。 */
 export interface ReplayStepResult {
   line: string;
   reservedApprovalToken?: string;
+  reservedTargetHint?: { tool: string; x?: number; y?: number; target_description?: string };
+}
+
+/** ΤΕΛ-3b：重放步兑换形状铸造（click_mouse 步 —— 与 actionGate targetHintOf
+ *  及 clickMouse 消费点**同一标准**：x/y 有限数在场才入形、描述通道
+ *  target_description ?? expected_text 且非空白；纯函数、防御式绝不抛）。
+ *  绑定令牌经重放兑换时，validate（actionGate）/beginAttempt（本模块）/
+ *  consume（settleReservedApproval）三面比对的是同一摘要 —— 同一标准立法。 */
+function replayTargetHintOf(a: Record<string, any>): { tool: string; x?: number; y?: number; target_description?: string } {
+  const hint: { tool: string; x?: number; y?: number; target_description?: string } = { tool: 'click_mouse' };
+  if (typeof a.x === 'number' && Number.isFinite(a.x)) hint.x = a.x;
+  if (typeof a.y === 'number' && Number.isFinite(a.y)) hint.y = a.y;
+  const rawDesc =
+    typeof a.target_description === 'string' && a.target_description.trim() !== ''
+      ? a.target_description
+      : typeof a.expected_text === 'string' && a.expected_text.trim() !== ''
+        ? a.expected_text
+        : undefined;
+  if (rawDesc !== undefined) hint.target_description = rawDesc;
+  return hint;
 }
 
 /** ΝΩ-5：预留令牌的步终结算（世界判决 → 账本动作）。纯旁路义务：结算失败
- *  绝不炸重放主流程（运行层铁律）。token 缺席 ⇒ no-op（无预留的步零行为）。 */
-export function settleReservedApproval(token: string | undefined, failed: boolean, reason: string): void {
+ *  绝不炸重放主流程（运行层铁律）。token 缺席 ⇒ no-op（无预留的步零行为）。
+ *  ΤΕΛ-3b：hint = 预留时的兑换形状（绑定令牌 consume 的比对凭据 —— 缺席 ⇒
+ *  旧裸调用面：未绑定令牌免疫 hint，行为零变化；绑定令牌 fail-closed 拒绝）。 */
+export function settleReservedApproval(
+  token: string | undefined,
+  failed: boolean,
+  reason: string,
+  hint?: { tool: string; x?: number; y?: number; target_description?: string },
+): void {
   if (token === undefined) return;
   try {
     if (failed) approval.attemptFailed(token, reason);
-    else approval.consume(token);
+    else approval.consume(token, hint);
   } catch { /* 运行层铁律：结算旁路失败不炸重放 */ }
 }
 
@@ -313,8 +398,12 @@ export async function replayOneTraced(
   // FAILED 结算 attemptFailed，预留不悬账；与 clickElement/clickMouse 的
   // attemptReserved 前置同律）。
   let reservedApprovalToken: string | undefined;
+  // ΤΕΛ-3b：预留形状随结果携带（步终结算 consume 的比对凭据）
+  let reservedTargetHint: ReplayStepResult['reservedTargetHint'];
   const traced = (line: string): ReplayStepResult =>
-    reservedApprovalToken === undefined ? { line } : { line, reservedApprovalToken };
+    reservedApprovalToken === undefined
+      ? { line }
+      : { line, reservedApprovalToken, ...(reservedTargetHint !== undefined ? { reservedTargetHint } : {}) };
   try {
     if (entry.tool === 'click_mouse' || entry.tool === 'type_text') {
       const gate = assertActionAllowed(entry.tool, a, config);
@@ -327,12 +416,17 @@ export async function replayOneTraced(
       // clickMouse 的验收链路，预算即预算）；在途/耗尽 ⇒ 拦截，不派发。
       // ΝΩ-5：预留标记随结果携带 —— 步循环在步终按世界判决结算（本函数
       // 自身不 consume/attemptFailed，结算权在能看到死步/失败事实的调用方）。
+      // ΤΕΛ-3b：beginAttempt 携 targetHint（此前裸调 —— 绑定令牌的重放兑换在
+      // 预留处恒被 target-hint-required 拒绝）；形状 = replayTargetHintOf（与
+      // actionGate validate / 步终 consume 同一标准）。
       if (entry.tool === 'click_mouse' && gate.dangerous && a.approval_token) {
-        if (!approval.beginAttempt(String(a.approval_token))) {
+        const hint = replayTargetHintOf(a);
+        if (!approval.beginAttempt(String(a.approval_token), { target: hint })) {
           return { line: `FAILED: [${SAFETY_GATE_BLOCK}] 重放被安全闸门拦截 (attempt-in-flight-or-budget-exhausted) — ` +
             "the approval token's retry budget is exhausted or another attempt is still in flight." };
         }
         reservedApprovalToken = String(a.approval_token);
+        reservedTargetHint = hint;
       }
     }
     switch (entry.tool) {
@@ -365,6 +459,34 @@ export async function replayOneTraced(
       case 'switch_window':
         await system.switchWindowByTitle(String(a.titleKeyword ?? ''));
         return traced('window switched');
+      case 'open_url': {
+        // ΠΑΝ-16（open_url 重放契约）：journal 的 ACTION_TOOLS 立法 open_url 可
+        // 重放（同 URL 再跳），但重放内核此前无此分支（default ⇒ SKIPPED），而
+        // run_skill 把 SKIPPED 计 failed ⇒ 以 open_url 开头的技能结构性永远失败、
+        // 可靠度单调衰减直至被排练门禁封死。修法：重放 = 安全重发 —— 走与
+        // open_url 工具完全相同的 urlSense 安检阶梯（scheme 白名单 http/https、
+        // 包裹/尾随标点剥离、自由文本提取），过闸后经 system.openUrl 派发
+        //（跳转是幂等导航动作：同 URL 再跳回到同一页）。安检不能过（scheme
+        // 拒绝/歧义/URL 缺席）⇒ 诚实降级为 verified-absent（SKIPPED 方言 +
+        // 拒因 —— URL 未重发、非失败），由调用方按跳过处理（replay_actions 的
+        // executed=null 三态 / run_skill 的不计失败步）。
+        const raw = typeof a.url === 'string' ? a.url : '';
+        let verdict = normalizeUrlCandidate(raw);
+        if (verdict.kind === 'refused') {
+          const candidates = extractUrls(raw);
+          if (candidates.length === 1) {
+            verdict = { kind: 'ok', url: candidates[0] };
+          } else if (candidates.length > 1) {
+            return traced(`SKIPPED (open_url replay refused: ${candidates.length} URL candidates — ` +
+              'ambiguity is never resolved by coin flip; re-run open_url live with exactly ONE of them)');
+          }
+        }
+        if (verdict.kind === 'refused') {
+          return traced(`SKIPPED (open_url replay refused: ${verdict.reason})`);
+        }
+        await system.openUrl(verdict.url);
+        return traced(`reopened ${verdict.url}`);
+      }
       case 'click_element':
         return traced('SKIPPED (element-ID tools depend on runtime cache; replay with click_mouse coordinates instead)');
       case 'dismiss_popup':
@@ -390,6 +512,8 @@ export async function replayOne(
   settleReservedApproval(
     r.reservedApprovalToken,
     r.line.startsWith('FAILED:') || r.line.includes(SAFETY_GATE_BLOCK),
-    'replay-step-failed');
+    'replay-step-failed',
+    // ΤΕΛ-3b：成功臂的 consume 携预留形状（绑定令牌的比对凭据与预留同源）
+    r.reservedTargetHint);
   return r.line;
 }

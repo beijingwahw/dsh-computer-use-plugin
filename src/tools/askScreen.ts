@@ -8,11 +8,138 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from '../config';
 import * as backend from '../physicalBackend';
-import { normalizeHash } from '../perceptualHash';
+import { normalizeHash, dhash, hammingDistance } from '../perceptualHash';
 import { contextManager } from '../contextManager';
 import { toolOk, toolErr } from '../toolResult';
 import { getGlmClient, isGlmConfigured, type GlmClient } from '../vlm/glmClient';
 import { encodeForVlm } from '../vlm/codec';
+import { kernelRegistry } from '../kernel/registry';
+
+// ─── R5-4（视觉外包经济面）：同屏语义回放 + 视觉摘要缓存 ───
+//
+// 架构事实（R4-2 D4）：宿主规划脑 glm-5.3 为纯文本，ask_screen 是唯一眼睛；
+// 批1/批2 证据包 59 次 ask_screen 中验证类占 ~53%，且 diff_view/read_text/
+// find_text 全批 0 次调用 —— 唯一眼睛被当成了唯一验证通道。两面降本：
+//
+//   ① 语义回放（b）：同屏（dhash 汉明 0）+ 同问 + 同脑 ⇒ 30s 窗内直接回放
+//      答案，零编码零拨号。键律与 ΝΩ-48 grounding 缓存同源（dhash/client/
+//      question 都是输出语义的输入，缺一不可回放）；开关走内核键
+//      `ask.semanticCache`（productionSpecs 入册，缺省 0=关 —— 与 ΝΩ-48
+//      「W5-4⑧ 同输入双调必须两次真实进 VLM」契约的零回归铁律同款，
+//      开关权交宿主）。
+//   ② 视觉摘要缓存（a）：每次成功 ask 后登记单槽摘要（dhash+问+答+时刻）；
+//      take_screenshot 回执按指纹近似（汉明 ≤ stableScreenDistance，与变化
+//      门同阈）捎带该摘要 —— 纯文本宿主读回执即知「同屏不重问」。咨询性
+//      提示（120s 新鲜窗），不做网络层拦截，故不加开关（纯加法回执面）。
+
+/** R5-4: 语义回放窗口（与 ΝΩ-48 grounding 缓存同窗 30s） */
+const ASK_CACHE_TTL_MS = 30_000;
+/** R5-4: 回放缓存 LRU 容量封顶（防 Map 无界泄漏） */
+const ASK_CACHE_CAP = 32;
+/** R5-4: 回执摘要新鲜窗（咨询性提示，宽于回放窗 —— 答案 stale 得比回放慢） */
+const ASK_SUMMARY_FRESH_MS = 120_000;
+/** R5-4: 回执携带的问题/答案摘要截断（Token 纪律：状态锚点不是全文转录） */
+const ASK_SUMMARY_Q_MAX = 120;
+const ASK_SUMMARY_A_MAX = 300;
+
+/** R5-4: 回放缓存槽 */
+interface AskCacheEntry { answer: string; model: string; at: number }
+/** R5-4: 视觉摘要缓存单槽（最近一次成功 ask 的指纹+问答） */
+interface AskSummaryRecord { dhash: string; question: string; answer: string; at: number }
+
+const askCache = new Map<string, AskCacheEntry>();
+let lastAskSummary: AskSummaryRecord | null = null;
+/** R5-4: 墙钟缝（生产恒 Date.now —— TTL 判定唯一时源；测试注入见 _override） */
+let askClock: () => number = Date.now;
+/** R5-4: client 身份证 —— WeakMap 发号（同 ΝΩ-48：缓存不跨腔回放） */
+const askClientIds = new WeakMap<object, number>();
+let askClientSeq = 0;
+
+function askCacheClientId(client: object): number {
+  let id = askClientIds.get(client);
+  if (id === undefined) {
+    askClientSeq += 1;
+    id = askClientSeq;
+    askClientIds.set(client, id);
+  }
+  return id;
+}
+
+/** R5-4: dhash 安全包装 —— 任何失败（sharp 缺席/非图字节/解码异常）返回 null（缓存失能，增益不是依赖） */
+async function dhashSafe(buffer: Buffer): Promise<string | null> {
+  try {
+    const h = await dhash(buffer);
+    return typeof h === 'string' && h.length > 0 ? h : null;
+  } catch {
+    return null;
+  }
+}
+
+/** R5-4: 铸回放缓存键 —— dhash + client 身份 + question（缺一即语义变，不可回放） */
+function buildAskCacheKey(screenHash: string, question: string, client: object): string {
+  return `h=${screenHash}|c=${askCacheClientId(client)}|q=${question}`;
+}
+
+/** R5-4: 查回放缓存 —— TTL 内命中 ⇒ LRU 刷新回放；过期诚实逐出回源。零异常。 */
+function lookupAskCache(key: string): AskCacheEntry | null {
+  const hit = askCache.get(key);
+  if (!hit) return null;
+  if (askClock() - hit.at > ASK_CACHE_TTL_MS) {
+    askCache.delete(key);
+    return null;
+  }
+  askCache.delete(key);
+  askCache.set(key, hit); // LRU 刷新：插入序 = 最近使用序
+  return hit;
+}
+
+/** R5-4: 回填回放缓存 —— 仅成功答案；容量封顶 LRU 逐出。零异常。 */
+function storeAskCache(key: string, entry: AskCacheEntry): void {
+  try {
+    if (askCache.size >= ASK_CACHE_CAP) {
+      const oldest = askCache.keys().next().value;
+      if (oldest !== undefined) askCache.delete(oldest);
+    }
+    askCache.set(key, entry);
+  } catch { /* 理论不可达 —— 安静放弃缓存 */ }
+}
+
+/**
+ * R5-4（a · 视觉摘要缓存的读面）：给定当前屏指纹，若与最近一次成功 ask_screen
+ * 的问屏指纹近似（汉明距离 ≤ maxDistance —— 与 take_screenshot 变化门同阈，
+ * 跨 clean/overlaid 域的既有容差先例 = ΝΩ-31 复用闸）且在新鲜窗内，返回该
+ * 问答摘要（take_screenshot 回执捎带给纯文本宿主：同屏不重问）。
+ * 任何不匹配/过期/无记录 ⇒ null。纯读，零副作用。
+ */
+export function peekAskSummary(
+  screenHash: string,
+  maxDistance: number,
+  maxAgeMs: number = ASK_SUMMARY_FRESH_MS,
+): { question: string; answer: string; age_ms: number } | null {
+  if (!lastAskSummary) return null;
+  const age = askClock() - lastAskSummary.at;
+  if (!(age >= 0) || age > maxAgeMs) return null;
+  const a = normalizeHash(lastAskSummary.dhash);
+  const b = normalizeHash(screenHash);
+  if (b.length !== 64 || /^0+$/.test(b)) return null; // 脏指纹/全零哨兵 ⇒ 无证据不提示（零误报优先）
+  if (hammingDistance(a, b) > Math.max(0, maxDistance)) return null;
+  return {
+    question: lastAskSummary.question.slice(0, ASK_SUMMARY_Q_MAX),
+    answer: lastAskSummary.answer.slice(0, ASK_SUMMARY_A_MAX),
+    age_ms: age,
+  };
+}
+
+/** R5-4: 测试注入口 —— 回放缓存 + 摘要单槽清零 */
+export function _resetAskCache_forTest(): void {
+  askCache.clear();
+  lastAskSummary = null;
+}
+
+/** R5-4: 测试注入口 —— 覆写墙钟（null = 复位 Date.now） */
+export function _overrideAskClock_forTest(clock: (() => number) | null): void {
+  askClock = clock ?? Date.now;
+}
 
 /** 回答字符预算（Token 纪律：问答是状态锚点，不是整屏转录） */
 const ANSWER_MAX_CHARS = 1500;
@@ -89,7 +216,15 @@ export function createAskScreenTool(_config: Config, deps: AskScreenDeps = {}) {
       'Ask the GLM vision model a free-form question about the CURRENT screen (captured fresh, without overlays). ' +
       'Use it when local tools are not enough: overall page state, purpose of unfamiliar UI, mixed text-and-image ' +
       'content, or anything requiring open semantic understanding. Read-only — it never touches the world. ' +
-      'For precise text coordinates use find_text; for plain text extraction use read_text.',
+      'For precise text coordinates use find_text; for plain text extraction use read_text. ' +
+      // R5-4（c · 验证经济）：批1/批2 证据 —— 59 次 ask 中验证类 ~53%，而
+      // diff_view/read_text/find_text 全批 0 次。描述层立「确定性优先」门：
+      // 动作后验证先走本地免费通道，本工具只留给语义判断。
+      'VERIFICATION ECONOMY: this is the most expensive observation channel (a VLM round trip). ' +
+      'For post-action verification prefer, in order: diff_view (did the screen change, and where), ' +
+      'read_text / find_text (exact on-screen text or keyword presence), and the effect/state_anchor fields ' +
+      'already present in action receipts (effect.detected). Reserve ask_screen for questions only semantic ' +
+      'vision can answer (which control is focused, what an unfamiliar UI means, caret position).',
     parameters: {
       question: {
         type: 'string', required: true,
@@ -144,15 +279,48 @@ export function createAskScreenTool(_config: Config, deps: AskScreenDeps = {}) {
             'The capture pipeline may be unavailable — try take_screenshot to check the vision channel.',
           );
         }
+        // ── R5-4（b · 同屏语义回放）：开关走内核键 ask.semanticCache（缺省 0=关，
+        // 未注册回声同值 = 零行为变化）。键 = dhash + client 身份 + question ——
+        // 与 ΝΩ-48 同律：三分量任一变则语义变，不可回放。命中 ⇒ 零编码零拨号。 ──
+        const client = deps.client ?? getGlmClient();
+        const cacheWanted = kernelRegistry.getOrDefault('ask.semanticCache', 0) > 0.5;
+        // R5-4: dhash 恒算（摘要登记不受回放开关调制——纯回执加法面；sharp 缺席 ⇒ null 安静失能）
+        const screenHash = await dhashSafe(buffer);
+        const cacheKey = cacheWanted && screenHash ? buildAskCacheKey(screenHash, question, client) : null;
+        const replay = cacheKey ? lookupAskCache(cacheKey) : null;
+        if (replay) {
+          // 回放也刷新摘要单槽（take_screenshot 的同屏提示以最近一次问答为准）
+          lastAskSummary = { dhash: screenHash!, question, answer: replay.answer, at: askClock() };
+          return toolOk(
+            `ask_screen: "${question.slice(0, 80)}" answered by ${replay.model}.`,
+            {
+              answer: replay.answer,
+              latency_ms: 0,
+              model: replay.model,
+              // R5-4: 回放标记 —— 网络面零拨号，宿主计量可据此分桶（verify 去重命中面）
+              answer_source: `semantic-cache-hit (screen fingerprint + question identical within ${Math.round(ASK_CACHE_TTL_MS / 1000)}s — no VLM call was made)`,
+              ...(reusedFrom !== null
+                ? { frame_source: `reused cached screenshot #${reusedFrom} (screen unchanged since capture)` }
+                : { frame_source: 'fresh capture' }),
+            },
+            'The answer describes the screen AT CAPTURE TIME — it may be stale now. ' +
+            'Before acting on it, ground coordinates yourself: take_screenshot (visual grounding) or find_text; ' +
+            'ask_screen is read-only and never justifies clicking guessed coordinates.',
+          );
+        }
         const enc = await encodeForVlm(buffer);
         if (!enc.ok || !enc.value) {
           return toolErr(
             'ask_screen failed.',
             enc.error ?? 'screenshot encoding failed',
-            'Retry once; if it persists, fall back to take_screenshot + local text tools.',
+            // R4-3（b6，证据：R1-8 九跑 ask_screen 失败回执的降级建议 7 次出现
+            // 0 次执行 read_text/find_text）：「fall back to 工具清单」不是可执行
+            // 指令。改为逐步命令 + 熔断（不再重试 ask_screen）。
+            'Retry ask_screen ONCE. If it fails again, switch tools for good: call take_screenshot and read the screen ' +
+            'yourself; for text or coordinates call read_text (on-screen text) or find_text with your exact keyword ' +
+            '(returns clickable coordinates). Do not keep retrying ask_screen.',
           );
         }
-        const client = deps.client ?? getGlmClient();
         const res = await client.chat({
           images: [{ base64: enc.value.base64, mime: enc.value.mime }],
           system: ASK_SYSTEM_PROMPT,
@@ -164,7 +332,12 @@ export function createAskScreenTool(_config: Config, deps: AskScreenDeps = {}) {
           return toolErr(
             'ask_screen failed.',
             res.error ?? 'unknown VLM error',
-            'The cloud cortex did not answer — fall back to take_screenshot + read_text / find_text.',
+            // R4-3（b6，证据：R1-8 a2-a9 ask_screen 429 后建议 fall back to
+            // read_text / find_text 共 7 次，0 次被执行 —— 模型对文字通道有
+            // 系统性盲区）：降级建议必须是可直接执行的指令，点名参数形状。
+            'The cloud cortex did not answer. Do this NOW instead of retrying: 1) call take_screenshot and read the ' +
+            'screen yourself; 2) if you need on-screen text call read_text, or call find_text with your exact keyword ' +
+            'to get clickable coordinates. ask_screen may be retried at most once, then abandoned.',
           );
         }
         const answer = res.text.trim();
@@ -172,9 +345,16 @@ export function createAskScreenTool(_config: Config, deps: AskScreenDeps = {}) {
           return toolErr(
             'ask_screen failed.',
             'Vision model returned an empty answer.',
-            'Rephrase the question more concretely, or fall back to take_screenshot.',
+            // R4-3（b6）：同册可执行化 —— 空答案给出确定的替代动作而非开放选项。
+            'Rephrase the question more concretely and retry ONCE; if still empty, call take_screenshot and answer it ' +
+            'yourself from the image (read_text can extract the on-screen text for you).',
           );
         }
+        // ── R5-4：成功答案登记两面 ──
+        // b · 回放缓存回填（开关开且指纹可得时；仅成功答案，失败不污染缓存）；
+        // a · 摘要单槽刷新（无条件 —— take_screenshot 回执的同屏捎带面）。
+        if (cacheKey) storeAskCache(cacheKey, { answer, model: res.model, at: askClock() });
+        if (screenHash) lastAskSummary = { dhash: screenHash, question, answer, at: askClock() };
         return toolOk(
           `ask_screen: "${question.slice(0, 80)}" answered by ${res.model}.`,
           {
@@ -194,7 +374,9 @@ export function createAskScreenTool(_config: Config, deps: AskScreenDeps = {}) {
         return toolErr(
           'ask_screen failed.',
           error?.message ?? 'unknown error',
-          'Capture or the VLM pipeline failed — fall back to take_screenshot + local text tools.',
+          // R4-3（b6）：同册可执行化（catch 面与编码失败面同律）。
+          'Capture or the VLM pipeline failed. Switch tools NOW: call take_screenshot to see the screen yourself; for ' +
+          'text or coordinates use read_text / find_text "<your keyword>" instead of retrying ask_screen.',
         );
       }
     },

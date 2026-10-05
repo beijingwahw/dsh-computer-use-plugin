@@ -47,10 +47,10 @@ export interface CanaryObservation {
 }
 
 /**
- * 金丝雀端口（注入缝）：物理微动作原语 + 帧哈希通道，全部可缺席、全部可替换。
- * 生产实现 productionCanaryPorts 经 physicalBackend（healthSnapshot 在场 +
- * 非 dry-run 才派发 —— 与 interactivityProbe/rootCauseGuard 的零孵化、dry-run
- * 纪律同律）；测试注入假端口即全离线。
+ * 金丝雀端口（注入缝）：物理微动作原语 + 帧哈希通道 + 区域 OCR 通道，全部可
+ * 缺席、全部可替换。生产实现 productionCanaryPorts 经 physicalBackend
+ * （healthSnapshot 在场 + 非 dry-run 才派发 —— 与 interactivityProbe/
+ * rootCauseGuard 的零孵化、dry-run 纪律同律）；测试注入假端口即全离线。
  */
 export interface CanaryProbePorts {
   /** 单次点击（归一化坐标）；返回 false = 派发失败（世界未被触碰） */
@@ -64,6 +64,16 @@ export interface CanaryProbePorts {
    * 返回 null/空 = 帧通道缺席（本次观察降级，绝不孵化服务来补）
    */
   regionHash?: (point: { x: number; y: number } | null, radius: number) => Promise<string | null>;
+  /**
+   * ΠΑΝ-77（C2-1 F14）多源证据端口：落点邻域的 OCR 实读文本（point 为 null
+   * 时读焦点区）。返回 string（可为空串 = 实读了但区域无字）= 证据在场；
+   * null/缺席 = 通道缺席（降级回自述单源，行为与 ΠΑΝ-77 前零差异）。
+   * 证据用途（只在分类面消费，绝不喂认识论）：
+   *   · 危险词交叉：OCR 实读命中 dangerPatterns ⇒ danger-cross（任一危险即拦）；
+   *   · 幂等准入否决：OCR 实读否证自述的幂等切换标签 ⇒ 论证不出可逆探针；
+   *   · 即时反应交叉：焦点区实读带 search/自动补全信号 ⇒ type 探针降级不可论证。
+   */
+  readRegionText?: (point: { x: number; y: number } | null, radius: number) => Promise<string | null>;
 }
 
 /** 试演事件的证据环条目（recentCanaryEvents 观察面；审计/诊断/测试） */
@@ -162,10 +172,16 @@ export function boundCanaryEpistemicPorts(): CanaryEpistemicPorts | null {
   return w8CanaryPorts.ports;
 }
 
-/** classifyCanaryTrigger 的产出：让位 / destructive 豁免 / 试演计划 */
+/** classifyCanaryTrigger 的产出：让位 / destructive 豁免 / 多源危险交叉 / 试演计划 */
 export type CanaryTrigger =
   | { kind: 'skip'; why: CanarySkipWhy; note: string }
   | { kind: 'exempt-destructive'; note: string }
+  // ── ΠΑΝ-77（多源证据）：自述无害而独立实读（OCR）报危 ⇒ 交叉拦截 ──
+  // 「任一危险即拦」：模型自述 target_description 是被审计对象自己提供的证词
+  //（C2-1 F14 的信任基座错位）；OCR 实读是独立证据源，两者对危险性的主张
+  // 只要有一方报危，就不把该调用当可试演的可逆微动作 —— 拦截 + 降级问人
+  //（approval.request，同分歧路径），绝不带矛盾证据试演。
+  | { kind: 'danger-cross'; note: string }
   | {
     kind: 'rehearse';
     probe: CanaryProbePlan;
@@ -255,6 +271,8 @@ function strArg(v: unknown): string | undefined {
  *   3. destructive：显式 risk_tier='destructive' 或 target_description /
  *      expected_text 命中 dangerPatterns ⇒ exempt-destructive（不试演，
  *      放行给既有审批闸门直接审批 —— 试演一次性按钮是二次伤害）；
+ *      ΠΑΝ-77：自述无害而 opts.regionText（OCR 实读）命中危险词 ⇒
+ *      danger-cross（任一危险即拦 —— 交叉证据下的拦截 + 降级问人）；
  *   4. 探针预算耗尽 ⇒ skip budget-exhausted；
  *   5. costPriorOfCall 代价档非 high ⇒ skip low-cost（低危不触发）；
  *   6. adviseAction（confidence=args.confidence，缺省 0 —— 无自报置信认识论
@@ -262,11 +280,22 @@ function strArg(v: unknown): string | undefined {
  *   7. 探针计划：click 须有合法归一化坐标 + 幂等切换标签；type 恒有
  *      （单字符退格），但目标字符串证据命中疑似即时反应词表 ⇒ 降级不可论证
  *      （ΑΩ-R38 副作用先验闸，与 click 的幂等词表闸同构）。不可满足 ⇒ skip
- *      no-reversible-probe；
+ *      no-reversible-probe。ΠΑΝ-77：OCR 实读在场时对幂等准入有**否决权**
+ *      （实读否证自述标签 ⇒ 论证不出可逆探针），对即时反应闸是**并联源**
+ *      （任一源命中 ⇒ 降级不可论证）；
  *   8. predictedEffects 缺席 ⇒ skip prediction-unavailable（无比对基准）。
  * W8-B4：第 5/6/8 步的认识论面经端口注入（opts.epistemics 优先，缺省用装配
  * 注册位）；端口缺席 ⇒ 第 5 步前即诚实让位 'epistemics-unbound'（生产装配
  * 恒绑定 —— 该分支仅为防御缺口的显式化，绝不臆造裁决）。
+ *
+ * ΠΑΝ-77 误伤校准（乘性误伤的收敛方向 —— 与检疫票同律的纪律）：多源并联
+ * 本会把误伤概率做并集放大（K 个噪声源各有 FP 概率 p ⇒ union ≈ Kp），此处
+ * 刻意让**新增证据源只作用于「探针准入/危险路由」两个可恢复方向**：
+ *   · OCR 报危 ⇒ 一次人工审批（deny 即回到常态，条目可重新入队 —— 不是
+ *     会话级累计惩罚，不存在「永试用期」）；
+ *   · OCR 否证幂等 ⇒ 本次不试演（让位放行，下次 OCR 一致即可恢复试演）；
+ *   · OCR 通道缺席 ⇒ 逐字节回到自述单源行为（零回归方向）。
+ * 任何一条都不写持久账、不折减会话信任 —— 诚实源的误伤是一次性的、可自愈。
  */
 export function classifyCanaryTrigger(
   tool: string,
@@ -277,6 +306,8 @@ export function classifyCanaryTrigger(
     probeBudgetCap?: number;
     /** W8-B4：认识论端口（调用方注入优先；缺省用 bindCanaryEpistemicPorts 注册位） */
     epistemics?: CanaryEpistemicPorts;
+    /** ΠΑΝ-77：独立证据源 —— 落点邻域 OCR 实读（undefined = 通道缺席，回自述单源） */
+    regionText?: string;
   } = {},
 ): CanaryTrigger {
   const a = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {};
@@ -313,6 +344,16 @@ export function classifyCanaryTrigger(
     return {
       kind: 'exempt-destructive',
       note: 'destructive 档豁免试演：直接放行给既有审批闸门（那类动作本就该直接审批）',
+    };
+  }
+  // ΠΑΝ-77（多源证据交叉）：自述无害而 OCR 实读报危 ⇒ danger-cross。任一
+  // 危险即拦 —— 独立证据源与自述证词对危险性的主张做 OR，不做平均（提示
+  // 注入给一次性按钮标 "menu" 的攻击面在此闭合：实读文本才是落点上真有的字）。
+  // 证据缺席（regionText undefined）⇒ 本分支不可达（零回归）。
+  if (typeof opts.regionText === 'string' && matchesDangerPatterns(opts.regionText, opts.dangerPatterns ?? '')) {
+    return {
+      kind: 'danger-cross',
+      note: `多源证据交叉：自述无害，但落点邻域 OCR 实读命中危险词（实读片段：${opts.regionText.slice(0, 80)}）—— 按任一危险即拦`,
     };
   }
   // 4. 预算封顶
@@ -380,6 +421,17 @@ export function classifyCanaryTrigger(
         note: '点击目标无幂等切换标签（或坐标缺席），论证不出可逆探针，诚实跳过',
       };
     }
+    // ΠΑΝ-77（幂等准入否决权）：OCR 实读在场 ⇒ 实读文本是落点上真有的字 ——
+    // 自述 "menu" 而实读 "Submit"（提示注入的经典错标）时，点击+回点不是可逆
+    // 微实验而是把一次性按钮点两下。实读否证 ⇒ 论证不出可逆探针（让位放行，
+    // 不试演）。空串实读（区域无字）同律否决 —— 无法证实幂等就不冒险试演。
+    if (typeof opts.regionText === 'string' && !isIdempotentToggleLabel(opts.regionText)) {
+      return {
+        kind: 'skip',
+        why: 'no-reversible-probe',
+        note: `OCR 实读否证幂等标签（实读片段：${opts.regionText.slice(0, 80) || '（空）'}）—— 落点邻域无幂等切换证据，论证不出可逆探针（ΠΑΝ-77）`,
+      };
+    }
     probe = { kind: 'click-toggle', point: { x: x as number, y: y as number }, char: 'x' };
   } else {
     // ΑΩ-R38（副作用先验闸）：type-char 探针作用于真实焦点元素 —— 对带 oninput
@@ -395,6 +447,16 @@ export function classifyCanaryTrigger(
         kind: 'skip',
         why: 'no-reversible-probe',
         note: '输入目标带疑似即时反应信号（search/自动补全/即时筛选类）—— 单字符探针可能触发不可逆 oninput 副作用，论证不出可逆探针，诚实跳过（ΑΩ-R38）',
+      };
+    }
+    // ΠΑΝ-77（即时反应并联源）：焦点区 OCR 实读带 search/自动补全信号 ⇒ 同律
+    // 降级不可论证（自述与实阅读做 OR —— 任一源报信号即不把单字符探针放进
+    // 真实焦点元素）。证据缺席 ⇒ 本分支不可达（零回归）。
+    if (isInstantReactionLabel(opts.regionText)) {
+      return {
+        kind: 'skip',
+        why: 'no-reversible-probe',
+        note: `焦点区 OCR 实读带即时反应信号（实读片段：${String(opts.regionText).slice(0, 80)}）—— 单字符探针可能触发不可逆 oninput 副作用，诚实跳过（ΠΑΝ-77）`,
       };
     }
     probe = { kind: 'type-char', point: null, char: 'x' };

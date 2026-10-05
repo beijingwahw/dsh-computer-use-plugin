@@ -6,12 +6,51 @@ let globalElementId = 1;
 export function setAccessibilityProvider(p) {
     provider = p;
 }
+/** role 方言归一表：python L1 词表 → 本模块 interactiveRoles 词表 */
+const UIA_ROLE_ALIASES = {
+    edit: 'textbox',
+    hyperlink: 'link',
+};
+/** ΤΕΛ-1：L1 UIA 树 provider 工厂（纯适配层 —— 零副作用、永不主动抛）。
+ *  fetchTree 由组合根注入真身（D-5 通道缺席时它抛出 ⇒ 提取层的 try/catch
+ *  消化为空清单 —— 与无 provider 时代的 takeScreenshot 降级路径同语义）。
+ *  返回的树根 rect 零尺寸（traverse 的面积闸门自滤，根永不入清单）。 */
+export function createUiaTreeProvider(fetchTree) {
+    return async () => {
+        const res = await fetchTree();
+        const raw = Array.isArray(res?.elements) ? res.elements : [];
+        const children = raw
+            .filter((el) => el !== null && typeof el === 'object')
+            .map((el) => {
+            const r = el.rect;
+            // 防御性几何：rect 缺席/非对象/任一字段非有限数 ⇒ 元素整体弃置（把 NaN
+            // 洗成 0 会凭空铸造「原点幻影元素」—— 脏几何绝不进可点击清单）；有限
+            // 但 ≤0 的宽高放行（提取层 width/height>0 闸门自滤退化框）
+            if (r === null || typeof r !== 'object')
+                return null;
+            const { x, y, width, height } = r;
+            if (![x, y, width, height].every(v => typeof v === 'number' && Number.isFinite(v)))
+                return null;
+            const roleRaw = typeof el.role === 'string' ? el.role.trim().toLowerCase() : '';
+            return {
+                rect: { x: x, y: y, width: width, height: height },
+                role: UIA_ROLE_ALIASES[roleRaw] ?? roleRaw,
+                name: typeof el.name === 'string' ? el.name : '',
+                children: [],
+            };
+        })
+            .filter((n) => n !== null);
+        return { rect: { x: 0, y: 0, width: 0, height: 0 }, role: 'root', name: '', children };
+    };
+}
 /** D-3 白盒源就绪判定：provider 已注入方可声明 isReady（同步、无副作用） */
 export function hasAccessibilityProvider() {
     return provider !== null;
 }
 /**
- * 提取可交互元素。双重过滤（语义角色 + 几何面积>0）+ 三级 fallback 命名 + Token 预算(50)。
+ * 提取可交互元素。双重过滤（语义角色 + 几何面积>0）+ fallback 命名（ΠΑΝ-110：
+ * name 缺席落 [role] 占位 —— 绝不回显 node.value，用户已输入内容不进提示词）
+ * + Token 预算(50)。
  */
 export async function extractInteractiveElements(force = false) {
     if (!provider) {
@@ -31,8 +70,14 @@ export async function extractInteractiveElements(force = false) {
                 if (interactiveRoles.includes(node.role?.toLowerCase())) {
                     elements.push({
                         id: globalElementId++,
-                        // 三级 fallback：无文本取值，无值取角色 —— 元素永远有可读名字
-                        name: node.name || node.value || `[${node.role}]`,
+                        // ΠΑΝ-110（隐私 · C1-3 M-9）：三级 fallback 砍掉 node.value 臂 ——
+                        // 旧实现 `node.name || node.value || [role]` 把无 name 的 textbox 的
+                        // value（用户已键入的搜索词、聊天草稿、验证码回显等）当元素名送进
+                        // 提示词/点击握手。风险词脱敏（typeText 方言）只覆盖凭据类词面，
+                        // 普通敏感输入不命中词表 —— 回显 value 与「绝不回显用户输入」的
+                        // 红线冲突。修法：value 一律不进 name（控件可寻址性由 id+role+rect
+                        // 承担 —— name 缺席时落 [role] 占位，元素永远有可读名字）。
+                        name: (typeof node.name === 'string' && node.name.trim() ? node.name : '') || `[${node.role}]`,
                         role: node.role,
                         rect: node.rect,
                     });

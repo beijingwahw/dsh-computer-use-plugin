@@ -10,6 +10,10 @@
 //   - grant/revoke 双通道：用户口头同意（grant=true）即激活令牌；拒绝（revoke）立即作废。
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { approval, approvalQueue, configureDemonstrations, setDemonstrationObserver, } from '../approval.js';
+// ΤΕΛ-3a：绑定事实的透明化探针（targetDigest 在场性 —— 只读，绝不外泄摘要本体）
+import { boundTargetOf } from '../approval.security.js';
+// ΠΑΝ-37：veto 撤销已批条目的执法原语（adjudicate 工具 grant=false 臂的透传点）
+import { revokeGrantedEntries } from '../approval.queueState.js';
 import { skillLibrary } from '../skillLibrary.js';
 // W4-0（F 接线）：暂存步账 —— stageAction 的 stepCursor 计量面（journal 总条数，
 // 与 orchestrator 续跑对账的 ledgerCount 同源）。
@@ -53,7 +57,9 @@ export function createRequestApprovalTool(config) {
             'stage the irreversible action into the offline approval queue (evidence attached) and continue all REVERSIBLE ' +
             'work — the next sleep morning report lists staged items for one-annotated batch adjudication. ' +
             'Workflow: call this tool -> relay the message to the user -> wait for consent -> ' +
-            'call grant_approval if they agree (with their confirm code, when required) -> re-invoke click_mouse with the token.',
+            'call grant_approval if they agree (with their confirm code, when required) -> re-invoke click_mouse with the token. ' +
+            'ΤΕΛ-3a: pass the optional target argument to mint a TARGET-BOUND token — the consent then buys exactly that ' +
+            'target (mismatching redeem calls are refused fail-closed); omit it for the legacy unbound form.',
         parameters: {
             description: {
                 type: 'string', required: true,
@@ -71,6 +77,39 @@ export function createRequestApprovalTool(config) {
                     'the staging window and reversible work remains; adjudication then flows through the morning report / ' +
                     'adjudicate_approval_queue — do NOT keep asking in chat for a staged item.',
             },
+            // ΤΕΛ-3a：激活能力限缩令牌的生产铸造面（ΠΑΝ-5 targetDigest 的模型可调入口）。
+            // 模型请求审批时声明「这次同意买的是什么」—— 声明后被铸入 targetDigest，
+            // 兑换面（validate/beginAttempt/consume）对不匹配目标 fail-closed 拒绝。
+            target: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    tool: {
+                        type: 'string',
+                        description: 'The EXACT tool name you will redeem this approval with (click_mouse / drag_mouse / ' +
+                            'click_element / press_hotkey). The redeeming call must carry the SAME tool.',
+                    },
+                    target_description: {
+                        type: 'string',
+                        description: 'What you will act on, e.g. "发送 button at the bottom of the compose window". Must match ' +
+                            'the target_description you pass on the redeeming call (click_element: the element name).',
+                    },
+                    x: {
+                        type: 'number',
+                        description: 'Normalized x [0,1] of the click point — only for coordinate-addressed tools (click_mouse). ' +
+                            'Quantized to 1/1000 (tolerance band); omit for description-addressed tools (click_element/drag_mouse/press_hotkey).',
+                    },
+                    y: {
+                        type: 'number',
+                        description: 'Normalized y [0,1] of the click point — same rules as x.',
+                    },
+                },
+                description: 'ΤΕΛ-3a (capability scoping): OPTIONAL target binding. When present, the minted token is ' +
+                    'cryptographically bound to this target (macaroon-style targetDigest) and can ONLY be redeemed against a ' +
+                    'dispatch that matches it — the user\'s consent buys EXACTLY this action, not "any dangerous click within ' +
+                    'TTL". Omit it and the token stays unbound (legacy bearer form, byte-identical behavior). Once bound, a ' +
+                    'mismatching redeem call is REFUSED (fail-closed) — bind only what you will actually execute.',
+            },
         },
         output: {
             schema: { type: 'string' },
@@ -86,13 +125,54 @@ export function createRequestApprovalTool(config) {
             // 连形状都不记，最小捕获面）。request_approval 只确知「描述」—— 工具名与
             // 坐标诚实缺席（described-action）；携带完整形状的调用方经 approval.request
             // 直接铸入。type_text 类在铸造点即脱敏为长度桶（隐私铁律）。
+            // ΤΕΛ-3a：target 在场 ⇒ 透传 approval.request 的 opts.target —— 生产铸造面
+            // 自此可铸**能力限缩令牌**（macaroon 式 targetDigest：目标描述+动作+坐标域
+            // 的规范化哈希，ΠΑΝ-5 的 API 此前只有编程面调用方）。模型请求审批时声明
+            // 「这次同意买的是什么」；一旦绑定，兑换面（validate/beginAttempt/consume）
+            // 对不匹配目标 fail-closed 拒绝。
+            // 兼容律（ΤΕΛ-3c）：target 缺席 ⇒ opts.target 缺席 ⇒ 令牌不携带绑定 ⇒
+            // 铸造路径与返回值逐字节不变（绑定是 opt-in 升级面）。防御式：垃圾形态
+            // （非对象/缺 tool）⇒ 绑定诚实缺席 + 输出面 target_binding.bound=false 透明
+            // 申报（绝不抛、绝不静默把限缩请求降级为全能力令牌而不告知）。
+            const rawTarget = args.target;
+            const targetProvided = rawTarget !== undefined && rawTarget !== null;
+            let mintTarget;
+            let targetIgnoredReason;
+            if (targetProvided) {
+                if (typeof rawTarget === 'object' && !Array.isArray(rawTarget)) {
+                    const t = rawTarget;
+                    const tool = typeof t.tool === 'string' ? t.tool.trim() : '';
+                    if (tool !== '') {
+                        mintTarget = {
+                            tool,
+                            ...(typeof t.x === 'number' && Number.isFinite(t.x) ? { x: t.x } : {}),
+                            ...(typeof t.y === 'number' && Number.isFinite(t.y) ? { y: t.y } : {}),
+                            ...(typeof t.target_description === 'string' && t.target_description.trim() !== ''
+                                ? { target_description: t.target_description }
+                                : {}),
+                        };
+                    }
+                    else {
+                        targetIgnoredReason = 'invalid-target-shape (tool missing or empty — no bindable capability identity)';
+                    }
+                }
+                else {
+                    targetIgnoredReason = 'invalid-target-shape (target must be an object with a non-empty tool string)';
+                }
+            }
             const pa = approval.request(args.description, {
                 ttlMs: config.approvalTokenTtlMs,
                 maxAttempts: config.approvalMaxAttempts,
                 actionShape: config.enableDemonstrations
                     ? { tool: 'described-action', target_description: args.description }
                     : undefined,
+                // ΤΕΛ-3a：opts.target 在场 ⇒ request 内铸入 targetDigest（不可规范化 ⇒
+                // 绑定诚实缺席 —— request 宽容面；输出面如实申报）
+                ...(mintTarget !== undefined ? { target: mintTarget } : {}),
             });
+            // ΤΕΛ-3a：绑定事实的铸造后核验（boundTargetOf = 簿记真值源 —— 不信透传
+            // 自证，以账本为准）。targetDigest 本体绝不外泄（输出面只见布尔与成因）。
+            const targetBound = targetProvided && boundTargetOf(pa.token) !== undefined;
             const consequence = args.consequence
                 ? ` Consequence: ${args.consequence}.`
                 : ' This action is likely irreversible.';
@@ -160,6 +240,20 @@ export function createRequestApprovalTool(config) {
                     // 诚实标记 absent（该令牌不可经对话授予 —— fail-closed）
                     confirm_code_required: codeRequired,
                     confirm_channel: codeRequired ? 'out-of-band' : 'out-of-band-absent',
+                    // ΤΕΛ-3a：绑定事实透明化（只在模型显式携 target 时入键 —— 无 target
+                    // 调用的输出面逐字节保持旧形态，ΤΕΛ-3c 兼容律）。bound=true ⇒ 一次
+                    // 同意恰授权这一个目标；成因字段只在绑定未成立时在场（诚实申报）。
+                    ...(targetProvided
+                        ? {
+                            target_binding: {
+                                bound: targetBound,
+                                ...(targetBound
+                                    ? { note: 'Token is TARGET-BOUND: redeem calls must carry the SAME tool/x/y/target_description ' +
+                                            '(mismatch is refused fail-closed and does NOT burn the token).' }
+                                    : { reason: targetIgnoredReason ?? 'binding-absent (digest pipeline refused the shape)' }),
+                            },
+                        }
+                        : {}),
                     // W2-1（H4）：暂存降级透明化 —— 用户离开时超时后的非阻塞出路
                     staging: (() => {
                         const s = approvalQueue.stagingAvailability();
@@ -177,11 +271,17 @@ export function createRequestApprovalTool(config) {
                         : {}),
                 },
                 message_to_relay: `I am about to: ${args.description}.${consequence} ${consentAsk}`,
-                next_step: w4Staged !== null && w4Staged.ok
+                // ΤΕΛ-3a：绑定令牌的兑换指引（只在 bound 时附加 —— 无 target/绑定未成立
+                // 路径的 next_step 逐字节保持旧文，ΤΕΛ-3c 兼容律）。绑定 = 兑换面强制
+                // 比对：模型必须以与铸造时同一形状（同 tool、同坐标、同目标描述）兑现。
+                next_step: (w4Staged !== null && w4Staged.ok
                     ? 'STAGED into the offline approval queue (step_cursor captured). Continue all REVERSIBLE work; the ' +
                         'staged irreversible step executes after adjudication via the morning report / adjudicate_approval_queue ' +
                         '(or an in-chat grant before then). Do NOT keep re-asking for a staged item.'
-                    : nextStep,
+                    : nextStep) + (targetBound
+                    ? ' TARGET-BOUND token: the redeeming call MUST carry the SAME tool/x/y/target_description you declared ' +
+                        'here (quantization tolerance 1/1000) — a mismatching target is refused fail-closed.'
+                    : ''),
             }, null, 2);
         },
     });
@@ -200,6 +300,8 @@ export function createGrantApprovalTool(config) {
             'W1-2 (H1): optional note carries the user annotation amending the plan (e.g., "yes, but click the ' +
             'small Send at the bottom-right") — it is cast onto the token as a structured amendment the executor ' +
             'honors before dispatch. ' +
+            'ΤΕΛ-3a: target-bound tokens (minted with the target argument) report target_bound=true — redeem them ONLY ' +
+            'against the exact tool/x/y/target_description they were bound to. ' +
             'grant=false (or calling revoke) immediately invalidates the token.',
         parameters: {
             token: { type: 'string', required: true, description: 'The pending token from request_approval.' },
@@ -299,18 +401,27 @@ export function createGrantApprovalTool(config) {
             // 诚实的前瞻披露，绝不冒充「已教育」的计数。
             // W1-2（H1）：批注铸入成功 ⇒ 回显结构化 amendment（模型必须照修正后的
             // 计划执行 —— 批注是用户亲手改过的计划，不是可选建议）。
+            // ΤΕΛ-3a：绑定令牌的授予面指引 —— boundTargetOf 只读探针（令牌携带
+            // targetDigest ⇒ 回执如实标注 + 兑换形状指引；未绑定 ⇒ 零新键，授予
+            // 回执逐字节保持旧形态，ΤΕΛ-3c 兼容律）。摘要本体绝不外泄。
             const amendment = approval.amendmentOf(args.token);
+            const grantedTargetBound = boundTargetOf(args.token) !== undefined;
             const granted = {
                 status: 'GRANTED',
                 state_anchor: {
                     token: args.token,
                     granted: true,
                     ...(amendment ? { amended: true } : {}),
+                    ...(grantedTargetBound ? { target_bound: true } : {}),
                 },
                 next_step: 'User consent recorded. Re-invoke click_mouse NOW with approval_token="' +
                     args.token + '". ONE consent covers the WHOLE task: if the result reports ' +
                     'acceptance=retry-allowed (no verified effect yet), fix and RETRY with the same token — ' +
-                    'do NOT ask the user again. When acceptance=verified, report the acceptance result to the user.',
+                    'do NOT ask the user again. When acceptance=verified, report the acceptance result to the user.' +
+                    (grantedTargetBound
+                        ? ' This token is TARGET-BOUND: every redeem call (validate/beginAttempt/consume) must carry the SAME ' +
+                            'tool/x/y/target_description declared at request_approval — a different target is refused fail-closed.'
+                        : ''),
             };
             if (amendment) {
                 granted.amendment = {
@@ -346,10 +457,15 @@ export function createAdjudicateApprovalQueueTool(config) {
             'irreversible actions that went unanswered; the user reviews them ONCE here. One call carries the verdict ' +
             'for MANY items, and the optional note is the user ANNOTATION (W1-2 amendment protocol): consent WITH ' +
             'corrections — each entry gets its own amendment cast from its own description, honored at resume time. ' +
-            'Each granted item consumes one rate-budget token (queue batch is not a click-fatigue backdoor); EXPIRED ' +
-            'items are conservatively REFUSED (ttl-expired) and need a fresh request_approval; already-decided items ' +
-            'cannot be re-decided. Call this ONLY after relaying the morning-report pending list to the user and ' +
-            'getting their explicit verdict (and their corrections, as the note).',
+            'ΠΑΝ-1/ΠΑΝ-36 (human-proof): granting an entry requires the 6-digit OUT-OF-BAND confirm code that was ' +
+            'delivered to the user when the ORIGINAL request was staged — pass confirm_code as a single string (one ' +
+            'code for a single item / all items from the same approval) or as an object mapping each entry id to its ' +
+            'own code (batch morning-report adjudication where each item carries its own code). No code ⇒ refused; ' +
+            'wrong codes burn the entry after 5 attempts. Each granted item consumes one rate-budget token; EXPIRED ' +
+            'items are conservatively REFUSED (ttl-expired); already-decided items cannot be re-decided. ' +
+            'ΠΑΝ-37: grant=false (veto) ALSO revokes already-granted-but-not-yet-resumed entries — user refusal ' +
+            'always wins over a prior grant. Call this ONLY after relaying the morning-report pending list to the ' +
+            'user and getting their explicit verdict (their codes, and their corrections as the note).',
         parameters: {
             ids: {
                 type: 'array',
@@ -357,7 +473,24 @@ export function createAdjudicateApprovalQueueTool(config) {
             },
             grant: {
                 type: 'boolean', required: true,
-                description: 'true = the user approves the listed actions; false = the user refuses them (token-free, clears the list).',
+                description: 'true = the user approves the listed actions; false = the user refuses them (token-free, clears the list, ' +
+                    'and revokes already-granted entries that have not resumed yet).',
+            },
+            confirm_code: {
+                oneOf: [
+                    {
+                        type: 'string',
+                        description: 'The 6-digit out-of-band confirm code the user gave you — applies to every listed id ' +
+                            '(single-item adjudication, or all items staged from the same approval).',
+                    },
+                    {
+                        type: 'object',
+                        additionalProperties: true,
+                        description: 'Per-entry codes for batch adjudication: {"<entry-id>": "<6-digit code>", ...} — each entry ' +
+                            'was anchored with its own original approval\'s code.',
+                    },
+                ],
+                description: 'ΠΑΝ-1: required for grant=true (the user\'s out-of-band codes; never guess — mismatches burn entries).',
             },
             note: {
                 type: 'string',
@@ -376,7 +509,29 @@ export function createAdjudicateApprovalQueueTool(config) {
             // 防御式：非法类型按缺席处理（ids 非数组 ⇒ 全部待批；note 空串 ⇒ 无批注）
             const ids = Array.isArray(args.ids) ? args.ids : [];
             const note = typeof args.note === 'string' && args.note.trim() ? args.note : undefined;
-            const r = approvalQueue.adjudicate(ids, args.grant === true, note);
+            // ΠΑΝ-37：veto 撤销先行 —— grant=false 时已批未续跑的条目就地改判 denied
+            //（裁决于撤销之后 ⇒ 撤销过的条目对 adjudicate 呈 already-decided，账面如实）。
+            let revokedGranted = 0;
+            if (args.grant !== true) {
+                revokedGranted = revokeGrantedEntries(ids).revoked;
+            }
+            // ΠΑΝ-36a：confirm_code 透传（string = 施于全部条目；object = 逐条目各交
+            // 各码；其余形态 ⇒ 未携码 —— 队列侧 fail-closed 拒绝 grant）。
+            const rawCode = args.confirm_code;
+            let confirmCode;
+            if (typeof rawCode === 'string' && rawCode.trim() !== '') {
+                confirmCode = rawCode;
+            }
+            else if (rawCode && typeof rawCode === 'object' && !Array.isArray(rawCode)) {
+                const map = {};
+                for (const [k, v] of Object.entries(rawCode)) {
+                    if (typeof v === 'string' && v.trim() !== '')
+                        map[k] = v;
+                }
+                if (Object.keys(map).length > 0)
+                    confirmCode = map;
+            }
+            const r = approvalQueue.adjudicate(ids, args.grant === true, note, confirmCode);
             const summary = approvalQueue.pendingSummary();
             const granted = r.results.filter(x => x.outcome === 'granted').length;
             const denied = r.results.filter(x => x.outcome === 'denied').length;
@@ -384,6 +539,7 @@ export function createAdjudicateApprovalQueueTool(config) {
                 adjudicated: r.results.length,
                 granted,
                 denied,
+                ...(revokedGranted > 0 ? { revoked_granted: revokedGranted } : {}),
                 queue_after: {
                     pending: summary.pending,
                     expired: summary.expired,
@@ -395,12 +551,25 @@ export function createAdjudicateApprovalQueueTool(config) {
                 anchor.persistence_warning =
                     'Queue persistence FAILED — decisions are in memory only; re-run this adjudication after the host recovers.';
             }
+            // ΠΑΝ-36a：码要求的诚实指引（grant 臂被人证拒绝时给出正确出路）
+            const codeBlocked = r.results.some(x => x.outcome === 'confirm-code-required' || x.outcome === 'confirm-code-mismatch'
+                || x.outcome === 'confirm-channel-absent' || x.outcome === 'code-attempts-exhausted');
             const nextStep = args.grant === true
-                ? 'Approved entries await RESUME: the orchestrator consumes them (takeGranted) and completes the final ' +
-                    'irreversible step under a pre-granted execution token; you do NOT re-ask the user.'
-                : 'Refused entries are recorded (with the annotation) and will not execute; propose alternatives if needed.';
+                ? (codeBlocked
+                    ? 'Human proof REQUIRED (ΠΑΝ-1): granting a staged entry needs the 6-digit OUT-OF-BAND confirm code the ' +
+                        'user received when the request was staged. Ask the USER for the code (you can NEVER see it yourself), ' +
+                        'then re-call adjudicate_approval_queue with grant=true and confirm_code=that code (single string, or ' +
+                        'one code per entry id for batches). Wrong codes burn entries after 5 attempts — never guess. ' +
+                        'Entries without a code anchor (restored from disk) can NEVER be batch-granted: the user must deny ' +
+                        'and re-request via request_approval.'
+                    : 'Approved entries await RESUME: the orchestrator consumes them (takeGranted) and completes the final ' +
+                        'irreversible step under a pre-granted execution token; you do NOT re-ask the user.')
+                : (revokedGranted > 0
+                    ? 'Refused entries are recorded (with the annotation) and will not execute; ' + revokedGranted +
+                        ' previously-GRANTED entry(ies) were REVOKED by this veto (they can no longer be resumed).'
+                    : 'Refused entries are recorded (with the annotation) and will not execute; propose alternatives if needed.');
             return JSON.stringify({
-                status: r.results.length === 0 ? 'NOTHING_TO_ADJUDICATE' : 'ADJUDICATED',
+                status: r.results.length === 0 && revokedGranted === 0 ? 'NOTHING_TO_ADJUDICATE' : 'ADJUDICATED',
                 state_anchor: anchor,
                 per_item: r.results,
                 next_step: nextStep,

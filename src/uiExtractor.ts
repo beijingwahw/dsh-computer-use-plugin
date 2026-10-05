@@ -24,13 +24,89 @@ export function setAccessibilityProvider(p: AccessibilityProvider) {
   provider = p;
 }
 
+// ── ΤΕΛ-1（C2-7 §1.3）：L1 UIA 树 provider 工厂 —— element-ID 模式的生产电源 ──
+//
+// 背景：setAccessibilityProvider 组合根此前零调用 ⇒ enableElementIdMode=true 在
+// 任何部署都不可能工作（take_screenshot catch 后静默 elements=[]，四个下游
+// 消费端恒空）。本工厂把 D-5 微服务的 L1 无障碍树通道（physicalBackend.getUiTree
+// {source:'tree'} —— python_service ui_tree.py 的 comtypes/uiautomation 快照）
+// 适配成本模块的 provider 契约，供组合根（src/index.ts）一行注入。
+//
+// role 方言归一（两端词表的已知缝隙，python 端 _UIA_CONTROL_TYPE_ROLES 注释
+// 自证「与 TS 端 interactiveRoles 同形」仅部分成立）：L1 词表 'edit'/'hyperlink'
+// 在本模块 interactiveRoles（button/textbox/link/checkbox/combobox/menuitem）
+// 之外 —— 不映射则文本框与链接两大交互主力被提取层静默滤空。其余角色
+// （button/checkbox/combobox/menuitem）双端同形直通；非交互角色原样透传
+// （提取层的角色闸门自会过滤，工厂不重复立法）。
+
+/** L1 树元素的最小结构面（physicalBackend UiTreeResult.elements 的防御投影） */
+export interface UiaTreeElementLike {
+  role?: unknown;
+  name?: unknown;
+  rect?: unknown;
+}
+
+/** L1 树快照的最小结构面（UiTreeResult 的防御投影 —— 只有 elements 被消费） */
+export interface UiaTreeSnapshotLike {
+  elements?: ReadonlyArray<UiaTreeElementLike> | null;
+}
+
+/** role 方言归一表：python L1 词表 → 本模块 interactiveRoles 词表 */
+const UIA_ROLE_ALIASES: Readonly<Record<string, string>> = {
+  edit: 'textbox',
+  hyperlink: 'link',
+};
+
+/** provider 树节点形态（本模块 traverse 消费的 {rect, role, name, children} 约定） */
+interface UiaTreeNode {
+  rect: { x: number; y: number; width: number; height: number };
+  role: string;
+  name: string;
+  children: UiaTreeNode[];
+}
+
+/** ΤΕΛ-1：L1 UIA 树 provider 工厂（纯适配层 —— 零副作用、永不主动抛）。
+ *  fetchTree 由组合根注入真身（D-5 通道缺席时它抛出 ⇒ 提取层的 try/catch
+ *  消化为空清单 —— 与无 provider 时代的 takeScreenshot 降级路径同语义）。
+ *  返回的树根 rect 零尺寸（traverse 的面积闸门自滤，根永不入清单）。 */
+export function createUiaTreeProvider(
+  fetchTree: () => Promise<UiaTreeSnapshotLike | null | undefined>,
+): AccessibilityProvider {
+  return async (): Promise<UiaTreeNode> => {
+    const res = await fetchTree();
+    const raw = Array.isArray(res?.elements) ? res.elements : [];
+    const children: UiaTreeNode[] = raw
+      .filter((el): el is UiaTreeElementLike => el !== null && typeof el === 'object')
+      .map((el): UiaTreeNode | null => {
+        const r = el.rect as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null;
+        // 防御性几何：rect 缺席/非对象/任一字段非有限数 ⇒ 元素整体弃置（把 NaN
+        // 洗成 0 会凭空铸造「原点幻影元素」—— 脏几何绝不进可点击清单）；有限
+        // 但 ≤0 的宽高放行（提取层 width/height>0 闸门自滤退化框）
+        if (r === null || typeof r !== 'object') return null;
+        const { x, y, width, height } = r as Record<string, unknown>;
+        if (![x, y, width, height].every(v => typeof v === 'number' && Number.isFinite(v))) return null;
+        const roleRaw = typeof el.role === 'string' ? el.role.trim().toLowerCase() : '';
+        return {
+          rect: { x: x as number, y: y as number, width: width as number, height: height as number },
+          role: UIA_ROLE_ALIASES[roleRaw] ?? roleRaw,
+          name: typeof el.name === 'string' ? el.name : '',
+          children: [],
+        };
+      })
+      .filter((n): n is UiaTreeNode => n !== null);
+    return { rect: { x: 0, y: 0, width: 0, height: 0 }, role: 'root', name: '', children };
+  };
+}
+
 /** D-3 白盒源就绪判定：provider 已注入方可声明 isReady（同步、无副作用） */
 export function hasAccessibilityProvider(): boolean {
   return provider !== null;
 }
 
 /**
- * 提取可交互元素。双重过滤（语义角色 + 几何面积>0）+ 三级 fallback 命名 + Token 预算(50)。
+ * 提取可交互元素。双重过滤（语义角色 + 几何面积>0）+ fallback 命名（ΠΑΝ-110：
+ * name 缺席落 [role] 占位 —— 绝不回显 node.value，用户已输入内容不进提示词）
+ * + Token 预算(50)。
  */
 export async function extractInteractiveElements(force: boolean = false): Promise<UIElement[]> {
   if (!provider) {
@@ -53,8 +129,14 @@ export async function extractInteractiveElements(force: boolean = false): Promis
         if (interactiveRoles.includes(node.role?.toLowerCase())) {
           elements.push({
             id: globalElementId++,
-            // 三级 fallback：无文本取值，无值取角色 —— 元素永远有可读名字
-            name: node.name || node.value || `[${node.role}]`,
+            // ΠΑΝ-110（隐私 · C1-3 M-9）：三级 fallback 砍掉 node.value 臂 ——
+            // 旧实现 `node.name || node.value || [role]` 把无 name 的 textbox 的
+            // value（用户已键入的搜索词、聊天草稿、验证码回显等）当元素名送进
+            // 提示词/点击握手。风险词脱敏（typeText 方言）只覆盖凭据类词面，
+            // 普通敏感输入不命中词表 —— 回显 value 与「绝不回显用户输入」的
+            // 红线冲突。修法：value 一律不进 name（控件可寻址性由 id+role+rect
+            // 承担 —— name 缺席时落 [role] 占位，元素永远有可读名字）。
+            name: (typeof node.name === 'string' && node.name.trim() ? node.name : '') || `[${node.role}]`,
             role: node.role,
             rect: node.rect,
           });

@@ -33,12 +33,24 @@ export function createProbeInteractivityTool(config) {
         },
         async execute(args) {
             try {
-                if (args.x < 0 || args.x > 1 || args.y < 0 || args.y > 1) {
-                    return '[Error]: Coordinates must be in 0.0-1.0 (normalized).';
+                // ΠΑΝ-111（NaN 卫兵）：NaN 与任何数比较均 false —— 域检查穿透后 NaN
+                // 坐标会流进 moveMouse 的物理派发。非有限值与域外值同判：诚实报错。
+                const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+                if (!finite(args.x) || !finite(args.y) || args.x < 0 || args.x > 1 || args.y < 0 || args.y > 1) {
+                    return '[Error]: Coordinates must be finite numbers in 0.0-1.0 (normalized).';
                 }
                 const r = await probeInteractivity(config, args.x, args.y);
+                // R4-3（b2，证据：R1-8 a5/a7）：对收起菜单左列区域的探针得 control 0.85
+                // （wallpaper/taskbar hover 重绘），模型 reasoning 直接写「menu rows
+                // verified interactive」——「某控件响应」被读成「目标控件在场」。control
+                // 判读追加语义限定（加法式，原句保留）。判决铸造面（fuseVerdict/
+                // uiaVerdict）为纯函数不含话术，语义限定统一落在回执层。
                 const explain = {
-                    control: 'The OS confirms this is an interactive element (hand cursor and/or hover repaint). Safe to click.',
+                    control: 'The OS confirms this is an interactive element (hand cursor and/or hover repaint). Safe to click. ' +
+                        'LIMITATION: control means SOME interactive control responded at this point — it does NOT identify WHICH control. ' +
+                        'A dropdown menu item exists ONLY while its dropdown is expanded; a probe on the collapsed menu bar or screen ' +
+                        'margin can fire on unrelated hover redraw. If you expected a SPECIFIC control here (e.g., a menu item), confirm ' +
+                        'it visually first (take_screenshot / zoom_inspect) before clicking.',
                     text: 'This is selectable TEXT (I-beam cursor) — static content such as a chat message or document body, NOT a clickable entry. Do not click it when looking for a button. (Exception: if you intended to focus a text input, clicking is fine — verify focus afterwards.)',
                     inconclusive: 'Channels were inconclusive (native controls often keep the arrow cursor and some have no hover effect). Fall back to visual affordance: zoom_inspect for button chrome (border/background) before clicking.',
                 };

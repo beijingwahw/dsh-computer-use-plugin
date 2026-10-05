@@ -18,8 +18,8 @@
 //   - inconclusive 不记 —— 「不知道」不是证据；环境微变后的重实验是对的
 //   - 无指纹（截图失败）不记 —— 无场景锚的判决无法安全复用
 //
-// 召回降级律：via=memory、confidence -0.03 且封顶 0.9 —— 记忆是先验，
-// 永不冒充新鲜实验。
+// 召回降级律：via=memory、confidence -0.03 且封顶 0.89 —— 记忆是先验，
+// 永不冒充新鲜实验，也永不触发点击拦截地板执法（见 ΠΑΝ-131）。
 import { similarity } from './perceptualHash';
 import type { ProbeResult, InteractivityVerdict, ProbeEvidence } from './interactivityProbe';
 
@@ -202,11 +202,21 @@ class ProbeMemory {
     const e = best.entry;
     e.hits++;
     e.lastUsedAt = now; // 命中即续期（LRU 活性）
+    // R4-3（b1，证据：R1-8 a9 seq159/179）：via=memory 召回（dwell_ms:0）的
+    // control 0.82 被模型当作现场证据采信。note 从中性遥测升格为显式警示 ——
+    // 记忆是先验不是证据，回执读者必须一眼看出这不是本屏实测。加法式：原
+    // scene_similarity/hits 遥测全保留。
     return {
       point: { ...point },
       verdict: e.verdict,
       // 召回降级律：记忆是先验，降一等且封顶 —— 永不冒充新鲜实验
-      confidence: Math.min(0.9, e.confidence - 0.03),
+      // ΠΑΝ-131: 封顶 0.9 → 0.89 —— 旧封顶下 UIA text 0.93 存档召回恰为
+      // 0.90 == TEXT_CLICK_REFUSE_FLOOR(0.9)（0.93−0.03 浮点恰等于 0.9），
+      // gateTextClick 的「≥ 地板即拦」在等值边界照拦 ⇒ −0.03 降级对该通道
+      // 是装饰性的（陈旧记忆拦住合法点击）。封顶 0.89 后诚实召回恒低于
+      // 地板（记忆只标注、不执法）；新鲜判决不经本封顶，地板语义方向不动
+      // （0.90/0.91 的决定性新鲜判决仍拦）。
+      confidence: Math.min(0.89, e.confidence - 0.03),
       evidence: {
         via: 'memory',
         cursor_kind: e.cursorKind,
@@ -224,7 +234,8 @@ class ProbeMemory {
           }
           : {}),
       },
-      note: `recalled from scene memory (scene_similarity=${best.sim.toFixed(3)}, hits=${e.hits})`,
+      note: `MEMORY RECALL (cached from an earlier scene, NOT the current screen; scene_similarity=${best.sim.toFixed(3)}, hits=${e.hits}) — ` +
+        `do NOT treat as fresh evidence; re-probe or take_screenshot before acting on it`,
     };
   }
 

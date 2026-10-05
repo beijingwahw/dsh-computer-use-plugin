@@ -172,6 +172,11 @@ export async function readText(buffer: Buffer, lang = 'eng'): Promise<OcrResult>
   const sharp = await getSharp();
   const meta = await sharp(buffer).metadata();
   const W = meta.width!, H = meta.height!;
+  // ΠΑΝ-111（NaN 卫兵族）：元数据缺席宽高 ⇒ 归一化分母 NaN，词级 bbox/center
+  // 全 NaN。诚实降级：放弃词级坐标、保留全文（词表为空 —— 与 OCR 零词同形状）。
+  if (!Number.isFinite(W) || !Number.isFinite(H) || W < 1 || H < 1) {
+    return { text: data.text ?? '', words: [] };
+  }
 
   // tesseract v5 的词级输出结构随版本有差异，防御性兼容 words / lines.words
   const anyData = data as any;
@@ -286,6 +291,13 @@ export async function semanticConfirm(
   lang = 'eng',
 ): Promise<SemanticConfirm | null> {
   try {
+    // ΠΑΝ-111（NaN 卫兵族）：数值参数非有限 ⇒ 诚实缺席（return null）——
+    // 旧实现 NaN 一路流进 Math.max/min 产出 NaN 区域（NaN < 0.005 为 false
+    // 穿过宽度闸），污染服务端请求与 sharp 裁剪。降级律同本函数其余故障面。
+    const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+    if (!finite(cxPct) || !finite(cyPct) || !finite(radiusPct) || typeof expected !== 'string') {
+      return null;
+    }
     const left = Math.max(0, cxPct - radiusPct);
     const top = Math.max(0, cyPct - radiusPct);
     const width = Math.min(1 - left, radiusPct * 2);

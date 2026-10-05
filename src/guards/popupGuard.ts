@@ -116,6 +116,12 @@ export function resetPopupState(): void {
 // 战术暂停指令：单一事实源，popupGuard 与 dismiss_popup 工具共享 —— 保证统一话术
 // B-4：status 对齐锚点协议枚举（ACTION_REQUIRED = 需模型重新介入，非失败非成功，
 // 熔断/遥测不计入失败统计 —— 语义正确的拦截态）
+// R4-3（b3，证据：R1-8 a2/a4）：popup_evidence='none'（屏幕上无弹窗）时旧话术的
+// MANDATORY 把模型钉死在「必须点一个关闭键」这条不可能完成的指令上 —— 模型不
+// 质疑检测器而是幻觉出关闭键坐标连点（a2 (0.96,0.05)→(0.74,0.36)、a4 (0.67,0.21)
+// →(0.94,0.05)，confidence 0.4→0.8 无证据升）。追加逃逸条款（加法式）：截图
+// 证明无弹窗在场 ⇒ 明令禁止猜测关闭键位置，改走刷新截图/上报失配。既有测试
+// 钉的 MANDATORY / 'click_mouse' / 'X'|Close|Cancel 锚点全保留。
 export const TACTICAL_PAUSE = JSON.stringify({
   status: 'ACTION_REQUIRED',
   state_anchor: {
@@ -123,7 +129,11 @@ export const TACTICAL_PAUSE = JSON.stringify({
     required_action: 'Re-analyze the current screenshot.',
   },
   next_step: "MANDATORY: Look closely at the screenshot. Locate the popup's close button " +
-    "(e.g., 'X', 'Close', 'Cancel', or 'Accept') and call 'click_mouse' with its normalized coordinates.",
+    "(e.g., 'X', 'Close', 'Cancel', or 'Accept') and call 'click_mouse' with its normalized coordinates. " +
+    "ESCAPE CLAUSE: if your latest screenshot shows NO popup/modal on screen (take_screenshot receipts say " +
+    "popup_detected=false or popup_evidence='none'), the detector may be stale — do NOT guess a close button " +
+    "position and do NOT click blind. Call 'take_screenshot' to refresh the state; if the fresh screenshot still " +
+    "shows no popup yet actions remain blocked, report this mismatch to the user instead of clicking.",
 }, null, 2);
 
 export function registerPopupGuard(ctx: Context): void {

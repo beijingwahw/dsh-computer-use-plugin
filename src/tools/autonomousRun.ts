@@ -51,6 +51,18 @@ const CRITERIA_MAX_COUNT = 8;
 const evolution = new EvolutionEngine();
 
 /**
+ * ΤΕΛ-10（D-G31 三单例归零缝）：EXP4 进化单例的卸载归零面 —— 组合根
+ * UNLOAD_CHECKLIST 'autonomousRun.evolution.reset' 键的消费物料（T1-6 移交
+ * 方案 (b)：单例模块私有，唯一暴露面就是本函数）。EvolutionEngine.reset
+ * 即其类立法的「清账重置：history 归零、权重/教训/蒸馏回到出厂（单例跨场
+ * 复用时的换场闸）」—— 会话边界（热重载）执法：上一会话的运行史不跨会话
+ * 混账。纯内存清账零持久化面；绝不抛（reset 本体无抛路径）。
+ */
+export function resetAutonomousRunEvolution(): void {
+  evolution.reset();
+}
+
+/**
  * autonomous_run 可注入依赖（透传 RuntimeDeps —— 假截屏序列/假 OCR/假云脑/
  * 假时钟由此进，测试全离线；缺省走真实管线）
  *
@@ -364,6 +376,11 @@ export async function runPilotLoop(opts: PilotLoopOptions): Promise<string> {
    * error / regress）⇒ success:false；margin = 决策最佳得分。
    * 注：闭环契约只把 PolicyAction 递到 execute 面（decision.degraded 不随行），
    * 故「非 degraded」以可观察代理落地：matchScore 在场 + before 快照 degraded 为空。
+   * ΠΑΝ-52（去删失 · 双向证据）：本函数**不得**按当前阈值过滤样本 —— 未过
+   * 置信门但仍被执行的判据点击（云脑仲裁改选 / 无云脑确定性回退两径都落
+   * matchScore）是「降阈」决策的唯一实证来源，其 (margin=真实得分, success)
+   * 必须与过门样本同册入账（执法测试锁定：低于阈值的 margin 行在场）。阈学习
+   * 自此在当前值两侧都有数据 —— 单向棘轮（只升不降）的证据结构缺陷消除。
    */
   const recordFreeEvidence = (
     action: PolicyAction,
@@ -388,8 +405,14 @@ export async function runPilotLoop(opts: PilotLoopOptions): Promise<string> {
    * 慢真值对账（门控）：对 click/type 类动作，outcome 判定后旁路跑 settle 神谕
    * （缺省 waitForStableHash(150, settleMs×4) + reportEffect(before, stable, 阈)）
    * 得真值 detected；instant = outcome==='progress'；agree = instant === truth ⇒
-   * 记 world.hammingTolerance：success=agree、margin = dhash 距离 − 当前内核容差
-   * （有符号距离差 —— 与训练营同口径，负号即「容差过松」的方向编码）。
+   * 记 world.hammingTolerance：success=agree。
+   * ΠΑΝ-52（margin 去内生）：margin 改记**外部可观测的原始 dhash 距离**
+   * （truth.distance —— 参数扰动方向上的外部观测量：「新容差下仍判稳定的样本
+   * 裕量分布」即距离分布，候选容差 t 把 distance ≤ t 判稳定）。旧口径
+   * margin = distance − 当前内核容差 是对合映射 x → q − x：margin 分布随当前值
+   * x 平移、校准器学得的阈 t* ≈ q − x、落回新值 x' = t* ⇒ 迭代导数 −1，参数
+   * 代际振荡（C1-9 H4 —— Beta 后验压噪声振荡，压不住这种结构性翻转）。改记
+   * 原始距离后 margin 分布与 x 无关 ⇒ 学得阈直接是外部判别分位 q，单调收敛。
    * before 串复用 deps.lastSnapshotRef 既有机制（感知写 / 本包装器动作前读）。
    * 神谕返回 null（指纹退化）⇒ 诚实跳过（宁缺毋错）。
    */
@@ -408,9 +431,12 @@ export async function runPilotLoop(opts: PilotLoopOptions): Promise<string> {
     recordEvidence({
       key: 'world.hammingTolerance',
       success: instant === truth.detected,
-      margin: truth.distance - tolerance,
+      // ΠΑΝ-52：margin = 原始 dhash 距离（外部观测量 —— 见 reconcileSlowTruth
+      // 注释的对合振荡论证）。tolerance 变量仅作即时判决对照，不入 margin。
+      margin: truth.distance,
       ts: nowMs(),
     });
+    void tolerance; //（保留读点 —— 判决口径的取证面；margin 域已与其解耦）
   };
 
   /** 对账旁路总入口：同步段（免费证据）恒开；门控关 ⇒ 返回 null（调用方零 await） */

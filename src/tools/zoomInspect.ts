@@ -67,7 +67,10 @@ export function createZoomInspectTool(config: Config) {
     description:
       'Crops and upscales a region around a point, overlaying a fine grid for precise grounding. ' +
       'Use this when you are unsure about a target location from the full screenshot, ' +
-      'or after a click that produced no visible effect.',
+      'before clicking SMALL targets (menu bar entries, dropdown menu items, toolbar icons) ' +
+      // R2-4：小目标/菜单词形显式点名 —— 全屏估坐标误差与菜单行高同量级（实战
+      // R1-8 菜单项点击系统性偏移的根因），描述层把 zoom 前置为菜单操作缺省步。
+      'whose full-screen estimates are unreliable, or after a click that produced no visible effect.',
     parameters: {
       x: { type: 'number', required: true, description: 'Center X of the region (0.0-1.0).' },
       y: { type: 'number', required: true, description: 'Center Y of the region (0.0-1.0).' },

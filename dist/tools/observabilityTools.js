@@ -16,7 +16,7 @@ import { system } from '../system.js';
 import { dhash } from '../perceptualHash.js';
 import { diagnose, bayesianBelief, LOOP_ENTROPY_MIN_ACTIONS, LOOP_PHRASE_MIN_ACTIONS } from '../diagnosis.js';
 import { fitReactPhases } from '../phaseHmm.js';
-import { reactTraceProperties, mineTraceProperties } from '../ltlf.js';
+import { reactTraceProperties, mineTraceProperties, enforceMinedProperties } from '../ltlf.js';
 import { Telemetry } from '../telemetry.js';
 import { organCensus } from '../organCensus.js';
 // 纪元 Ι（自我模型）：经验胜任度后验单例 —— get_metrics 的自省面（路径显式指到
@@ -26,6 +26,68 @@ import { selfModel } from '../selfmodel/index.js';
 // —— noop 率 ≥40% 且 ≥5 次调用的工具进入会诊信号（CognitionSignals 文档同源）。
 const NOOP_INSIGHT_RATE_PCT = 40;
 const NOOP_INSIGHT_MIN_CALLS = 5;
+// ── ΤΕΛ-1（C2-9 主题1 A 级 · enforceMinedProperties 生产接线）：挖掘性质执法基线 ──
+//
+// 会话内单例（进程生命周期 —— 与 journal 同寿）：{props, traceLen}。首次
+// self_diagnose 立法（全迹挖掘）；此后每次诊断对 traceLen 之后的新段执法，
+// 然后重立法。journal 复位（unload 的 journal.reset / 测试隔离）⇒ 迹变短 ⇒
+// 基线失效重铸。纯内存、绝不外抛 —— 观察式旁路（self_diagnose 的设计原则）。
+let minedInvariantBaseline = null;
+/** ΤΕΛ-1：mine→enforce 闭环的会话内执法器（self_diagnose 内消费）。
+ *  返回 check 行或 null（无可报 —— 诚实缺席：无基线可立法/无新段可执法/
+ *  全程异常吞掉均不出行）。立法窗口按 MINE_MIN_SUPPORT 由挖掘器自判。 */
+function enforceMinedInvariants(entries) {
+    try {
+        // 基线失效防御：journal 复位后迹变短 ⇒ 旧法对新世界无管辖权，重开立法窗
+        if (minedInvariantBaseline !== null && entries.length < minedInvariantBaseline.traceLen) {
+            minedInvariantBaseline = null;
+        }
+        if (minedInvariantBaseline === null) {
+            const props = mineTraceProperties(entries);
+            if (props.length === 0)
+                return null; // 迹不足以立法（< 支持度门槛或无一铁律）—— 诚实缺席
+            minedInvariantBaseline = { props, traceLen: entries.length };
+            return {
+                subsystem: 'mined-invariant-enforcement',
+                status: 'GREEN',
+                detail: `${props.length} mined invariant(s) legislated on ${entries.length}-step history ` +
+                    `(e.g. ${props[0].formula}); future self_diagnose runs enforce them on new trace segments.`,
+            };
+        }
+        const seg = entries.slice(minedInvariantBaseline.traceLen);
+        if (seg.length === 0) {
+            return {
+                subsystem: 'mined-invariant-enforcement',
+                status: 'GREEN',
+                detail: `${minedInvariantBaseline.props.length} invariant(s) armed; no new trace since last diagnosis — nothing to enforce.`,
+            };
+        }
+        const verdicts = enforceMinedProperties(seg, minedInvariantBaseline.props);
+        const violated = verdicts.filter(v => v.violations.length > 0);
+        // 重立法（世界变了/没变都要以最新全迹为准 —— 零反例律自动淘汰被违反的旧法）
+        const reLegislated = mineTraceProperties(entries);
+        minedInvariantBaseline = reLegislated.length > 0
+            ? { props: reLegislated, traceLen: entries.length }
+            : null;
+        if (violated.length > 0) {
+            return {
+                subsystem: 'mined-invariant-enforcement',
+                status: 'AMBER',
+                detail: violated.slice(0, 3).map(v => `${v.id} violated at segment step(s) ${v.violations.slice(0, 3).join(',')}`).join('; ') +
+                    (violated.length > 3 ? ` +${violated.length - 3} more` : '') +
+                    ' — the world changed (or the law was overfitted); violated invariants are dropped from the re-legislated baseline.',
+            };
+        }
+        return {
+            subsystem: 'mined-invariant-enforcement',
+            status: 'GREEN',
+            detail: `${verdicts.length} invariant(s) hold on ${seg.length} new step(s) — baseline re-legislated.`,
+        };
+    }
+    catch {
+        return null; // 执法是旁路：任何故障零行零影响（self_diagnose 观察式铁律）
+    }
+}
 export function createGetMetricsTool() {
     return defineTool({
         name: 'get_metrics',
@@ -267,7 +329,10 @@ export function createSelfDiagnoseTool(config) {
             }
             // O 纪元（#23）：性质挖掘 —— 行动迹自动铸造的时序不变量（支持度成文；
             // 弱模式不立 —— 性质库是判据不是倾向表）
-            const mined = mineTraceProperties(journal.list(true).map(e => ({ tool: e.tool, observed: e.observe !== undefined, effect: e.effect_detected })));
+            const fullTrace = journal.list(true).map(e => ({
+                tool: e.tool, observed: e.observe !== undefined, effect: e.effect_detected,
+            }));
+            const mined = mineTraceProperties(fullTrace);
             if (mined.length > 0) {
                 checks.push({
                     subsystem: 'mined-temporal-invariants',
@@ -275,6 +340,18 @@ export function createSelfDiagnoseTool(config) {
                     detail: mined.slice(0, 4).map(m => `${m.formula} (${m.support}×)`).join('; ') +
                         (mined.length > 4 ? ` +${mined.length - 4} more` : ''),
                 });
+            }
+            // ΤΕΛ-1（C2-9 主题1 A 级 · enforceMinedProperties 生产接线）：挖掘性质的
+            // 在线执法 —— mine→enforce 闭环（S-5 立法注释：「性质库从描述统计升格为
+            // 在线规约」此前只有前半句通电）。会话内基线立法制：首次诊断把全迹挖掘
+            // 铸为性质基线；此后每次诊断对**上次诊断以来的新迹段**执法 —— 违例 =
+            // 世界变了或立法过拟合（两者都该被看见，AMBER 上报）；随后以全迹重立法
+            // （挖掘零反例律保证被违反的性质自然出局 —— 世界变了，旧法作废）。
+            // 基线随 journal 复位（迹变短）⇒ 视为新一轮立法窗口。观察式旁路铁律：
+            // 一切异常吞掉、零违例可报时不出行（诚实缺席，不凑行数）。
+            const enforcement = enforceMinedInvariants(fullTrace);
+            if (enforcement !== null) {
+                checks.push(enforcement);
             }
             // U 纪元（U-4 自省层）：器官册 census —— 33 件数学器官逐件点名
             const census = organCensus();
