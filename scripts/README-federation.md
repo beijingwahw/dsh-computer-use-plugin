@@ -29,11 +29,17 @@ node scripts/federation-server.mjs [--port N]
 设置 `DSH_FEDERATION_TOKEN` 后，`POST /aggregate`、`POST /barrier/{allocate,commit,status}`、
 `GET /barrier/status` 要求头：
 
-- `x-dsh-fed-timestamp`：epoch 毫秒（±5 分钟容差，防重放）
+- `x-dsh-fed-timestamp`：epoch 毫秒（±30s 容差 —— ΠΑΝ-88 起自 ±5 分钟收窄，v1/v2 同受此窗）
 - `x-dsh-fed-signature`：hex `HMAC-SHA256("<timestamp>.<body>", <token>)`
+- `x-dsh-fed-nonce`（**推荐，协议 v2**）：一次性随机串（8~128 字符）。在场 ⇒ 签名输入升格
+  `"<timestamp>.<nonce>.<body>"`，且服务端在时钟窗 + 滞留窗内按 **nonce 本身** 重放拒绝 ——
+  截获原样重放不再可行。缺席 = 兼容协议 v1（签名级去重，向后兼容——老客户端零变化可用）。
 
-GET 请求正文为空 ⇒ 签名输入是 `"<timestamp>."`。验签在 JSON 解析之前 —— 中间人换体即失配。
-TS 侧等价客户端：`src/federation/index.ts` 的 `federationAuthHeaders(body, token, Date.now())`。
+GET 请求正文为空 ⇒ 签名输入是 `"<timestamp>."`（v2：`"<timestamp>.<nonce>."`）。验签在
+JSON 解析之前 —— 中间人换体即失配。
+TS 侧等价客户端：`src/federation/index.ts` 的 `federationAuthHeaders(body, token, Date.now())`
+（v1）／ `federationAuthHeaders(body, token, Date.now(), nonce)`（v2）；联邦同步臂开 v2 只需
+`federationSync({ ..., authNonce: true })`（ΤΕΛ-6/D-G29 客户端半边）。
 
 ### curl 示例（barrier allocate）
 
@@ -42,21 +48,26 @@ export DSH_FEDERATION_TOKEN='deploy-secret'
 ENDPOINT='http://127.0.0.1:18433'
 body='{"name":"dial","peer":"A","n":2}'
 ts=$(date +%s%3N)   # epoch ms（BSD date：date +%s000）
-sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$DSH_FEDERATION_TOKEN" -hex | sed 's/^.* //')
+nonce=$(openssl rand -hex 16)   # 协议 v2 推荐：一次性 nonce（8~128 字符）
+sig=$(printf '%s.%s.%s' "$ts" "$nonce" "$body" | openssl dgst -sha256 -hmac "$DSH_FEDERATION_TOKEN" -hex | sed 's/^.* //')
 curl -sS -X POST "$ENDPOINT/barrier/allocate" \
   -H 'content-type: application/json' \
   -H "x-dsh-fed-timestamp: $ts" \
+  -H "x-dsh-fed-nonce: $nonce" \
   -H "x-dsh-fed-signature: $sig" \
   -d "$body"
 ```
 
-GET status（空正文签名）：
+（v1 兼容姿势：去掉 nonce 行，签名输入 `printf '%s.%s' "$ts" "$body"`，其余同。）
+
+GET status（空正文签名；v2 形态）：
 
 ```bash
 ts=$(date +%s%3N)
-sig=$(printf '%s.' "$ts" | openssl dgst -sha256 -hmac "$DSH_FEDERATION_TOKEN" -hex | sed 's/^.* //')
+nonce=$(openssl rand -hex 16)
+sig=$(printf '%s.%s.' "$ts" "$nonce" | openssl dgst -sha256 -hmac "$DSH_FEDERATION_TOKEN" -hex | sed 's/^.* //')
 curl -sS "$ENDPOINT/barrier/status?name=dial" \
-  -H "x-dsh-fed-timestamp: $ts" -H "x-dsh-fed-signature: $sig"
+  -H "x-dsh-fed-timestamp: $ts" -H "x-dsh-fed-nonce: $nonce" -H "x-dsh-fed-signature: $sig"
 ```
 
 ### crossMachine 客户端加签（无需改源码）
@@ -67,10 +78,12 @@ fetch —— 生产部署以加签 fetchImpl 包装即可（W9-2 落锤姿势）
 ```ts
 import { makeHttpBarrierTransport, type BarrierFetch } from './crossMachine.ts';
 import { federationAuthHeaders } from './federation/index.ts';
+import { randomUUID } from 'node:crypto';
 
 const secret = process.env.DSH_FEDERATION_TOKEN!;
+// v2 推荐协议：每次请求一次性 nonce（重放拒绝）；v1 = 去掉第三参即可
 const signedFetch: BarrierFetch = async (url, init) =>
-  fetch(url, { ...init, headers: { ...init.headers, ...federationAuthHeaders(init.body, secret, Date.now()) } });
+  fetch(url, { ...init, headers: { ...init.headers, ...federationAuthHeaders(init.body, secret, Date.now(), randomUUID()) } });
 const transport = makeHttpBarrierTransport({ endpoint: 'http://127.0.0.1:18433', fetchImpl: signedFetch });
 ```
 

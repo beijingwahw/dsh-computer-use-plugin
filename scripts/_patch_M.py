@@ -1,16 +1,40 @@
 # M 纪元 patcher：set_contrast / homoglyph 扩表 / CPT 标定 / SO_PEERCRED 接线
-import io
+#
+# ΠΑΝ-89（C2-6/M-5）一次性纪元施工文物的守卫化（同 _patch_L.py）：
+#   · `if __name__ == '__main__'` 守卫（import 零副作用——__pycache__ 实证本件曾被
+#     误当模块导入）；· dry-run 缺省（无 --write 只验证锚点 + 打印计划，不落盘）；
+#   · __file__ 定根（env DSH_PATCH_ROOT 可覆写）。
+# patch 对内容为 M 纪元施工的历史原始记录（逐字保留——改写文物即篡改账目）。
+import io, os, re, sys
+from pathlib import Path
+
+ROOT = Path(os.environ.get('DSH_PATCH_ROOT') or Path(__file__).resolve().parent.parent).resolve()
+DRY = True  # 缺省 dry-run：只打印计划；--write 才落盘
+
+
+def read_file(rel: str) -> str:
+    return io.open(ROOT / rel, encoding='utf-8').read()
+
+
+def write_file(rel: str, content: str) -> None:
+    if DRY:
+        print(f'[dry-run] 将写入 {rel}（{len(content)} 字符）—— 加 --write 落盘')
+        return
+    io.open(ROOT / rel, 'w', encoding='utf-8', newline='\n').write(content)
+    print('patched', rel)
+
 
 def patch(path, pairs):
-    s = io.open(path, encoding='utf-8').read()
+    s = read_file(path)
     for old, new in pairs:
         assert old in s, (path, old[:70])
         s = s.replace(old, new, 1)
-    io.open(path, 'w', encoding='utf-8', newline='\n').write(s)
-    print('patched', path)
+    write_file(path, s)
 
-# ══ ① Windows set_contrast：SystemParametersInfo P/Invoke（SPI_GETHIGHCONTRAST/SETHIGHCONTRAST）══
-patch('src/environmentShaper.ts', [(
+
+def run() -> None:
+    # ══ ① Windows set_contrast：SystemParametersInfo P/Invoke（SPI_GETHIGHCONTRAST/SETHIGHCONTRAST）══
+    patch('src/environmentShaper.ts', [(
 """      case 'set_contrast': {
         // 不可达（capabilities 诚实不含此项）；分支完备性保留
         throw new Error('set_contrast on Windows is an honestly-declared void (registry+SPI roundtrip unreliable)');
@@ -29,9 +53,9 @@ patch('src/environmentShaper.ts', [(
       }"""
 )])
 
-# 辅助：真实 PS 脚本（避免模板嵌套地狱 —— 拼装在常量）
-s = io.open('src/environmentShaper.ts', encoding='utf-8').read()
-HELPER = '''
+    # 辅助：真实 PS 脚本（避免模板嵌套地狱 —— 拼装在常量）
+    s = read_file('src/environmentShaper.ts')
+    HELPER = '''
 /** 高对比度 P/Invoke 声明（GET=0x42 / SET=0x43；HCF_HIGHCONTRASTON=0x1） */
 const HC_DECL =
   "Add-Type -Name U32HC -Namespace Win -MemberDefinition \\"" +
@@ -43,20 +67,20 @@ function setHighContrastPs(flagExpr: string): string {
   return `${HC_DECL}; [Win.U32HC]::SetHC(${flagExpr}) | Out-Null`;
 }
 '''
-anchor = "export class WindowsAdapter implements SystemAdapter {"
-assert anchor in s
-s = s.replace(anchor, HELPER + "\n" + anchor, 1)
-io.open('src/environmentShaper.ts', 'w', encoding='utf-8', newline='\n').write(s)
-print('HC helpers added')
+    anchor = "export class WindowsAdapter implements SystemAdapter {"
+    assert anchor in s
+    s = s.replace(anchor, HELPER + "\n" + anchor, 1)
+    write_file('src/environmentShaper.ts', s)
+    print('HC helpers added')
 
-# ══ ② homoglyph 扩表：数学字母/带圈/括号化 —— 码点算术批量生成 ══
-patch('src/riskGate.ts', [(
+    # ══ ② homoglyph 扩表：数学字母/带圈/括号化 —— 码点算术批量生成 ══
+    patch('src/riskGate.ts', [(
 "function normalizeForRisk(s: string): string {\n  let out = '';\n  let lc = s.toLowerCase();",
 "function normalizeForRisk(s: string): string {\n  let out = '';\n  let lc = s.toLowerCase();"
 )])
 
-r = io.open('src/riskGate.ts', encoding='utf-8').read()
-GEN = '''
+    r = read_file('src/riskGate.ts')
+    GEN = '''
 /**
  * L 纪元扩表（值即边界 → 算术全表）：数学字母（U+1D400 系五套：粗/斜/粗斜/
  * 粗花/花）、带圈 A-Z/ⓐ-ⓩ、括号化字母、上标/下标字母 —— 码点偏移算术批量
@@ -66,7 +90,7 @@ GEN = '''
 function buildHomoglyphMap(): Record<string, string> {
   const m: Record<string, string> = {
     // ── 策展跨脚本核心（原 K 纪元表，保留）──
-    '\\u0430': 'a', '\\u0435': 'e', '\\u043e': 'o', '\\u0441': 'c', '\\u0440': 'p',
+    '\\u0430': 'a', '\\u0435': 'e', '\\u03bf': 'o', '\\u0441': 'c', '\\u0440': 'p',
     '\\u0445': 'x', '\\u0443': 'y', '\\u0456': 'i', '\\u0455': 's', '\\u04bb': 'h',
     '\\u0501': 'd', '\\u0497': 'g', '\\u04cf': 'l', '\\u04e3': 'm', '\\u0439': 'u',
     '\\u0458': 'j', '\\u0463': 'y', '\\u051b': 'q',
@@ -104,20 +128,19 @@ function buildHomoglyphMap(): Record<string, string> {
 }
 const HOMOGLYPH_MAP2 = buildHomoglyphMap();
 '''
-# 找到 K 纪元 HOMOGLYPH_MAP 定义处，在其前插入生成器并让原 map 并入
-old_decl = "// K 纪元（留白兑现之六）：同形字（homoglyph）归一 —— E-6 留白的兑现。"
-assert old_decl in r
-r = r.replace(old_decl, GEN + "\n" + old_decl, 1)
-# 原 const HOMOGLYPH_MAP 改为并入生成表
-import re
-m2 = re.search(r"const HOMOGLYPH_MAP: Record<string, string> = \{[\s\S]*?\};", r)
-assert m2
-r = r.replace(m2.group(0), "const HOMOGLYPH_MAP: Record<string, string> = { ...buildHomoglyphMap() };", 1)
-io.open('src/riskGate.ts', 'w', encoding='utf-8', newline='\n').write(r)
-print('homoglyph expanded')
+    # 找到 K 纪元 HOMOGLYPH_MAP 定义处，在其前插入生成器并让原 map 并入
+    old_decl = "// K 纪元（留白兑现之六）：同形字（homoglyph）归一 —— E-6 留白的兑现。"
+    assert old_decl in r
+    r = r.replace(old_decl, GEN + "\n" + old_decl, 1)
+    # 原 const HOMOGLYPH_MAP 改为并入生成表
+    m2 = re.search(r"const HOMOGLYPH_MAP: Record<string, string> = \{[\s\S]*?\};", r)
+    assert m2
+    r = r.replace(m2.group(0), "const HOMOGLYPH_MAP: Record<string, string> = { ...buildHomoglyphMap() };", 1)
+    write_file('src/riskGate.ts', r)
+    print('homoglyph expanded')
 
-# ══ ③ CPT 标定数据：枚举蒸馏（规则表为 oracle 的最大共识拟合）══
-patch('src/diagnosis.ts', [(
+    # ══ ③ CPT 标定数据：枚举蒸馏（规则表为 oracle 的最大共识拟合）══
+    patch('src/diagnosis.ts', [(
 "export function bayesianBelief(signals: BinarySignals): BayesianBelief[] | null {",
 """/**
  * L 纪元（留白兑现）：CPT 标定 —— 数据从哪来？**从审计过的确定性规则表蒸馏**。
@@ -179,8 +202,8 @@ export function calibrateCptFromRules(): {
 export function bayesianBelief(signals: BinarySignals): BayesianBelief[] | null {"""
 )])
 
-# ══ ④ SO_PEERCRED 接线：server.run UDS 分支 + auth 中间件 pid 刻度 ══
-patch('python_service/dsh_physical/server.py', [(
+    # ══ ④ SO_PEERCRED 接线：server.run UDS 分支 + auth 中间件 pid 刻度 ══
+    patch('python_service/dsh_physical/server.py', [(
 "    import uvicorn\n\n    if config.server.transport == 'uds':",
 """    import uvicorn
 
@@ -196,7 +219,7 @@ patch('python_service/dsh_physical/server.py', [(
 "        uvicorn.run(\n            app,\n            http=_peercred_http,  # type: ignore[arg-type]\n            uds=config.server.uds_path,"
 )])
 
-patch('python_service/dsh_physical/server.py', [(
+    patch('python_service/dsh_physical/server.py', [(
 "        # Layer 2: PID Attestation —— 传输层 SO_PEERCRED 未实现（见 auth.py 头注），\n        #           仅在 Layer 3 验签后对 payload.pid 做 /proc 存在性/白名单校验。",
 """        # Layer 2: PID Attestation —— L 纪元兑现：UDS+Linux 下 peercred 协议
         # 把对端 PID 注入 scope；在场 ⇒ token.pid 必须逐位相等（auth.py 头注
@@ -212,4 +235,22 @@ patch('python_service/dsh_physical/server.py', [(
                 ),
             )"""
 )])
-print('M PATCHES DONE')
+    print('M PATCHES DONE')
+
+
+def main(argv) -> int:
+    global DRY
+    if '-h' in argv or '--help' in argv:
+        print('用法：python scripts/_patch_M.py [--write]\n'
+              '  缺省 dry-run：验证锚点 + 打印写入计划，不落盘；--write 才执行改写。\n'
+              '  env DSH_PATCH_ROOT 可覆写根目录（沙箱测试用；缺省 = 仓库根）。')
+        return 0
+    DRY = '--write' not in argv
+    if DRY:
+        print('〔dry-run 计划模式（ΠΑΝ-89）：锚点验证 + 计划打印，不落盘；加 --write 执行〕')
+    run()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

@@ -29,7 +29,8 @@
 //   · 仅绑定 127.0.0.1（环回）；无限速、无 TLS —— **参考实现**；
 //   · W6R-A5（共享密钥认证）：环境变量 DSH_FEDERATION_TOKEN 设置 ⇒ /aggregate
 //     强制 HMAC-SHA256 请求签名（头 x-dsh-fed-timestamp + x-dsh-fed-signature；
-//     签名输入 = `${timestamp}.${body}`，时间戳容差 ±5 分钟防重放 —— 与
+//     签名输入 = `${timestamp}.${body}`，时间戳容差 ±30s（ΠΑΝ-88 收窄，原 ±5 分钟）
+//     —— 与
 //     dsh_physical 的 Cap Token 同风格、与 src/federation/index.ts 的
 //     federationAuthHeaders 同协议，双端口径由 test/epochMu2 等价断言把守）；
 //     未设置 ⇒ open 模式零配置环回可用（/health 的 authMode 与启动日志明示
@@ -81,8 +82,9 @@
 // 部署指南：scripts/README-federation.md（env 清单 / 签名客户端示例 / 关停语义）。
 
 import http from 'node:http';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
+import { open as openAsync, rename as renameAsync, mkdir as mkdirAsync, unlink as unlinkAsync } from 'node:fs/promises';
 import path from 'node:path';
 // W8-A7（D-F3 闭：barrier 面单源化）：barrier 状态机彻底退役 JS 手工移植，
 // 直连 dist 构建产物里的 TS 权威源（package.json "type":"module" ⇒ dist 是
@@ -138,11 +140,25 @@ const ALLOW_OPEN_BARRIER = process.env[OPEN_BARRIER_ENV] === '1';
 // ─── W6R-A5：共享密钥认证（HMAC-SHA256 + 时间戳防重放 —— Cap Token 同风格） ───
 // 协议契约与 src/federation/index.ts 的 federationAuthHeaders 同律（双实现口径：
 // 等价性由 test/epochMu2 的带签往返把守）。env 缺席 ⇒ open 模式零配置（诚实声明）。
+//
+// ΠΑΝ-88（C2-6/M-4）：nonce + 时间戳 ±30s 窗 + 重放拒绝 ——
+//   · 推荐协议 v2：三头 x-dsh-fed-timestamp + x-dsh-fed-nonce + x-dsh-fed-signature，
+//     签名输入 `${ts}.${nonce}.${body}`；nonce 由客户端一次性铸造（随机/计数器），
+//     服务端 nonce 缓存窗内重复 ⇒ 401 replayed-request（截获原样重放不再可行）；
+//   · 兼容协议 v1（无 nonce）：签名输入 `${ts}.${body}`（federationAuthHeaders 既有
+//     面）——同样受 ±30s 窗与**签名级重放缓存**约束（同一签名材料窗内只被接受一次）；
+//   · 窗口从 ±5 分钟收窄到 ±30 秒（重放面就位后宽窗只剩误放行风险）。
 
 const AUTH_ENV = 'DSH_FEDERATION_TOKEN';
 const AUTH_TIMESTAMP_HEADER = 'x-dsh-fed-timestamp';
 const AUTH_SIGNATURE_HEADER = 'x-dsh-fed-signature';
-const AUTH_SKEW_MS = 5 * 60_000; // 与 TS FEDERATION_AUTH_SKEW_MS 同值（±5 分钟）
+const AUTH_NONCE_HEADER = 'x-dsh-fed-nonce';
+// ΠΑΝ-88：±30s 窗（原 ±5 分钟——nonce 重放拒绝就位后收窄；legacy v1 同受此窗）
+const AUTH_SKEW_MS = 30_000;
+// 重放缓存滞留 > 窗口（过期条目本身已进 stale 拒绝域，双保险）
+const REPLAY_TTL_MS = AUTH_SKEW_MS + 60_000;
+const REPLAY_CAP = 8192; // 上界（合法洪峰 = 合法请求率；超界淘汰最旧）
+const seenSignatures = new Map(); // `${version}:${nonce|ts}:${sig}` → expiresAt
 
 /** 共享密钥（env 设置 ⇒ token 模式；未设置/非字符串 ⇒ open 模式） */
 const fedTokenRaw = process.env[AUTH_ENV];
@@ -164,17 +180,35 @@ function constantTimeHexEqual(actual, expected) {
   }
 }
 
+/** 重放缓存修剪：过期条目惰性清；超界强制淘汰最旧（Map 保插入序） */
+function pruneReplayCache(force) {
+  const now = Date.now();
+  for (const [k, exp] of seenSignatures) {
+    if (exp <= now) seenSignatures.delete(k);
+  }
+  if (force) {
+    while (seenSignatures.size > Math.floor(REPLAY_CAP / 2)) {
+      const oldest = seenSignatures.keys().next();
+      if (oldest.done) break;
+      seenSignatures.delete(oldest.value);
+    }
+  }
+}
+
 /**
  * 请求验签（token 模式）：头 x-dsh-fed-timestamp（epoch ms）+
- * x-dsh-fed-signature（hex HMAC-SHA256(`${ts}.${body}`, token)）。
- * 时间戳偏移超 ±5 分钟 ⇒ stale（防重放窗口）；签名覆盖正文 ⇒ 中间人换体即失配。
- * open 模式恒 { ok:true }（零配置环回语义不变）。绝不抛（坏头按拒绝处理）。
+ * x-dsh-fed-signature（hex HMAC-SHA256）+ 可选 x-dsh-fed-nonce（ΠΑΝ-88 推荐）。
+ * v2（nonce 在场）：签名输入 `${ts}.${nonce}.${body}`，nonce 窗内重复 ⇒ 重放拒绝；
+ * v1（legacy 无 nonce）：签名输入 `${ts}.${body}`，签名级缓存窗内去重。
+ * 时间戳偏移超 ±30s ⇒ stale；签名覆盖正文 ⇒ 中间人换体即失配。open 模式恒
+ * { ok:true }（零配置环回语义不变）。绝不抛（坏头按拒绝处理）。
  */
 function verifyAuth(req, bodyText) {
   if (!AUTH_REQUIRED) return { ok: true, mode: 'open' };
   try {
     const tsRaw = req.headers[AUTH_TIMESTAMP_HEADER];
     const sigRaw = req.headers[AUTH_SIGNATURE_HEADER];
+    const nonceRaw = req.headers[AUTH_NONCE_HEADER];
     if (tsRaw === undefined || sigRaw === undefined) {
       return { ok: false, mode: 'token', reason: 'missing-signature-headers' };
     }
@@ -184,11 +218,27 @@ function verifyAuth(req, bodyText) {
       return { ok: false, mode: 'token', reason: 'stale-timestamp' };
     }
     const sig = String(Array.isArray(sigRaw) ? sigRaw[0] : sigRaw);
-    const expected = createHmac('sha256', FED_TOKEN).update(`${ts}.${bodyText}`).digest('hex');
+    const nonce = nonceRaw === undefined
+      ? null
+      : String(Array.isArray(nonceRaw) ? nonceRaw[0] : nonceRaw);
+    if (nonce !== null && (nonce.length < 8 || nonce.length > 128)) {
+      return { ok: false, mode: 'token', reason: 'malformed-nonce' };
+    }
+    // ΠΑΝ-88：v2 `${ts}.${nonce}.${body}`（推荐）/ v1 `${ts}.${body}`（兼容）
+    const input = nonce === null ? `${ts}.${bodyText}` : `${ts}.${nonce}.${bodyText}`;
+    const expected = createHmac('sha256', FED_TOKEN).update(input).digest('hex');
     if (!constantTimeHexEqual(sig, expected)) {
       return { ok: false, mode: 'token', reason: 'signature-mismatch' };
     }
-    return { ok: true, mode: 'token' };
+    // ΠΑΝ-88：重放拒绝——v2 按 **nonce 本身**去重（同 nonce 再签名也算重放）；
+    // v1（无 nonce）按签名材料去重（同一签名 = 同一次签名操作的原样重放）
+    const replayKey = nonce === null ? `v1:${ts}:${sig}` : `v2:${nonce}`;
+    if (seenSignatures.has(replayKey)) {
+      return { ok: false, mode: 'token', reason: 'replayed-request' };
+    }
+    seenSignatures.set(replayKey, Date.now() + REPLAY_TTL_MS);
+    if (seenSignatures.size > REPLAY_CAP) pruneReplayCache(true);
+    return { ok: true, mode: nonce === null ? 'token' : 'token+nonce' };
   } catch {
     return { ok: false, mode: 'token', reason: 'auth-internal-error' };
   }
@@ -412,9 +462,122 @@ const startedAt = Date.now();
 // 缺席 ⇒ 内存单实例语义与落锤前逐字节一致；设置 ⇒ 以「摘要落盘」换重启环
 // 连续性 —— 权衡由部署方拍板，本件只提供能力与诚实的文档（README）。
 // 写纪律：tmp + fsync + rename 原子写（checkpoint/escrow WAL 同律 —— 绝无半档）；
-// 读纪律：起动防御回读（形状过滤 + 截到 BUFFER_CAP —— 坏档 ⇒ 空环起步，绝不炸）；
+// 读纪律：起动防御回读（ΠΑΝ-88 内容签名验证 + 截到 BUFFER_CAP —— 坏档/被篡改
+//         档 ⇒ 空环起步，绝不炸）；
 // 故障纪律：落盘失败记 warning 事件继续服务（持久化是旁路能力，不是主路径）。
+//
+// ΠΑΝ-88（C2-6/M-4）两处强化：
+//   · 组提交：运行期不再每次 POST 同步 fsync（曾每次 /aggregate 阻塞事件循环
+//     一个 fsync 周期）——入环只**标记脏**，150ms 去抖后异步批写（突发入环合并
+//     为一次落盘；事件循环零阻塞）；关停路径仍同步落盘（阻塞可接受）。
+//   · 内容签名：落盘载荷带 contentSig = HMAC-SHA256(digests 序列化, 持久化密钥)；
+//     密钥 = PERSIST_DIR 下 sidecar 文件（首启随机铸造 32B，重启复用）。回读重算
+//     比对——形状合法但内容被替换/篡改的档 ⇒ 拒之门外（空环起步 + persist-tamper
+//     事件）。诚实边界：能读盘的攻击者也能读 sidecar 密钥——本签名防的是意外
+//     损坏与随手篡改，不是全权磁盘攻击者。
 
+const PERSIST_GROUP_DELAY_MS = 150; // 组提交去抖窗（突发合并；旧值 = 每次 POST 即写）
+const PERSIST_KEY_NAME = '.federation-persist-key';
+
+let PERSIST_KEY = null; // Buffer(32) | null（loadOrCreatePersistKey 装载）
+let persistPendingCause = null;
+let persistTimer = null;
+let persistFlushRunning = false;
+let persistFlushAgain = false;
+
+/** ΠΑΝ-88：摘要环内容签名（对 digests 的规范序列化做 HMAC——回读同式重算比对） */
+function ringContentSignature(digests) {
+  if (PERSIST_KEY === null) return null;
+  return createHmac('sha256', PERSIST_KEY).update(JSON.stringify(digests)).digest('hex');
+}
+
+function ringPayload(cause) {
+  return {
+    version: 2,
+    savedAt: Date.now(),
+    cause,
+    contentSig: ringContentSignature(buffer),
+    digests: buffer,
+  };
+}
+
+/** ΠΑΝ-88：sidecar 持久化密钥——首启随机铸造（wx 独占创建防竞态双写），之后复用 */
+function loadOrCreatePersistKey() {
+  if (PERSIST_DIR === null) return;
+  const keyFile = path.join(PERSIST_DIR, PERSIST_KEY_NAME);
+  try {
+    if (existsSync(keyFile)) {
+      const k = readFileSync(keyFile, 'utf8').trim();
+      if (/^[0-9a-f]{64}$/.test(k)) { PERSIST_KEY = Buffer.from(k, 'hex'); return; }
+      console.error(JSON.stringify({ event: 'persist-key-invalid', file: keyFile }));
+      return;
+    }
+    mkdirSync(PERSIST_DIR, { recursive: true });
+    const k = randomBytes(32);
+    try {
+      writeKeyExclusive(keyFile, k);
+    } catch {
+      // 竞态：他进程已铸造 ⇒ 复读之（多进程共享同 key 是正确收敛）
+      const existing = readFileSync(keyFile, 'utf8').trim();
+      if (/^[0-9a-f]{64}$/.test(existing)) { PERSIST_KEY = Buffer.from(existing, 'hex'); return; }
+      throw new Error('persist key race unresolved');
+    }
+    PERSIST_KEY = k;
+  } catch (e) {
+    PERSIST_KEY = null; // 无密钥 ⇒ 写出的档无签名 ⇒ 下次回读必拒（fail-closed，事件可见）
+    console.error(JSON.stringify({ event: 'persist-key-failed', error: e instanceof Error ? e.message : String(e) }));
+  }
+}
+
+function writeKeyExclusive(keyFile, k) {
+  const fd = openSync(keyFile + '.tmp', 'wx'); // 独占创建（竞态诚实失败，调用方收敛）
+  try {
+    writeSync(fd, k.toString('hex'), 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(keyFile + '.tmp', keyFile);
+}
+
+/** ΠΑΝ-88 组提交：入环只标脏 + 去抖调度；真正的写盘在异步批处理里（不阻塞事件循环） */
+function schedulePersist(cause) {
+  if (PERSIST_FILE === null) return;
+  persistPendingCause = cause;
+  if (persistTimer !== null || persistFlushRunning) return;
+  persistTimer = setTimeout(() => { persistTimer = null; void persistFlushGroup(); }, PERSIST_GROUP_DELAY_MS);
+  if (typeof persistTimer.unref === 'function') persistTimer.unref();
+}
+
+async function persistFlushGroup() {
+  if (persistFlushRunning) { persistFlushAgain = true; return; }
+  persistFlushRunning = true;
+  try {
+    do {
+      persistFlushAgain = false;
+      const cause = persistPendingCause ?? 'group-flush';
+      persistPendingCause = null;
+      const tmp = PERSIST_FILE + '.tmp';
+      try {
+        await mkdirAsync(path.dirname(PERSIST_FILE), { recursive: true });
+        const fh = await openAsync(tmp, 'w');
+        try {
+          await fh.writeFile(Buffer.from(JSON.stringify(ringPayload(cause)), 'utf8'));
+          await fh.sync(); // fsync（异步等待——事件循环不阻塞）
+        } finally {
+          await fh.close();
+        }
+        await renameAsync(tmp, PERSIST_FILE);
+      } catch (e) {
+        try { await unlinkAsync(tmp); } catch { /* tmp 可能未创建 */ }
+        console.error(JSON.stringify({ event: 'persist-failed', cause, error: e instanceof Error ? e.message : String(e) }));
+      }
+    } while (persistFlushAgain || persistPendingCause !== null);
+  } finally {
+    persistFlushRunning = false;
+  }
+}
+
+/** 关停路径的最终同步落盘（阻塞可接受；w9deploy 立法在源断言本名在场） */
 function persistRing(cause) {
   if (PERSIST_FILE === null) return;
   const tmp = PERSIST_FILE + '.tmp';
@@ -422,7 +585,7 @@ function persistRing(cause) {
     mkdirSync(path.dirname(PERSIST_FILE), { recursive: true });
     const fd = openSync(tmp, 'w');
     try {
-      writeSync(fd, Buffer.from(JSON.stringify({ version: 1, savedAt: Date.now(), cause, digests: buffer }, 'utf8')));
+      writeSync(fd, Buffer.from(JSON.stringify(ringPayload(cause)), 'utf8'));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -437,9 +600,19 @@ function persistRing(cause) {
 function loadRingAtBoot() {
   if (PERSIST_FILE === null) return;
   try {
+    loadOrCreatePersistKey(); // ΠΑΝ-88：内容签名密钥先就位（fail-closed：无钥不回读）
     if (!existsSync(PERSIST_FILE)) return;
     const parsed = JSON.parse(readFileSync(PERSIST_FILE, 'utf8'));
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.digests)) return; // 坏档 ⇒ 空环起步
+    // ΠΑΝ-88：内容签名验证——形状合法但内容被替换/伪造（或 v1 无签档）⇒ 拒绝
+    const expected = typeof parsed.contentSig === 'string' ? parsed.contentSig : null;
+    const actual = expected !== null && PERSIST_KEY !== null
+      ? createHmac('sha256', PERSIST_KEY).update(JSON.stringify(parsed.digests)).digest('hex')
+      : null;
+    if (expected === null || actual === null || expected !== actual) {
+      console.error(JSON.stringify({ event: 'persist-tamper', detail: 'content signature missing/mismatch — discarding persisted ring, empty start' }));
+      return;
+    }
     for (const d of parsed.digests.slice(-BUFFER_CAP)) {
       if (looksLikeDigest(d)) buffer.push(d); // 形状过滤 —— 坏件按缺席（与入环资格同律）
     }
@@ -514,7 +687,7 @@ const server = http.createServer((req, res) => {
         barrierAuthMode: BARRIER_AUTH_REQUIRED ? 'token' : 'open',
         authNotice: AUTH_REQUIRED
           ? (BARRIER_AUTH_REQUIRED
-            ? `HMAC signature enforced on POST /aggregate AND /barrier/{allocate,commit,status} (${AUTH_TIMESTAMP_HEADER} + ${AUTH_SIGNATURE_HEADER}; ±${Math.round(AUTH_SKEW_MS / 1000)}s clock skew)`
+            ? `HMAC signature enforced on POST /aggregate AND /barrier/{allocate,commit,status} (${AUTH_TIMESTAMP_HEADER} + ${AUTH_SIGNATURE_HEADER}; nonce header ${AUTH_NONCE_HEADER} recommended — replays rejected, ±${Math.round(AUTH_SKEW_MS / 1000)}s clock skew)`
             : `HMAC signature enforced on POST /aggregate (${AUTH_TIMESTAMP_HEADER} + ${AUTH_SIGNATURE_HEADER}); barrier endpoints remain OPEN (${OPEN_BARRIER_ENV}=1 compatibility mode)`)
           : `UNAUTHENTICATED mode: set ${AUTH_ENV} to require HMAC signatures on POST /aggregate`,
         buffered: buffer.length,
@@ -522,6 +695,7 @@ const server = http.createServer((req, res) => {
         maxBodyBytes: MAX_BODY_BYTES,
         // W9-2（D-C2 生产化透明面 —— 增量字段，旧 peer 不读不受影响）
         persistence: PERSIST_FILE !== null,          // 摘要环落盘开关（缺席 = 内存单实例语义）
+        persistPending: persistPendingCause !== null, // ΠΑΝ-88：组提交待写标记（透明面）
         barrierTtlOverrideMs: BARRIER_TTL_OVERRIDE_MS, // null = TS 立法缺省（120s —— 单源纪律不在本件复制缺省值）
         drainMs: DRAIN_MS,                             // 优雅关停排空上限
         uptimeMs: Date.now() - startedAt,
@@ -646,7 +820,9 @@ const server = http.createServer((req, res) => {
             else rejected += 1; // 坏件不入环（缺席处理 —— 与鲁棒律同源）
           }
           while (buffer.length > BUFFER_CAP) buffer.shift();
-          persistRing('aggregate'); // W9-2（D-C2）：持久化开启 ⇒ 环变更随行落盘（缺席 = no-op）
+          // ΠΑΝ-88：组提交——入环只标脏，去抖后异步批写（不再每次 POST 同步 fsync
+          // 阻塞事件循环；关停路径仍同步落盘）
+          schedulePersist('aggregate');
           const rr = robustMergeJS(buffer);
           sendJson(res, 200, {
             ok: true,
@@ -724,6 +900,11 @@ function shutdown(signal) {
   try {
     console.log(JSON.stringify({ event: 'shutdown', signal, drainMs: DRAIN_MS, buffered: buffer.length }));
   } catch { /* 日志面故障不挡关停 */ }
+  // ΠΑΝ-88：取消组提交去抖定时器——关停路径由下方同步 persistRing 兜底终态
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
   try {
     if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
   } catch { /* 无空闲连接面（老运行时）—— server.close 仍等待在途 */ }

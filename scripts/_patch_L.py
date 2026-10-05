@@ -1,16 +1,43 @@
 # L 纪元 patcher：服务归属决策 + 契约占位激活 + TODO 兑现
-import io, re
+#
+# ΠΑΝ-89（C2-6/M-5）一次性纪元施工文物的守卫化：
+#   · `if __name__ == '__main__'` 守卫——被 import 不再执行全量改写（__pycache__ 实证
+#     本类脚本曾被误当模块导入；模块级副作用彻底消除）；
+#   · dry-run 缺省——无 `--write` 确认参数时只验证锚点 + 打印写入计划，绝不落盘
+#     （一次性 patcher 对当前仓库已属历史文物，锚点漂移在 dry-run 即响亮失败）；
+#   · 路径一律 __file__ 定根（env DSH_PATCH_ROOT 可覆写——沙箱测试用），
+#     不再依赖 CWD=仓库根（与其余 scripts/ 脚本纪律对齐）。
+# patch 对内容为 L 纪元施工的历史原始记录（逐字保留——改写文物即篡改账目）。
+import io, os, re, sys
+from pathlib import Path
+
+ROOT = Path(os.environ.get('DSH_PATCH_ROOT') or Path(__file__).resolve().parent.parent).resolve()
+DRY = True  # 缺省 dry-run：只打印计划；--write 才落盘
+
+
+def read_file(rel: str) -> str:
+    return io.open(ROOT / rel, encoding='utf-8').read()
+
+
+def write_file(rel: str, content: str) -> None:
+    if DRY:
+        print(f'[dry-run] 将写入 {rel}（{len(content)} 字符）—— 加 --write 落盘')
+        return
+    io.open(ROOT / rel, 'w', encoding='utf-8', newline='\n').write(content)
+    print('patched', rel)
+
 
 def patch(path, pairs):
-    s = io.open(path, encoding='utf-8').read()
+    s = read_file(path)
     for old, new in pairs:
         assert old in s, (path, old[:70])
         s = s.replace(old, new, 1)
-    io.open(path, 'w', encoding='utf-8', newline='\n').write(s)
-    print('patched', path)
+    write_file(path, s)
 
-# ── ① stubs：Context 增补可选服务注册面（宿主裁决；缺席 ⇒ 消费方降级不变）──
-patch('types/dsh-stubs.d.ts', [(
+
+def run() -> None:
+    # ── ① stubs：Context 增补可选服务注册面（宿主裁决；缺席 ⇒ 消费方降级不变）──
+    patch('types/dsh-stubs.d.ts', [(
 """    /** 按名查询服务；可选服务不存在时返回 undefined */
     get<T = any>(name: string): T | undefined;""",
 """    /** 按名查询服务；可选服务不存在时返回 undefined */
@@ -24,8 +51,8 @@ patch('types/dsh-stubs.d.ts', [(
     set?<T>(name: string, instance: T): void;"""
 )])
 
-# ── ① D-5 sandbox 插件：注册 dsh.sandbox（引擎的最小对外视图）──
-patch('src/sandbox/index.ts', [(
+    # ── ① D-5 sandbox 插件：注册 dsh.sandbox（引擎的最小对外视图）──
+    patch('src/sandbox/index.ts', [(
 "  engine.configure(config);",
 """  engine.configure(config);
 
@@ -42,8 +69,8 @@ patch('src/sandbox/index.ts', [(
   } catch { /* 注册失败 = 旁路义务：消费方降级路径不变 */ }"""
 )])
 
-# ── ① D-7 knowledge 插件：注册 dsh.knowledge-pipeline ──
-patch('src/knowledge/index.ts', [(
+    # ── ① D-7 knowledge 插件：注册 dsh.knowledge-pipeline ──
+    patch('src/knowledge/index.ts', [(
 "  const verdictBridge = new DoctorVerdictBridge();",
 """  // L 纪元（服务归属决策）：D-7 自荐注册 —— 消费方（D-1 delegate_to_pipeline
   // 的 primary_consumer 指引）从此有可探测的注册方；宿主无 set ⇒ 降级不变。
@@ -55,35 +82,35 @@ patch('src/knowledge/index.ts', [(
   const verdictBridge = new DoctorVerdictBridge();"""
 )])
 
-# ── ② hasVerificationLayer 激活：verify_sandbox_log 工具报告各层在场性 ──
-s = io.open('src/sandbox/types.ts', encoding='utf-8').read()
-m = re.search(r"export function hasVerificationLayer\([^)]*\)[^{]*\{", s)
-assert m
-patch('src/sandbox/index.ts', [(
+    # ── ② hasVerificationLayer 激活：verify_sandbox_log 工具报告各层在场性 ──
+    s = read_file('src/sandbox/types.ts')
+    m = re.search(r"export function hasVerificationLayer\([^)]*\)[^{]*\{", s)
+    assert m
+    patch('src/sandbox/index.ts', [(
 "export { engine };",
 "export { engine };\nexport { hasVerificationLayer } from './types';"
 )])
 
-# verify_sandbox_log 工具内报告在场层（找其 execute）
-vs = io.open('src/sandbox/index.ts', encoding='utf-8').read()
-m2 = re.search(r"name: 'verify_sandbox_log'[\s\S]{0,600}?async execute\(\)[^{]*\{", vs)
-assert m2, 'verify_sandbox_log execute not found'
-# 在其 execute 体内追加在场性报告（诚实只报最近一次排练 —— pendingOutcomes 不可达，
-# 故报告为 CLI 级说明 + 引用函数本身保持活导出）。改为最小真实用法：
-OLD = m2.group(0)
-vs = vs.replace(OLD, OLD + """
+    # verify_sandbox_log 工具内报告在场层（找其 execute）
+    vs = read_file('src/sandbox/index.ts')
+    m2 = re.search(r"name: 'verify_sandbox_log'[\s\S]{0,600}?async execute\(\)[^{]*\{", vs)
+    assert m2, 'verify_sandbox_log execute not found'
+    # 在其 execute 体内追加在场性报告（诚实只报最近一次排练 —— pendingOutcomes 不可达，
+    # 故报告为 CLI 级说明 + 引用函数本身保持活导出）。改为最小真实用法：
+    OLD = m2.group(0)
+    vs = vs.replace(OLD, OLD + """
       // L 纪元：hasVerificationLayer 从死导出升级为活引用 —— 审计面携带
       // 四层在场性判据的说明（判据函数对任意 RehearsalOutcome 可用）。
       const layerGuide = ['L1-pixel', 'L2-diff', 'L3-semantic', 'L4-expectation']
         .map(l => `${l}:判定函数就绪(hasVerificationLayer)`).join(' | ');""", 1)
-io.open('src/sandbox/index.ts', 'w', encoding='utf-8', newline='\n').write(vs)
-print('hasVerificationLayer activated in verify_sandbox_log')
+    write_file('src/sandbox/index.ts', vs)
+    print('hasVerificationLayer activated in verify_sandbox_log')
 
-# ── ② SandboxDoctorView 激活：doctorChannel 构造医生视图（D-4 消费契约）──
-ts = io.open('src/sandbox/types.ts', encoding='utf-8').read()
-m3 = re.search(r"export interface SandboxDoctorView \{[\s\S]*?\}", ts)
-assert m3
-patch('src/doctorChannel.ts', [(
+    # ── ② SandboxDoctorView 激活：doctorChannel 构造医生视图（D-4 消费契约）──
+    ts = read_file('src/sandbox/types.ts')
+    m3 = re.search(r"export interface SandboxDoctorView \{[\s\S]*?\}", ts)
+    assert m3
+    patch('src/doctorChannel.ts', [(
 "import { SANDBOX_EVENTS } from './sandbox/events';",
 "import { SANDBOX_EVENTS } from './sandbox/events';\nimport type { SandboxDoctorView, RehearsalOutcome } from './sandbox/types';"
 ), (
@@ -104,8 +131,8 @@ export function toSandboxDoctorView(outcome: RehearsalOutcome): SandboxDoctorVie
 export function wireDoctorVerdictChannel(ctx: Context, config: Config): void {"""
 )])
 
-# ── ② idGen 接线位激活：D-6 intent 铸造走 IdGenerator（'intent' kind 兑现预留）──
-patch('src/orchestration/index.ts', [(
+    # ── ② idGen 接线位激活：D-6 intent 铸造走 IdGenerator（'intent' kind 兑现预留）──
+    patch('src/orchestration/index.ts', [(
 "import { PipelineOrchestratorImpl } from './pipeline';",
 "import { PipelineOrchestratorImpl } from './pipeline';\nimport { createDefaultIdGenerator } from '../sandbox/types';"
 ), (
@@ -116,8 +143,8 @@ patch('src/orchestration/index.ts', [(
 "          id: intentIdGen.next('intent'),"
 )])
 
-# ── ③ auditGuard TODO 真实集成：审计行携带风险语境（消费 J 纪元 risk/approval 体系）──
-patch('src/guards/auditGuard.ts', [(
+    # ── ③ auditGuard TODO 真实集成：审计行携带风险语境（消费 J 纪元 risk/approval 体系）──
+    patch('src/guards/auditGuard.ts', [(
 "import { onToolPre } from './hooks';",
 "import { onToolPre } from './hooks';\nimport { matchesRiskPatterns } from '../riskGate';"
 ), (
@@ -147,8 +174,8 @@ patch('src/guards/auditGuard.ts', [(
   });"""
 )])
 
-# ── ③ index.ts Actor TODO 改写（K-3 已兑现）──
-patch('src/index.ts', [(
+    # ── ③ index.ts Actor TODO 改写（K-3 已兑现）──
+    patch('src/index.ts', [(
 """      // Actor：TODO 接入 DSH agents 服务的子 Agent 循环。
       // 诚实失败优于虚假成功（地层教训：simulated success 是债）—— 返回 [FAILED]
       // 让编排器的 fail-fast 协议立即中止并如实上报。
@@ -158,4 +185,22 @@ patch('src/index.ts', [(
       // success 是债 —— fail-fast 协议立即中止并如实上报）。
       // K 纪元（留白兑现）：Actor 双通道接线 —— ① DSH agents 服务（在场时）"""
 )])
-print('L PATCHES DONE')
+    print('L PATCHES DONE')
+
+
+def main(argv) -> int:
+    global DRY
+    if '-h' in argv or '--help' in argv:
+        print('用法：python scripts/_patch_L.py [--write]\n'
+              '  缺省 dry-run：验证锚点 + 打印写入计划，不落盘；--write 才执行改写。\n'
+              '  env DSH_PATCH_ROOT 可覆写根目录（沙箱测试用；缺省 = 仓库根）。')
+        return 0
+    DRY = '--write' not in argv
+    if DRY:
+        print('〔dry-run 计划模式（ΠΑΝ-89）：锚点验证 + 计划打印，不落盘；加 --write 执行〕')
+    run()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

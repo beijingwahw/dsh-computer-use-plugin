@@ -1,16 +1,40 @@
 # K-4..K-8 patcher
-import io
+#
+# ΠΑΝ-89（C2-6/M-5）一次性纪元施工文物的守卫化（同 _patch_L.py）：
+#   · `if __name__ == '__main__'` 守卫（import 零副作用）；· dry-run 缺省
+#     （无 --write 只验证锚点 + 打印计划，不落盘）；· __file__ 定根
+#     （env DSH_PATCH_ROOT 可覆写）。
+# patch 对内容为 K 纪元施工的历史原始记录（逐字保留——改写文物即篡改账目）。
+import io, os, sys
+from pathlib import Path
+
+ROOT = Path(os.environ.get('DSH_PATCH_ROOT') or Path(__file__).resolve().parent.parent).resolve()
+DRY = True  # 缺省 dry-run：只打印计划；--write 才落盘
+
+
+def read_file(rel: str) -> str:
+    return io.open(ROOT / rel, encoding='utf-8').read()
+
+
+def write_file(rel: str, content: str) -> None:
+    if DRY:
+        print(f'[dry-run] 将写入 {rel}（{len(content)} 字符）—— 加 --write 落盘')
+        return
+    io.open(ROOT / rel, 'w', encoding='utf-8', newline='\n').write(content)
+    print('patched', rel)
+
 
 def patch(path, pairs):
-    s = io.open(path, encoding='utf-8').read()
+    s = read_file(path)
     for old, new in pairs:
         assert old in s, (path, old[:70])
         s = s.replace(old, new, 1)
-    io.open(path, 'w', encoding='utf-8', newline='\n').write(s)
-    print('patched', path)
+    write_file(path, s)
 
-# ── K-4：贝叶斯会诊皮层（精确枚举推断的小型离散网络）──
-patch('src/diagnosis.ts', [(
+
+def run() -> None:
+    # ── K-4：贝叶斯会诊皮层（精确枚举推断的小型离散网络）──
+    patch('src/diagnosis.ts', [(
 "/** 会诊输入：各引擎的标准化信号（全部可缺席 —— 缺席不参与规则） */",
 """// ─── K 纪元（留白兑现之四）：贝叶斯会诊 —— 规则表的概率侧写 ───
 // 设计立场：确定性规则表仍是**主诊断**（可审计、可回放）；本网络提供的是
@@ -84,16 +108,16 @@ export function bayesianBelief(signals: BinarySignals): BayesianBelief[] | null 
 /** 会诊输入：各引擎的标准化信号（全部可缺席 —— 缺席不参与规则） */"""
 )])
 
-# get_metrics 接线：belief 附加（找到 diagnose( 调用后插一行 + 输出对象加字段）
-s = io.open('src/tools/observabilityTools.ts', encoding='utf-8').read()
-anchor = "      const dx = diagnose({"
-assert anchor in s
-# 读完整个调用块再定注入点 —— 简化：在 dx 判空处附加 belief（需看上下文行）
-io.open('src/tools/observabilityTools.ts', 'w', encoding='utf-8', newline='\n').write(s)
-print('diagnosis BN added (wiring next)')
+    # get_metrics 接线：belief 附加（找到 diagnose( 调用后插一行 + 输出对象加字段）
+    s = read_file('src/tools/observabilityTools.ts')
+    anchor = "      const dx = diagnose({"
+    assert anchor in s
+    # 读完整个调用块再定注入点 —— 简化：在 dx 判空处附加 belief（需看上下文行）
+    write_file('src/tools/observabilityTools.ts', s)
+    print('diagnosis BN added (wiring next)')
 
-# ── K-5：SSD 二阶随机占优（交叉分布的可判域）──
-patch('src/telemetry.ts', [(
+    # ── K-5：SSD 二阶随机占优（交叉分布的可判域）──
+    patch('src/telemetry.ts', [(
 """  static firstOrderStochasticDominance(samplesA: readonly number[], samplesB: readonly number[]):'A' | 'B' | 'none' {""",
 """  /**
    * K 纪元（留白兑现之五）：二阶随机占优 SSD —— FSD 交叉分布的可判域。
@@ -134,8 +158,8 @@ patch('src/telemetry.ts', [(
   static firstOrderStochasticDominance(samplesA: readonly number[], samplesB: readonly number[]):'A' | 'B' | 'none' {"""
 )])
 
-# dominance pairs 附加 ssd 判定
-patch('src/telemetry.ts', [(
+    # dominance pairs 附加 ssd 判定
+    patch('src/telemetry.ts', [(
 """    const out: Array<{ faster: string; slower: string }> = [];
     for (let i = 0; i < cands.length; i++) {
       for (let j = i + 1; j < cands.length; j++) {
@@ -160,8 +184,8 @@ patch('src/telemetry.ts', [(
     return out;"""
 )])
 
-# ── K-6：同形字归一（confusable → ASCII）──
-patch('src/riskGate.ts', [(
+    # ── K-6：同形字归一（confusable → ASCII）──
+    patch('src/riskGate.ts', [(
 "function normalizeForRisk(s: string): string {\n  let out = '';\n  for (const ch of s.toLowerCase()) {\n    if (LEET_MAP[ch] !== undefined) { out += LEET_MAP[ch]; continue; }",
 """// K 纪元（留白兑现之六）：同形字（homoglyph）归一 —— E-6 留白的兑现。
 // 策领图（Unicode confusables 的策展子集，覆盖攻击面最广的三族）：
@@ -169,7 +193,7 @@ patch('src/riskGate.ts', [(
 //   数千条 —— 策展 ~50 条是"值即边界"（新增条目零风险，纯数据扩展）。
 const HOMOGLYPH_MAP: Record<string, string> = {
   // 西里尔（视觉同形拉丁）
-  '\\u0430': 'a', '\\u0435': 'e', '\\u043e': 'o', '\\u0441': 'c', '\\u0440': 'p',
+  '\\u0430': 'a', '\\u0435': 'e', '\\u03bf': 'o', '\\u0441': 'c', '\\u0440': 'p',
   '\\u0445': 'x', '\\u0443': 'y', '\\u0456': 'i', '\\u0455': 's', '\\u04bb': 'h',
   '\\u0501': 'd', '\\u0497': 'g', '\\u04cf': 'l', '\\u04e3': 'm',
   '\\u0439': 'u', '\\u0458': 'j', '\\u0463': 'y', '\\u051b': 'q',
@@ -193,8 +217,8 @@ function normalizeForRisk(s: string): string {
     if (HOMOGLYPH_MAP[ch] !== undefined) { out += HOMOGLYPH_MAP[ch]; continue; }"""
 )])
 
-# ── K-7：噪声容忍循环检测（E-3 留白兑现）──
-patch('src/oscillationTracker.ts', [(
+    # ── K-7：噪声容忍循环检测（E-3 留白兑现）──
+    patch('src/oscillationTracker.ts', [(
 """// 诚实边界：精确匹配语义 —— 中途插入一帧噪声即断尾（对噪声不鲁棒）；
 // 量化指纹（如 4 位格雷码桶）上的模糊循环检测是留白，值即边界。
 const RING_SIZE = 12;   // 3 × 最大周期 4：容纳三份完整周期块的观测窗
@@ -240,4 +264,22 @@ function isPCycle(w: string[], p: number): boolean {
   return true;
 }"""
 )])
-print('K-4..K-7 patched (K-4 wiring pending)')
+    print('K-4..K-7 patched (K-4 wiring pending)')
+
+
+def main(argv) -> int:
+    global DRY
+    if '-h' in argv or '--help' in argv:
+        print('用法：python scripts/_patch_k4to8.py [--write]\n'
+              '  缺省 dry-run：验证锚点 + 打印写入计划，不落盘；--write 才执行改写。\n'
+              '  env DSH_PATCH_ROOT 可覆写根目录（沙箱测试用；缺省 = 仓库根）。')
+        return 0
+    DRY = '--write' not in argv
+    if DRY:
+        print('〔dry-run 计划模式（ΠΑΝ-89）：锚点验证 + 计划打印，不落盘；加 --write 执行〕')
+    run()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

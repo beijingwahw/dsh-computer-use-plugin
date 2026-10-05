@@ -9,7 +9,7 @@
 注册表（每类：检测器 + 起源故事 + 定位法）：
   BC-1 PS 引号律     PowerShell 字符串内的 `\\"` 不是转义（PS 用反引号）——
                      经 execFile 真机调用必炸。起源：O-#17 USER32_DECL/HC_DECL
-                     （注入式测试掩盖）。检测：PS 命令串含 `\\"`。
+                     （注入式测试掩盖）。检测：PS 上下文文件的字符串字面量含 `\\"`。
   BC-2 闭包重赋值    Python 嵌套函数对捕获名重赋值 ⇒ UnboundLocalError
                      （先读后赋路径任何平台必炸）。起源：O-#1 screen._encode
                      的 img。检测：AST 语句序分析（Load 先于该名首赋值）。
@@ -23,7 +23,20 @@
                      方言克隆律 —— mulberry32/FNV-1a 六处副本。检测：注释
                      剥离 + 空白归一的 tokenize 指纹分组；行注释含
                      `exempt` 豁免（知情的残余克隆 —— 见豁免处的理由注）。
-用法：python scripts/bug_class_lint.py [--strict]（--strict：任何命中 exit 1）
+
+ΠΑΝ-85 规避封堵（C2-6/H-2 的三处实证绕过面）：
+  · BC-3 类型注解不再豁免（剥除注解后再判：`const requestId: number =
+    Date.now()` 照报）；行内任意 `// monotonic` 不再灭活检测——豁免必须精确
+    格式 `// bcr-exempt: BC-3: <理由>` 且**登记**（输出尾部列豁免清单，豁免
+    是可见的治理决定不是静默吞报）；`Math.max` 抑制须为真实调用（`Math.max(`），
+    注释里提一嘴不再免报。
+  · BC-4 词法级解析：constructor 形参表在「注释与字符串抹空」文本上配平括号
+    （默认值 `f("(")` 不再错切段），顶层逗号切分后逐参数判修饰符前缀——单行
+    多参数 `constructor(a: string, private b: number)` 照报，不再依赖行首锚。
+  · BC-1 pwsh 入上下文；上下文判定升为**文件级**（PS 构造与 \\" 分行写不再
+    绕过），命中面从「行内含 \\"」改为「字符串字面量含 \\"」（注释里的 \\" 不报）。
+用法：python scripts/bug_class_lint.py [--strict] [--root DIR]
+  （--strict：任何命中 exit 1；--root：扫描根（缺省仓库根）——阳性对照夹具用）
 """
 from __future__ import annotations
 
@@ -35,6 +48,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 violations: list[str] = []
+# ΠΑΝ-85 豁免登记册：精确格式豁免（bcr-exempt）必须在此可见——静默吞报 = 治理漏洞
+exemptions: list[str] = []
 
 
 def report(cls: str, where: str, detail: str) -> None:
@@ -43,18 +58,64 @@ def report(cls: str, where: str, detail: str) -> None:
 
 # ─── BC-1：PS 引号律 ───
 
-PS_CONTEXT = re.compile(r"powershell|PS_EXE|Add-Type|MemberDefinition|SetWindowPos|SystemParametersInfo", re.I)
+# ΠΑΝ-85：pwsh 入列（execFile('pwsh', …) 同一引号律）；上下文判定为文件级
+PS_CONTEXT = re.compile(r"powershell|pwsh|PS_EXE|Add-Type|MemberDefinition|SetWindowPos|SystemParametersInfo", re.I)
+
+
+def iter_string_literals(text: str):
+    """产出字符串字面量跨度 (start, end, lineno)——注释盲区安全（注释内伪字符串
+    不入列）；跨 sq/dq/tmpl 三态，处理转义与模板 ${} 嵌套（ΠΑΝ-85：BC-1 的命中面
+    从「行含 \\"」升为「字符串字面量含 \\"」——分行书写不再绕过）。"""
+    i, n, mode = 0, len(text), "code"
+    stack: list[str] = []
+    start = -1
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if mode == "code":
+            if c == "/" and nxt == "/":
+                i = text.find("\n", i)
+                i = n if i < 0 else i
+                continue
+            if c == "/" and nxt == "*":
+                j = text.find("*/", i + 2)
+                i = n if j < 0 else j + 2
+                continue
+            if c == "}":  # 模板 ${ 的闭界：回到模板态
+                mode = stack.pop() if stack else "code"
+                i += 1
+                continue
+            if c in "'\"`":
+                mode = {"'": "sq", '"': "dq", "`": "tmpl"}[c]
+                start = i
+            i += 1
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if (mode == "sq" and c == "'") or (mode == "dq" and c == '"'):
+            yield start, i + 1, text.count("\n", 0, start) + 1
+            mode = "code"
+        elif mode == "tmpl":
+            if c == "`" and not stack:
+                yield start, i + 1, text.count("\n", 0, start) + 1
+                mode = "code"
+            elif c == "$" and nxt == "{":
+                stack.append("tmpl")
+                mode = "code"
+                i += 2
+                continue
+        i += 1
 
 
 def check_ps_quotes() -> None:
     for p in (REPO / "src").rglob("*.ts"):
         text = p.read_text(encoding="utf8", errors="replace")
-        if not PS_CONTEXT.search(text):
+        if not PS_CONTEXT.search(text):  # 文件级 PS 上下文（ΠΑΝ-85：含 pwsh）
             continue
-        for i, line in enumerate(text.splitlines(), 1):
-            # PS 命令构造行内的 \" 序列（TS 源码里合法的 JS 转义，但传给 PS 即炸）
-            if '\\"' in line and PS_CONTEXT.search(line):
-                report("BC-1", f"{p.relative_to(REPO)}:{i}", "PS 命令串含 \\\" —— PS 双引号串内不是转义（用单引号包 C# 定义）")
+        for s, e, ln in iter_string_literals(text):
+            if '\\"' in text[s:e]:
+                report("BC-1", f"{p.relative_to(REPO)}:{ln}", "PS 命令串含 \\\" —— PS 双引号串内不是转义（用单引号包 C# 定义；pwsh 同律）")
 
 
 # ─── BC-2：闭包重赋值（语句序敏感的 AST 分析）───
@@ -108,41 +169,78 @@ def check_closure_reassignment() -> None:
 
 # ─── BC-3：时钟单调假设 ───
 
-CLOCK_ID = re.compile(r"(const|let)\s+(\w*(?:id|Id|ID|seq|Seq)\w*)\s*=\s*Date\.now\(\)")
+# ΠΑΝ-85：`(?::[^=\n]+)?` 剥类型注解——`const requestId: number = Date.now()` 照报
+# （批判样本：加注解即漏报）。
+CLOCK_ID = re.compile(r"(const|let)\s+(\w*(?:id|Id|ID|seq|Seq)\w*)\s*(?::[^=\n]+)?=\s*Date\.now\(\)")
+# ΠΑΝ-85 豁免精确格式：`// bcr-exempt: BC-3: <理由>`——登记后可见（输出尾部列清单）；
+# 行内任意 `// monotonic` 不再灭活检测。
+BC3_EXEMPT = re.compile(r"//\s*bcr-exempt:\s*BC-3\b\s*[:：]\s*(\S.*)$", re.I)
 
 
 def check_clock_ids() -> None:
     for p in (REPO / "src").rglob("*.ts"):
         for i, line in enumerate(p.read_text(encoding="utf8", errors="replace").splitlines(), 1):
-            if CLOCK_ID.search(line) and "Math.max" not in line and "monotonic" not in line.lower():
-                report("BC-3", f"{p.relative_to(REPO)}:{i}",
-                       f"裸 Date.now() 作 id/序键 —— 同毫秒碰撞 + 时钟回拨倒序（用 max(now, last+1) 混合逻辑时钟）：{line.strip()[:80]}")
+            if not CLOCK_ID.search(line):
+                continue
+            # ΠΑΝ-85：Math.max 抑制须为真实调用（`Math.max(`）——注释里提一嘴不再免报
+            if "Math.max(" in line:
+                continue
+            m = BC3_EXEMPT.search(line)
+            if m:
+                exemptions.append(f"[BC-3] {p.relative_to(REPO)}:{i} 豁免（bcr-exempt）：{m.group(1).strip()}")
+                continue
+            report("BC-3", f"{p.relative_to(REPO)}:{i}",
+                   f"裸 Date.now() 作 id/序键 —— 同毫秒碰撞 + 时钟回拨倒序（用 max(now, last+1) 混合逻辑时钟；"
+                   f"豁免须精确格式 // bcr-exempt: BC-3: <理由> 并登记）：{line.strip()[:80]}")
 
 
 # ─── BC-4：TS 构造器参数属性（transform 语法 —— Node strip-only 拒载）───
 # 起源：Q-3 SprtPopupFilter / S-2 P2Quantile 两度踩响。检测：constructor 形参
 # 列表含 access-modifier 前缀（public/protected/private/readonly 组合）。
+# ΠΑΝ-85：词法级解析——①括号配平在「注释与字符串内容抹空」文本上做（默认值
+# `f("(")` 不再错切参数段）；②顶层逗号切分后逐参数判修饰符前缀（单行多参数
+# `constructor(a: string, private b: number)` 照报——不再依赖行首锚）。
+
+
+def _split_params(params: str) -> list[str]:
+    """形参表 → 顶层参数列表（(),[],{} 配平处切分；输入为字符串抹空文本）。"""
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for c in params:
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(c)
+    out.append("".join(buf))
+    return [s.strip() for s in out if s.strip()]
 
 
 def check_ctor_param_properties() -> None:
     for p in (REPO / "src").rglob("*.ts"):
-        text = p.read_text(encoding="utf8", errors="replace")
-        # 块匹配 constructor( ... )：粗粒度括号配平（跨行）
-        for m in re.finditer(r"constructor\s*\(", text):
+        raw = p.read_text(encoding="utf8", errors="replace")
+        _, struct = _strip_for_bc5(raw)  # 结构层：注释与字符串内容全抹空（保长保行号）
+        for m in re.finditer(r"\bconstructor\s*\(", struct):
             depth, i = 1, m.end()
-            while i < len(text) and depth > 0:
-                if text[i] == "(":
+            while i < len(struct) and depth > 0:
+                if struct[i] == "(":
                     depth += 1
-                elif text[i] == ")":
+                elif struct[i] == ")":
                     depth -= 1
                 i += 1
-            params = text[m.end():i - 1]
-            for ln, line in enumerate(params.splitlines(), 1):
-                # readonly 形参缺类型注解（`readonly b,`/`readonly b)`）也是参数属性——
-                # 无类型的 transform 语法同样被 Node strip-only 拒载，一并检出
-                if re.match(r"^\s*(public|protected|private)\s|readonly\s+\w+\s*(?::|[,)]|$)", line):
-                    report("BC-4", f"{p.relative_to(REPO)}:ctor",
-                           f"构造器参数属性（transform 语法，Node strip-only 拒载）：{line.strip()[:60]}")
+            params = struct[m.end():i - 1]
+            # readonly 形参缺类型注解（`readonly b`）也是参数属性——无类型的
+            # transform 语法同样被 Node strip-only 拒载，一并检出
+            for param in _split_params(params):
+                if re.match(r"(?:public|protected|private)\s|readonly\s+\w+", param):
+                    ln = raw.count("\n", 0, m.start()) + 1
+                    report("BC-4", f"{p.relative_to(REPO)}:{ln}",
+                           f"构造器参数属性（transform 语法，Node strip-only 拒载）：{param[:60]}")
                     break
 
 
@@ -287,7 +385,15 @@ def check_function_clones() -> None:
                    f"函数体克隆 ×{len(members)}（≥{BC5_MIN_LINES} 行逐字复刻）—— 单源化或加 exempt 行注释申报知情")
 
 
-def main() -> int:
+def main(argv: list[str]) -> int:
+    global REPO
+    strict = "--strict" in argv
+    if "--root" in argv:
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            print("✖ --root 缺值（扫描根目录）", file=sys.stderr)
+            return 3
+        REPO = Path(argv[i + 1]).resolve()
     check_ps_quotes()
     check_closure_reassignment()
     check_clock_ids()
@@ -297,12 +403,22 @@ def main() -> int:
         print(f"✖ 虫型检测命中 {len(violations)} 处：")
         for v in violations:
             print(f"  {v}")
-        if "--strict" in sys.argv:
+        _print_exemptions()
+        if strict:
             return 1
         return 0
     print("✔ Bug 类注册表（BC-1/BC-2/BC-3/BC-4/BC-5）全库零命中")
+    _print_exemptions()
     return 0
 
 
+def _print_exemptions() -> None:
+    if exemptions:
+        # ΠΑΝ-85 豁免登记面：精确格式豁免全部列示——豁免是可见的治理决定
+        print(f"✔ 豁免登记 {len(exemptions)} 处（bcr-exempt，精确格式）：")
+        for e in exemptions:
+            print(f"  {e}")
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

@@ -11,12 +11,17 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_OUT = fileURLToPath(new URL('../docs/config-schema.md', import.meta.url));
 const MIN_LINES = 150;
 
-// ── schemastery 节点元信息读取（meta 优先，根属性兜底） ──
+// ── schemastery 节点元信息读取（meta 优先，根属性兜底）──
+// ΤΕΛ-8a 修正：schemastery 节点是可调用函数，`.default` / `.description` 等方法
+// 挂在函数属性上 —— 无 meta.default 的字段（三态开关 enableSandboxStack 刻意
+// 不设缺省）经 `?? node?.default` 兜底会把 default() **方法函数本体**当成缺省
+// 值泄漏进文档单元格。函数值一律按「无字面缺省」处理（—）。
 function metaOf(node) {
+  const rawDefault = node?.meta?.default ?? node?.default;
   return {
     type: node?.type ?? 'any',
     description: node?.meta?.description ?? node?.description ?? '',
-    default: node?.meta?.default ?? node?.default,
+    default: typeof rawDefault === 'function' ? undefined : rawDefault,
   };
 }
 

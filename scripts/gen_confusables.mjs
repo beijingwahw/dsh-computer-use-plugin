@@ -19,6 +19,13 @@ const date = src.match(/^# Date:\s*(.+)$/m)?.[1]?.trim() ?? 'unknown';
 
 const map = new Map();
 let total = 0;
+// ΠΑΝ-11: 不可见键排除 —— 键本身是 Cf/Mn/变体选择符（软连字符 U+00AD、组合记号
+// U+0301、VS16 U+FE0F、VS17-256 U+E0100-E01EF 等，即 riskGate ΠΑΝ-9 的不可见
+// 剥除集）的条目不得入表：riskGate 的折叠顺序是 LEET/HOMOGLYPH 先于剥除，
+// 此类键会从不可见字符**注入**可见字母 —— 既制造假阳性，也打断邻接造成漏报
+//（'pass\u0301word' 若 U+0301 折叠成某字母则 password 断裂逃逸）。当前源表
+// 蒸馏后实测 0 条命中本排除（与 riskGate.buildHomoglyphMap 的运行时过滤双保险）。
+const INVISIBLE_KEY_RE = /[\p{Cf}\p{Mn}\uFE0F\u{E0100}-\u{E01EF}]/u;
 for (const line of src.split('\n')) {
   const m = line.match(/^([0-9A-Fa-f]+)\s+;\s+((?:[0-9A-Fa-f]+\s*)+);\s*MA/);
   if (!m) continue;
@@ -26,6 +33,7 @@ for (const line of src.split('\n')) {
   const proto = m[2].trim().split(/\s+/).map(cp => String.fromCodePoint(parseInt(cp, 16))).join('').toLowerCase();
   if (!/^[a-z0-9]+$/.test(proto)) continue;
   const key = String.fromCodePoint(parseInt(m[1], 16)).toLowerCase();
+  if (INVISIBLE_KEY_RE.test(key)) continue; // ΠΑΝ-11: 不可见键不入折叠链（由剥除集接管）
   // 同键多值取先出现者（consortium 表按视觉相似度聚类，首条 = 规范原型）
   if (!map.has(key)) map.set(key, proto);
 }

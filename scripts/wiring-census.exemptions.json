@@ -1,0 +1,4410 @@
+{
+  "meta": {
+    "wave": "ΤΕΛ-11（ΤΕΛΟΣ 纪元 census 豁免册终局收割：T1 波 11 幽灵删条；24 条 dead-code 按 ΤΕΛ-2 独立复核改判 —— 7 生产在用（census 词法盲区误判，spread/三元冒号消费位）与 9 文件内消费转 internal-surface、3 转 test-only、5 cordis 壳契约转 unwired-organ；ΤΕΛ-1 六器官通电/改判已先行同步）",
+    "note": "装配完备性执法器豁免册 —— 每条 = 一个当前零生产调用的导出/方法与其豁免理由。执法纪律：新孤儿必须接线或登记（无理由即红）；条目对应的孤儿被接线/删除后必须同步删除本条（幽灵即红，r29 册不留幽灵同律）。类别枚举: unwired-organ | test-only | internal-surface | reserved-api | tool-only | dead-code。生成: node scripts/wiring_census.mjs --register-current（确定性，无时间戳）。"
+  },
+  "entries": [
+    {
+      "file": "src/actionVerifier.ts",
+      "name": "AUDIO_EVIDENCE_CONFIDENCE_CAP",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4audio.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/actionVerifier.ts",
+      "name": "AUDIO_VISUAL_PRIORITY",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4audio.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/actionVerifier.ts",
+      "name": "REMOTE_EVIDENCE_OVERLAP_MIN",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "W5-3 跨机互证谓词严格性立法常量：仅本文件内部消费 —— :180 judgeRemoteChange 公开包装面以本常量为立法阈值（与 actionVerifier.channels.ts 判决核心的 value 二环按「纯函数端口注入」方言拆环）；测试面 actionVerifier.channels/w5cross；导出面冗余、实现活。ΠΑΝ-130 补登记（并行工位在途新增）。"
+    },
+    {
+      "file": "src/actionVerifier.ts",
+      "name": "REMOTE_PEERS_MAX",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5cross.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/actionVerifier.ts",
+      "name": "judgeRemoteChange",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "W5-3：仅本文件内部消费 —— :438 远端变更互证判决的生产路径调用点（本体 = channels 判决核心的阈值注入包装面）；测试面 actionVerifier.channels/w5cross；导出面冗余、实现活。ΠΑΝ-130 补登记（并行工位在途新增）。"
+    },
+    {
+      "file": "src/approval.bypass.ts",
+      "name": "escrowBlockOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1approval.test.ts、test/w3escrow.test.ts、test/w8.escrow.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/approval.bypass.ts",
+      "name": "escrowGateArmed",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan3437.fix.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/approval.queueState.ts",
+      "name": "sanitizeQueueEntry",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/approval.security.ts",
+      "name": "TokenBucket",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/approval.security.ts",
+      "name": "lastTargetRejection",
+      "kind": "let",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（5 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/approval.security.ts",
+      "name": "targetRejectionOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1approval.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/approval.shapes.ts",
+      "name": "lengthBucket",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "POPUP_HABITAT_NORM",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΠΑΝ-119 弹窗栖息地镜像（popupDetector centerRegionNorm(0.4) 的锁面）：主循环内经 pan119PopupConfirmBoundsGate 消费 + 执法测试与 popupDetector 源常量锁死（pan114-119.fix）；导出面为镜像审计而设。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "boundSteerSessionFactory",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.arch.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "classifyExpectedVisualEffect",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts、test/w1gate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "lastBranchCard",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4wire.test.ts、test/w5steer.test.ts、test/w7e2e.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "pan119PopupConfirmBoundsGate",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΠΑΝ-119 弹窗确认 bounds 闸：autoPilot 主循环 ③″′ 同文件接线（生产路径在用）+ 纯函数执法测试面（pan114-119.fix）；跨文件导出为测试注入缝。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "releasePilotW4Wire",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/autoPilot.ts",
+      "name": "resetW4PilotWire",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts、test/w4wire.test.ts、test/w5steer.test.ts 等 6 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/autonomyConstitution.ts",
+      "name": "classifyRisk",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.autonomyConstitution.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/counterfactual.ts",
+      "name": "counterfactualWorldModelWired",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.counterfactual.test.ts、test/pan56-61.autonomy.test.ts、test/w4wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/counterfactual.ts",
+      "name": "expectedInformationGain",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.counterfactual.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/counterfactual.ts",
+      "name": "releaseCounterfactualWorldModel",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/counterfactual.ts",
+      "name": "transitionConfidenceFactor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.counterfactual.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "DEFAULT_WEIGHTS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（6 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "RISK_SCORES",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "RISK_UNKNOWN",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "actionText",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "n4",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（4 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "overlapRate",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/counterfactualUtil.ts",
+      "name": "tokenize",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/autonomy/criteriaEval.ts",
+      "name": "negativeFuzzyTolerance",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "EXP4_HYPERPARAMS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1exp4.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "FEATURE_LAYOUT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1exp4.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "HCA_GAMMA",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.evolutionEngine.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "KNOWN",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "PENALTY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "RECOVERY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "RECOVERY_MAP",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.evolutionEngine.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "RELIABILITY_INIT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "RELIABILITY_MAX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "RELIABILITY_STEP",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "REWARD",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "W_MAX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "W_MIN",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "causeOf",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "failureSignature",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.evolutionEngine.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "hcaFactor",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "hcaStepMagnitude",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.evolutionEngine.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "r3",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（7 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "shouldDistillSkill",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.evolutionEngine.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "stepsOf",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/evolutionPrimitives.ts",
+      "name": "strategiesOf",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（4 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "EXPLORATION_ALTERNATION_PENALTY",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3explore.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "EXPLORATION_ELEMENT_CAP",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "EXPLORATION_RISK_COST_DANGER",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "EXPLORATION_RISK_COST_SENSITIVE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "explorationEvidenceTier",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "normLabel",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/explorationCore.ts",
+      "name": "quantizeRegion",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3explore.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/gym.pcgGrammar.ts",
+      "name": "pcgBaseWeights",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4pcg.test.ts、test/w8gymsplit.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "CLOCK_STEP_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-127 拆环：立法常量受 w8gymsplit ②「立法在源」源级锁定留守导出；卫星侧虚拟时钟步进经桶包装端口注入—— 导出面为立法审计面。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "DEFAULT_MAX_STEPS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-127 拆环：立法常量受 w8gymsplit ②「立法在源」源级锁定留守导出；卫星侧缺省经桶包装端口注入（生产接线走包装内参）—— 导出面为立法审计面。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "DEFAULT_SEED",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-127 拆环：立法常量受 w8gymsplit ②「立法在源」源级锁定留守导出；卫星侧缺省经桶包装端口注入（生产接线走包装内参）—— 导出面为立法审计面。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "KIND_ORDER",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-127 拆环：四世界轮转律受 w8gymsplit ②「export const KIND_ORDER」源级锁定留守导出；卫星（noiseSweep 扫频）经 GymSweepPorts 端口消费—— 导出面为立法审计面。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "castTask",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-127 拆环：任务铸造核心随 KIND_ORDER 族源级锁定留守；卫星（noiseSweep 扫频）经 GymSweepPorts 端口消费、generateTasks 件内消费—— 导出面为立法审计面。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "generateTasks",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.gym.test.ts、test/epochKappa.curriculum.test.ts、test/r14.gymDialect.test.ts 等 5 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "gymCriteriaEvidence",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/r14.gymDialect.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "noiseSweep",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΠΑΝ-127 拆环后桶面公开包装（核心在 gym.noise.ts、经 GymSweepPorts 注入训练营工厂与立法）：W1-4 诊所观察式扫频 API，消费面 = 测试（w1gymnoise/w4pcg）与宿主离线校准；原核心条目（gym.noise::noiseSweep）因桶导入接线转 wired 已删（幽灵律）。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "runPcgCampaign",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΠΑΝ-127 拆环后桶面公开包装（核心在 gym.pcgCampaign.ts、经 PcgCampaignPorts 注入训练营工厂与立法缺省）：W4-4 文法训练营有界消费 API，消费面 = 测试（w4pcg/w8gymsplit）与宿主离线校准；原核心条目因桶导入接线转 wired 已删（幽灵律）。"
+    },
+    {
+      "file": "src/autonomy/gym.ts",
+      "name": "sampleCurriculumWorld",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochKappa.curriculum.test.ts、test/w7fuzz.test.ts、test/w8gymsplit.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/index.ts",
+      "name": "releaseExplorationLedger",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/index.ts",
+      "name": "surpriseEvolution",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.finalwiring.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/pilotStore.ts",
+      "name": "PILOT_MAX_RUNS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/policyEngineUtil.ts",
+      "name": "SWITCH_CYCLE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（4 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/policyEngineUtil.ts",
+      "name": "lastSwitchKind",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/runtime.perceive.ts",
+      "name": "makeDefaultGroundVlm",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/runtime.perceive.ts",
+      "name": "makeDefaultPopupNotes",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/runtime.ts",
+      "name": "gateMacroStepFor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan56-61.autonomy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/runtime.ts",
+      "name": "macroStepPointLabel",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/autonomy/runtime.ts",
+      "name": "resolveVlmBudget",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R3-3（GAP-2）：createExecute 构造期读内核键 codec.maxImagesPerTask/maxBytesPerTask 铸 VlmBudget 的单一解析点 —— 同文件消费方在用（实现活），导出面仅服务 test/r33.gaps.test.ts 的预算生效执法断言（set 键 ⇒ 闸响应）；组合根无需直调（createExecute 已在产线）。"
+    },
+    {
+      "file": "src/autonomy/sceneSemantics.ts",
+      "name": "hammingDistanceHex",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.sceneSemantics.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/selfAudit.ts",
+      "name": "trajectorySignature",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"占位\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/autonomy/uncertainty.ts",
+      "name": "DRIFT_ENTROPY_TRIGGER",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/uncertainty.ts",
+      "name": "calibratedProbability",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.uncertainty.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/uncertainty.ts",
+      "name": "combineConfidences",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.uncertainty.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/uncertainty.ts",
+      "name": "shannonEntropy",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.uncertainty.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/worldSnapshot.ts",
+      "name": "arbitrationRoleAt",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.worldSnapshot.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/worldSnapshot.ts",
+      "name": "findInSnapshot",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.worldSnapshot.test.ts、test/w1exec.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/autonomy/worldSnapshot.ts",
+      "name": "interactiveElements",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.worldSnapshot.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/branchCards.card.ts",
+      "name": "BranchReplayController",
+      "kind": "class",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/branchCards.ledger.ts",
+      "name": "BRANCH_LEDGER_CAPACITY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用 :131 容量缺省）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。ΠΑΝ-130 册随迁注记：原在 branchCards.ts，ΠΑΝ-127（D-F5）账本域下沉叶纯结构搬家至此，语义零变化。"
+    },
+    {
+      "file": "src/branchCards.ledger.ts",
+      "name": "BRANCH_LEDGER_SEGMENT_VERSION",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用 :177 段版本铸字）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。ΠΑΝ-130 册随迁注记：原在 branchCards.ts，ΠΑΝ-127（D-F5）账本域下沉叶纯结构搬家至此，语义零变化。"
+    },
+    {
+      "file": "src/branchCards.ledger.ts",
+      "name": "idxOr",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（5 处正文引用 :140/:143/:223/:245/:246 防御性下标缺省）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。ΠΑΝ-130 册随迁注记：原在 branchCards.ts，ΠΑΝ-127（D-F5）账本域下沉叶纯结构搬家至此，语义零变化。"
+    },
+    {
+      "file": "src/branchCards.ledger.ts",
+      "name": "parseStepRecord",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用 :192 重建步记录）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。ΠΑΝ-130 册随迁注记：原在 branchCards.ts，ΠΑΝ-127（D-F5）账本域下沉叶纯结构搬家至此，语义零变化。"
+    },
+    {
+      "file": "src/calibration.ts",
+      "name": "calibrateNcdThreshold",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochO.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/calibration.ts",
+      "name": "calibrateSchmittEvidence",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochO.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/checkpoint.ts",
+      "name": "checkpointSectionStats",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/checkpoint.test.ts、test/f2-9.guards.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/checkpoint.ts",
+      "name": "migrateCheckpoint",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/checkpoint.ts",
+      "name": "resetCheckpointSectionCache",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/checkpoint.test.ts、test/f2-9.guards.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/contextManager.records.ts",
+      "name": "SURPRISE_BIT_FLOOR",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/contextManager.records.ts",
+      "name": "SURPRISE_SALIENCE_BONUS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan31.pinEngine.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/contextManager.ts",
+      "name": "clearTaskAnchor",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan31.pinEngine.test.ts、test/w1visualecon.test.ts、test/w2wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/contextManager.ts"
+      ]
+    },
+    {
+      "file": "src/contextManager.ts",
+      "name": "configureIncremental",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.incremental.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/contextManager.ts"
+      ]
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_AUTH_ENV",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-106 barrier HMAC 鉴权方言（F3-9 工单交付）：仅本文件内部消费 —— :166 武装入口缺省读 env DSH_BARRIER_TOKEN；导出面冗余、实现活（createBarrierCore/makeHttpBarrierTransport 武装路径内部贯通）。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_AUTH_SKEW_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-106：仅本文件内部消费 —— :147 verifyBarrierMac 缺省时间窗、:237 传输壳缺省 skew（federation ±5min 同值防重放）；测试面 pan105-113 复核窗律；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_DEFAULT_POLL_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_DEFAULT_TIMEOUT_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_FETCH_TIMEOUT_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_MAX_LIVE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_MAX_PARTICIPANTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5cross.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_MAX_TOMBSTONES",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_NAME_MAX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_PEER_MAX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_STEP_RE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "BARRIER_TTL_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "arriveAndWaitBarrier",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5cross.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "barrierMacInput",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-106：仅本文件内部消费 —— :132 signBarrierRequest 的 MAC 域稳定序列化（ts/mac 不入域的防篡改锚）；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "barrierSessionKey",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-106：仅本文件内部消费 —— :131 会话密钥推导（每 barrier 名一个会话域、密钥协商不经网络传输）；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "createBarrierClient",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5cross.test.ts、test/w9deploy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "createBarrierCore",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5cross.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "makeHttpBarrierTransport",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5cross.test.ts、test/w9deploy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "signBarrierRequest",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-106：仅本文件内部消费 —— :154 verifyBarrierMac 期望值复算、:541 HTTP 壳密钥在场时请求附签（生产签名路径）；测试面 pan105-113；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/crossMachine.ts",
+      "name": "verifyBarrierMac",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-106：仅本文件内部消费 —— :302 武装态服务端 MAC 校验（缺席/失配/超窗 ⇒ unauthorized 的 fail-closed 判决，生产验证路径）；测试面 pan105-113；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "OCR_ANCHOR_MIN_MEDIAN_CONFIDENCE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-115 OCR 锚质量闸的测量中位数下限（0-100 方言）：ocrFocusAnchorQuality 判决序④ 同文件消费；导出为判决常量的审计面。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "OCR_ANCHOR_MIN_TEXT_CHARS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-115 OCR 锚质量闸的最小锚长下限：ocrFocusAnchorQuality 判决序① 同文件消费（index.ts focusPort 接线消费的是函数面）；导出为判决常量的审计面。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "ROOT_CAUSE_LADDER",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2recovery.test.ts、test/w3branch.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "calibrateCptFromRules",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "C2-9 主题1 B 级：CPT 标定换血制度从未接生产数据流（数据血缘：oracle 可审计，真实遥测流接入点=替换 oracle —— M 纪元 patcher 自述）。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "calibrateCptFromTelemetry",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "C2-9 主题1 B 级：CPT 遥测标定面，真实遥测流未接。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "differentialDiagnose",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1rootcause.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/diagnosis.ts",
+      "name": "observeSignalsForCalibration",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "C2-9 主题1 B 级：标定观测面，生产数据流未接。"
+    },
+    {
+      "file": "src/dialects/bilingual.ts",
+      "name": "BILINGUAL_PAIRS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/no29.bilingual.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/dialects/bilingual.ts",
+      "name": "LOOKUP",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/no29.bilingual.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/dialects/canonical.ts",
+      "name": "CANONICAL_DEFAULT_MAX_DEPTH",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/dialects/canonical.ts",
+      "name": "CANONICAL_SENTINEL",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/dialects/tokenizer.ts",
+      "name": "STOPWORDS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/doctorChannel.ts",
+      "name": "APPROVAL_CONFIRM_CODE_EVENT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1approval.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/doctorChannel.ts",
+      "name": "armOutOfBandConfirmChannel",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1approval.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/doctorChannel.ts",
+      "name": "toSandboxDoctorView",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochK.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/doctorChannel.ts",
+      "name": "translateReportToVerdict",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p0-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/doctorEvents.ts",
+      "name": "SCORE_MAX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/doctorRules.core.ts",
+      "name": "DOCTOR_RULES_CORE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判（原 dead-code 系误判）：跨文件生产消费在案 —— src/doctorRules.ts:13 导入、:21 展开进 DOCTOR_RULES（生产规则引擎在用）；另 test/pan114-119.fix。census 绑定引用正则把 spread（...NAME）消费位误排除故仍判 orphan 在册 —— 实为 wired，census 引用判定面修复后本条应随幽灵律出册。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/doctorRules.security.ts",
+      "name": "DOCTOR_RULES_SECURITY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判（原 dead-code 系误判）：跨文件生产消费在案 —— src/doctorRules.ts:14 导入、:21 展开进 DOCTOR_RULES（sec.approval-fail-closed 三面锚所在安全规则面）。census 绑定引用正则把 spread（...NAME）消费位误排除故仍判 orphan 在册 —— 实为 wired，census 引用判定面修复后本条应随幽灵律出册。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "GUI_LAUNCH_PROBE_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "R2-5：GUI 直启存活观察窗缺省 —— 本文件内 WindowsAdapter 构造器消费（AdapterDeps.launchProbeMs 缺席时的兜底值）；导出面为 test/r25.launchApp.test.ts 钉死缺省值 600ms 的执法锚（战报对账窗口的单一事实源）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "LinuxAdapter",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/agency.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "NullAdapter",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/agency.test.ts、test/epochK.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "WindowsAdapter",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochK.test.ts、test/epochO.test.ts、test/now25.systemPerf.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "coalesceAdjacentRuns",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/now25.systemPerf.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "createShaperCompensationExecutor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3escrow.test.ts、test/w8.escrow.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "createShaperRollbackExecutor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "guiLaunchSpawnOptions",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-5：GUI 直启 spawn 语义纯函数面 —— 本文件内 WindowsAdapter.apply('launch_app') 消费（四不变量：detached 作业逃逸/stdio ignore 零管道/shell false 零注入面/windowsHide false GUI 可见）；导出面为 test/r25.launchApp.test.ts 的语义钉死锚（Object.freeze 防篡改）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "psEncodeCommand",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w6r.shellhardening.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "resolveLaunchableApp",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-5：GUI 应用白名单解析纯函数 —— 本文件内 Shaper.apply 前置闸门与 WindowsAdapter.apply 双层消费（纵深防御）；导出面为 test/r25.launchApp.test.ts 的闭集执法锚（任意命令/路径/参数注入结构性拒绝）。"
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "setAdapterForTest",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/agency.test.ts、test/epochK.test.ts、test/now25.systemPerf.test.ts 等 7 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/environmentShaper.ts"
+      ]
+    },
+    {
+      "file": "src/environmentShaper.ts",
+      "name": "undoShaperRecord",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "DEFAULT_CONTRIBUTION_CAP_SHARE",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "OUTLIER_FLOOR",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "OUTLIER_IQR_SCALE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "OUTLIER_NOISE_SCALES",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΠΑΝ-117 检疫地板的 DP 噪声尺度倍数（floor=max(3, 3/ε)）：dpNoiseFloorOf 同文件消费 + pan114-119.fix 纯函数律执法；导出为校准常量的审计面。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "QUARANTINE_VOTES_PER_REGRESSED",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "contributionCap",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/aggregate.ts",
+      "name": "dpNoiseFloorOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΠΑΝ-117 按源 ε 铸 DP 噪声校准地板：robustMergeDigests 同文件消费 + pan114-119.fix 纯函数律执法；导出为测试注入/审计面。"
+    },
+    {
+      "file": "src/federation/apply.ts",
+      "name": "APPLY_TS_SCATTER_MS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "PRIVACY_BUDGET_MAX_ACCOUNTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "RDP_ORDER",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "mergeDigests",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "privacyBudgetOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "privacyBudgetReport",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "rdpEpsilon",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "resetPrivacyBudgetRuntime",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "subsampleAmplifiedEpsilon",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/digest.ts",
+      "name": "zeroBins",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "FEDERATION_AUTH_ENV",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "FEDERATION_AUTH_SIGNATURE_HEADER",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "FEDERATION_AUTH_TIMESTAMP_HEADER",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "FEDERATION_DP_KEY_ENV",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "FEDERATION_SIGNING_KEY_ENV",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "KNOWN_CLIENT_ROSTER_CAPACITY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "KNOWN_CLIENT_ROSTER_SATURATION",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "canonicalFederationJson",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts、test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "federationAuthHeaders",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts、test/w9deploy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "federationDpSeed",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "federationMaxRemotes",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "federationSigningIdentity",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "federationSigningKeyHint",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "logFederationSigningKeyHint",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "signEvidenceDigest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/sync.ts",
+      "name": "verifyEvidenceDigestSignature",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "DEFAULT_TRUST_FLUSH_EVERY",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w6persist.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "FEDERATION_FINGERPRINT_KEY_SEP",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "FEDERATION_REVOCATION_STORE_VERSION",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（4 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "PROBATION_CLEAN_MERGES",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "PROBATION_TRUST_CAP",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "TRUST_PROBATION_EXEMPT_SOURCE",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "TRUST_STORE_VERSION",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（4 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "armFederationRevocationList",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "createFederationRevocationFileStore",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "federationRevocationList",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "federationTrustPersistenceStatus",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/w6persist.test.ts、test/w7wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "flushFederationRevocations",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "loadFederationRevocations",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "restoreFederationRevocations",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "restoreFederationTrust",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu.federation.test.ts、test/epochMu2.aggregate.test.ts、test/pan6975.fedprivacy.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "revokeFederationSource",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "serializeFederationRevocations",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "serializeFederationTrust",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochMu2.aggregate.test.ts、test/w6persist.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/federation/trust.ts",
+      "name": "unrevokeFederationSource",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/filePerms.ts",
+      "name": "buildIcaclsArgs",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/filePerms.test.ts、test/vlm.connection.perms.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/filePerms.ts",
+      "name": "tightenWindowsAcl",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/focusTracker.ts",
+      "name": "NO_FOCUS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1exec.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/focusTracker.ts",
+      "name": "predictedFresh",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1exec.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/fuzzy.ts",
+      "name": "approximateSubstring",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochR.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryGuard.ts",
+      "name": "attemptCanaryProbe",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2canary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryGuard.ts",
+      "name": "canaryBudgetSnapshot",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/f2-9.guards.test.ts、test/w2canary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryGuard.ts",
+      "name": "productionCanaryPorts",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/f2-9.guards.test.ts、test/w2canary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryGuard.ts",
+      "name": "recentCanaryEvents",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/f2-9.guards.test.ts、test/w2audit.test.ts、test/w2canary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryLogic.ts",
+      "name": "CANARY_ACTION_TOOLS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：真实消费 = 本文件 :323 金丝雀判定（canary 探针工具白名单判据面，生产路径在用）；guards/canaryGuard.ts:87 为桶再导出（导出≠通电）—— 导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/guards/canaryLogic.ts",
+      "name": "boundCanaryEpistemicPorts",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.arch.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryLogic.ts",
+      "name": "isIdempotentToggleLabel",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2canary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/canaryLogic.ts",
+      "name": "isInstantReactionLabel",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2canary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/circuitBreakerGuard.ts",
+      "name": "RECOVERY_HINT_TEXT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2recovery.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/circuitBreakerGuard.ts",
+      "name": "posteriorTripProbability",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochR.test.ts、test/w2recovery.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/circuitBreakerGuard.ts",
+      "name": "regularizedBeta",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochR.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/popupGuard.ts",
+      "name": "popupSessionCount",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY6.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/rootCauseGuard.ts",
+      "name": "productionRootCausePorts",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1rootcause.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/rootCauseGuard.ts",
+      "name": "recentRootCauseReports",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1rootcause.test.ts、test/w7e2e.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/rootCauseGuard.ts",
+      "name": "rootCauseProbesSettled",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1rootcause.test.ts、test/w7e2e.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/hmacKeyFile.ts",
+      "name": "HMAC_KEY_FILE_BYTES",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "F3-7 BC-5 收编共享件（ΠΑΝ-3/ΠΑΝ-80 密钥档）：仅本文件内部消费 —— loadOrCreateHexKeyFile 缺省参数（32B = sha256 对称宽，对齐 approval.security CSPRNG 标准）；两调用方 queueContracts/checkpoint 不取该缺省面；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/imageDelivery.ts",
+      "name": "imageBlockFromValue",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判（原 dead-code 系误判）：跨文件生产消费在案 —— src/tools/takeScreenshot.ts:30/:64 与 src/tools/zoomInspect.ts:12/:88（生产工具面 attachments 铸块）。消费位均为 spread（...imageBlockFromValue(value)），census 引用正则误排除故判 orphan 在册 —— 实为 wired，census 引用判定面修复后本条应随幽灵律出册。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "PROBE_ECON_EXPENSIVE_BITS_PER_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "PROBE_ECON_MIN_SAMPLES",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochNu.probeEcon.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "PROBE_ECON_STOP_BITS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochNu.probeEcon.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "TEXT_CLICK_REFUSE_FLOOR",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochZ.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "economyChannelOrder",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochNu.probeEcon.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "economyShouldStop",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochNu.probeEcon.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "fuseVerdict",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/interactivityProbe.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "uiaVerdict",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/interactivityProbe.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/interactivityProbe.ts",
+      "name": "verdictBits",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochNu.probeEcon.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ioMutex.ts",
+      "name": "IO_TIMEOUT_MARKER",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p1-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ioMutex.ts",
+      "name": "IoTimeoutError",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p1-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ioMutex.ts",
+      "name": "getIoTimeoutDefault",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p1-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/journal.ts",
+      "name": "inspectJournalWal",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΤΕΛ-2 复核改判：仅测试宇宙消费（test/pan49-55.fixes.test.ts ×10）—— WAL 段直查的测试注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/journal.ts",
+      "name": "journalDiskStats",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/checkpoint.test.ts、test/journal.test.ts、test/w2audit.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/journal.ts",
+      "name": "lempelZivComplexity",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochF.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/journal.ts",
+      "name": "normalizedActionComplexity",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochF.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/kernel/calibrator.ts",
+      "name": "DEFAULT_GUARDRAILS",
+      "kind": "const",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/kernel/calibrator.ts",
+      "name": "gpRbf1d",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/kernel.calibrator.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/kernel/calibrator.ts",
+      "name": "optimalThreshold",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/kernel.calibrator.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/kernel/calibrator.ts",
+      "name": "optimalThresholdGpUcb",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/kernel.calibrator.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/kernel/conductor.ts",
+      "name": "DEFAULT_TICK_INTERVAL_MS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/kernel.conductor.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/kernel/index.ts",
+      "name": "promoteFromCli",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΤΕΛ-2 复核改判：仅测试宇宙消费（test/pan49-55.fixes.test.ts ×5）—— CLI 晋升通道的测试注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/kernel/lineage.ts",
+      "name": "LINEAGE_DEFAULT_KEEP",
+      "kind": "const",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/kernel/registry.ts",
+      "name": "resetKernelRuntime",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.counterfactual.test.ts、test/epochMu.federation.test.ts、test/epochTheta.wiring.test.ts 等 10 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/adapters.ts",
+      "name": "translateVerdict",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p0-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/events.ts",
+      "name": "KNOWLEDGE_EVENTS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/knowledge/index.ts",
+      "name": "apply",
+      "kind": "function",
+      "category": "unwired-organ",
+      "reason": "ΤΕΛ-2 复核改判：cordis 插件壳生命周期契约（name/inject/apply 三件套之一）—— 宿主 ctx.plugin 装载路径反射消费，grep 不可见；apply 体为 D-7 器官约 290 行装配立法，非死代码。epochK.test.ts:390 源级断言其在位。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/knowledge/index.ts",
+      "name": "inject",
+      "kind": "const",
+      "category": "unwired-organ",
+      "reason": "ΤΕΛ-2 复核改判：cordis 插件壳三件套之 inject（依赖驱动加载声明）—— 宿主反射消费，grep 不可见，缺席即改插件契约形状；epochK.test.ts:403 消费同壳 name/apply 执法契约形状。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/knowledge/index.ts",
+      "name": "name",
+      "kind": "const",
+      "category": "unwired-organ",
+      "reason": "ΤΕΛ-2 复核改判：cordis 插件壳三件套之 name（插件标识）—— 宿主反射消费，grep 不可见；epochK.test.ts:403 直接消费同壳面执法契约形状。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/knowledge/knowledgeBase.core.ts",
+      "name": "cocktailRotate",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.random.ts",
+      "name": "betaPosterior",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "DEFAULT_REWARD_WINDOW_MS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "MEMORY_OP_CATEGORIES",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（7 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "MEMORY_OP_FEEDBACK_GATE",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "MEMORY_OP_KINDS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "compareHelpedCohorts",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "decideMemoryOpThreshold",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "evaluateMemoryOpSuccess",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "memoryOpSpecOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "memoryOpSpecs",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "recordMemoryOpFeedback",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "registerMemoryOpKernels",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/knowledge.test.ts、test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/memoryOps.ts",
+      "name": "thresholdFromSample",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2memory.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/metrics.ts",
+      "name": "learningCurve",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/persistence.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/metrics.ts",
+      "name": "mannWhitney",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochQ.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/metrics.ts",
+      "name": "summarizeRuns",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/ablation.bench.ts、test/persistence.test.ts、test/realMachine.bench.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/params.ts",
+      "name": "paramCatalog",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/calibration.bench.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/params.ts",
+      "name": "resetParams",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/calibration.bench.ts、test/jointCalibration.bench.ts、test/paramAblation.bench.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/params.ts",
+      "name": "setParam",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/calibration.bench.ts、test/jointCalibration.bench.ts、test/paramAblation.bench.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/stations.ts",
+      "name": "StubDecisionStation",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/knowledge.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/stations.ts",
+      "name": "embedCached",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/reflexiveDecision.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/stations.ts",
+      "name": "ocrWordsToClickCandidates",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochZ.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/worldModel.ts",
+      "name": "WORLD_MODEL_MAX_TYPES",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan43-48.knowledgeClosures.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/knowledge/worldModel.ts",
+      "name": "mergeSimilarTypes",
+      "kind": "method",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-1 改判（原 unwired-organ）：批判点名的「类型无界增长零治理」已由 ΠΑΝ-47 的 maintainCapacity 维护幕接线收口 —— pipeline run-end 生产主路径（碎片收拢 + 容量执法单点，journaling fork 拒绝执行的纪律面）内以 this.mergeSimilarTypes() 消费；治理已通电，直连外呼反而绕开维护幕纪律（收拢不进 ops 日志的重放等价性立法）。测试面 worldModel 直接调用为器官自带电源注入面；导出面为治理审计面。接线源级锚：test/tel1.wiring.test.ts ΤΕΛ-1⑥。",
+      "definers": [
+        "src/knowledge/worldModel.ts"
+      ]
+    },
+    {
+      "file": "src/knowledge/worldModel.ts",
+      "name": "surpriseSpectrum",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochKappa.curriculum.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ltlf.ts",
+      "name": "MINE_MIN_SUPPORT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochO.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ltlf.ts",
+      "name": "boundedResponse",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochI.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ltlf.ts",
+      "name": "ltlG",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochI.test.ts、test/epochP.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ltlf.ts",
+      "name": "ltlU",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochI.test.ts、test/epochP.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ltlf.ts",
+      "name": "ltlX",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochI.test.ts、test/epochP.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/macroExecutor.reanchor.ts",
+      "name": "REANCHOR_IOU_GATE",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4macro.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/macroExecutor.reanchor.ts",
+      "name": "REANCHOR_WINDOW_MAX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/macroExecutor.reanchor.ts",
+      "name": "REANCHOR_WINDOW_MIN",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/macroExecutor.ts",
+      "name": "MACRO_DEFAULT_BUDGET",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/macroExecutor.ts",
+      "name": "MACRO_SPOT_FLAT_ABORT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/macroExecutor.ts",
+      "name": "MACRO_SPOT_PERIOD",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4macro.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/macroExecutor.ts",
+      "name": "skillReliability",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/ncd.ts",
+      "name": "lzCount",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochH.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/ncd.ts",
+      "name": "ncd",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochH.test.ts、test/epochP.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/index.ts",
+      "name": "ADAPTIVE_ANCHOR_THRESHOLD",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochPi.notary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/index.ts",
+      "name": "notaryAutoAnchorIfDue",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochPi.notary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/index.ts",
+      "name": "shouldAnchor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochPi.notary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "DER_OID_SHA256",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "TSA_PIN_ENV_KEY",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/aor5.tsaSignature.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "buildTimestampRequest",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "derChildren",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/aor5.tsaSignature.test.ts、test/epochPi.notary.test.ts、test/w8.replaynotary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "derContent",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（18 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "derEncode",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/aor5.tsaSignature.test.ts、test/epochPi.notary.test.ts、test/w8.replaynotary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "derRead",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/aor5.tsaSignature.test.ts、test/epochPi.notary.test.ts、test/w8.replaynotary.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "parseTimestampReply",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "parseTsaPinList",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/aor5.tsaSignature.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/notary/rfc3161.ts",
+      "name": "verifyTsaSignature",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/aor5.tsaSignature.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/orchestration/index.ts",
+      "name": "apply",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochO.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/orchestration/index.ts",
+      "name": "backfillVerdict",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/orchestration/index.ts",
+      "name": "inject",
+      "kind": "const",
+      "category": "unwired-organ",
+      "reason": "ΤΕΛ-2 复核改判：cordis 插件壳三件套之 inject —— 宿主反射消费，grep 不可见；同壳 apply/name 均活（epochO.test.ts:735 直接 import apply；epochJ/w8.no26 消费同文件 reconcileVerdicts），单删 inject 将使契约残缺。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/orchestration/index.ts",
+      "name": "name",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/orchestration/index.ts",
+      "name": "reconcileVerdicts",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochJ.test.ts、test/w8.no26.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/orchestration/pipeline.ts",
+      "name": "decodePlanReadyChain",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-118 plan-ready chain 臂防御解码：run() 同文件消费（毒链不入场闸）+ pan114-119.fix 执法；导出为解码面的测试与审计面。"
+    },
+    {
+      "file": "src/orchestrator.ts",
+      "name": "ACTOR_SYSTEM_PROMPT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/orchestrator.ts",
+      "name": "PLANNER_BUDGET_FRACTION",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/no3fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/orchestrator.ts",
+      "name": "actorChannelWeights",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochS.test.ts、test/epochXi.wiring.test.ts、test/p2b-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/orchestrator.ts",
+      "name": "layerSubTasks",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3dag.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/organCensus.ts",
+      "name": "ORGAN_CENSUS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochDelta.infra.test.ts、test/epochU.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/organCensus.ts",
+      "name": "diffOrganCensus",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-124：仅本文件内部消费 —— :194 organCensusDrift 的基线比对原子（跨版本对比/测试复算漂移事件序的执法锚，pan124）；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/organCensus.ts",
+      "name": "organCensusDrift",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "ΠΑΝ-124 定义点注释自证预留（「接线面：观测 API 在场，消费方按需点名 —— 与 organCensus() 同步契约」）：quality_checkup 自省段 AMBER 注记的观测面待点名（organCensus() 已由 observabilityTools.ts:302 生产消费，drift 面尚未）；接线落地后删本条。"
+    },
+    {
+      "file": "src/perceptualHash.ts",
+      "name": "ringHash",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochU.test.ts、test/organAblation.bench.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/phaseHmm.ts",
+      "name": "PHASE_LABELS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalBackend.surface.ts",
+      "name": "androidSurface",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4mobile.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalBackend.surface.ts",
+      "name": "parseSurfaceId",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4mobile.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalBackend.ts",
+      "name": "PhysicalBackendError",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/now25.systemPerf.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalBackend.ts",
+      "name": "_setAdapterForTests",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/actionVerifier.stable.test.ts、test/epochBeta.refute.test.ts、test/epochF.test.ts 等 19 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalBackend.ts",
+      "name": "defaultKeyPath",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalBackend.ts",
+      "name": "defaultMmapDir",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalBackend.ts",
+      "name": "listMobileDevices",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4mobile.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalBackend.ts",
+      "name": "listSurfaces",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4mobile.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/capToken.ts",
+      "name": "parseToken",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΤΕΛ-2 复核改判：仅测试宇宙消费（test/pan128.capContract.test.ts cap 契约对账执法面）+ src/physicalExecution/index.ts:37 桶再导出（导出≠通电）；组合根零调用。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/physicalExecution/d7HostPort.ts",
+      "name": "RESPAWN_BACKOFF_BASE_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalExecution/d7HostPort.ts",
+      "name": "RESPAWN_BACKOFF_CAP_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalExecution/d7HostPort.ts",
+      "name": "RESPAWN_MAX_ATTEMPTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan64-68.physicalExecution.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/d7HostPort.ts",
+      "name": "respawnRuling",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan64-68.physicalExecution.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/d7HostPort.ts",
+      "name": "sanitizeScreenSize",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/physicalExecution/d7HostPort.ts",
+      "name": "translateFailureKind",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan64-68.physicalExecution.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/httpClient.ts",
+      "name": "setUndiciBridge",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "C2-7 §1.5（低危）：宿主桥臂（ΑΩ-R3\"宿主桥最优先\"）在本仓部署不可达 —— undici 动态 import 臂仍活。宿主如注入则活。"
+    },
+    {
+      "file": "src/physicalExecution/screenshotHandle.ts",
+      "name": "ScreenshotBatch",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/physicalExecution.screenshotHandle.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/serviceManager.ts",
+      "name": "SHUTDOWN_GRACE_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalExecution/serviceManager.ts",
+      "name": "SHUTDOWN_HTTP_TIMEOUT_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/physicalExecution/serviceManager.ts",
+      "name": "judgeHealthBody",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochDelta.infra.test.ts、test/epochSigma.identity.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/serviceManager.ts",
+      "name": "stopChildProcess",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/physicalExecution.serviceManager.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/shmReader.ts",
+      "name": "clearMmapRoots",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan64-68.physicalExecution.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/physicalExecution/shmReader.ts",
+      "name": "closeAllFds",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan64-68.physicalExecution.test.ts、test/physicalExecution.shmReader.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/planner.ts",
+      "name": "PLANNER_STREAM_IDLE_MS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/no3fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/planner.ts",
+      "name": "PLANNER_SYSTEM_PROMPT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/planner.ts",
+      "name": "extractJsonArraySpan",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/no3fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/planner.ts",
+      "name": "mintChainPlanReady",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan39-42.sandbox.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/popupDetector.freshness.ts",
+      "name": "GROUNDING_FRESHNESS_THRESHOLD",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2audit.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/popupDetector.freshness.ts",
+      "name": "freshnessPortInstalled",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2audit.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/popupDetector.freshness.ts",
+      "name": "resetFreshnessProbe",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochDelta.safety.test.ts、test/p2b-fixes.test.ts、test/w2audit.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/popupDetector.ts",
+      "name": "SprtPopupFilter",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochQ.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "BLEND_FINAL",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "BLEND_PROCESS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "DEFAULT_CHANNEL_WEIGHTS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :246/:254/:288 缺省权重面；另 test/w3score 消费。三处消费位均为 spread（...DEFAULT_CHANNEL_WEIGHTS），census 引用正则误排除故原判 dead-code；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "DEFAULT_LATE_BIAS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3score.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "DEFAULT_LOW_STEP_THRESHOLD",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3score.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "INTENT_VALUE_PHASH_AGREE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :349 pHash 一致分值（三元值位消费，census 引用正则的冒号前瞻误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "INTENT_VALUE_PHASH_DISSENT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "INTENT_VALUE_SATISFIED",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :348 意图满足分值（三元值位消费，census 引用正则的冒号前瞻误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "INTENT_VALUE_THOUGHT_ONLY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "INTENT_VALUE_UNSATISFIED",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "OSC_RUN2",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :356 二轮震荡分值（三元值位消费，census 引用正则的冒号前瞻误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "SCALE_VALUE_ELEMENT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :343 元素级证据分值（三元值位消费，census 引用正则的冒号前瞻误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "SCALE_VALUE_PAGE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :342 页级证据分值（三元值位消费，census 引用正则的冒号前瞻误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "SCALE_VALUE_UNKNOWN",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "SCORE_CALIBER_VERSION",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3score.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "SCORE_TOOL_SETS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΠΑΝ-109 同源锁测试的对账锚（定义注释自证「不改变任何运行行为」）—— 仅 test/pan105-113 消费：读 journal.ts 源文本与副本逐元素对账防漂移；运行面直接消费内部 SCORED_TOOLS/MARKER_TOOLS，不经本面。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "WAIT_STREAK_DECAY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "renderProcessScore",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3score.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "renderSegmentedScore",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w6deep.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "scoreJournalLines",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3score.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "scoreJournalSegmentsLines",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "scoreJournalSegmentsText",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w6deep.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/processScore.ts",
+      "name": "scoreJournalText",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3score.test.ts、test/w6deep.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/proof.ts",
+      "name": "bagPeaks",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/proof.ts",
+      "name": "leafHash",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/prophecy/index.ts",
+      "name": "mintProphecy",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochEpsilon.prophecy.test.ts、test/r18.prophecy.test.ts、test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/index.ts",
+      "name": "settleProphecy",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochEpsilon.prophecy.test.ts、test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/index.ts",
+      "name": "surpriseRunRecord",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "COARSE_PREFIX_HEX",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "PROB_EPSILON",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "PROPHECY_QUANT_KERNEL_KEY",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/autonomy.counterfactual.test.ts、test/r18.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "QUANT_KEEP_HEX",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/r18.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "QUANT_MAX_KEEP_HEX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "QUANT_MIN_KEEP_HEX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "SURPRISE_MAX_BITS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/r18.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/internal.ts",
+      "name": "clampSurpriseBits",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/r18.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/stats.ts",
+      "name": "DEFAULT_TOP_K",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（5 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/prophecy/stats.ts",
+      "name": "prophecyCalibration",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/stats.ts",
+      "name": "prophecyPostmortem",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/stats.ts",
+      "name": "prophecyPostmortemLines",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.prophecy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/prophecy/stats.ts",
+      "name": "prophecyStats",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判（原 dead-code 系误判）：跨文件生产消费在案 —— src/prophecy/index.ts:354 导入、:654 引擎生命体征统计；:349 为桶再导出（导出≠通电）。:654 消费位为 spread（...prophecyStats(this.ledger)），census 引用正则误排除故判 orphan 在册 —— 实为 wired，census 引用判定面修复后本条应随幽灵律出册。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "assertExemptionRegistryValid",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7doctor.test.ts、test/w9supply.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "bindPluginConfig",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "doctorSourceCacheStats",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/doctor.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "formatDoctorSummary",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/doctorCli.smoke.test.ts、test/w7doctor.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "resetConfig",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/doctor.test.ts、test/epochJ.test.ts、test/w6r.doctor.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/qualityDoctor.ts"
+      ]
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "resetDoctorSourceCache",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/doctor.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/qualityDoctor.ts",
+      "name": "resetMemory",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/doctor.test.ts、test/epochJ.test.ts、test/w6r.doctor.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/qualityDoctor.ts"
+      ]
+    },
+    {
+      "file": "src/recoveryEfficacy.ts",
+      "name": "RECOVERY_MIN_SAMPLES",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/recoveryEfficacy.ts",
+      "name": "RECOVERY_WINDOW_DEFAULT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2recovery.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/recoveryEfficacy.ts",
+      "name": "demarcateRecoveryEpisodes",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2recovery.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/recoveryEfficacy.ts",
+      "name": "recoveryEventsFromJournal",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2recovery.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/recoveryEfficacy.ts",
+      "name": "recoveryPosteriorMean",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2recovery.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/resultContract.ts",
+      "name": "escapeContractPrefix",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "ΠΑΝ-108 定义点注释自证预留（「发射侧（正文以 [Error]/[System] 开头的工具）用本函数包一层即安全，双端同源」）：判定侧行首锚定已生产接线（firstLineHasPrefix），发射侧转义收编待后续工单；接线落地后删本条。"
+    },
+    {
+      "file": "src/reversalEscrow.ts",
+      "name": "builtinCompensationSemantics",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3escrow.test.ts、test/w4reverse.test.ts、test/w6fix.test.ts 等 6 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/reversalEscrow.ts",
+      "name": "compensationPathOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts、test/w6fix.test.ts、test/w7fuzz.test.ts 等 5 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/reversalEscrow.ts",
+      "name": "createCompositeCompensationExecutor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.escrow.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/riskGate.confusables.generated.ts",
+      "name": "CONFUSABLES_ASCII",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判（原 dead-code 系误判）：跨文件生产消费在案 —— src/riskGate.ts:9 导入、:90 展开进混淆折叠表（风险词门生产在用）。消费位为 spread（...CONFUSABLES_ASCII），census 引用正则误排除故判 orphan 在册 —— 实为 wired，census 引用判定面修复后本条应随幽灵律出册。生成器 scripts/gen_confusables.mjs 同名单源。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/riskGate.ts",
+      "name": "parseRiskPatterns",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochE.test.ts、test/safetySystems.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/riskGate.ts",
+      "name": "riskPatternCacheSize",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochDelta.perimeter.test.ts、test/riskGate.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/riskGate.ts",
+      "name": "setLevel",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts、test/w8.escrow.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/riskGate.ts"
+      ]
+    },
+    {
+      "file": "src/rollbackPlanner.plan.ts",
+      "name": "inverseForStep",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "REPLAN_BUDGET_STEPS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "RESTORATION_TOLERANCE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "ReplanBudgetController",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "createSteerBiasPort",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "defaultAlternativeKeys",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "executeRollback",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "pendingBiasOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/rollbackPlanner.ts",
+      "name": "verifyRestoration",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4reverse.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/actionSchema.ts",
+      "name": "ACTION_LIMITS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（8 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/sandbox/apply.ts",
+      "name": "physicalBackendHostExecutor",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochChi.attestation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/events.ts",
+      "name": "FINGERPRINT_MAX_BITS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochChi.attestation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/events.ts",
+      "name": "FINGERPRINT_MIN_BITS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochChi.attestation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/index.ts",
+      "name": "apply",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochK.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/index.ts",
+      "name": "inject",
+      "kind": "const",
+      "category": "unwired-organ",
+      "reason": "ΤΕΛ-2 复核改判：cordis 插件壳三件套之 inject —— 宿主反射消费，grep 不可见；epochK.test.ts:403 直接消费同壳 name/apply（插件契约形状执法面）。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/sandbox/index.ts",
+      "name": "name",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochK.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/log.ts",
+      "name": "SandboxLog",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochChi.attestation.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/macroRehearsal.ts",
+      "name": "MacroRehearsalGate",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan39-42.sandbox.test.ts、test/w4macro.test.ts、test/w7e2e.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/macroRehearsal.ts",
+      "name": "buildVirtualScene",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4macro.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/macroRehearsal.ts",
+      "name": "translateToSandboxActions",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4macro.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/memory.ts",
+      "name": "MUSCLE_HOST_COLLAPSE_MIN_TRIALS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-11 应急补登记（并行工位在途新增，T1-4 D-G16 M7 留案域的宿主塌陷治理立法件）：本文件内部消费在案 —— :292 塌陷判定最小宿主重放次数；导出面冗余、实现活。工位收稿后按实况复核本条。"
+    },
+    {
+      "file": "src/sandbox/memory.ts",
+      "name": "MUSCLE_HOST_COLLAPSE_RELIABILITY",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-11 应急补登记（并行工位在途新增，T1-4 D-G16 M7 留案域的宿主塌陷治理立法件）：本文件内部消费在案 —— :293 塌陷判定的可靠度下限阈值；导出面冗余、实现活。工位收稿后按实况复核本条。"
+    },
+    {
+      "file": "src/sandbox/memory.ts",
+      "name": "MUSCLE_MEMORY_MAX_ENTRIES",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-11 应急补登记（并行工位在途新增，T1-4 D-G16 M7「muscle 记忆无容量上限」留案的收口立法件）：本文件内部消费在案 —— :232/:348 两处容量上限执法（满员驱逐）；导出面冗余、实现活。工位收稿后按实况复核本条。"
+    },
+    {
+      "file": "src/sandbox/memory.ts",
+      "name": "MUSCLE_STALE_AFTER_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-11 应急补登记（并行工位在途新增，T1-4 D-G16 M7 留案域的过期淘汰立法件）：本文件内部消费在案 —— :189 过期先走排序键 + :200 诊断回显；导出面冗余、实现活。工位收稿后按实况复核本条。"
+    },
+    {
+      "file": "src/sandbox/memory.ts",
+      "name": "stepSignature",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4macro.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/types.ts",
+      "name": "hasVerificationLayer",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochK.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sandbox/virtualScreen.ts",
+      "name": "VIRTUAL_POPUP_Z",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判（原 dead-code 系误判）：跨文件生产消费在案 —— src/sandbox/macroRehearsal.ts:22/:171（宏排练 popup 铸高层 z 单源）+ 本文件 :71 缺省。:171 消费位为三元值位（? VIRTUAL_POPUP_Z : 0），census 引用正则的冒号前瞻误排除故判 orphan 在册 —— 实为 wired，census 引用判定面修复后本条应随幽灵律出册。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/selfmodel/index.ts",
+      "name": "SelfModel",
+      "kind": "class",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"未来\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/sequitur.ts",
+      "name": "expandGrammar",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochF.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "DEFAULT_SKILL_FED_FLUSH_EVERY",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_ACTIVATE_LOCAL_HITS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4fed.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_FED_STORE_VERSION",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（4 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_FED_VERSION",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_FP_SCENE_PREFIX",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_HASH_DOMAIN_MAX",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_HASH_GRID",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :349/:520 hash 域桶宽单源（identity 域 1/ε 网格与地板，三元值位消费，census 引用正则的冒号前瞻误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_INJECT_SAMPLE_GATE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_LSH_GRID",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4fed.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_MAX_UPLOADS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_MIN_AGGREGATE_SOURCES",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4fed.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_OUTLIER_FLOOR_BUCKETS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_OUTLIER_IQR_SCALE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "SKILL_SLOT_CLIP",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "aggregateSkillShares",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts、test/w4fed.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "buildSkillUploads",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts、test/w4fed.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "shouldAttemptInjection",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w4fed.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "skillFederationPersistenceStatus",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillFederation.ts",
+      "name": "slotChannelOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillLibrary.templates.ts",
+      "name": "TEMPLATE_MAX_ALIGN_COST_RATIO",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3skill.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillLibrary.templates.ts",
+      "name": "TEMPLATE_MIN_HOMOLOGS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3skill.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillLibrary.templates.ts",
+      "name": "dtwAlignTools",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3skill.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillLibrary.templates.ts",
+      "name": "holeTypeOf",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3skill.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillLibrary.templates.ts",
+      "name": "inferHoleSource",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3skill.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/skillLibrary.ts",
+      "name": "setSaveTimersForTest",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3skill.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/skillLibrary.ts"
+      ]
+    },
+    {
+      "file": "src/sleep/dreamReplay.ts",
+      "name": "DREAM_BUDGET_DEFAULTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5dream.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/dreamReplay.ts",
+      "name": "locateDivergence",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5dream.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/dreamReplay.ts",
+      "name": "readDreamCostLedger",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5dream.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/dreamReplay.ts",
+      "name": "resolveDreamBudget",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5dream.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/dreamReplayCore.ts",
+      "name": "PER_WEIGHTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5dream.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/dreamReplayCore.ts",
+      "name": "POLICY_FINGERPRINT_GRID",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5dream.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/dreamReplayCore.ts",
+      "name": "finiteNonNeg",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（8 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/sleep/index.ts",
+      "name": "DEFAULT_SLEEP_BUDGET_MS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochUpsilon.sleep.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/sleep/index.ts",
+      "name": "SLEEP_ACT_CAP_FLOOR_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-113 单幕预算上限立法：仅本文件内部消费 —— :183 max(200ms, 总预算×35%) 的地板常量（一幕吃光全预算致五幕饿死的执法面）；测试面 pan105-113；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/sleep/index.ts",
+      "name": "SLEEP_ACT_MAX_SHARE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-113：仅本文件内部消费 —— :183 单幕预算份额 0.35（幕间事后记账 + 迟到梦幕硬闸共用）；测试面 pan105-113；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "ARBITRATION_CALIBRATION",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΠΑΝ-120 定标语料的只读镜像导出（定义注释自证「执法测试直接复算分布与阈值」）—— 仅 test/pan120 消费；生产阈值函数直接读内部 CALIBRATION_NULL/POSITIVE_PAIRS，不经本面。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "EvidenceBackedArbitrator",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2swarm.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "anchorIoU",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2swarm.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "calibratedConsensusThreshold",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-120：仅本文件内部消费 —— :150 缺省裁决策略的 consensus 阈值 ROC 定标点（生产裁决路径活：真共识对不再被旧 0.5 误判冲突）；测试面 pan120 定标确定性/分离不变量；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "geometricAnchorMatch",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2swarm.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "mintVerifierMission",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2swarm.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/subAgent.arbitration.ts",
+      "name": "semanticAnchorMatch",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2swarm.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/subAgent.ts",
+      "name": "wireBoardJournal",
+      "kind": "method",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w6persist.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。",
+      "definers": [
+        "src/subAgent.ts"
+      ]
+    },
+    {
+      "file": "src/swarm.ts",
+      "name": "privateSceneTag",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan6975.fedprivacy.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/system.ts",
+      "name": "_setOpenUrlSpawnForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/tools.openUrl.test.ts、test/w6r.shellhardening.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "ReservoirSketch",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochS.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "Ring",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/telemetry.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "StreamingPercentiles",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochS.test.ts、test/organAblation.bench.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "cusumAlarm",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochG.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "cusumAlarmTwoSided",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochO.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "fitGpdTail",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochF.test.ts、test/epochO.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/telemetry.ts",
+      "name": "hurstExponent",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochG.test.ts、test/epochP.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/textReader.ts",
+      "name": "_setServerOcrFailedAt_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p2a-fixes.test.ts、test/p3-ocrscore.test.ts、test/tools.textTools.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/textReader.ts",
+      "name": "_setWorkerFactory_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochF.test.ts、test/p3-ocrscore.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/actionGate.ts",
+      "name": "DEFAULT_ACTION_GATE_CONFIG",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :572 缺省配置合并（spread 消费位 ...DEFAULT_ACTION_GATE_CONFIG，census 引用正则误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/tools/actionGate.ts",
+      "name": "isRecoveryChord",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R5-1（恢复键误撞不可逆闸校正）：本文件内部消费在案 —— judgeHotkeyFace ③ 危险上下文分类前的豁免判定（AGON 批2 T8 双败修法面，undo/redo 与裸编辑删除键不进审批域）；测试面 test/r51.recoveryChord.test.ts 纯函数锁定；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/tools/actionGate.ts",
+      "name": "notaryHandshake",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/tools/approvalTools.ts",
+      "name": "wireDemonstrationEducation",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/tools/clickElement.ts",
+      "name": "elementVerify",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p2b-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/clickMouse.ts",
+      "name": "frameTicketing",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/clickMouse.ts",
+      "name": "mouseVerify",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/clickMouse.ts",
+      "name": "menuExpandBetrayedHint",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-4 话术纯函数：clickMouse.ts 内 guidanceStage 生产消费（同文件消费方在用）；导出面仅为 test/r24.menuTwoStage.test.ts 直测话术要素。接线（跨文件消费）落地后删本条。"
+    },
+    {
+      "file": "src/tools/clickMouse.ts",
+      "name": "menuNotOpenGateHint",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-4 话术纯函数：clickMouse.ts 内 interactivityStage 生产消费（同文件消费方在用）；导出面仅为 test/r24.menuTwoStage.test.ts 直测话术要素。接线（跨文件消费）落地后删本条。"
+    },
+    {
+      "file": "src/tools/dragMouse.ts",
+      "name": "judgeTransport",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/index.ts",
+      "name": "assertToolAuditClassification",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2audit.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/index.ts",
+      "name": "buildAllTools",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2audit.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/index.ts",
+      "name": "w4ForwardingSteerSession",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/tools/metricsDashboard.ts",
+      "name": "noteAutonomyOutcome",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochSigma.dashboard.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/metricsDashboard.ts",
+      "name": "resetAutonomyLedger",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochSigma.dashboard.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/pressHotkey.ts",
+      "name": "HOTKEY_WHITELIST_KEYS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/tools/pressHotkey.ts",
+      "name": "isSelectionChord",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R5-2（T8·选区回执）代登记（并行工位在途新增，ΠΑΝ-130 同律）：本文件内部消费在案 —— 选族和弦（shift+导航键）回执注记位（光标锚定区域 dHash 验证未接线，见 R5-2 报告 §T8-2）；测试面 test/r52.typeTextNewline.test.ts；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/tools/replayActions.ts",
+      "name": "DEAD_STEP_DISTANCE",
+      "kind": "const",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"后续\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/tools/replayActions.ts",
+      "name": "isDeadStep",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/replayActions.ts",
+      "name": "replayOne",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"预留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/tools/scrollPage.ts",
+      "name": "COLUMN_STRIP_COUNT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/scrollPage.ts",
+      "name": "MAX_SCROLL_AMOUNT",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/no31fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/scrollPage.ts",
+      "name": "frameColLuminance",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/skillTools.ts",
+      "name": "POSTCONDITION_THRESHOLD",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/skillTools.ts",
+      "name": "judgePostcondition",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "DRIFT_ALERT_THRESHOLD",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（2 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "DRIFT_CHECK_INTERVAL_STEPS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "STEER_THROTTLE_STEPS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "buildSteerChoice",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "createSteerSession",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts、test/w5steer.test.ts、test/w7e2e.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "parseBranchAnswer",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w5steer.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "parseSteerAnswer",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "scoreDrift",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/steerTools.ts",
+      "name": "shouldCheckDrift",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3drift.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/switchTab.ts",
+      "name": "TAB_SWITCH_SETTLE_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/tools/switchTab.ts",
+      "name": "TAB_SWITCH_STABLE_DISTANCE",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/tools.switchTab.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/switchTab.ts",
+      "name": "_setTabHashCaptureForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/tools.switchTab.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/switchTab.ts",
+      "name": "judgeTabSwitch",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/tools.switchTab.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/vlmWizard.ts",
+      "name": "_resetVlmWizardForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.tools.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/zoomInspect.ts",
+      "name": "PYRAMID_DEFAULTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/zoomInspect.ts",
+      "name": "nextPyramidRegion",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/tools/zoomInspect.ts",
+      "name": "pyramidShouldStop",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/uiExtractor.ts",
+      "name": "nmsElements",
+      "kind": "function",
+      "category": "reserved-api",
+      "reason": "定义点注释自证预留（标记\"保留\"）—— 尚未接线的外来面；接线落地后删本条。"
+    },
+    {
+      "file": "src/uiMemory.ts",
+      "name": "LANDMARK_HALF_LIFE_H",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochY.test.ts、test/p2b-fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "DEFAULT_LEDGER_TUNING",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΤΕΛ-2 复核改判：本文件内部消费在案 —— :823 缺省调参合并（spread 消费位 ...DEFAULT_LEDGER_TUNING，census 引用正则误排除故原判 dead-code）；导出面冗余、实现活。ΤΕΛ-11 收割改判。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "defaultAnalyze",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w7wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "estimateGlobalDisplacement",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "ΠΑΝ-121：仅本文件内部消费 —— :260 computeDiffRegions / :949 defaultAnalyze 前置的全局位移估计（三闸防伪配准：相干/增益/幅度）；测试面 pan121 位移原子阳/阴性；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "regionKey",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochG.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "regionKeys",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochH.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "regionsToPatchRects",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3incremental.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/visualDiff.ts",
+      "name": "usableImageDims",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3incremental.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/visualOverlay.ts",
+      "name": "addVisualOverlay",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochP.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/arbitration.ts",
+      "name": "arbitrateText",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochTheta.wiring.test.ts、test/vlm.arbitration.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/arbitration.ts",
+      "name": "iou",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.arbitration.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/autoAdopt.ts",
+      "name": "LOCAL_CANDIDATES",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.connection.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/autoAdopt.ts",
+      "name": "parseNetstatListeningPids",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/autoAdopt.ts",
+      "name": "pickVisionModel",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.connection.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/autoAdopt.ts",
+      "name": "resolveListenerOwnership",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/codec.ts",
+      "name": "_overrideSharpResolver_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochGamma.fovea.test.ts、test/epochGamma2.inset.test.ts、test/w1visualecon.test.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/codec.ts",
+      "name": "encodedPatchRectToSource",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3incremental.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/codec.ts",
+      "name": "patchRectToEncoded",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3incremental.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/codec.ts",
+      "name": "patchRectToNormalized",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3incremental.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/connection.ts",
+      "name": "_setFsForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/filePerms.test.ts、test/vlm.connection.perms.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/connection.ts",
+      "name": "_setIcaclsSpawnForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/filePerms.test.ts、test/vlm.connection.perms.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/connection.ts",
+      "name": "_setPlatformForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/filePerms.test.ts、test/vlm.connection.perms.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/connection.ts",
+      "name": "defaultConnectionPath",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.connection.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/diagnosis.ts",
+      "name": "diagnoseFailure",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/vlm.diagnosis.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/diagnosis.ts",
+      "name": "normalizeHypotheses",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.diagnosis.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/diffExplainer.ts",
+      "name": "explainDiff",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/vlm.diffExplainer.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/glmClient.ts",
+      "name": "GlmClient",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p2a-fixes.test.ts、test/pan20-24.vlm.fixes.test.ts、test/vlm.diffExplainer.test.ts 等 12 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/grounding.ts",
+      "name": "_overrideGroundingClock_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.grounding.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/grounding.ts",
+      "name": "_overrideZoomSharpResolver_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1zoom.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/grounding.ts",
+      "name": "_resetGroundingCache_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochGamma.fovea.test.ts、test/vlm.grounding.test.ts、test/w1zoom.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/grounding.ts",
+      "name": "iouBbox",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.grounding.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/grounding.ts",
+      "name": "nmsElements",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.grounding.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "attachCascadeSceneHashPort",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "buildRefuteQuorumFace",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "cascadeRequestFactors",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "cascadeSceneFamiliar",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "cascadeSceneFingerprint",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "cascadeSemanticValidators",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "classifyCascadeRequest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "classifyCascadeRiskText",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "rememberCascadeScene",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "resetCascadeTriageFamiliarity",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/index.ts",
+      "name": "wireCascadeConsultFace",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/internalUtils.ts",
+      "name": "scanBalanced",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/vlm/internalUtils.ts",
+      "name": "stripFences",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/vlm/metering.ts",
+      "name": "VlmMeter",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p2a-fixes.test.ts、test/vlm.metering.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/metering.ts",
+      "name": "jitterBackoff",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.metering.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/onboarding.ts",
+      "name": "renderOnboardingHtml",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts、test/vlm.onboarding.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/cascade.triage.ts",
+      "name": "CASCADE_RISK_SCORE",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/vlm/providers/cascade.triage.ts",
+      "name": "CASCADE_TRIAGE_WEIGHTS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/cascade.triage.ts",
+      "name": "triageDanger",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2cascade.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/cascade.ts",
+      "name": "ocrTextValidator",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2cascade.test.ts、test/w3wire.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/cascade.ts",
+      "name": "schemaValidator",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2cascade.test.ts、test/w3wire.test.ts、test/w5cascade.bench.ts 等 4 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/cascade.ts",
+      "name": "withinBboxValidator",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w2cascade.test.ts、test/w3wire.test.ts、test/w5cascade.bench.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/failover.ts",
+      "name": "ProviderPool",
+      "kind": "class",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/p2a-fixes.test.ts、test/vlm.providers.failover.test.ts、test/w2cascade.test.ts 等 5 处）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/failover.ts",
+      "name": "getPreset",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.providers.failover.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/registry.ts",
+      "name": "CUSTOM_PRESET_ID",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.providers.registry.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/registry.ts",
+      "name": "effectiveBaseUrl",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.providerPort.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/types.ts",
+      "name": "jitterDelayMs",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.providers.types.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/providers/types.ts",
+      "name": "maskBaseUrl",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.providerPort.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/refute.ts",
+      "name": "REFUTE_DEFAULT_TIMEOUT_MS",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（1 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/vlm/refute.ts",
+      "name": "_overrideRefuteTimeoutForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/refute.ts",
+      "name": "buildRefutationQuorumSystemPrompt",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/pan20-24.vlm.fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/refute.ts",
+      "name": "buildRefutationSystemPrompt",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts、test/pan20-24.vlm.fixes.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/refute.ts",
+      "name": "buildRefutationUserPrompt",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/refute.ts",
+      "name": "refuteStats",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/som.layout.ts",
+      "name": "SOM_COLOR_PALETTE",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w1som.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/som.layout.ts",
+      "name": "SOM_LABEL_GAP",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "仅本文件内部引用（8 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
+    },
+    {
+      "file": "src/vlm/som.ts",
+      "name": "markerCentroid",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.som.test.ts、test/w7fuzz.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/som.ts",
+      "name": "sanitizeSomSeedInput",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/w8.organwiring.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/verdict.ts",
+      "name": "fuseWithPixelEvidence",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochXi.wiring.test.ts、test/vlm.verdict.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/verdict.ts",
+      "name": "judgeEffect",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/vlm.verdict.test.ts、test/w8.providerPort.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/vlm/vlmOcr.ts",
+      "name": "findTextViaVlm",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochGamma.fovea.test.ts、test/vlm.vlmOcr.test.ts、test/w8.providerPort.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/windowFocusGuard.ts",
+      "name": "HOST_WINDOW_MARKERS_DEFAULT",
+      "kind": "const",
+      "category": "reserved-api",
+      "reason": "R2-5 补登记（ΠΑΝ-130 并行工位在途新增同律 —— R2-3 焦点保卫器官的缺省标记表导出面）：当前全库零引用的预留面；R2-3 工位定稿时若确认无消费方应删导出并出册。"
+    },
+    {
+      "file": "src/windowFocusGuard.ts",
+      "name": "_resetWindowFocusGuardForTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R2-5 补登记（R2-3 并行工位在途新增）：测试隔离复位面，仅 test/r23.focusGuard.test.ts 消费 —— 命名即纪律（_forTest 后缀）。"
+    },
+    {
+      "file": "src/windowFocusGuard.ts",
+      "name": "clearTargetWindow",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R2-5 补登记（R2-3 并行工位在途新增）：仅测试宇宙消费（test/r23.focusGuard.test.ts）—— 焦点账本清零的测试隔离面。"
+    },
+    {
+      "file": "src/windowFocusGuard.ts",
+      "name": "isHostWindowTitle",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-5 补登记（R2-3 并行工位在途新增）：本文件内 2 处消费（宿主窗判定）；导出面为测试的纯函数执法锚。"
+    },
+    {
+      "file": "src/windowFocusGuard.ts",
+      "name": "parseHostMarkersCsv",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-5 补登记（R2-3 并行工位在途新增）：本文件内 config 解析消费；导出面为测试的纯函数执法锚。"
+    },
+    {
+      "file": "src/windowFocusGuard.ts",
+      "name": "peekTargetWindow",
+      "kind": "function",
+      "category": "internal-surface",
+      "reason": "R2-5 补登记（R2-3 并行工位在途新增）：本文件内焦点判定消费；导出面为测试的只读观察锚。"
+    },
+    {
+      "file": "src/tools/askScreen.ts",
+      "name": "_resetAskCache_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R5-4 测试注入口（回放缓存+摘要单槽清零）—— 仅测试宇宙消费（test/r54.vlmEconomy.test.ts）；与 _resetGroundingCache_forTest 同律（ΝΩ-48 先例）：TTL/LRU 会话态的隔离面，组合根零调用。"
+    },
+    {
+      "file": "src/tools/askScreen.ts",
+      "name": "_overrideAskClock_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R5-4 测试注入口（墙钟覆写，TTL 判定）—— 仅测试宇宙消费（test/r54.vlmEconomy.test.ts）；与 _overrideGroundingClock_forTest 同律。"
+    }
+  ]
+}

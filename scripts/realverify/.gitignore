@@ -1,0 +1,5 @@
+# ΤΕΛ-9 realverify 运行产物（收割证据不入库——报告含机器路径/时戳）
+realverify-report.json
+evidence-*.png
+evidence-*.jpg
+__pycache__/

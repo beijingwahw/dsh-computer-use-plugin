@@ -14,17 +14,30 @@
 //   ④ DEBTS 状态字段按台账头部自申报枚举校验；
 //   ⑤ 纪元内「合计 N/0」与表行加总的账内自洽核对（纯文本算术执法）。
 //
+// ΠΑΝ-84（删行洗白封堵 —— 执法面与发现面重合）：--check 的 exit 1 不再只由
+//   虚报/实跑异常触发，审计器**发现的**违例一律执法：
+//   · 未入账盘存文件实跑 fail>0 或实跑异常 ⇒ exit 1（删掉含失败申报的账行 ⇒
+//     该测试落入未入账盘存 ⇒ 同样红面；豁免面 = env DSH_AUDIT_EXEMPT_UNLEDGERED
+//     显式登记（逗号分隔文件键），豁免须显式、不可默认）；
+//   · 纪元合计算术不自洽（epochSums.ok === '不自洽'）⇒ exit 1；
+//   · DEBTS 枚举违例 / 重复编号 ⇒ exit 1。
+//
 // CLI（自设）：
 //   node scripts/genesis_audit.mjs                 默认：抽样审计——每纪元前 3 条可实跑
 //                                                   账目 + W1-W6 未入账盘存，分钟级
-//     --check        严格模式：虚报 / 实跑异常 / 0-fail 声明破产 ⇒ exit 1
+//     --check        严格模式：虚报 / 实跑异常 / 未入账红面（fail>0 或实跑异常，
+//                     无豁免）/ 合计不自洽 / DEBTS 枚举违例与重复编号 ⇒ exit 1
+//                     （--full 另含全量 fail>0、tsc≠0）
 //     --full         全量：全部账目实跑 + 全量套件 + tsc + 基线比对（分钟级）
-//     --sample N     抽样覆写：每纪元前 N 条可实跑账目（N=0 ⇒ 全部账目；默认 3）
+//     --sample N     抽样覆写：每纪元前 N 条可实跑账目（N=0 ⇒ 全部；默认 3）
 //     --parse        只解析比对可文本核验项，不实跑（秒级）
+//     --unledgered-only  只盘未入账面：账目判「未实跑」，仅实跑未入账文件（探针/快查）
 //     --json         机读结构化输出（判定字段不含任何时长/时间戳——确定性面）
 //     --conc N       实跑并发（默认 4）
 //     --selftest     审计器自身单元测试（纯函数 fixtures + 两个真实最小实跑）
 //     --help
+//   环境注入缝（缺省恒指仓库正本；仅测试/探针用）：
+//     DSH_AUDIT_GENESIS / DSH_AUDIT_DEBTS / DSH_AUDIT_TESTDIR / DSH_AUDIT_EXEMPT_UNLEDGERED
 //
 // 判定口径：
 //   一致  = 实跑 tests == 账面 tests 且 实跑 fail == 账面 fail
@@ -50,7 +63,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 审计对象注入缝（仅测试用：篡改副本探针证明执法路径；缺省恒指仓库正本）
 const GENESIS_PATH = process.env.DSH_AUDIT_GENESIS || path.join(ROOT, 'GENESIS.md');
 const DEBTS_PATH = process.env.DSH_AUDIT_DEBTS || path.join(ROOT, 'DEBTS.md');
-const TEST_DIR = path.join(ROOT, 'test');
+// ΠΑΝ-84：测试目录注入缝（--unledgered-only 探针用最小 fixture 目录；缺省 = test/）
+const TEST_DIR_ENV = process.env.DSH_AUDIT_TESTDIR || '';
+const TEST_DIR = TEST_DIR_ENV ? path.resolve(TEST_DIR_ENV) : path.join(ROOT, 'test');
+/** 测试文件的账键（缺省 `test/<name>`；注入 TESTDIR 时为绝对路径键——豁免面按此匹配） */
+const testFileKey = (name) => (TEST_DIR_ENV ? `${TEST_DIR}${path.sep}${name}`.split(path.sep).join('/') : `test/${name}`);
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -299,12 +316,16 @@ function killTree(child) {
   }
 }
 
-/** 实跑单个测试文件（相对 repo 根路径），返回 TAP 计数或异常 */
+/** 实跑单个测试文件（repo 相对键或绝对路径），返回 TAP 计数或异常 */
 export function runTestFile(relFile, timeoutMs = 300_000) {
   return new Promise((resolve) => {
+    // ΠΑΝ-84：注入 TESTDIR 下的绝对键直接作为测试路径（cwd 仍 ROOT ⇒ register.mjs 解析不变）
+    const testPath = path.isAbsolute(relFile) ? relFile : path.join(ROOT, relFile);
     const args = [
       '--experimental-strip-types', '--test', '--test-reporter=tap',
-      '--import', './test/register.mjs', relFile,
+      '--import', './test/register.mjs',
+      // ΠΑΝ-84：注入 TESTDIR 的绝对键直接作为测试路径（cwd=ROOT ⇒ register.mjs 不受影响）
+      path.isAbsolute(relFile) ? relFile : path.join(ROOT, relFile),
     ];
     const child = spawn(process.execPath, args, { cwd: ROOT, shell: false });
     let out = '';
@@ -431,18 +452,22 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
-/** stem → 实际测试文件（.test.ts 优先，次 .bench.ts）；带内容佐证读（缓存） */
+/** stem → 实际测试文件（.test.ts 优先，次 .bench.ts）；带内容佐证读（缓存）。
+ *  ΠΑΝ-84：解析对 TEST_DIR 注入缝生效；返回账键（缺省 `test/x`，注入时绝对键）。 */
 async function makeResolver() {
   const contentCache = new Map();
   const resolveStem = (stem) => {
-    for (const f of [`test/${stem}.test.ts`, `test/${stem}.bench.ts`]) {
-      if (existsSync(path.join(ROOT, f))) return f;
+    for (const suffix of ['.test.ts', '.bench.ts']) {
+      if (existsSync(path.join(TEST_DIR, `${stem}${suffix}`))) return testFileKey(`${stem}${suffix}`);
     }
     return null;
   };
   const readCached = async (rel) => {
     if (!contentCache.has(rel)) {
-      try { contentCache.set(rel, await readFile(path.join(ROOT, rel), 'utf8')); }
+      try {
+        const abs = path.isAbsolute(rel) ? rel : path.join(ROOT, rel);
+        contentCache.set(rel, await readFile(abs, 'utf8'));
+      }
       catch { contentCache.set(rel, ''); }
     }
     return contentCache.get(rel);
@@ -452,10 +477,13 @@ async function makeResolver() {
 
 /**
  * 汇编审计。
- * opts: { sample?: number|null, run?: boolean, conc?: number, full?: boolean }
+ * opts: { sample?: number|null, run?: boolean, conc?: number, full?: boolean,
+ *         unledgeredOnly?: boolean }
+ * ΠΑΝ-84：unledgeredOnly —— 只盘未入账面（账目判「未实跑」，仅实跑未入账文件；
+ * 探针/快查通道，执法面与 --check 组合即「删行洗白」端到端执法路径）。
  */
 export async function audit(opts = {}) {
-  const { sample = null, run = true, conc = 4, full = false } = opts;
+  const { sample = null, run = true, conc = 4, full = false, unledgeredOnly = false } = opts;
   const [genesisMd, debtsMd] = await Promise.all([
     readFile(GENESIS_PATH, 'utf8'),
     readFile(DEBTS_PATH, 'utf8'),
@@ -514,8 +542,10 @@ export async function audit(opts = {}) {
     }
   }
 
-  // —— 抽样护栏（--sample N：每纪元取前 N 条可实跑账目；n/a 账保留；--parse 恒全量） ——
-  const auditedClaims = run ? sampleClaims(claims, sample ?? null) : claims;
+  // —— 抽样护栏（--sample N：每纪元取前 N 条可实跑账目；n/a 账保留；--parse 恒全量；
+  //    --unledgered-only：账面不实跑（判「未实跑」），仅盘未入账面） ——
+  const runClaims = run && !unledgeredOnly;
+  const auditedClaims = runClaims ? sampleClaims(claims, sample ?? null) : claims;
 
   // —— 盘存：磁盘 W1-W6 的 w* 文件（w7+ 为并行施工在途批次，不属本审计宇宙，
   //    且 GENESIS/DEBTS 均未为其立账——跑它们只会把施工噪声当账务信号）。
@@ -524,9 +554,9 @@ export async function audit(opts = {}) {
     .filter((f) => /^w[1-6].*\.(test\.ts|bench\.ts)$/.test(f))
     .sort();
   const allClaimFiles = new Set(claims.flatMap((c) => c.files)); // 抽样前的完整账面文件集
-  const auditedFiles = new Set(auditedClaims.flatMap((c) => c.files));
+  const auditedFiles = new Set(runClaims ? auditedClaims.flatMap((c) => c.files) : []);
   const unledgeredFiles = diskFiles
-    .map((f) => `test/${f}`)
+    .map((f) => testFileKey(f))
     .filter((f) => !allClaimFiles.has(f));
   const universeFiles = run
     ? [...new Set([...auditedFiles, ...unledgeredFiles])].sort()
@@ -540,6 +570,16 @@ export async function audit(opts = {}) {
   // —— 逐账判定 ——
   const claimVerdicts = [];
   for (const c of auditedClaims) {
+    if (!runClaims) {
+      // ΠΑΝ-84：--parse / --unledgered-only 都不实跑账目（后者更不判虚报——只盘未入账面）
+      claimVerdicts.push({
+        ...c,
+        verdict: '未实跑',
+        detail: unledgeredOnly ? '--unledgered-only 只盘未入账面' : '--parse 只解析模式',
+        actual: null,
+      });
+      continue;
+    }
     if (c.files.length === 0) {
       claimVerdicts.push({
         ...c,
@@ -551,10 +591,6 @@ export async function audit(opts = {}) {
           : '非 node 测试面（python/冒烟口径），账面 0/0 不实跑',
         actual: null,
       });
-      continue;
-    }
-    if (!run) {
-      claimVerdicts.push({ ...c, verdict: '未实跑', detail: '--parse 只解析模式', actual: null });
       continue;
     }
     const runs = c.files.map((f) => results.get(f)).filter(Boolean);
@@ -738,6 +774,58 @@ export async function audit(opts = {}) {
   };
 }
 
+// ── 5b. ΠΑΝ-84 执法面（纯函数）：审计结果 → --check 破面清单 ─────────────────
+// 执法面与发现面重合：审计器发现的违例（虚报/实跑异常/未入账红面/合计不自洽/
+// DEBTS 枚举违例与重复编号）一律构成破面；未入账红面有显式豁免面（登记制，
+// 缺省零豁免）。--full 附加全局 0-fail 与 tsc 执法（既有口径不变）。
+export function enforcementBreaks(r, { full = false, exemptUnledgered = [] } = {}) {
+  const breaks = [];
+  for (const v of r.claimVerdicts) {
+    if (v.verdict === '虚报' || v.verdict === '实跑异常') {
+      breaks.push({ kind: v.verdict, detail: `[${v.epoch}/${v.label}] ${v.detail || ''}`.trim() });
+    }
+  }
+  for (const s of r.epochSums) {
+    if (s.ok === '不自洽') {
+      breaks.push({
+        kind: '合计不自洽',
+        detail: `${s.epoch}: 表行加总 ${s.tableSum}（+表内另立 ${s.prose另立InTable}/仅散文另立 ${s.proseOnlySum}）vs 口径段申报 ${s.declared}`,
+      });
+    }
+  }
+  // 未入账红面（删行洗白封堵）：账行被删 ⇒ 该测试落入未入账盘存 ⇒ fail>0/
+  // 实跑异常同样破面；豁免须显式登记（DSH_AUDIT_EXEMPT_UNLEDGERED，逗号分隔账键）
+  const exempt = new Set(exemptUnledgered.map((s) => String(s).trim()).filter(Boolean));
+  for (const u of r.unledgered) {
+    const red = u.verdict.includes('fail>0') || u.verdict.includes('异常');
+    if (!red) continue;
+    if (exempt.has(u.file)) continue;
+    breaks.push({ kind: '未入账红面', detail: `${u.file}: ${u.verdict}${u.error ? `（${u.error}）` : ''}` });
+  }
+  const d = r.debtsAudit;
+  if (d.dupIds.length) {
+    breaks.push({ kind: 'DEBTS编号重复', detail: d.dupIds.join(',') });
+  }
+  if (d.enumViolations.length) {
+    breaks.push({
+      kind: 'DEBTS枚举违例',
+      detail: d.enumViolations.map((v) => `${v.id}→「${v.token}」`).join('；'),
+    });
+  }
+  if (full && r.fullResult) {
+    if (r.fullResult.fullRun.ok ? r.fullResult.fullRun.fail > 0 : true) {
+      breaks.push({
+        kind: '全量fail>0',
+        detail: r.fullResult.fullRun.ok ? `全量 fail=${r.fullResult.fullRun.fail}` : r.fullResult.fullRun.error,
+      });
+    }
+    if (!r.fullResult.tsc.ok) {
+      breaks.push({ kind: 'tsc≠0', detail: `exit ${r.fullResult.tsc.code}` });
+    }
+  }
+  return breaks;
+}
+
 // ── 6. 报告 ──────────────────────────────────────────────────────────────────
 
 const W = process.stdout.write.bind(process.stdout);
@@ -746,7 +834,7 @@ function printReport(r, opts) {
   W('════════════════════════════════════════════════════════════════\n');
   W('创世审计器 W7-2 · GENESIS 账实一致审计（机器执法，只报告不代改）\n');
   W(`审计对象：GENESIS.md W 纪元账目 × test/w*.test.ts|bench 实跑；DEBTS.md 台账\n`);
-  W(`模式：${opts.run ? (opts.sample ? `抽样(每纪元前 ${opts.sample} 条)` : '全部 W 纪元账目实跑') : '仅解析(--parse)'}`
+  W(`模式：${opts.unledgeredOnly ? '只盘未入账面(--unledgered-only)' : opts.run ? (opts.sample ? `抽样(每纪元前 ${opts.sample} 条)` : '全部 W 纪元账目实跑') : '仅解析(--parse)'}`
     + `${opts.full ? ' + 全量套件/tsc/基线比对(--full)' : ''}；并发 ${opts.conc}；node ${process.version}\n`);
   W('────────────────────────────────────────────────────────────────\n');
 
@@ -850,7 +938,7 @@ function printReport(r, opts) {
     }
     W(`  分纪元：${parts.join(' · ')}\n`);
   }
-  W(`  未入账新纪元文件：${r.unledgered.length} 个（其中 fail>0/异常：${r.unledgeredFailBreak.length} 个${r.unledgeredFailBreak.length ? '——盘存警告：在途批次实跑有红，无账面可违不入 --check 执法面，' + r.unledgeredFailBreak.map((u) => u.file).join('、') : ''}）\n`);
+  W(`  未入账新纪元文件：${r.unledgered.length} 个（其中 fail>0/异常：${r.unledgeredFailBreak.length} 个${r.unledgeredFailBreak.length ? '——ΠΑΝ-84 执法：删行洗白封堵，未入账红面在 --check 下即 exit 1（豁免须 env DSH_AUDIT_EXEMPT_UNLEDGERED 显式登记）：' + r.unledgeredFailBreak.map((u) => u.file).join('、') : ''}）\n`);
   W(`  DEBTS：枚举违例 ${d.enumViolations.length} 条 · 分节条数偏差 ${d.countDiffs.length} 处 · 编号重复 ${d.dupIds.length} 处\n`);
   const 虚报明细 = r.claimVerdicts.filter((v) => v.verdict === '虚报' || v.verdict === '实跑异常');
   if (虚报明细.length) {
@@ -881,10 +969,12 @@ function genesisTitles() {
 
 // ── 7. JSON 输出（确定性面：不含时长/时间戳） ────────────────────────────────
 
-function toJson(r) {
+function toJson(r, opts = {}) {
   return JSON.stringify(
     {
       auditor: 'W7-2 genesis_audit',
+      // ΠΑΝ-84：执法面机读输出（--check 的破面判定依据，确定性面）
+      enforcement: enforcementBreaks(r, { full: Boolean(r.fullResult), exemptUnledgered: opts.exemptUnledgered ?? [] }),
       epochsFound: r.epochsFound,
       epochsMissing: r.epochsMissing,
       claims: r.claimVerdicts.map((v) => ({
@@ -936,14 +1026,21 @@ function toJson(r) {
 function usage() {
   W(`用法：node scripts/genesis_audit.mjs [选项]
   （默认）抽样审计：每纪元前 3 条可实跑账目 + W1-W6 未入账盘存逐文件实跑
-  --check      严格模式：虚报/实跑异常（--full 另含全量 fail>0、tsc≠0）⇒ exit 1
+  --check      严格模式：虚报/实跑异常 ⇒ exit 1；ΠΑΝ-84 起另执法：未入账红面
+               （fail>0/实跑异常，无豁免）/ 合计不自洽 / DEBTS 枚举违例与重复编号
+               （--full 另含全量 fail>0、tsc≠0）
   --full       全量：全部账目实跑 + 全量套件 + tsc + 基线(2070/2059/0)比对
   --sample N   每纪元抽前 N 条可实跑账目（N=0 ⇒ 全部账目；默认 3；--full 隐含 0）
   --parse      只做可文本核验项（解析/枚举/算术自洽），不实跑
+  --unledgered-only  只盘未入账面：账目判「未实跑」，仅实跑未入账文件（快查/探针）
   --json       机读输出（与文本模式同判定；判定面零时长字段）
   --conc N     实跑并发（默认 4）
   --selftest   审计器自身单元测试
   --help       本说明
+环境注入缝（缺省 = 仓库正本；仅测试/探针用）：
+  DSH_AUDIT_GENESIS / DSH_AUDIT_DEBTS      账本副本路径（篡改探针）
+  DSH_AUDIT_TESTDIR                        测试目录（最小 fixture 探针）
+  DSH_AUDIT_EXEMPT_UNLEDGERED              未入账红面豁免登记（逗号分隔文件账键）
 `);
 }
 
@@ -953,6 +1050,7 @@ async function main(argv) {
     full: argv.includes('--full'),
     json: argv.includes('--json'),
     parse: argv.includes('--parse'),
+    unledgeredOnly: argv.includes('--unledgered-only'),
     selftest: argv.includes('--selftest'),
     help: argv.includes('--help') || argv.includes('-h'),
   };
@@ -967,34 +1065,42 @@ async function main(argv) {
   if (flags.selftest) { return await selftest(); }
 
   const t0 = Date.now();
-  const r = await audit({ sample, run: !flags.parse, conc, full: flags.full });
+  const r = await audit({ sample, run: !flags.parse, conc, full: flags.full, unledgeredOnly: flags.unledgeredOnly });
+  const exemptUnledgered = (process.env.DSH_AUDIT_EXEMPT_UNLEDGERED || '').split(',');
 
   if (flags.json) {
-    W(toJson(r));
+    W(toJson(r, { exemptUnledgered }));
   } else {
-    printReport(r, { run: !flags.parse, sample, full: flags.full, conc });
+    printReport(r, { run: !flags.parse, sample, full: flags.full, conc, unledgeredOnly: flags.unledgeredOnly });
     W(`（纪元章节：${genesisTitles().join(' ｜ ')}）\n`);
   }
 
-  let exit0 = true;
+  // ΠΑΝ-84：执法面 = 发现面 —— 虚报/实跑异常 + 未入账红面（无豁免）+ 合计不自洽
+  // + DEBTS 枚举违例/重复编号（--full 另执法全局「0 fail」与 tsc）。
+  // 删掉含失败申报的账行 ⇒ 该文件落入未入账盘存 ⇒ 同样破面（删行洗白封堵）。
   const fatal = r.claimVerdicts.filter((v) => v.verdict === '虚报' || v.verdict === '实跑异常');
+  let exit0 = true;
+  let breaks = [];
   if (flags.check) {
-    // 执法面 = 账面声明被违反（虚报/实跑异常）；--full 另执法全局「0 fail」与 tsc。
-    // 未入账在途文件的 fail>0 是盘存警告（无账面可违——DEBTS「并行批次在途文件」
-    // 先例），醒目呈报不计 exit。
-    if (fatal.length) exit0 = false;
-    if (flags.full && r.fullResult) {
-      if (r.fullResult.fullRun.ok ? r.fullResult.fullRun.fail > 0 : true) exit0 = false;
-      if (!r.fullResult.tsc.ok) exit0 = false;
-    }
+    breaks = enforcementBreaks(r, { full: flags.full, exemptUnledgered });
+    if (breaks.length) exit0 = false;
   }
   // JSON 模式：stdout 只留纯 JSON（逐字节可复现——判定面零时长字段），
   // 退出状态行走 stderr（耗时属运维面，不污染机读面）。
+  const breakSummary = breaks.length
+    ? ` · 执法破面 ${breaks.length} 条（${[...new Set(breaks.map((b) => b.kind))].join('/')}${exemptUnledgered.filter(Boolean).length ? ` · 豁免 ${exemptUnledgered.filter(Boolean).length} 项` : ''}）`
+    : '';
   const statusLine = `\n[退出码 ${exit0 ? 0 : 1}] 虚报/实跑异常 ${fatal.length} 条` +
     (flags.check ? `（--check 严格模式${exit0 ? '：通过' : '：不通过'}）` : '（未启用 --check，仅报告）') +
-    ` · 耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s\n`;
+    breakSummary + ` · 耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s\n`;
   if (flags.json) process.stderr.write(statusLine);
-  else W(statusLine);
+  else {
+    W(statusLine);
+    if (breaks.length) {
+      W('执法破面明细（ΠΑΝ-84：发现即执法）：\n');
+      for (const b of breaks) W(`    [${b.kind}] ${b.detail}\n`);
+    }
+  }
   return exit0 ? 0 : 1;
 }
 
@@ -1235,6 +1341,56 @@ async function selftest() {
       deepEqual(sampleClaims(claims, null), claims);
       equal(sampleClaims(claims, 0).length, 1); // 0 ⇒ 仅 n/a 账保留（CLI 层已把 0 归一为 null=全部）
     });
+
+    // —— ΠΑΝ-84 执法面（纯函数）：发现即执法 + 显式豁免制 ——
+    const mkR = (over = {}) => ({
+      claimVerdicts: [],
+      epochSums: [],
+      unledgered: [],
+      debtsAudit: { dupIds: [], enumViolations: [] },
+      fullResult: null,
+      ...over,
+    });
+    t('enforcementBreaks：干净结果 ⇒ 零破面', () => {
+      deepEqual(enforcementBreaks(mkR()), []);
+    });
+    t('enforcementBreaks：虚报/实跑异常 ⇒ 破面', () => {
+      const r = mkR({ claimVerdicts: [
+        { epoch: 'W1', label: 'w1exec', verdict: '虚报', detail: 'x' },
+        { epoch: 'W2', label: 'w2q', verdict: '实跑异常', detail: 'timeout' },
+      ] });
+      const kinds = enforcementBreaks(r).map((b) => b.kind);
+      deepEqual(kinds, ['虚报', '实跑异常']);
+    });
+    t('enforcementBreaks：合计不自洽 ⇒ 破面（算术执法）', () => {
+      const r = mkR({ epochSums: [
+        { epoch: 'W1', tableSum: 169, benchSum: 0, declared: 170, prose另立InTable: 0, proseOnlySum: 0, ok: '不自洽' },
+      ] });
+      equal(enforcementBreaks(r).length, 1);
+      equal(enforcementBreaks(r)[0].kind, '合计不自洽');
+    });
+    t('enforcementBreaks：未入账红面 ⇒ 破面；豁免登记 ⇒ 放行（删行洗白封堵）', () => {
+      const r = mkR({ unledgered: [
+        { file: 'test/w6x.test.ts', verdict: '未入账·fail>0', actual: { tests: 3, pass: 1, fail: 2 } },
+        { file: 'test/w6y.test.ts', verdict: '未入账·0 fail ✓', actual: { tests: 3, pass: 3, fail: 0 } },
+        { file: 'test/w6z.test.ts', verdict: '未入账·实跑异常', actual: null, error: 'timeout>300000ms' },
+      ] });
+      equal(enforcementBreaks(r).length, 2, 'fail>0 与实跑异常都破面，0 fail 不破');
+      const ex = enforcementBreaks(r, { exemptUnledgered: ['test/w6x.test.ts', '', 'test/w6z.test.ts'] });
+      deepEqual(ex, [], '两处红面全部显式豁免 ⇒ 零破面（豁免制不默认）');
+    });
+    t('enforcementBreaks：DEBTS 枚举违例/重复编号 ⇒ 破面', () => {
+      const r = mkR({ debtsAudit: {
+        dupIds: ['D-A1'],
+        enumViolations: [{ id: 'D-B2', token: '已忘记录', raw: '已忘记录（…）' }],
+      } });
+      deepEqual(enforcementBreaks(r).map((b) => b.kind), ['DEBTS编号重复', 'DEBTS枚举违例']);
+    });
+    t('enforcementBreaks：--full 附加全量 fail>0 与 tsc≠0（既有口径不变）', () => {
+      const r = mkR({ fullResult: { fullRun: { ok: true, tests: 10, pass: 9, fail: 1 }, tsc: { ok: false, code: 2 } } });
+      deepEqual(enforcementBreaks(r, { full: true }).map((b) => b.kind), ['全量fail>0', 'tsc≠0']);
+      deepEqual(enforcementBreaks(r, { full: false }), [], '非 full 不执法全局面');
+    });
   }
 
   // —— 真实最小实跑（端到端验证执法通道） ——
@@ -1264,13 +1420,13 @@ async function selftest() {
     ok(doctored !== genesisMd, '探针前提：篡改点在正本中存在');
     const doctoredPath = path.join(tmp, 'GENESIS.doctored.md');
     await writeFile(doctoredPath, doctored, 'utf8');
-    const runCli = (args) => new Promise((resolve) => {
+    const runCli = (args, envOver = {}) => new Promise((resolve) => {
       const child = spawn(
         process.execPath,
         [fileURLToPath(import.meta.url), ...args],
         {
           cwd: ROOT, shell: false,
-          env: { ...process.env, DSH_AUDIT_GENESIS: doctoredPath, DSH_AUDIT_DEBTS: DEBTS_PATH },
+          env: { ...process.env, DSH_AUDIT_DEBTS: DEBTS_PATH, ...envOver },
         },
       );
       let out = '';
@@ -1278,14 +1434,77 @@ async function selftest() {
       child.stderr.on('data', (d) => { out += d; });
       child.on('close', (code) => resolve({ code, out }));
     });
-    const bad = await runCli(['--check', '--sample', '1']);
+    const bad = await runCli(['--check', '--sample', '1'], { DSH_AUDIT_GENESIS: doctoredPath });
     t('端到端执法：篡改账面 37→99（虚报）⇒ --check exit 1', () => {
       equal(bad.code, 1, `CLI 输出片段：${bad.out.slice(-400)}`);
       ok(bad.out.includes('虚报'));
     });
-    const clean = await runCli(['--check', '--parse']);
+    const clean = await runCli(['--check', '--parse'], { DSH_AUDIT_GENESIS: GENESIS_PATH });
     t('端到端执法：正本账面（--parse）⇒ --check exit 0', () => {
       equal(clean.code, 0, `CLI 输出片段：${clean.out.slice(-400)}`);
+    });
+
+    // —— ΠΑΝ-84 端到端执法探针（三条新破面路径 + 豁免制，全部秒级 --parse/--unledgered-only）——
+    // (a) 删行洗白的算术镜像：合计申报 +1 ⇒ 表行加总对不上 ⇒ 「合计不自洽」⇒ exit 1
+    const doctoredSum = genesisMd.replace('九器官合计 169/0', '九器官合计 170/0');
+    ok(doctoredSum !== genesisMd, '探针前提：W1 合计申报在场');
+    const sumPath = path.join(tmp, 'GENESIS.sum-doctored.md');
+    await writeFile(sumPath, doctoredSum, 'utf8');
+    const badSum = await runCli(['--check', '--parse'], { DSH_AUDIT_GENESIS: sumPath });
+    t('ΠΑΝ-84 端到端：合计申报 169→170（算术不自洽）⇒ --check --parse exit 1', () => {
+      equal(badSum.code, 1, `CLI 输出片段：${badSum.out.slice(-400)}`);
+      ok(badSum.out.includes('不自洽'));
+    });
+    // (b) DEBTS 枚举毒化：头部自申报枚举改词 ⇒ 在用状态主词全体违例 ⇒ exit 1
+    const doctoredDebts = debtsMd.replace('**已闭环**（债清', '**已闭环X**（债清');
+    ok(doctoredDebts !== debtsMd, '探针前提：DEBTS 枚举头在场');
+    const debtsPath = path.join(tmp, 'DEBTS.enum-doctored.md');
+    await writeFile(debtsPath, doctoredDebts, 'utf8');
+    const badEnum = await runCli(['--check', '--parse'], { DSH_AUDIT_GENESIS: GENESIS_PATH, DSH_AUDIT_DEBTS: debtsPath });
+    t('ΠΑΝ-84 端到端：枚举头毒化（已闭环→已闭环X）⇒ --check --parse exit 1', () => {
+      equal(badEnum.code, 1, `CLI 输出片段：${badEnum.out.slice(-400)}`);
+      ok(badEnum.out.includes('枚举违例'));
+    });
+    // (c) 未入账红面（删行洗白的正形态）：fixture 目录放一个失败的 w6 未入账文件 ⇒
+    //     --check --unledgered-only exit 1；同一文件显式豁免 ⇒ exit 0（豁免登记制）。
+    //     GENESIS 用最小副本（真实账本的 stem 在 fixture TESTDIR 下解析不到 ⇒ bench 行
+    //     分类失真会伪报「合计不自洽」——与本探针的执法点无关，隔离之）。
+    const probeGenesis = path.join(tmp, 'GENESIS.probe-min.md');
+    await writeFile(probeGenesis, [
+      '# ΠΑΝ-84 探针最小账本', '',
+      '## 执行与感知韧性（纪元 W1 · 探针）',
+      '| 器官 | 根基 | 执法 | 审判 |',
+      '| --- | --- | --- | --- |',
+      '| 探针行 | x | w1exec | 37/0 |',
+      '',
+    ].join('\n'), 'utf8');
+    const fixtureDir = path.join(tmp, 'testdir');
+    await (await import('node:fs/promises')).mkdir(fixtureDir, { recursive: true });
+    const fixtureRel = 'w6pan84probe.test.ts';
+    await writeFile(
+      path.join(fixtureDir, fixtureRel),
+      [
+        '// ΠΑΝ-84 探针 fixture：故意失败的未入账文件（审计器自测专用，跑完即删）',
+        "import { test } from 'node:test';",
+        "import assert from 'node:assert/strict';",
+        "test('pan84 probe: intentional failure', () => { assert.equal(1, 2); });",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const fixtureKey = `${fixtureDir}/${fixtureRel}`.split(path.sep).join('/');
+    const probeEnv = { DSH_AUDIT_GENESIS: probeGenesis, DSH_AUDIT_TESTDIR: fixtureDir };
+    const badUnledgered = await runCli(['--check', '--unledgered-only'], probeEnv);
+    t('ΠΑΝ-84 端到端：未入账文件 fail>0 ⇒ --check --unledgered-only exit 1（删行洗白封堵）', () => {
+      equal(badUnledgered.code, 1, `CLI 输出片段：${badUnledgered.out.slice(-400)}`);
+      ok(badUnledgered.out.includes('未入账'), `输出应含未入账红面：${badUnledgered.out.slice(-400)}`);
+    });
+    const exemptUnledgeredRun = await runCli(
+      ['--check', '--unledgered-only'],
+      { ...probeEnv, DSH_AUDIT_EXEMPT_UNLEDGERED: fixtureKey },
+    );
+    t('ΠΑΝ-84 端到端：同一红面显式豁免 ⇒ exit 0（豁免登记制，缺省零豁免）', () => {
+      equal(exemptUnledgeredRun.code, 0, `CLI 输出片段：${exemptUnledgeredRun.out.slice(-400)}`);
     });
   }
 
