@@ -6,7 +6,9 @@
 // gymWorldFactory 与无限世界流水 pcgWorldStream（生成侧无限，消费侧预算封顶）。
 // 行为零变化（纯搬运，逐字节不改）；gym.ts 以再导出保持导入面不变。画布立法
 // （GYM_W/GYM_H）与噪声诊所契约自兄弟件导入 —— 单一事实源不变。绝不抛异常。
-import { DEFAULT_SEED, fnv1a, mulberry32 } from './gym';
+// ΠΑΝ-127（D-F5 清偿）：rng 立法改自零出边叶 gym.rng.ts 导入；DEFAULT_SEED
+// 缺省回退上移至桶 gym.ts 的 pcgWorldStream 包装（立法在源桶，注入于边界）。
+import { fnv1a, mulberry32 } from './gym.rng';
 import { GYM_W, GYM_H, type GymControl } from './gym.world';
 import { corruptOcrLabel, GYM_NOISY_OCR_CONF, resolveGymNoise } from './gym.noise';
 import type { GymNoiseResolved } from './gym.noise';
@@ -438,8 +440,10 @@ export function gymWorldFactory(seed: number, opts?: GymGrammarOptions): PcgWorl
  * 同 seed 同序号 ⇒ 同世界（重放一致）；无限性仅由「永不 done」的生成器承载。
  */
 export function* pcgWorldStream(seed: number, opts?: GymGrammarOptions): Generator<PcgWorld, never, void> {
-  const seedNum = Number(seed);
-  const master = Number.isFinite(seedNum) ? Math.floor(seedNum) : DEFAULT_SEED;
+  // ΠΑΝ-127（D-F5 清偿）：非法种子的立法缺省回退（DEFAULT_SEED）上移至桶
+  // gym.ts 的 pcgWorldStream 公开包装（立法在源桶）—— 本核心收到的种子已由
+  // 包装归一为有限数；floor 律原样保留（行为零变化）。
+  const master = Math.floor(Number(seed));
   const grammar = opts ?? {};
   let i = 0;
   for (;;) {

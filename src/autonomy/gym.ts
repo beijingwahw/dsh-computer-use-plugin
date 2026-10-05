@@ -100,7 +100,8 @@ import { runAutonomousLoop } from './autoPilot';
 // src/dialects/random.ts 导入（私有副本退役，随机流逐字节同源、消费顺序不变
 // = 确定性回放锚；gym 侧种子归一卫兵见下方 mulberry32 定义）。
 import { evaluateCriteria, buildCriteriaPairs } from './criteriaEval';
-import { mulberry32 as dialectMulberry32 } from '../dialects/random';
+// ΠΑΝ-127：dialectMulberry32 直连退役 —— gym 消费面统一经 gym.rng 叶（叶内
+// 单源接线不变，ΑΩ-R14 ②rng 单源纪律照旧）。
 
 // 纪元 Μ3-W4（W4-4 文法 PCG 无限训练营）：训练营在四世界之上叠加**文法程序生成**
 // （PCFG）工厂 —— 桌面场景文法（屏幕→[标题栏,主体,侧栏?]、主体→表单|树形|列表|
@@ -301,36 +302,18 @@ export interface AutonomyGymOptions {
   noise?: GymNoiseSpec;
 }
 
-// ─── 确定性 PRNG（ΑΩ-R14 起 rng 单源：流实现自 src/dialects/random.ts） ───
+// ─── 确定性 PRNG 与任务生立立法（ΠΑΝ-127 起下沉零出边叶 gym.rng.ts） ───
 
-/**
- * mulberry32（gym 消费面）：单源流内核 + gym 种子归一卫兵。
- * ΑΩ-R14（方言统一②rng 单源）：流实现退役 —— 单源模块 src/dialects/random.ts
- * （照抄 evolutionPrimitives.ts:77/90 现实现，种子流逐字节同源）。卫兵保 gym
- * 旧方言的种子归一律（有限值 Math.floor / 非有限值按 0 记）：单源内核的
- * `seed >>> 0` 在 ToInt32 下对负小数种子截断（-1.5→-1）而 gym 旧律取 floor
- * （-1.5→-2），卫兵在 gym 边界包一层（dialects/random 头注的分工律）—— gym
- * 全域（含负小数种子）与旧实现逐字节一致，零回归。随机流消费顺序不变。
- */
-export function mulberry32(seed: number): () => number {
-  return dialectMulberry32(
-    typeof seed === 'number' && Number.isFinite(seed) ? Math.floor(seed) : 0,
-  );
-}
-
-/**
- * FNV-1a 32 位字符串散列（状态戳定位用，非密码学）。两旧方言（gym 私有副本与
- * evolutionPrimitives）逐字节同源 ⇒ 无卫兵直迁：W8-B1 起卫星件（noise/world/
- * pcgDerive/pcgWorld/pcgCampaign）经「立法在源」纪律从本件导入 —— 域分离派生
- * 纪律只此一份。ΑΩ-R14：实现自 src/dialects/random.ts 单源再导出（gym 导入面
- * 零改动），行为零变化。
- */
-export { fnv1a } from '../dialects/random';
-
-/** 保留两位小数（总结句里的权重展示）。W8-B1 起加 export：gym.noise.ts 消费（立法在源）。 */
-export function r2(x: number): number {
-  return Math.round(x * 100) / 100;
-}
+// ΠΑΝ-127（D-F5 清偿）：rng 立法（mulberry32/fnv1a/r2）已下沉至零出边叶
+// gym.rng.ts —— 卫星件曾回借本桶这些立法基元构成桶-卫星 value 环族。本桶与
+// 卫星皆改 import 叶；此处再导出保导入面零破坏（r14 金样/卫兵律/fnv1a 单源
+// 同一性全部照旧成立 —— 再导出链不换绑）。
+// 任务生立立法（KIND_ORDER/castTask 族）受 w8gymsplit ②「export const
+// KIND_ORDER」源级锁定留守本文件：卫星侧缺省需求（gym.noise 扫频）经端口注入；
+// 立法常量 DEFAULT_SEED/DEFAULT_MAX_STEPS/CLOCK_STEP_MS 同律留守：卫星侧缺省
+// 经下方包装以参数注入（端口注入方言）。
+export { mulberry32, fnv1a, r2 } from './gym.rng';
+import { mulberry32, r2 } from './gym.rng';
 
 // ─── 任务生成（确定性） ───
 
@@ -390,7 +373,8 @@ export function gymCriteriaEvidence(
 /**
  * 任务铸造核心（generateTasks 与纪元 Κ 课程采样共用）：难度按序号 4 个一块
  * 逐级升、目标/判据按世界种类立法、任务种子由 rng 流抽取。纯确定性 ——
- * 同序号同种类同 rng 流 ⇒ 逐字段相同。
+ * 同序号同种类同 rng 流 ⇒ 逐字段相同。ΠΑΝ-127：KIND_ORDER 源级锁定留守本件
+ *（castTask 亦随族留守 —— 卫星 gym.noise 经 GymSweepPorts 端口消费）。
  */
 export function castTask(index: number, kind: GymWorldKind, rng: () => number): GymTask {
   const difficulty = 1 + (Math.floor(index / KIND_ORDER.length) % 3);
@@ -1199,9 +1183,15 @@ export class AutonomyGym {
       });
 
       // Θ-3 记账①感知容差：perceived（snapshotChanged 按实验室 hammingTolerance
-      // 现值判决）vs truth（世界状态键变没变）。一致 ⇒ success（margin=|距离-容差|，
-      // 判决离阈值多远）；不一致 ⇒ failure（margin=有符号距离差：负 = 容差过松
-      // 漏报变化、正 = 容差过紧误报变化 —— 校准方向的直接编码）。
+      // 现值判决）vs truth（世界状态键变没变）。一致 ⇒ success。
+      // ΤΕΛ-5 D-G21②（ΠΑΝ-52 margin 去内生 · 实验室跟进）：margin 改记**外部可
+      // 观测的原始 dhash 距离**（distance）—— 与生产记录面（autonomousRun
+      // reconcileSlowTruth 的 margin=truth.distance）两侧同域。旧口径 margin =
+      // |距离−容差| / 距离−容差 是对合映射 x → q − x：margin 分布随当前容差 x
+      // 平移、校准器学得的阈 t* ≈ q − x、落回新值 ⇒ 迭代导数 −1 参数代际振荡；
+      // 改记原始距离后 margin 分布与 x 无关 ⇒ 学得阈直接是外部判别分位，单调
+      // 收敛。tolerance 读点仅作即时判决对照（snapshotChanged 判决面），不入
+      // margin 域。
       try {
         const prev = prevEvidence;
         if (lab && prev) {
@@ -1219,7 +1209,9 @@ export class AutonomyGym {
           recordOutcome(
             'world.hammingTolerance',
             agree,
-            distance === null ? 0 : agree ? Math.abs(distance - tolerance) : distance - tolerance,
+            // ΤΕΛ-5 D-G21②：margin = 原始 dhash 距离（外部观测量 —— 对合振荡
+            // 论证见上）；指纹缺席 ⇒ 0（对账面缺席的既有占位，行为不变）。
+            distance === null ? 0 : distance,
           );
         }
       } catch {
@@ -1531,7 +1523,12 @@ interface GymWorldLike {
 
 // W1-4 病态感知诊所（gym.noise.ts；corruptOcrLabel/GYM_NOISY_OCR_CONF 为件内
 // 实现面，只供世界铸造侧兄弟件导入 —— 不进公共再导出，导入面与拆分前逐符对齐）
-export { noiseSweep, resolveGymNoise } from './gym.noise';
+// ΠΑΝ-127（D-F5 清偿）：noiseSweep 由再导出改为「本桶包装 + 端口注入」—— 卫星
+// gym.noise.ts 曾回借本桶 AutonomyGym/DEFAULT_MAX_STEPS 构成 value 二环；核心
+// 实现仍全量在 gym.noise.ts（w8gymsplit ②「已分区」锁定不破），本桶仅注入
+// 训练营工厂与立法缺省（签名与语义零变化，消费方两参照旧）。
+export { resolveGymNoise } from './gym.noise';
+import { noiseSweep as noiseSweepCore } from './gym.noise';
 export type {
   GymNoiseLevel,
   GymNoiseResolved,
@@ -1540,6 +1537,17 @@ export type {
   GymNoiseSweepPoint,
   GymNoiseSweepResult,
 } from './gym.noise';
+import type { GymNoiseSweepOptions, GymNoiseSweepResult } from './gym.noise';
+
+/** W1-4 noiseSweep 公开面（训练营工厂与任务生立立法在此注入 —— 立法在源本文件） */
+export function noiseSweep(opts?: GymNoiseSweepOptions): Promise<GymNoiseSweepResult> {
+  return noiseSweepCore(opts, {
+    createGym: o => new AutonomyGym(o),
+    defaultMaxSteps: DEFAULT_MAX_STEPS,
+    castTask,
+    kindOrder: KIND_ORDER,
+  });
+}
 
 // 四世界状态机（gym.world.ts）
 export { GymWorld } from './gym.world';
@@ -1572,13 +1580,40 @@ export type {
 export { derivePcgScene } from './gym.pcgDerive';
 
 // W4-4 文法世界（gym.pcgWorld.ts；PcgWorld 原为值导出 —— 类再导出保持值面）
-export { PcgWorld, gymWorldFactory, pcgWorldStream } from './gym.pcgWorld';
+// ΠΑΝ-127（D-F5 清偿）：pcgWorldStream 由再导出改为「本桶包装 + 立法缺省注入」
+// —— 卫星 gym.pcgWorld.ts 曾回借本桶 DEFAULT_SEED 构成 value 二环；无限流水
+// 实现仍全量在 gym.pcgWorld.ts，本桶仅在边界补立法缺省（缺种子语义零变化）。
+export { PcgWorld, gymWorldFactory } from './gym.pcgWorld';
+import { pcgWorldStream as pcgWorldStreamCore } from './gym.pcgWorld';
+import type { GymGrammarOptions } from './gym.pcgGrammar';
+
+/** W4-4 无限世界流水公开面（非法种子的立法缺省在此注入 —— 立法在源本文件） */
+export function pcgWorldStream(seed: number, opts?: GymGrammarOptions) {
+  const s = Number(seed);
+  return pcgWorldStreamCore(Number.isFinite(s) ? s : DEFAULT_SEED, opts);
+}
 
 // W4-4 有界消费（gym.pcgCampaign.ts）
-export { runPcgCampaign } from './gym.pcgCampaign';
+// ΠΑΝ-127（D-F5 清偿）：runPcgCampaign 由再导出改为「本桶包装 + 端口注入」——
+// 卫星 gym.pcgCampaign.ts 曾回借本桶 AutonomyGym/DEFAULT_SEED/DEFAULT_MAX_STEPS/
+// CLOCK_STEP_MS 构成 value 二环；有界消费实现仍全量在 gym.pcgCampaign.ts
+// （w8gymsplit ②「已分区」锁定不破），本桶仅注入训练营工厂与立法缺省
+//（签名与语义零变化，消费方两参照旧）。
+import { runPcgCampaign as runPcgCampaignCore } from './gym.pcgCampaign';
 export type {
   PcgCampaignOptions,
   PcgCampaignReport,
   PcgRunBudgetInput,
   PcgRunReport,
 } from './gym.pcgCampaign';
+import type { PcgCampaignOptions, PcgCampaignReport } from './gym.pcgCampaign';
+
+/** W4-4 文法训练营有界消费公开面（训练营工厂与立法缺省在此注入 —— 立法在源本文件） */
+export function runPcgCampaign(opts?: PcgCampaignOptions): Promise<PcgCampaignReport> {
+  return runPcgCampaignCore(opts, {
+    createGym: o => new AutonomyGym(o),
+    defaultSeed: DEFAULT_SEED,
+    defaultMaxSteps: DEFAULT_MAX_STEPS,
+    clockStepMs: CLOCK_STEP_MS,
+  });
+}

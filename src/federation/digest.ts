@@ -4,11 +4,26 @@
 // + Μ-a 铸摘要 / Μ-b 合并摘要。逐字节搬运（零逻辑变更）；index.ts 原位再导出 —
 // — 导入面不变（消费方零改动）。
 // ΝΩ-20（隐私会计）：摘要铸造不再是无台账的免费动作 —— (a) rdpEpsilon 纯函数
-// 给出 Laplace 的 Rényi 发散度（Mironov 公式）；(b) 模块级 privacyBudget 账本按
-// 「窗口指纹」逐窗口累计 ε，Σε 超冻结上限 ⇒ mint 拒绝（返回 null，绝不抛）且
-// 拒绝事实在账本上如实申报；(c) 每 key 的 n 改 Laplace(1/ε) 加噪取整非负（活动量
-// 不再明文出境）；(d) 可选泊松子采样 γ（缺省关 —— 旧行为逐字节）+ 采样放大
-// ε_eff = log(1+γ(e^ε−1))。预算未超 ⇒ 铸造结果与旧实现逐字节一致（零回归纪律）。
+// 给出 Laplace 的 Rényi 发散度（Mironov 公式）；(b) 模块级 privacyBudget 账本累计
+// ε，Σε 超冻结上限 ⇒ mint 拒绝（返回 null，绝不抛）且拒绝事实在账本上如实申报；
+// (c) 每 key 的 n 改 Laplace(1/ε) 加噪取整非负（活动量不再明文出境）；(d) 可选
+// 泊松子采样 γ（缺省关 —— 旧行为逐字节）+ 采样放大 ε_eff = log(1+γ(e^ε−1))。
+// 预算未超 ⇒ 铸造结果与旧实现逐字节一致（零回归纪律）。
+// ΠΑΝ-70（种子与参数的 fail-closed）：显式给出但非法的 ε（≤0 / 非有限）⇒ 拒绝
+// 铸造（返回 null）—— 不再静默回落缺省 ε（「配置错当没配」是隐私面的 fail-open，
+// 方向反转）；注入 rng 产出任何非有限抽头 ⇒ 整次铸造中止（绝不以零噪声真值出境
+// —— 旧注释宣称「多掩蔽方向」而实现恰好反向，本工单对齐）。种子本身的密钥化
+// 派生在传输分区（sync.ts 的 HMAC(K_fed, digest_id)）。
+// ΠΑΝ-71（预算按主体记账）：账本键从「窗口指纹」（滑窗每滑一条 ⇒ 新指纹 ⇒ 新
+// ε=10 账户 —— 相邻窗共享 199/200 条记录的重叠释放根本不组合）改为「主体 # 键」
+//（subject 缺省 'local'，federationSync 喂 endpoint）：键族之间是并行组合（不同
+// key 的证据是 disjoint 个体 —— 各记各账互不叠加），同键跨窗口的滑窗重叠释放
+// 按最保守的朴素序列组合 Σε 累计（内容怎么滑都不换账）；预算闸内部故障 ⇒
+// fail-closed（拒绝铸造，绝不放行）；账本 Map 加冻结上界（上界满 ⇒ 拒绝开新账
+// —— 逐出等于洗预算，方向不可取）。
+// ΠΑΝ-73（回声环闭合）：账本视图的条目带 origin 时，联邦掺入记录（origin ===
+// 'federation'）不进摘要 —— 本地铸造只消费本地真实观察，掺入的远端证据下一轮
+// 不再被重新铸成摘要重新上传（含 DP 噪声的反馈放大环就此切断）。
 
 // ─── 常量（算法形状字面量 —— 非旋钮） ───
 
@@ -35,11 +50,32 @@ export const DEFAULT_FEDERATION_EPSILON = 1;
 export const DEFAULT_MAX_REMOTE_SHARE = 0.5;
 
 /**
- * ΝΩ-20：隐私预算总上限 —— 每个窗口指纹的累计 ε 不得超过 10（常量冻结）。
- * 语义：同一 200 条滑窗的内容无论被 sync 多少次，朴素序列组合下的纯 DP 损失
- * 上界 Σε ≤ 10 —— sync 任意频率调用不再能无界放大隐私损失（旧行为 k 次 ⇒ ≈k·ε）。
+ * ΝΩ-20：隐私预算总上限 —— 每个记账主体（主体 # 键）的累计 ε 不得超过 10（常量冻结）。
+ * 语义：同一主体同一 key 的证据无论被 sync 多少次、滑窗滑多少条，朴素序列组合下的
+ * 纯 DP 损失上界 Σε ≤ 10 —— sync 任意频率、窗口任意滑动都不再能无界放大隐私损失。
  */
 export const PRIVACY_BUDGET_EPSILON_TOTAL = 10;
+
+/**
+ * ΠΑΝ-71：预算账本的账户数冻结上界（内存有界纪律）。上界已满时再需开新账户 ⇒
+ * 拒绝铸造（fail-closed）—— 逐出旧账户等于给旧主体洗预算，方向不可取；诚实
+ * 方向是停下并保持拒绝（生产上 4096 个主体#键组合已远超真实联邦规模）。
+ */
+export const PRIVACY_BUDGET_MAX_ACCOUNTS = 4096;
+
+/**
+ * ΠΑΝ-70：单次 release 的 ε 合法域 —— (0, PRIVACY_BUDGET_EPSILON_TOTAL]（有限）。
+ * 这是 config.federationEpsilon 的范围校验对接点（config 侧与本模块共用同一判据，
+ * 防两处立法漂移）：单次 release 超过预算总上限的 ε 在任何有数据的窗口都不可
+ * 能被预算闸放行 —— 视为配置错误，在铸造入口就拒绝（fail-closed，绝不静默
+ * 回落缺省）。纯函数、绝不抛。
+ */
+export function validFederationEpsilon(eps: unknown): boolean {
+  return (
+    typeof eps === 'number' && Number.isFinite(eps) &&
+    eps > 0 && eps <= PRIVACY_BUDGET_EPSILON_TOTAL
+  );
+}
 
 /** ΝΩ-20：RDP 阶数缺省（冻结 α=10 —— rdpEpsilon 审计口径的固定阶） */
 export const RDP_ORDER = 10;
@@ -184,30 +220,39 @@ export interface EvidenceDigest {
 /** 摘要铸造的账本视图（结构化最小面 —— EvidenceLedger 结构性满足，测试可自铸假件） */
 export interface FederationLedgerView {
   keys(): string[];
-  entries(key: string): ReadonlyArray<{ success: boolean; margin?: number }>;
+  /**
+   * ΠΑΝ-73：条目可选携带 origin —— 'federation'（掺入记录）在铸造侧被过滤
+   * （本地摘要只消费本地真实观察；缺省缺席 = local 既有语义）。
+   */
+  entries(key: string): ReadonlyArray<{ success: boolean; margin?: number; origin?: 'local' | 'federation' }>;
 }
 
-// ─── ΝΩ-20 (b)：隐私预算账本（模块级内存 Map —— 进程生命周期） ───
+// ─── ΝΩ-20 (b) + ΠΑΝ-71：隐私预算账本（模块级内存 Map —— 进程生命周期） ───
 //
 // 立法背景：mintEvidenceDigest 对同一滑窗的每次调用都发一份全新 Laplace 噪声摘要，
 // sync 又可任意频率调用 —— k 次同步 ⇒ 实际隐私损失 ≈ k·ε 无上界（朴素组合律下
-// 线性叠加）。本账本给每次 release 记账（ts, ε），按「窗口指纹」（滑窗内容的
-// 确定性哈希 —— 内容变 ⇒ 新指纹 ⇒ 新预算，滑动窗生命期天然换账）累计：
+// 线性叠加）。本账本给每次 release 记账（ts, ε）：
 //
 //   Σε_eff ≤ PRIVACY_BUDGET_EPSILON_TOTAL（冻结 10）⇒ 通过；超 ⇒ mint 拒绝
 //   （返回 null，绝不抛）且拒绝事件如实落在账上（lastRejection —— 「如实申报
 //   budget-exhausted」的可观察面；null 本身与「视图非法」同形，区分靠本账本）。
 //
-// 组合律与保守性（工单 ΝΩ-20 的立法选择）：
-//   · 执法口径 = **朴素序列组合上界** Σε（k 次 ε-DP ⇒ ≤ kε-DP，纯 DP 不引入 δ）——
-//     比前沿的 Rényi 组合保守：RDP 组合在固定阶 α 下是 Σ D_α（更小），可兑换成
-//     (ε, δ) 预算多放几次 release；本账本不吃这口红利（纯 DP 口径最硬），RDP 只
-//     作审计面（totalRdpEpsilon —— 接收方/审计者可见前沿口径的实耗）。
-//   · 真做了泊松子采样（γ<1）的 release 按 ε_eff = log(1+γ(e^ε−1)) 记账（放大红利
-//     只发给真采样者 —— 不采样不放大）。
-//   · 空窗（全程零有效条目）零记账：输出分布与任何个体无关（纯噪声），0-DP 成本。
+// ΠΑΝ-71 记账主体律（修「窗口指纹换账」洞 —— 旧律滑窗每新增一条本地证据 ⇒ 指纹
+// 变 ⇒ 全新 ε=10 账户，相邻窗口共享 199/200 条记录的重叠释放根本不组合）：
+//   · 账户键 = `s:${subject}|k:${key}`（主体 # 键族 —— subject 由调用方喂：
+//     federationSync 喂 endpoint，缺省 'local'；key 即参数键，一族个体一个账）；
+//   · 键族之间并行组合不叠加：不同 key 的证据是 disjoint 个体（Kairammu 等式在
+//     本域的工程表述 —— 一行观察只属于一个 key），各自记各自的账；
+//   · 同键跨窗口的滑窗重叠释放按**最保守的朴素序列组合** Σε 累计（纯 DP 口径
+//     不引入 δ）—— 内容怎么滑都不换账，「滑动窗生命期天然换账」的旧叙事废除；
+//   · RDP 只作审计面（totalRdpEpsilon —— 前沿 Rényi 组合口径的实耗）；
+//   · 真做了泊松子采样（γ<1）的 release 按 ε_eff = log(1+γ(e^ε−1)) 记账（放大
+//     红利只发给真采样者 —— 不采样不放大）；
+//   · 空窗（全程零有效条目）零记账：输出分布与任何个体无关（纯噪声），0-DP 成本；
 //   · 账本是**会计不变量**不是缓存：进程内绝不随其他联邦运行时复位（隐私预算
 //     花掉了就是花掉了）；resetPrivacyBudgetRuntime 仅供测试隔离。
+//   · 账本 Map 有冻结上界 PRIVACY_BUDGET_MAX_ACCOUNTS：满员再开新账 ⇒ 拒绝铸造
+//     （fail-closed —— 逐出旧账 = 洗预算，不可取）。
 // 持久化选型（工单给的二择一）：模块级（进程生命周期）。跨进程续账可后续随 trust
 // store 同律落盘 —— 首期先关掉「同进程内无界 k·ε」这个最痛的洞。
 
@@ -227,9 +272,13 @@ export interface PrivacyBudgetRejection {
   note: string;
 }
 
-/** 窗口指纹的预算账户（privacyBudgetOf / privacyBudgetReport 的输出面 —— 全派生量防御副本） */
+/**
+ * 记账主体的预算账户（privacyBudgetOf / privacyBudgetReport 的输出面 —— 全派生量防御副本）。
+ * ΠΑΝ-71：fingerprint 字段是账户键 `s:${subject}|k:${key}`（主体 # 键族 —— 不再是
+ * 窗口内容指纹）。
+ */
 export interface PrivacyBudgetAccount {
-  /** 窗口指纹（滑窗内容哈希 —— 内容变 ⇒ 新账户） */
+  /** 账户键（主体 # 键族：`s:${subject}|k:${key}` —— 同主体同键跨窗口同账） */
   fingerprint: string;
   /** release 账目行（ts 升序 —— 追加序） */
   releases: PrivacyBudgetRelease[];
@@ -285,27 +334,52 @@ export function privacyBudgetReport(): PrivacyBudgetAccount[] {
 /**
  * 预算闸（mint 的内部执法点，绝不抛）：本次 release 记账口径 ε_eff 能否放行。
  * 通过 ⇒ 追加账目行（ts, ε_eff）；超限 ⇒ 落 lastRejection 并返回 false。
+ * ΠΑΝ-71：入参是**一组** (账户键, ε_eff) —— 原子决算（任一账户超限 ⇒ 全部拒绝，
+ * 绝不部分放行：一次 release 是一个机制，半放行等于对被放行键免费释放）；
+ * 账本满员（PRIVACY_BUDGET_MAX_ACCOUNTS）再开新账 ⇒ 拒绝（fail-closed —— 逐出
+ * 旧账 = 洗预算）；记账内部故障 ⇒ 拒绝（fail-closed —— 旧律 catch 返回 true 是
+ * 隐私面的 fail-open：「记账故障 ⇒ 损失不记账继续释放」与 DP 纪律相反）。
  */
-function chargePrivacyBudget(fingerprint: string, ts: number, epsilonEff: number): boolean {
+function chargePrivacyBudget(charges: ReadonlyArray<{ fingerprint: string; epsilonEff: number }>, ts: number): boolean {
   try {
-    const cur = privacyBudgets.get(fingerprint) ?? { releases: [] };
-    const total = sumReleases(cur.releases);
-    if (total + epsilonEff > PRIVACY_BUDGET_EPSILON_TOTAL + PRIVACY_BUDGET_EPS_TOL) {
-      cur.lastRejection = {
-        ts,
-        epsilon: epsilonEff,
-        totalEpsilon: total,
-        cap: PRIVACY_BUDGET_EPSILON_TOTAL,
-        note: 'budget-exhausted：窗口指纹累计 ε 已达上限，mint 拒绝（诚实跳过，绝不抛）',
-      };
-      privacyBudgets.set(fingerprint, cur);
-      return false;
+    if (!Array.isArray(charges) || charges.length === 0) return true; // 空窗：零成本
+    // 先按账户键归并（同键多行合并入账 —— mint 每键恰一行，此处防御式归并）
+    const incomingByAccount = new Map<string, number>();
+    for (const c of charges) {
+      const e = typeof c?.epsilonEff === 'number' && Number.isFinite(c.epsilonEff) && c.epsilonEff > 0 ? c.epsilonEff : 0;
+      incomingByAccount.set(c.fingerprint, (incomingByAccount.get(c.fingerprint) ?? 0) + e);
     }
-    cur.releases.push({ ts, epsilon: epsilonEff });
-    privacyBudgets.set(fingerprint, cur);
+    // 第一遍：全额校验（含账本上界 —— 新账户需求在满员账本上不可满足）
+    const staged = new Map<string, { releases: PrivacyBudgetRelease[]; lastRejection?: PrivacyBudgetRejection }>();
+    for (const fingerprint of incomingByAccount.keys()) {
+      if (!privacyBudgets.has(fingerprint) && privacyBudgets.size + staged.size >= PRIVACY_BUDGET_MAX_ACCOUNTS) {
+        return false; // ΠΑΝ-71：账本满员 ⇒ 拒绝开新账（不逐出 —— 逐出 = 洗预算）
+      }
+      staged.set(fingerprint, privacyBudgets.get(fingerprint) ?? { releases: [] });
+    }
+    for (const [fingerprint, cur] of staged) {
+      const total = sumReleases(cur.releases);
+      const incoming = incomingByAccount.get(fingerprint) ?? 0;
+      if (total + incoming > PRIVACY_BUDGET_EPSILON_TOTAL + PRIVACY_BUDGET_EPS_TOL) {
+        cur.lastRejection = {
+          ts,
+          epsilon: incoming,
+          totalEpsilon: total,
+          cap: PRIVACY_BUDGET_EPSILON_TOTAL,
+          note: 'budget-exhausted：主体#键累计 ε 已达上限，mint 拒绝（诚实跳过，绝不抛）',
+        };
+        privacyBudgets.set(fingerprint, cur); // 拒绝事实如实落账
+        return false;
+      }
+    }
+    // 第二遍：全部通过 ⇒ 原子入账（部分放行不存在 —— 一次 release 是一个机制）
+    for (const [fingerprint, cur] of staged) {
+      cur.releases.push({ ts, epsilon: incomingByAccount.get(fingerprint) ?? 0 });
+      privacyBudgets.set(fingerprint, cur);
+    }
     return true;
   } catch {
-    return true; // 记账故障 ⇒ 放行（预算闸是隐私旁路义务，不反噬铸造主路 —— 宁可多放不可炸宿主）
+    return false; // ΠΑΝ-71：记账故障 ⇒ 拒绝铸造（fail-closed —— 绝不「损失不记账继续释放」）
   }
 }
 
@@ -316,15 +390,21 @@ export function resetPrivacyBudgetRuntime(): void {
 
 // ─── Μ-a 铸摘要：mintEvidenceDigest ───
 
-/** 铸造选项（ε / 种子 / 时钟 / 随机源 / 子采样率全可注入 —— 确定性测试的完整缝） */
+/** 铸造选项（ε / 种子 / 时钟 / 随机源 / 子采样率 / 记账主体全可注入 —— 确定性测试的完整缝） */
 export interface MintDigestOptions {
-  /** 差分隐私 ε（>0 有限；非法回落缺省 1 —— config.federationEpsilon 由调用方喂） */
+  /**
+   * 差分隐私 ε。ΠΑΝ-70 fail-closed：**显式给出**但非法（≤0 / 非有限）⇒ 拒绝铸造
+   * 返回 null —— 缺席才回落缺省 1（「没配」与「配错」是两件事，配错不静默洗白）。
+   */
   epsilon?: number;
-  /** rng 种子（缺省 0 ⇒ 确定性预览；federationSync 缺省由 now 派生 ⇒ 跨次上传不复用同一噪声流） */
+  /** rng 种子（缺省 0 ⇒ 确定性预览；federationSync 缺省由 HMAC(K_fed, digest_id) 派生 ⇒ 公开面推不出） */
   seed?: number;
   /** 时钟注入（缺省 Date.now） */
   now?: () => number;
-  /** 完全接管随机源（给出则忽略 seed —— 直注均匀流的测试缝） */
+  /**
+   * 完全接管随机源（给出则忽略 seed —— 直注均匀流的测试缝）。ΠΑΝ-70：接管流产出
+   * 任何非有限抽头 ⇒ 整次铸造中止返回 null（绝不以零噪声真值出境）。
+   */
   rng?: () => number;
   /**
    * ΝΩ-20 (d)：泊松子采样率 γ ∈ (0,1)（可选；缺省/非法 ⇒ 不采样，行为与旧实现
@@ -333,6 +413,11 @@ export interface MintDigestOptions {
    * 消耗显著缩小，代价是直方图质量按 γ 缩水（接收方按有噪估计消费）。
    */
   sampleGamma?: number;
+  /**
+   * ΠΑΝ-71：记账主体（预算账户键的 subject 段；缺省 'local'）。federationSync
+   * 喂 endpoint —— 同一主体无论窗口怎么滑都记同一批账（键族粒度见节首注记）。
+   */
+  subject?: string;
 }
 
 /**
@@ -342,14 +427,18 @@ export interface MintDigestOptions {
  * （mulberry32 流 + 固定格序：key 序、逐条目子采样币、n 噪声、坨 0..7、success
  * 先于 fail）。无 margin 的条目计入 n、不入格（直方图只覆盖带裕量的证据 —— 与
  * calibrator 只消费 margins 的口径对齐）；账本视图非法 ⇒ null（诚实跳过，
- * 绝不抛）。rng 异常产出非有限噪声 ⇒ 该格按 0（宁缺毋假，绝不回退真值 —— DP
- * 的失败方向只能是多掩蔽、不能是少掩蔽）。
+ * 绝不抛）。rng 异常产出非有限抽头 ⇒ **整次铸造中止返回 null**（ΠΑΝ-70：绝不
+ * 以零噪声真值出境 —— DP 的失败方向只能是拒绝，不能是多掩蔽的缺席）。
  *
- * ΝΩ-20 (b) 隐私预算闸：铸造按窗口指纹记账 —— 全程零有效条目（输出与任何个体
- * 无关的纯噪声）⇒ 零成本；否则按 ε_eff（采样放大后）对照 Σε ≤ 上限执法，超限 ⇒
- * 返回 null 且拒绝事件落在 privacyBudget 账本（lastRejection 如实申报
- * budget-exhausted —— null 的区分面在账本不在返回值）。预算未超 ⇒ 返回值与旧
- * 实现逐字节一致（零回归纪律）；预算是会计不变量 —— 同窗口反复 mint 会真实扣减。
+ * ΠΑΝ-73 回声环闭合：条目 origin === 'federation'（联邦掺入记录）不进摘要 ——
+ * 本地铸造只消费本地真实观察，掺入的远端证据下一轮不再被重新铸成摘要重新上传。
+ *
+ * ΝΩ-20 (b) + ΠΑΝ-71 隐私预算闸：铸造按「主体 # 键」记账 —— 全程零有效本地条目
+ * （输出与任何个体无关的纯噪声）⇒ 零成本；否则每个有贡献的 key 各记一行
+ * ε_eff（采样放大后）对照 Σε ≤ 上限原子执法，超限 ⇒ 返回 null 且拒绝事件落在
+ * privacyBudget 账本（lastRejection 如实申报 budget-exhausted —— null 的区分面
+ * 在账本不在返回值）。窗口滑动（内容变）**不换账**：同主体同键的滑窗重叠释放
+ * 按朴素序列组合累计 —— 「滑动窗生命期天然换账」的旧洞就此关闭。
  */
 export function mintEvidenceDigest(
   ledgerView: FederationLedgerView | null | undefined,
@@ -359,15 +448,33 @@ export function mintEvidenceDigest(
     if (!ledgerView || typeof ledgerView.keys !== 'function' || typeof ledgerView.entries !== 'function') {
       return null; // 账本视图非法：诚实跳过（零摘要，不是坏摘要）
     }
+    // ΠΑΝ-70 fail-closed：显式给出的 ε 非法（≤0 / 非有限）⇒ 拒绝铸造 —— 不再
+    // 静默回落缺省（配置错当没配是隐私面的 fail-open）
+    if (opts?.epsilon !== undefined && !(typeof opts.epsilon === 'number' && Number.isFinite(opts.epsilon) && opts.epsilon > 0)) {
+      return null;
+    }
     const epsilon = numOr(opts?.epsilon, DEFAULT_FEDERATION_EPSILON, Number.MIN_VALUE, Infinity);
     const scale = 1 / epsilon; // 计数敏感度 1 ⇒ Laplace 尺度 1/ε（Dwork 机制）
     // ΝΩ-20 (d)：泊松子采样率 γ（缺省/非法 ⇒ 1 = 不采样 —— 旧行为逐字节）
     const gammaRaw = opts?.sampleGamma;
     const gamma = typeof gammaRaw === 'number' && Number.isFinite(gammaRaw) && gammaRaw > 0 && gammaRaw < 1 ? gammaRaw : 1;
-    const rng =
+    // ΠΑΝ-70：注入 rng 的非有限抽头哨兵 —— 任何一次抽头非有限 ⇒ 整次铸造中止
+    // （mulberry32 流恒有限，此闸只对直注 rng 生效；消费点经 safeDraw 走）
+    let rngInvalid = false;
+    const rawRng =
       typeof opts?.rng === 'function'
         ? opts.rng
         : mulberry32(typeof opts?.seed === 'number' && Number.isFinite(opts.seed) ? opts.seed : 0);
+    const rng = (): number => {
+      try {
+        const u = rawRng();
+        if (!Number.isFinite(u)) rngInvalid = true;
+        return typeof u === 'number' ? u : Number.NaN;
+      } catch {
+        rngInvalid = true;
+        return Number.NaN;
+      }
+    };
     let mintedAt = Date.now();
     if (typeof opts?.now === 'function') {
       try {
@@ -377,6 +484,8 @@ export function mintEvidenceDigest(
         /* 时钟故障保持 Date.now —— 绝不抛 */
       }
     }
+    // ΠΑΝ-71：记账主体（预算账户键的 subject 段；缺省 'local' —— 离线手递手铸造）
+    const subject = typeof opts?.subject === 'string' && opts.subject !== '' ? opts.subject : 'local';
     let keyList: string[] = [];
     try {
       keyList = ledgerView.keys() ?? [];
@@ -384,31 +493,33 @@ export function mintEvidenceDigest(
       keyList = [];
     }
     const outKeys: EvidenceDigestKeyEntry[] = [];
-    let fp = 0x811c9dc5; // ΝΩ-20：窗口指纹累积器（FNV-1a 偏移基）
-    let totalN = 0; // ΝΩ-20：全程有效条目数（零 ⇒ 纯噪声输出 ⇒ 零记账）
+    let totalN = 0; // 全程有效**本地**条目数（零 ⇒ 纯噪声输出 ⇒ 零记账）
+    const contributingKeys: string[] = []; // ΠΑΝ-71：有本地贡献的 key（各开各账）
     for (const rawKey of keyList) {
       if (typeof rawKey !== 'string' || rawKey === '') continue; // 垃圾 key 不入摘要
-      let entries: ReadonlyArray<{ success: boolean; margin?: number }> = [];
+      let entries: ReadonlyArray<{ success: boolean; margin?: number; origin?: 'local' | 'federation' }> = [];
       try {
         entries = ledgerView.entries(rawKey) ?? [];
       } catch {
         entries = []; // 单 key 读账故障：按空窗铸（其余 key 不受牵连）
       }
-      fp = fnv1a32(fp, `\u0000${rawKey}\u0000`);
       const bins = zeroBins();
       let n = 0;
+      let contributed = false;
       for (const e of entries) {
         if (!e || typeof e.success !== 'boolean') continue; // 注入视图的垃圾条目：n 与格子都不收
-        // ΝΩ-20：指纹滚入**子采样前**的全量有效条目（窗口身份 = 影响输出的条目集，
-        // 子采样是逐 release 的随机视图不是窗口本身）
-        fp = fnv1a32(fp, `${e.success ? 's' : 'f'}:${e.margin === undefined || !Number.isFinite(e.margin) ? '' : String(e.margin)};`);
+        // ΠΑΝ-73 回声环闭合：联邦掺入记录不进摘要（本地铸造只消费本地真实观察 ——
+        // 掺入的远端证据重新上传 = 含 DP 噪声的反馈放大环，就此切断）
+        if (e.origin === 'federation') continue;
         if (gamma < 1 && !(rng() < gamma)) continue; // ΝΩ-20 (d)：泊松子采样（γ=1 时此臂短路 —— 旧行为零消耗 rng）
         n += 1;
+        contributed = true;
         if (e.margin === undefined || !Number.isFinite(e.margin)) continue; // 无裕量：只计 n
         const m = Math.min(DIGEST_MARGIN_CLIP, Math.max(-DIGEST_MARGIN_CLIP, e.margin));
         const idx = Math.min(DIGEST_BINS - 1, Math.floor((m + DIGEST_MARGIN_CLIP) / ((2 * DIGEST_MARGIN_CLIP) / DIGEST_BINS)));
         bins[idx][e.success ? 0 : 1] += 1;
       }
+      if (contributed) contributingKeys.push(rawKey);
       totalN += n;
       // ΝΩ-20 (c)：n 加噪（Laplace(1/ε) 取整非负；rng 异常 ⇒ 0 —— 多掩蔽方向，
       // 绝不回退真值）
@@ -422,12 +533,15 @@ export function mintEvidenceDigest(
       );
       outKeys.push({ key: rawKey, n: noisyN, bins: noisyBins });
     }
-    // ΝΩ-20 (b)：隐私预算闸（零有效条目 ⇒ 纯噪声输出 ⇒ 零成本不记账）
+    // ΠΑΝ-70：注入 rng 产出过非有限抽头 ⇒ 整次铸造中止（绝不以零噪声真值出境）
+    if (rngInvalid) return null;
+    // ΝΩ-20 (b) + ΠΑΝ-71：隐私预算闸（零有效本地条目 ⇒ 纯噪声输出 ⇒ 零成本不记账；
+    // 有贡献的 key 各记一行 —— 原子决算，任一超限整体拒绝）
     if (totalN > 0) {
       const epsEff = gamma < 1 ? subsampleAmplifiedEpsilon(epsilon, gamma) : epsilon;
-      const fingerprint = `w${fp.toString(16).padStart(8, '0')}`;
-      if (!chargePrivacyBudget(fingerprint, mintedAt, epsEff)) {
-        return null; // budget-exhausted：诚实拒绝（拒绝详情在 privacyBudgetOf(fingerprint)）
+      const charges = contributingKeys.map(k => ({ fingerprint: `s:${subject}|k:${k}`, epsilonEff: epsEff }));
+      if (!chargePrivacyBudget(charges, mintedAt)) {
+        return null; // budget-exhausted / 账本满员：诚实拒绝（拒绝详情在 privacyBudgetOf）
       }
     }
     return { v: DIGEST_VERSION, mintedAt, epsilon, keys: outKeys };

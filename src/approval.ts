@@ -39,7 +39,7 @@
 // 该裁决方法现居 approval.ledger.ts；本桶文件**不得**出现该方法的字面名
 // （否则规则会锚定到无守卫的桶文件上，产生误报）。
 import { pending } from './approval.registry';
-import { grantBucket, setConfirmCodeChannel } from './approval.security';
+import { grantBucket, setConfirmCodeChannel, resetApprovalSecurityState } from './approval.security';
 import { resetDemonstrationState, resetEscrowState } from './approval.bypass';
 import { resetQueueState } from './approval.queueState';
 import { reversibilityRegistry } from './riskGate';
@@ -47,21 +47,23 @@ import { reversibilityRegistry } from './riskGate';
 // ─── 公共符号面（与拆分前逐一对齐 —— 导入面零改动） ───
 
 // 脱敏契约
-export { lengthBucket, sanitizeActionShape } from './approval.shapes';
+export { lengthBucket, sanitizeActionShape, normalizeToken } from './approval.shapes';
 export type { RawActionShape, ActionShape } from './approval.shapes';
 
 // 簿记注册表
 export type { PendingApproval, ReversibilityCarry } from './approval.registry';
 
 // 安全原语（S2 带外人证 / H1 批注 / Y-10 限流桶）
-export type { ApprovalAmendment, ConfirmCodeDelivery, GrantOutcome } from './approval.security';
+export type { ApprovalAmendment, ConfirmCodeDelivery, GrantOutcome, TargetHint, TargetRejectionInfo } from './approval.security';
 export { TokenBucket, setConfirmCodeChannel, approvalBudget } from './approval.security';
+// ΠΑΝ-5（能力限缩令牌）：目标摘要规范化/比对原语与绑定拒绝透明化面
+export { computeTargetDigest, digestsEqual, targetRejectionOf } from './approval.security';
 
 // 旁路面（Τ 示范事件 + W3-1 托管钩子）
 export type { DemonstrationEvent } from './approval.bypass';
 export { setDemonstrationObserver, configureDemonstrations } from './approval.bypass';
 export type { DispatchEscrowCheck, DispatchEscrowVerdict, BeginAttemptOpts, EscrowBlockInfo } from './approval.bypass';
-export { setDispatchEscrowHook, setEscrowSettlementHook, escrowBlockOf } from './approval.bypass';
+export { setDispatchEscrowHook, setEscrowSettlementHook, escrowBlockOf, escrowGateArmed } from './approval.bypass';
 
 // 主账本
 export { approval } from './approval.ledger';
@@ -85,6 +87,9 @@ export { approvalQueue, armApprovalQueue } from './approval.queue';
  *  block=null —— 托管面回「未武装」默认；生产由 reversalEscrow.arm 重接）。
  *  W4-3（S5）：可逆性分级注册表的证据账一并归零（approval 现在直接喂
  *  注册表 —— 隔离缝不漏旁路的全局态，与 Τ 观察者面同律）。
+ *  ΠΑΝ-5/6（能力限缩令牌修复潮）：安全原语区的伴随账（目标绑定映射 /
+ *  兑换权标记 / 最近目标绑定拒绝）一并归零 —— 测试不得读到上一用例的绑定
+ *  或兑换残迹（fail-closed 基线的确定性）。
  *  （W8-B3 拆分：各分区经自身的归零函数复位，调用顺序与原单文件实现一致。） */
 export function resetApproval(): void {
   pending.clear();
@@ -92,6 +97,7 @@ export function resetApproval(): void {
   resetDemonstrationState();
   setConfirmCodeChannel(null);
   resetEscrowState();
+  resetApprovalSecurityState();
   resetQueueState();
   try { reversibilityRegistry.reset(); } catch { /* 隔离缝防御：注册表故障不炸审批归零 */ }
 }

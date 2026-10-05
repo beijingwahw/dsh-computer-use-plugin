@@ -32,10 +32,38 @@ const LEET_MAP: Record<string, string> = {
   '0': 'o', '1': 'l', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's',
 };
 
+// ΠΑΝ-9（H-1 归一化补全·防御纵深）：不可见字符剥除集扩展 + NFKC 前置。
+// 旧剥除集 [\s\u200b\u200c\u200d\p{P}\p{S}] 只覆盖空白/零宽三兄弟/标点/符号 ——
+// 软连字符 U+00AD、词连接符 U+2060 与函数应用族 U+2061-2064（皆 Cf 类）、组合
+// 附加记号（Mn，如 U+0301）、变体选择符 U+FE0E/F 与 VS17-256（U+E0100-E01EF，
+// 亦 Mn）全部穿透 ⇒ 'pass­word'（软连字符）折叠后仍带不可见字符，词表
+// password 不命中 —— 风险词与不可逆操作词两道闸同时绕过（对抗性页面把敏感
+// 字段命名成不可见字符变体，OCR/模型转述携带该字符即漏拦，凭据被代输）。
+// 修法两条腿（缺一不可 —— NFKC 实测不消除 Cf/Mn：'\u00AD'.normalize('NFKC')
+// 原样返回；剥除集也管不到兼容分解形）：
+//   1) 剥除集扩为 Cf 全类 + Mn 全类 + FE0F/E0100-E01EF 显式点名（后两者本属
+//      Mn —— 显式列出防 Unicode 类目演进漂移；既有 \s/零宽/标点/符号类全保留）；
+//   2) 归一化链前置单码点 NFKC（见 normalizeOnceMapped 发射门）—— 兼容分解形
+//      （全角/带圈/数学字母/罗马数字/连字）不再单靠策表折叠。
+// 语义方向：剥除使不可见字符两侧**拼接** —— 'pass­word'→'password' 必须命中
+// 词表（这正是目的：剥除只许产生新的命中，不许产生新的逃逸）；方向与模块
+// 「宁误拦不漏拦」一致。绝不抛：正则/normalize 均为全函数。
+/** ΠΑΝ-9 不可见字符判据（Cf 全类 + Mn 全类 + 变体选择符点名）。
+ *  双重用途：① 剥除集成员判据（见 RISK_STRIP_RE）；② 生成同形字表里以不可见
+ *  字符为**键**的条目的运行时过滤（见 buildHomoglyphMap）—— 折叠顺序是
+ *  LEET/HOMOGLYPH 先于剥除，不可见键会从隐形字符注入可见字母（打断邻接 ⇒
+ *  漏报），与剥除语义冲突。注意判据刻意不含 \s/\p{P}/\p{S}：'|'→'l'、'×'→'x'
+ *  这类可见符号键的折叠是既有执法面（先折叠后剥除），必须保留。 */
+const INVISIBLE_CHAR_RE = /[\p{Cf}\p{Mn}\uFE0F\u{E0100}-\u{E01EF}]/u;
+/** 归一化剥除集：既有类（空白/零宽/标点/符号）+ ΠΑΝ-9 不可见类（Cf/Mn/变体选择符） */
+const RISK_STRIP_RE = /[\s\u200b\u200c\u200d\p{P}\p{S}\p{Cf}\p{Mn}\uFE0F\u{E0100}-\u{E01EF}]/u;
+
 /**
- * 归一化：小写 + leet 还原 + 剥空白/零宽字符/标点/符号。
+ * 归一化：小写 + 单码点 NFKC 前置 + leet 还原 + 同形字折叠 + 剥空白/零宽/不可见
+ * 字符（Cf/Mn/变体选择符）/标点/符号。
  * 「p@ssw0rd」→「password」、「密 码」→「密码」、「verificati0n c0de」→
- * 「verificationcode」—— 三类视觉混淆在归一化域内全部还原为可匹配形态。
+ * 「verificationcode」、「pass­word」（软连字符）→「password」—— 四类视觉
+ * 混淆在归一化域内全部还原为可匹配形态（第四类是 ΠΑΝ-9：不可见字符注入）。
  * 语义方向：匹配面扩大只增召回（宁误拦不漏拦 —— 风险闸门的使命是保守，
  *  拦截的代价有界：模型多看一眼截图；漏拦的代价是凭据被代输）。
  * 词表与待检文本同律归一（双向一致 —— 词表「api key」与文本「A P I k e y」对齐）。
@@ -81,6 +109,14 @@ function buildHomoglyphMap(): Record<string, string> {
     m[String.fromCharCode(0x24d0 + i)] = String.fromCharCode(97 + i);       // 带圈小写
   }
   for (let i = 0; i < 10; i++) m[String.fromCharCode(0xff10 + i)] = String(i); // 全角数字
+  // ΠΑΝ-9: 同形表不得含**不可见字符键** —— 折叠链是 LEET/HOMOGLYPH 先于剥除，
+  // 若 Cf/Mn 键存在会从不可见字符注入可见字母（'pass\u0301word' 若 U+0301 折叠
+  // 成某字母则 password 邻接断裂 ⇒ 漏报；反向则是无中生有的假字母）。当前
+  // 生成表实测 0 条此类键（scripts/gen_confusables.mjs 的 ΠΑΝ-11 蒸馏同律排除）；
+  // 运行时过滤是 belt-and-braces：陈旧生成文件也不带入坏键，与再生路径双保险。
+  for (const k of Object.keys(m)) {
+    if (INVISIBLE_CHAR_RE.test(k)) delete m[k];
+  }
   return m;
 }
 const HOMOGLYPH_MAP: Record<string, string> = buildHomoglyphMap();
@@ -146,17 +182,24 @@ function normalizeOnceMapped(s: string, prev: ReadonlyArray<number> | null): Map
     const ch = loCps[k];
     const origin = originOf[k] !== undefined ? originOf[k] : lastOrigin;
     lastOrigin = origin;
-    if (LEET_MAP[ch] !== undefined) {
-      for (const dst of LEET_MAP[ch]) { out += dst; map.push(origin); }
-      continue;
+    // ΠΑΝ-9: 单码点 NFKC 前置展开（兼容分解：ﬁ→fi、①→1、㏒→log、ｍ→m…）。
+    // 展开产物逐码点过同一 LEET/同形/剥除链，来源索引共享（一对多展开同源 ——
+    // 与 LEET/HOMOGLYPH 的既有记账律一致）。跨码点组合（a+◌́→预组合 á）不经
+    // 此路：分解形中的组合记号由扩展剥除集（Mn）兜住 ⇒ 'pa\u0301ssword' 与
+    // 'password' 在折叠域收敛为同一形态（剥除后拼接只产生新命中，不产生新逃逸）。
+    for (const dst of ch.normalize('NFKC')) {
+      if (LEET_MAP[dst] !== undefined) {
+        for (const c of LEET_MAP[dst]) { out += c; map.push(origin); }
+        continue;
+      }
+      if (HOMOGLYPH_MAP[dst] !== undefined) {
+        for (const c of HOMOGLYPH_MAP[dst]) { out += c; map.push(origin); }
+        continue;
+      }
+      if (RISK_STRIP_RE.test(dst)) continue; // ΠΑΝ-9: 空白/零宽/标点/符号/不可见（Cf/Mn/VS）全剥
+      out += dst;
+      map.push(origin);
     }
-    if (HOMOGLYPH_MAP[ch] !== undefined) {
-      for (const dst of HOMOGLYPH_MAP[ch]) { out += dst; map.push(origin); }
-      continue;
-    }
-    if (/[\s\u200b\u200c\u200d\p{P}\p{S}]/u.test(ch)) continue; // 空白/零宽/标点/符号全剥
-    out += ch;
-    map.push(origin);
   }
   return { text: out, map };
 }

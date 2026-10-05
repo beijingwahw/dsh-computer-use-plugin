@@ -20,8 +20,9 @@
 //
 // 异常诚实：失败 throw PhysicalError，由 adapter 转失败响应。
 import { open, type FileHandle } from 'fs/promises';
-import { existsSync } from 'fs';
-import { platform } from 'os';
+import { existsSync, realpathSync } from 'fs'; // ΤΕΛ-7b：realpathSync 用于 symlink 逃逸收口
+import { platform, homedir } from 'os';
+import { resolve as pathResolve, relative as pathRelative, isAbsolute as pathIsAbsolute, join as pathJoin } from 'path';
 import type { PhysicalError, ScreenshotResult } from './contracts.js';
 import { PhysicalErrorKind } from './contracts.js';
 
@@ -76,6 +77,113 @@ function resolveShmPath(name: string): string {
     return `/tmp/shm.${clean}`;
   }
   return `/dev/shm/${clean}`;
+}
+
+// ─── ΠΑΝ-66（mmap-file 路径校验）：shm 防线扩展到缺省传输，fail-closed ───
+// 旧实现把服务端返回的 `name`（mmap-file 模式 = 文件路径）直通 fs.open：
+// 被攻破/漂移的 Python 服务可让 Node 端 open+read 本机任意文件（字节进入
+// ScreenshotHandle.read() 消费链）。shm 模式的 resolveShmPath 防线
+//（'/'/'.'/'..' 拒绝）不覆盖缺省传输 —— 本节把等价防线补齐：
+//   1. 拒绝遍历：原始路径显式含 '..' 段一律拒绝（即使 resolve 后仍在根内
+//      —— 服务端不该用相对回溯描述自己管理的暂存文件）；
+//   2. 白名单根目录：解析后的绝对路径必须落在「显式注册根 ∪ 约定根」之内
+//      —— 显式注册根由 PhysicalServiceManager 在 spawn 时登记（它明知
+//      mmapDir）；约定根 = DSH_PHYSICAL_MMAP_DIR 环境变量 ∪ ~/.dsh/shots
+//      （Python 端 config.mmap_dir 缺省与 physicalBackend.defaultMmapDir 同源
+//      —— 覆盖稳定密钥部署/收养流；若约定变更，此处须同步 —— 对接点在
+//      python_service/dsh_physical/config.py 与 src/physicalBackend.ts）；
+//   3. fail-closed：不落任何根 ⇒ 拒绝读取（宁失明，不可被牵着读任意文件）。
+//   4. ΤΕΛ-7b（F2-7/源注登记的留白收口）：symlink 逃逸 —— 逻辑路径落根**不够**，
+//      白名单根内的符号链接可指向根外任意文件（被攻破/漂移的 Python 服务或本机
+//      攻击者在 mmapDir 放一个 symlink 即可让 Node 端读任意文件）。收口：
+//      resolve 落根后再 realpath 解析全部链接段，物理路径须仍落在某个白名单根
+//      的 realpath 之内（根自身含 symlink 如 macOS /tmp → /private/tmp 不误伤
+//      —— 对根也做 realpath 对账）；realpath 失败（断链/EACCES/ELOOP 等）
+//      ⇒ 拒绝（fail-closed），唯 ENOENT 放行交由 open 的 element_not_found
+//      诚实归因（对象已释放；文件不存在即无数据可读，非逃逸面）。open 目标
+//      = 校验后的物理路径（不是逻辑路径），缩小 realpath→open 间的 TOCTOU 窗。
+
+/** ΠΑΝ-66：显式注册的 mmap-file 白名单根目录（manager spawn 时登记） */
+const _mmapRoots = new Set<string>();
+
+/** ΠΑΝ-66：登记一个 mmap-file 白名单根目录（幂等）。PhysicalServiceManager
+ *  在 spawn 后登记自己的 mmapDir；外部部署（收养流/嵌入式）可直接调用。 */
+export function allowMmapRoot(dir: string): void {
+  if (typeof dir === 'string' && dir.trim() !== '') {
+    _mmapRoots.add(pathResolve(dir));
+  }
+}
+
+/** ΠΑΝ-66：清空显式注册根（执法测试面 —— 约定根不可撤销，始终在岗） */
+export function clearMmapRoots(): void {
+  _mmapRoots.clear();
+}
+
+/** ΠΑΝ-66：约定根（与 Python 缺省/物理后端稳定密钥部署同源） */
+function conventionalMmapRoots(): string[] {
+  const roots: string[] = [];
+  const envDir = process.env.DSH_PHYSICAL_MMAP_DIR;
+  if (typeof envDir === 'string' && envDir.trim() !== '') roots.push(pathResolve(envDir));
+  roots.push(pathResolve(pathJoin(homedir(), '.dsh', 'shots')));
+  return roots;
+}
+
+/** ΠΑΝ-66：mmap-file 服务端路径的防线（解析 + 拒绝遍历 + 白名单根，fail-closed）。
+ *  ΤΕΛ-7b：白名单校验后追加 symlink 逃逸收口（realpath 再验白名单）。
+ *  通过 ⇒ 返回**物理**路径（realpath 后——open 目标即校验目标）；任何一条不满足
+ *  ⇒ throw invalid_args（PhysicalError）。 */
+function resolveMmapFilePath(raw: string): string {
+  if (typeof raw !== 'string' || raw === '' || raw.includes('\0')) {
+    throw makeError('invalid_args', `invalid mmap-file path: ${JSON.stringify(raw)}`);
+  }
+  // 拒绝遍历：原始段显式含 '..'（正/反斜杠分隔）一律拒绝
+  if (raw.split(/[\\/]+/).includes('..')) {
+    throw makeError('invalid_args', `mmap-file path traversal rejected: ${raw}`);
+  }
+  const resolved = pathResolve(raw);
+  // 白名单根：显式注册根 ∪ 约定根；一都不落 ⇒ fail-closed 拒绝
+  const roots = [..._mmapRoots, ...conventionalMmapRoots()];
+  const inRoot = (root: string, p: string): boolean => {
+    const rel = pathRelative(root, p);
+    return rel === '' || (!rel.startsWith('..') && !pathIsAbsolute(rel));
+  };
+  if (!roots.some(root => inRoot(root, resolved))) {
+    throw makeError(
+      'invalid_args',
+      `mmap-file path '${raw}' is outside all whitelisted roots [${roots.join('; ')}] — refusing to open (fail-closed)`,
+    );
+  }
+  // ΤΕΛ-7b：symlink 逃逸收口 —— 逻辑落根后 realpath 再验（fail-closed）。
+  // 白名单根内的符号链接（含中间目录段的链接）可指向根外：被攻破/漂移的
+  // Python 服务或本机攻击者放一个 symlink 即可借 Node 端读任意文件。物理
+  // 路径须落在某白名单根的 realpath 之内（根自身含 symlink 不误伤——对根
+  // 也做 realpath 对账；根 realpath 失败 ⇒ 该根不可信，跳过）。
+  let physical: string;
+  try {
+    physical = realpathSync(resolved);
+  } catch (e: any) {
+    // 唯一放行：ENOENT（白名单内的不存在路径）—— 交由 open 的 element_not_found
+    // 诚实归因（对象已释放语义）；文件不存在即无数据可读，非逃逸面。其余失败
+    // （断链之外的 EACCES/ELOOP/ENOTDIR/未知）⇒ fail-closed 拒绝。
+    if (e && e.code === 'ENOENT') return resolved;
+    throw makeError(
+      'invalid_args',
+      `mmap-file path '${raw}' cannot be resolved (realpath: ${e && e.code ? e.code : e && e.message}) — refusing to open (fail-closed)`,
+    );
+  }
+  if (!roots.some(root => {
+    try {
+      return inRoot(realpathSync(root), physical);
+    } catch {
+      return false; // 根不可解析 ⇒ 该根不可信（fail-closed），试下一个
+    }
+  })) {
+    throw makeError(
+      'invalid_args',
+      `mmap-file path '${raw}' resolves via symlink outside all whitelisted roots (physical: ${physical}) — refusing to open (fail-closed)`,
+    );
+  }
+  return physical; // open 物理路径：realpath→open 的 TOCTOU 窗内换链也不指向此目标
 }
 
 /** 把异常包装为 PhysicalError 对象 */
@@ -174,7 +282,9 @@ export async function readShm(screenshot: ScreenshotResult): Promise<Buffer> {
     if (!screenshot.name) {
       throw makeError('invalid_args', 'mmap-file transport but name is empty');
     }
-    return readFromFile(screenshot.name, screenshot.size, '');
+    // ΠΑΝ-66：防线扩展到缺省传输 —— 校验后的规范化路径才准进 fs.open；
+    // cacheKey 保持原始 name（evictShmFd(meta.name) 的键同律，零回归）。
+    return readFromFile(resolveMmapFilePath(screenshot.name), screenshot.size, screenshot.name);
   }
 
   // shm 模式
@@ -274,8 +384,9 @@ export async function* readShmStreaming(
   if (screenshot.transport !== 'mmap-file' && platform() === 'win32') {
     throw makeError('invalid_args', 'shm transport not supported on win32 (use mmap-file or base64)');
   }
+  // ΠΑΝ-66：mmap-file 分支先过防线（解析 + 拒绝遍历 + 白名单根）再进 fs.open
   const path = screenshot.transport === 'mmap-file'
-    ? screenshot.name
+    ? resolveMmapFilePath(screenshot.name)
     : resolveShmPath(screenshot.name);
   if (!existsSync(path)) {
     throw makeError(
@@ -284,7 +395,7 @@ export async function* readShmStreaming(
     );
   }
 
-  const cacheKey = screenshot.transport === 'mmap-file' ? path : screenshot.name;
+  const cacheKey = screenshot.name; // ΠΑΝ-66：mmap-file 键 = 原始 name（与 readShm 的 evict 键同律）
   const [fh, entry] = await acquireFd(path, cacheKey);
   try {
     let offset = 0;

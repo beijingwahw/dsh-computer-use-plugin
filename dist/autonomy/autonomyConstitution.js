@@ -291,15 +291,23 @@ export class AutonomyConstitution {
             // ΑΩ-R43 审计标注（零行为）：goalText 自身的词族别 —— high = 命中不可逆词族；
             // elevated = 仅命中一般危险词表。动作面自带不可逆证据的路径判决逐字节冻结
             // （无字段、无注记）；goalText 干净 ⇒ 无字段无注记（判决形态与旧律一致）。
+            // ΠΑΝ-61：探索步的未知性标注（ctx.unknownTarget）⇒ 背景风险至少 'elevated'
+            //（语义未知的目标在判决书留痕 —— 纯审计，不顶格 tier）。
             const goalIrreversible = matchesDangerPatterns(goalText, irreversibleCsv);
             const backgroundRisk = goalIrreversible
                 ? 'high'
                 : matchesDangerPatterns(goalText, unionCsv)
                     ? 'elevated'
-                    : undefined;
+                    : c.unknownTarget === true
+                        ? 'elevated'
+                        : undefined;
             const note = (reason) => actionIrreversible || backgroundRisk === undefined
                 ? reason
-                : appendNote(reason, `ΑΩ-R43 背景风险 backgroundRisk=${backgroundRisk}（goalText 命中${goalIrreversible ? '不可逆词族' : '危险词表'}，已按旧律并入本步扫描面保守顶格，此标注仅供审计留痕）`);
+                : appendNote(reason, `ΑΩ-R43 背景风险 backgroundRisk=${backgroundRisk}（${goalIrreversible
+                    ? 'goalText 命中不可逆词族'
+                    : matchesDangerPatterns(goalText, unionCsv)
+                        ? 'goalText 命中危险词表'
+                        : 'ΠΑΝ-61 探索目标语义未知（unknown 标注）'}，${goalIrreversible || matchesDangerPatterns(goalText, unionCsv) ? '已按旧律并入本步扫描面保守顶格' : '纯审计留痕不顶格'}，此标注仅供审计留痕）`);
             const backgroundRiskField = actionIrreversible || backgroundRisk === undefined ? {} : { backgroundRisk };
             // ① 黑名单律：立法层绝对保留 —— 审批不可解锁
             if (this.merged.forbiddenActions.includes(kind)) {

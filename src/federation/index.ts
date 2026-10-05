@@ -71,6 +71,7 @@ import { resetLastSync } from './sync';
 export {
   DIGEST_VERSION, DIGEST_BINS, DIGEST_MARGIN_CLIP, FEDERATION_TIMEOUT_MS,
   DEFAULT_FEDERATION_EPSILON, DEFAULT_MAX_REMOTE_SHARE,
+  PRIVACY_BUDGET_EPSILON_TOTAL, PRIVACY_BUDGET_MAX_ACCOUNTS, validFederationEpsilon,
   mulberry32, laplaceNoise,
   type EvidenceDigestKeyEntry, type EvidenceDigest, type FederationLedgerView,
   type MintDigestOptions, mintEvidenceDigest,
@@ -78,10 +79,13 @@ export {
 } from './digest';
 export {
   FEDERATION_AUTH_ENV, FEDERATION_AUTH_TIMESTAMP_HEADER, FEDERATION_AUTH_SIGNATURE_HEADER,
-  FEDERATION_AUTH_SKEW_MS, federationAuthHeaders,
+  federationAuthHeaders,
   FEDERATION_SIGNING_KEY_ENV, federationSigningIdentity, signEvidenceDigest,
   verifyEvidenceDigestSignature, canonicalFederationJson, federationSigningKeyHint,
   logFederationSigningKeyHint,
+  // ΠΑΝ-70（DP 种子密钥派生）/ ΠΑΝ-74（新鲜度、撤销、名册饱和）
+  FEDERATION_DP_KEY_ENV, federationDpSeed,
+  KNOWN_CLIENT_ROSTER_SATURATION, KNOWN_CLIENT_ROSTER_CAPACITY, federationMaxRemotes,
   type FederationFetch, type FederationSyncOptions, type FederationSyncResult,
   type FederationSyncStatus, lastFederationSync, federationSync,
   type SignedEvidenceDigest, type FederationSigningIdentity, type FederationSignatureVerdict,
@@ -89,6 +93,7 @@ export {
 export {
   type FederationLedgerTarget, type ApplyFederatedEvidenceOptions,
   type FederatedApplyReport, applyFederatedEvidence,
+  FEDERATION_DIGEST_TTL_MS, FEDERATION_FRESHNESS_SKEW_MS, APPLY_TS_SCATTER_MS,
 } from './apply';
 export {
   type FederationTrustRecord, TRUST_STORE_VERSION, DEFAULT_TRUST_FLUSH_EVERY,
@@ -100,6 +105,13 @@ export {
   type FederationTrustRestoreReport, restoreFederationTrust, loadFederationTrust,
   type ArmTrustPersistenceOptions, armFederationTrustPersistence,
   type FederationTrustFlushReport, flushFederationTrust, federationTrustPersistenceStatus,
+  // ΠΑΝ-74（撤销表 —— 本地文件的 revocation list）
+  FEDERATION_REVOCATION_STORE_VERSION,
+  type FederationRevocationStore, type FederationRevocationStoreDoc,
+  createFederationRevocationFileStore, revokeFederationSource, unrevokeFederationSource,
+  isFederationSourceRevoked, federationRevocationList, serializeFederationRevocations,
+  restoreFederationRevocations, armFederationRevocationList, flushFederationRevocations,
+  loadFederationRevocations,
 } from './trust';
 
 // ─── 测试缝：联邦运行时复位（信任账 + 上次同步记忆 + W6-4 持久化武装；生产代码无理由调用） ───

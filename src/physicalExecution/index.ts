@@ -26,6 +26,7 @@ export type {
   PhysicalError, PhysicalErrorKind, PhysicalExecutionAdapter,
   PhysicalExecutionConfig, Result, ScreenshotHandleLike, ScreenshotResult,
   ScrollResult, SwitchWindowResult, TypeResult, UIElement, UiTreeResult,
+  ActiveWindowResult,
 } from './contracts.js';
 export { ALL_CAPS } from './contracts.js';
 export { PhysicalExecutionAdapterImpl } from './adapter.js';
@@ -65,19 +66,8 @@ export {
   type D7PhysicalHostPortOpts,
 } from './d7HostPort.js';
 
-import type { PhysicalExecutionAdapter, PhysicalExecutionConfig } from './contracts.js';
-import { PhysicalExecutionAdapterImpl } from './adapter.js';
-
-/**
- * 适配器工厂 —— D-7 编排器侧的便捷入口。
- *
- * 加载层方法：configure 内部失败 throw —— 拒绝带病上线。
- * 返回的适配器尚未预热，调用方需 ``await adapter.init()`` 加载 HMAC 密钥。
- */
-export function createPhysicalExecution(
-  config: PhysicalExecutionConfig,
-): PhysicalExecutionAdapter {
-  const adapter = new PhysicalExecutionAdapterImpl();
-  adapter.configure(config);
-  return adapter;
-}
+// ΠΑΝ-127（D-F5 清偿）：组合工厂 createPhysicalExecution 已下沉卫星
+// physicalExecution/compose.ts —— 卫星 d7HostPort.ts 曾回借本桶该工厂构成
+// d7↔index value 二环；此处再导出保导入面零破坏（physicalBackend 等消费点
+// 零改动）。行为零变化 —— 纯结构搬家。
+export { createPhysicalExecution } from './compose.js';

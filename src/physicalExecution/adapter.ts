@@ -17,7 +17,7 @@
 //   - 运行层 health/clickMouse/typeText/...：永不抛错，失败入 Result.error
 //   - 契约驱动：所有跨进程通信为强类型 JSON Payload
 import type {
-  ClickResult, CursorKindInfo, DragResult, HealthInfo, HitTestResult, HotkeyResult,
+  ActiveWindowResult, ClickResult, CursorKindInfo, DragResult, HealthInfo, HitTestResult, HotkeyResult,
   MoveResult, PhysicalError, PhysicalExecutionAdapter, PhysicalExecutionConfig, Result,
   ScreenshotResult, ScrollResult, SwitchWindowResult, TypeResult, UiTreeResult,
 } from './contracts.js';
@@ -123,14 +123,22 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     if (this.state.key) {
       return { ok: true, value: undefined };
     }
+    // 与 loadKey 同律：await 期间 reset()/二次 configure 可能换掉 state ——
+    // 只写回快照，绝不把旧配置的密钥写进新 state（或写进 null 抛 TypeError）
+    const state = this.state;
+    const key = state.keyPromise ?? (state.keyPromise = this.loadKey());
     try {
-      // 与 loadKey 同律：await 期间 reset()/二次 configure 可能换掉 state ——
-      // 只写回快照，绝不把旧配置的密钥写进新 state（或写进 null 抛 TypeError）
-      const state = this.state;
-      const key = state.keyPromise ?? (state.keyPromise = this.loadKey());
       state.key = await key;
       return { ok: true, value: undefined };
     } catch (e: any) {
+      // ΠΑΝ-67（连接韧性）：拒绝的 keyPromise 不得永久缓存 —— 旧实现失败后
+      // state.keyPromise 仍是同一 rejected promise，此后每次 init()/call() 都
+      // await 它 ⇒ 密钥文件迟到/暂时 EACCES 的一次瞬态失败 = 适配器终身瘫痪
+      //（之后所有请求带空 token ⇒ 永久 unauthorized，只能重建实例）。清零后
+      // 下一次调用重新 loadKey（d7HostPort._ensureInitialized 的 J 纪元同款
+      // 修正回扫到本类）。只清仍属于自己的 state/promise（await 期间
+      // reset/二次 configure 已换 state 的场合不动新 state 的 promise）。
+      if (this.state === state && state.keyPromise === key) state.keyPromise = null;
       return {
         ok: false,
         error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: `key load failed: ${e.message}` },
@@ -198,6 +206,8 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     x: number; y: number; button?: 'left' | 'right' | 'middle'; dryRun?: boolean;
     /** W4-5 移动 Surface：'host:<i>' / 'android:<serial>'；缺省 = 主机现状 */
     surface?: string;
+    /** ΠΑΝ-64：止损信号（与内部超时组合断流）—— router 透传 */
+    signal?: AbortSignal;
   }): Promise<Result<ClickResult, PhysicalError>> {
     return this.call('/click_mouse', {
       x: args.x, y: args.y,
@@ -205,42 +215,45 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
       dry_run: args.dryRun ?? false,
       // W4-5：undefined ⇒ JSON 序列化丢键 ⇒ 请求字节与现状等同（兼容铁律）
       surface: args.surface,
-    });
+    }, args.signal);
   }
 
   async typeText(args: {
     text: string; clearFirst?: boolean; dryRun?: boolean;
     surface?: string; // W4-5
+    signal?: AbortSignal; // ΠΑΝ-64
   }): Promise<Result<TypeResult, PhysicalError>> {
     return this.call('/type_text', {
       text: args.text,
       clear_first: args.clearFirst ?? false,
       dry_run: args.dryRun ?? false,
       surface: args.surface, // W4-5
-    });
+    }, args.signal);
   }
 
   async scrollPage(args: {
     direction: 'up' | 'down' | 'left' | 'right'; amount: number; dryRun?: boolean;
     surface?: string; // W4-5
+    signal?: AbortSignal; // ΠΑΝ-64
   }): Promise<Result<ScrollResult, PhysicalError>> {
     return this.call('/scroll_page', {
       direction: args.direction,
       amount: args.amount,
       dry_run: args.dryRun ?? false,
       surface: args.surface, // W4-5
-    });
+    }, args.signal);
   }
 
   async pressHotkey(args: {
     keys: string[]; dryRun?: boolean;
     surface?: string; // W4-5
+    signal?: AbortSignal; // ΠΑΝ-64
   }): Promise<Result<HotkeyResult, PhysicalError>> {
     return this.call('/press_hotkey', {
       keys: args.keys,
       dry_run: args.dryRun ?? false,
       surface: args.surface, // W4-5
-    });
+    }, args.signal);
   }
 
   async dragMouse(args: {
@@ -248,26 +261,28 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     end: { x: number; y: number };
     dryRun?: boolean;
     surface?: string; // W4-5
+    signal?: AbortSignal; // ΠΑΝ-64
   }): Promise<Result<DragResult, PhysicalError>> {
     return this.call('/drag_mouse', {
       start: args.start,
       end: args.end,
       dry_run: args.dryRun ?? false,
       surface: args.surface, // W4-5
-    });
+    }, args.signal);
   }
 
   /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
   async moveMouse(args: {
     x: number; y: number; durationMs?: number; dryRun?: boolean;
     surface?: string; // W4-5（android surface 服务端诚实拒绝 —— 触屏无悬停语义）
+    signal?: AbortSignal; // ΠΑΝ-64
   }): Promise<Result<MoveResult, PhysicalError>> {
     return this.call('/move_mouse', {
       x: args.x, y: args.y,
       duration_ms: args.durationMs ?? 0,
       dry_run: args.dryRun ?? false,
       surface: args.surface, // W4-5
-    });
+    }, args.signal);
   }
 
   async takeScreenshot(args?: {
@@ -445,12 +460,21 @@ export class PhysicalExecutionAdapterImpl implements PhysicalExecutionAdapter {
     return this.call('/get_ui_tree', {
       source: args?.source ?? 'auto',
       region: args?.region,
-      funnel_ceiling: args?.funnelCeiling ?? 'L3',
+      // ΠΑΝ-68（缺省花钱权对齐）：缺省 ceiling 改 'L2' —— D-6 立法
+      // 「funnelCeiling 是唯一闸门、L3 治理归属中枢、缺省授权 L2」；旧缺省
+      // 'L3' 是 D-5 层自铸花钱权（任何漏传 ceiling 的调用方即获 L3 授权，
+      // 外接真 VLM 后端时是计划外花钱口）。消费方显式要 L3 才花钱。
+      funnel_ceiling: args?.funnelCeiling ?? 'L2',
     }, args?.signal);
   }
 
-  async switchWindow(args: { keyword: string }): Promise<Result<SwitchWindowResult, PhysicalError>> {
-    return this.call('/switch_window', { keyword: args.keyword });
+  async switchWindow(args: { keyword: string; signal?: AbortSignal }): Promise<Result<SwitchWindowResult, PhysicalError>> {
+    return this.call('/switch_window', { keyword: args.keyword }, args.signal);
+  }
+
+  /** 感知辅助（R2-3 焦点保卫）：前台窗口标题只读探测（GET /active_window） */
+  async getActiveWindow(): Promise<Result<ActiveWindowResult, PhysicalError>> {
+    return this.callGet('/active_window');
   }
 
   async releaseShm(name: string): Promise<Result<{ released: boolean }, PhysicalError>> {

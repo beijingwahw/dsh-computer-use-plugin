@@ -45,10 +45,14 @@ export { robustMergeDigests, applyQuarantineToTrust, contributionCap, OUTLIER_FL
 // 聚合根（面分发 + 运行时复位门），导入面不变（消费方零改动）。
 import { resetTrustRuntime } from './trust.js';
 import { resetLastSync } from './sync.js';
-export { DIGEST_VERSION, DIGEST_BINS, DIGEST_MARGIN_CLIP, FEDERATION_TIMEOUT_MS, DEFAULT_FEDERATION_EPSILON, DEFAULT_MAX_REMOTE_SHARE, mulberry32, laplaceNoise, mintEvidenceDigest, mergeDigests, } from './digest.js';
-export { FEDERATION_AUTH_ENV, FEDERATION_AUTH_TIMESTAMP_HEADER, FEDERATION_AUTH_SIGNATURE_HEADER, FEDERATION_AUTH_SKEW_MS, federationAuthHeaders, FEDERATION_SIGNING_KEY_ENV, federationSigningIdentity, signEvidenceDigest, verifyEvidenceDigestSignature, canonicalFederationJson, federationSigningKeyHint, logFederationSigningKeyHint, lastFederationSync, federationSync, } from './sync.js';
-export { applyFederatedEvidence, } from './apply.js';
-export { TRUST_STORE_VERSION, DEFAULT_TRUST_FLUSH_EVERY, PROBATION_TRUST_CAP, PROBATION_CLEAN_MERGES, TRUST_PROBATION_EXEMPT_SOURCE, FEDERATION_FINGERPRINT_KEY_SEP, federationFingerprintSourceId, recordFederationTrust, federationTrustOf, federationTrustReport, createFederationTrustFileStore, serializeFederationTrust, restoreFederationTrust, loadFederationTrust, armFederationTrustPersistence, flushFederationTrust, federationTrustPersistenceStatus, } from './trust.js';
+export { DIGEST_VERSION, DIGEST_BINS, DIGEST_MARGIN_CLIP, FEDERATION_TIMEOUT_MS, DEFAULT_FEDERATION_EPSILON, DEFAULT_MAX_REMOTE_SHARE, PRIVACY_BUDGET_EPSILON_TOTAL, PRIVACY_BUDGET_MAX_ACCOUNTS, validFederationEpsilon, mulberry32, laplaceNoise, mintEvidenceDigest, mergeDigests, } from './digest.js';
+export { FEDERATION_AUTH_ENV, FEDERATION_AUTH_TIMESTAMP_HEADER, FEDERATION_AUTH_SIGNATURE_HEADER, federationAuthHeaders, FEDERATION_SIGNING_KEY_ENV, federationSigningIdentity, signEvidenceDigest, verifyEvidenceDigestSignature, canonicalFederationJson, federationSigningKeyHint, logFederationSigningKeyHint, 
+// ΠΑΝ-70（DP 种子密钥派生）/ ΠΑΝ-74（新鲜度、撤销、名册饱和）
+FEDERATION_DP_KEY_ENV, federationDpSeed, KNOWN_CLIENT_ROSTER_SATURATION, KNOWN_CLIENT_ROSTER_CAPACITY, federationMaxRemotes, lastFederationSync, federationSync, } from './sync.js';
+export { applyFederatedEvidence, FEDERATION_DIGEST_TTL_MS, FEDERATION_FRESHNESS_SKEW_MS, APPLY_TS_SCATTER_MS, } from './apply.js';
+export { TRUST_STORE_VERSION, DEFAULT_TRUST_FLUSH_EVERY, PROBATION_TRUST_CAP, PROBATION_CLEAN_MERGES, TRUST_PROBATION_EXEMPT_SOURCE, FEDERATION_FINGERPRINT_KEY_SEP, federationFingerprintSourceId, recordFederationTrust, federationTrustOf, federationTrustReport, createFederationTrustFileStore, serializeFederationTrust, restoreFederationTrust, loadFederationTrust, armFederationTrustPersistence, flushFederationTrust, federationTrustPersistenceStatus, 
+// ΠΑΝ-74（撤销表 —— 本地文件的 revocation list）
+FEDERATION_REVOCATION_STORE_VERSION, createFederationRevocationFileStore, revokeFederationSource, unrevokeFederationSource, isFederationSourceRevoked, federationRevocationList, serializeFederationRevocations, restoreFederationRevocations, armFederationRevocationList, flushFederationRevocations, loadFederationRevocations, } from './trust.js';
 // ─── 测试缝：联邦运行时复位（信任账 + 上次同步记忆 + W6-4 持久化武装；生产代码无理由调用） ───
 export function resetFederationRuntime() {
     resetTrustRuntime(); // W9-3：信任账/持久化武装复位（trust.ts 私有账本之门）

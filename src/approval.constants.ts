@@ -36,6 +36,11 @@ export const DEFAULT_QUEUE_TTL_MS = 24 * 60 * 60 * 1000;
 export const MAX_QUEUE_ENTRIES = 64;
 /** 持久化档版本 */
 export const APPROVAL_QUEUE_VERSION = 1;
+/** ΠΑΝ-1~4（ΠΑΝ 修复潮）：队列档信封版本 —— v2 = HMAC-SHA256 完整性信封
+ *  （{v:2, alg, mac?, payload}；内层 payload 仍是 APPROVAL_QUEUE_VERSION 的队列
+ *  JSON）。密钥缺席环境写入的降级档省略 mac（恢复面按不可信处理 —— 见
+ *  approval.queueContracts.ts 的 ΠΑΝ-3 注记）。改动 = 改恢复面信任语义。 */
+export const APPROVAL_QUEUE_ENVELOPE_VERSION = 2;
 /** W6-3（W2-1 遗留清偿）：已拒条目保留期缺省 —— 7 天（deny 后的审计窗口；
  *  到期在下次队列落盘时清除，清理经计数器留痕，绝不静默消失。可经
  *  arm({deniedRetentionMs}) 注入覆盖；负值 = 部署显式关闭清理）。 */

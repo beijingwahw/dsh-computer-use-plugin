@@ -3,12 +3,31 @@
 // 端共享密钥认证（HMAC 请求签名 + 防重放）+ Μ-e 同步 federationSync（网络纪律的
 // 落点：fire-and-forget POST / 鲁棒臂本地聚合 / 状态记忆）。逐字节搬运（零逻辑
 // 变更）；index.ts 原位再导出 —— 导入面不变（消费方零改动）。
-import { createHash, createHmac, createPrivateKey, createPublicKey, sign as ed25519Sign, verify as ed25519Verify, } from 'node:crypto';
+// ΠΑΝ-70（DP 种子密钥派生）：缺省种子不再 = nowMs >>> 0（mintedAt 公开 ⇒ 种子
+// 可从摘要自身完整重构 —— Laplace 隐私实际为零）。改 HMAC 派生：seed =
+// HMAC-SHA256(K_fed, digest_id)，K_fed = 显式注入 / env DSH_FED_DP_KEY 的本地
+// 长期密钥，digest_id 绑定（时刻 + 进程内序号 + endpoint）；密钥缺席且无显式
+// 种子 ⇒ 诚实拒绝 mint（fail-closed —— 绝不退化为公开可推的旧种子）。ε 越界
+//（≤0/非有限/超单次上限）在 sync 入口即拒（config.federationEpsilon 的范围
+// 校验对接点 = digest.validFederationEpsilon）。
+// ΠΑΝ-71（预算主体）：mint 记账主体 = endpoint（离线 'local'）—— digest 侧按
+// 「主体 # 键」开账，滑窗内容变化不再换账（组合律见 digest.ts 节首）。
+// ΠΑΝ-72（检疫账对齐）：签名路径的掺入信任按**参与合并的指纹账**取最弱链
+//（min）—— 检疫票记 endpoint#指纹账、配额闸查同一账（旧律查裸 endpoint 账：
+// 裸账 3 轮毕业恒 1.0，指纹票的折减没有任何闸门消费）；applied 只记指纹账。
+// ΠΑΝ-74（新鲜度与撤销）：远端摘要 mintedAt 过期（> FEDERATION_DIGEST_TTL_MS）
+// /无时间锚 ⇒ 剔除计数（staleSources）；本地撤销表（trust.ts 的 revocation
+// list，可落盘）命中的源/端点 ⇒ 剔除计数（revokedSources）；名册学习加饱和
+//（federationMaxRemotes —— 已知客户端数封顶 KNOWN_CLIENT_ROSTER_SATURATION，
+// 攻击者换钥撑大名册不再放松止血限额①）。
+import { createHash, createHmac, createPrivateKey, createPublicKey, randomUUID, sign as ed25519Sign, verify as ed25519Verify, } from 'node:crypto';
 import { evidenceLedger } from '../kernel/registry.js';
+// ΠΑΝ-49：canonical 单源消费（canonicalFederationJson 的实现体 —— 见该函数注释）
+import { canonicalJson } from '../dialects/index.js';
 import { robustMergeDigests, applyQuarantineToTrust } from './aggregate.js';
-import { DIGEST_VERSION, FEDERATION_TIMEOUT_MS, mintEvidenceDigest, } from './digest.js';
-import { applyFederatedEvidence } from './apply.js';
-import { federationFingerprintSourceId, recordFederationTrust } from './trust.js';
+import { DIGEST_VERSION, FEDERATION_TIMEOUT_MS, mintEvidenceDigest, validFederationEpsilon, } from './digest.js';
+import { applyFederatedEvidence, FEDERATION_DIGEST_TTL_MS, FEDERATION_FRESHNESS_SKEW_MS, } from './apply.js';
+import { federationFingerprintSourceId, recordFederationTrust, federationTrustOf, isFederationSourceRevoked, } from './trust.js';
 // ─── W6R-A5（聚合端共享密钥认证）：上行 HMAC 请求签名 ───
 //
 // 缝隙（D-C2 配套）：参考聚合端（scripts/federation-server.mjs）明文无认证 ——
@@ -28,28 +47,64 @@ export const FEDERATION_AUTH_ENV = 'DSH_FEDERATION_TOKEN';
 export const FEDERATION_AUTH_TIMESTAMP_HEADER = 'x-dsh-fed-timestamp';
 /** HMAC-SHA256 签名头（hex —— 密钥持有证明） */
 export const FEDERATION_AUTH_SIGNATURE_HEADER = 'x-dsh-fed-signature';
-/** 时间戳容差 ±5 分钟（服务端同值 —— 时钟偏移容忍与重放窗口的上界） */
-export const FEDERATION_AUTH_SKEW_MS = 5 * 60_000;
+// ΤΕΛ-6（D-G29）：ΠΑΝ-88 推荐协议 v2 的一次性 nonce 头。模块私有（不导出）——
+// 头字面量与 scripts/federation-server.mjs 的 AUTH_NONCE_HEADER 同串（双端口径
+// 由测试把守，同 FEDERATION_AUTH_ENV 族先例）；消费面全部在本文件内
+// （federationAuthHeaders 的 v2 臂 + federationSync 的 mint 臂）。
+const FEDERATION_AUTH_NONCE_HEADER = 'x-dsh-fed-nonce';
 /**
  * 签名头铸造（纯函数、绝不抛）：token 非空字符串 ⇒ { 时间戳头, 签名头 }；否则 {}
  * （open 客户端零头 —— 服务端 open 模式照收，token 模式 401 诚实降级）。签名输入
  * `${timestamp}.${body}`：body 恒以 { 开头（JSON 对象）⇒ 分隔符无歧义。crypto
  * 故障 ⇒ {}（多掩蔽方向：宁可不发签名被拒，绝不发可伪造的弱签名）。导出为
  * 公开面 —— 测试与聚合端的等价断言共用同一实现（双端口径的唯一 TS 权威源）。
+ *
+ * ΤΕΛ-6（D-G29）：可选第四参 nonce —— ΠΑΝ-88 推荐协议 v2 的客户端半边（D-G29
+ * 移交债收口）。非空字符串在场 ⇒ 签名输入升格 `${ts}.${nonce}.${body}` 并附
+ * x-dsh-fed-nonce 头（服务端窗内按 nonce 本身重放拒绝——截获原样重放不再可行）；
+ * 缺席/null/空串 ⇒ v1 既有面逐字节（`${ts}.${body}` 双头，向后兼容——「v1 客户端
+ * 零变化可用」是 ΠΑΝ-88 的明示兼容承诺）。nonce 长度与服务端同域 [8,128]：域外值
+ * 按缺席消毒为 v1（服务端 malformed-nonce 必 401 —— 绝不发自知会被拒的弱头）。
  */
-export function federationAuthHeaders(body, token, nowMs) {
+export function federationAuthHeaders(body, token, nowMs, nonce) {
     try {
         if (typeof token !== 'string' || token === '')
             return {};
         const ts = Number.isFinite(nowMs) ? Math.floor(nowMs) : Date.now();
-        const sig = createHmac('sha256', token).update(`${ts}.${body}`).digest('hex');
-        return {
+        // ΤΕΛ-6（D-G29）：nonce 消毒 —— 非字符串/空串/服务端长度域外一律按 v1（缺席）
+        const n = typeof nonce === 'string' && nonce.length >= 8 && nonce.length <= 128 ? nonce : null;
+        const sig = n === null
+            ? createHmac('sha256', token).update(`${ts}.${body}`).digest('hex')
+            : createHmac('sha256', token).update(`${ts}.${n}.${body}`).digest('hex');
+        const headers = {
             [FEDERATION_AUTH_TIMESTAMP_HEADER]: String(ts),
             [FEDERATION_AUTH_SIGNATURE_HEADER]: sig,
         };
+        if (n !== null)
+            headers[FEDERATION_AUTH_NONCE_HEADER] = n;
+        return headers;
     }
     catch {
         return {}; // 绝不抛纪律：签名失败 = 无头（服务端 401 = 诚实降级）
+    }
+}
+/**
+ * ΤΕΛ-6（D-G29）：v2 nonce 铸造（模块私有，绝不抛）。opts.authNonce === true ⇒
+ * 每次上行铸一次性 randomUUID（128bit 熵，服务端 [8,128] 长度域内）；字符串注入
+ * = 部署/测试钉面（显式指定 nonce，域外值降级 v1）；false/缺省 ⇒ null = v1。
+ * 铸造失败（极端环境）⇒ null 诚实降级 v1 —— 绝不因 nonce 缺席阻断同步（v1 是
+ * ΠΑΝ-88 明示的合法兼容面），也绝不发空/短 nonce 的弱 v2 头。
+ */
+function mintFederationNonce(opt) {
+    if (typeof opt === 'string')
+        return opt.length >= 8 && opt.length <= 128 ? opt : null;
+    if (opt !== true)
+        return null;
+    try {
+        return randomUUID();
+    }
+    catch {
+        return null; // 铸造缺席 ⇒ v1（诚实降级，绝不抛）
     }
 }
 /** 解析同步用的共享密钥：显式注入优先（'' = 显式不签）；缺省读 env（open 语义零头） */
@@ -96,24 +151,15 @@ export const FEDERATION_SIGNING_KEY_ENV = 'DSH_FED_SIGNING_KEY';
 const ED25519_PKCS8_SEED_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const ED25519_SEED_BYTES = 32; // Ed25519 私钥 seed 长度（RFC 8032 固定值，非阈值）
 /**
- * ΝΩ-19：稳定 canonical 序列化（notary/primitives.ts canonical 的本地同律镜像：
- * 键字典序 + undefined 过滤 —— 联邦不跨器官 import，mulberry32 同律的零依赖纪律）。
+ * ΝΩ-19：稳定 canonical 序列化 —— ΠΑΝ-49 起收编为 dialects/canonical.ts 单源
+ *（原为 notary/primitives.ts canonical 的本地同律镜像；复刻律因 C1-9 H1 实证
+ * 漂移退役 —— 逐字节一致的前提只能靠单源，不能靠复刻纪律）。
  * 签名域字节唯一性的根基：同一摘要无论经谁的 JSON 序列化（键序任意）往返，canonical
- * 字节恒同 —— 验签不因传输层键序漂移而误红。纯函数（循环引用会抛 —— 调用方全兜）。
+ * 字节恒同 —— 验签不因传输层键序漂移而误红。病态载荷（超深/真环）⇒ 哨兵降级
+ *（单源 ΝΩ-24 守卫 —— 旧形态循环引用无限递归）；BigInt/硬拒值照实抛（调用方全兜）。
  */
 export function canonicalFederationJson(value) {
-    if (value === null || typeof value !== 'object')
-        return JSON.stringify(value) ?? 'null';
-    if (Array.isArray(value))
-        return '[' + value.map(canonicalFederationJson).join(',') + ']';
-    const rec = value;
-    return ('{' +
-        Object.keys(rec)
-            .sort()
-            .filter(k => rec[k] !== undefined)
-            .map(k => JSON.stringify(k) + ':' + canonicalFederationJson(rec[k]))
-            .join(',') +
-        '}');
+    return canonicalJson(value);
 }
 /**
  * 摘要签名域字节 = 核心四域（v/mintedAt/epsilon/keys）的 canonical 序列化（ΝΩ-19：
@@ -296,6 +342,102 @@ function digestCarriesSignature(entry) {
         return false;
     }
 }
+// ─── ΠΑΝ-70（DP 种子密钥派生）：本地长期密钥 K_fed + HMAC 种子 ───
+//
+// 缝隙（C2-1 F1）：旧律缺省种子 = `nowMs >>> 0`，而 mint 把同一个 nowMs 写进
+// 摘要的公开域 mintedAt —— **种子与 mintedAt 是同一个数**。mulberry32 是无密钥
+// 确定性 PRNG：收到摘要的聚合端与任何同侪都能取 `seed = mintedAt >>> 0` 重放噪声
+// 流，用纯函数 laplaceNoise 逐一减去噪声，精确还原真值直方图与真值 n —— Laplace
+// 机制的全部隐私保证依赖噪声不可预测，预算账本记的是一个不存在的保证。
+// 修复律：
+//   · 种子 = HMAC-SHA256(K_fed, digest_id) 的前 32 位（digest_id = 铸造时刻 + 进程
+//     内铸造序号 + endpoint —— 序号是模块私有状态，公开面推不出）；
+//   · K_fed 是本地长期密钥：显式注入（opts.dpKey，测试缝）优先，缺省读 env
+//     DSH_FED_DP_KEY；密钥绝不进载荷/日志/错误面（密钥卫生同 authToken）；
+//   · **密钥缺席则诚实拒绝 mint**（digest = null + lastSync 如实注记）—— 绝不
+//     退化为公开可推的旧种子（那等于明文出境；隐私面 fail-closed）。显式 seed
+//     注入（手递手/确定性测试缝）仍可用 —— 显式种子不是公开信息，威胁模型内
+//     只有「从摘要公开域推出种子」这一条路，此路已断。
+//   · 附带收口（C2-1 F24）：同毫秒两次 sync ⇒ 同种子同噪声流的旧病随 digest_id
+//     的铸造序号段一并消失。
+/** ΠΑΝ-70：本地长期 DP 种子密钥的环境变量名（协议契约字面量） */
+export const FEDERATION_DP_KEY_ENV = 'DSH_FED_DP_KEY';
+/** 铸造序号（digest_id 的私有随机性段 —— 模块级单调计数，公开面推不出） */
+let mintSequence = 0n;
+/** 解析 DP 种子密钥原料：显式注入优先（'' / null = 显式无钥）；缺省读 env */
+function resolveFederationDpKeyMaterial(explicit) {
+    if (typeof explicit === 'string')
+        return explicit;
+    if (explicit === null)
+        return '';
+    try {
+        const v = process.env[FEDERATION_DP_KEY_ENV];
+        return typeof v === 'string' ? v : '';
+    }
+    catch {
+        return '';
+    }
+}
+/**
+ * ΠΑΝ-70：HMAC 派生种子（纯函数、绝不抛）：seed = readUInt32BE(
+ * HMAC-SHA256(K_fed, digest_id)[0..4] )。digest_id 绑定本次铸造（时刻 + 进程内
+ * 序号 + endpoint）—— 序号段保证同毫秒不同铸、密钥保证公开面（mintedAt/载荷
+ * 全量）推不出种子。密钥缺席 ⇒ null（调用方诚实拒绝，不退化）。导出为公开面：
+ * 「种子不可从公开面推出」的执法测试与运维诊断共用同一实现。
+ */
+export function federationDpSeed(dpKey, digestId) {
+    try {
+        if (typeof dpKey !== 'string' || dpKey === '')
+            return null;
+        if (typeof digestId !== 'string')
+            return null;
+        return createHmac('sha256', dpKey).update(digestId).digest().readUInt32BE(0);
+    }
+    catch {
+        return null;
+    }
+}
+// ─── ΠΑΝ-74（新鲜度与撤销）：远端摘要的新鲜度过滤 + 名册饱和 ───
+/**
+ * ΠΑΝ-74：远端摘要新鲜度过滤（纯函数、绝不抛）：mintedAt 缺席/非法/超 TTL 的
+ * 件按缺席剔除（新鲜度不可判 = 没有掺入资格，fail-closed）。**未来锚同拒**：
+ * `now − t` 为负会使 TTL 检查恒过 —— 恶意源把 mintedAt 定到远未来即得「永不过期」
+ * 的重放件；容差 = FEDERATION_FRESHNESS_SKEW_MS（时钟偏移容忍，apply 侧同律）。
+ * 在验签**之前**执行 —— 便宜的数值检查先挡旧摘要洪泛（对恶意聚合端的 Ed25519
+ * 验签 CPU 面也是一道前置闸）。
+ */
+function filterFreshRemotes(remotes, nowMs) {
+    const kept = [];
+    let stale = 0;
+    for (const d of remotes) {
+        const t = d.mintedAt;
+        if (typeof t !== 'number' || !Number.isFinite(t) || t < 0 || nowMs - t > FEDERATION_DIGEST_TTL_MS) {
+            stale += 1;
+            continue;
+        }
+        if (t > nowMs + FEDERATION_FRESHNESS_SKEW_MS) {
+            stale += 1; // ΠΑΝ-74：未来锚（超容差）—— 新鲜度不可判，同拒
+            continue;
+        }
+        kept.push(d);
+    }
+    return { kept, stale };
+}
+/**
+ * ΠΑΝ-74：止血限额①的饱和律（纯函数）—— 名册学习不再放松 maxRemotes：
+ * `maxRemotes = min(已知客户端数, ROSTER_SATURATION) × 2 + 4`。旧律已知客户端
+ * 只增不减 ⇒ 攻击者批量换钥即可把名册撑大、自我放松限额（护栏的一阶性质被
+ * 名册增长对冲）；饱和后新指纹不再抬高上限（封顶 32×2+4 = 68 —— 真实联邦
+// 规模之上、Sybil 洪泛成本面之下的冻结值）。
+ */
+export const KNOWN_CLIENT_ROSTER_SATURATION = 32;
+/** ΠΑΝ-74：名册记忆容量上界（满员停学 —— 内存有界；不逐出：逐出会重置既有指纹的已知性） */
+export const KNOWN_CLIENT_ROSTER_CAPACITY = 256;
+/** ΠΑΝ-74：源数上限的饱和计算（纯函数、绝不抛 —— 测试与 sync 共用唯一权威源） */
+export function federationMaxRemotes(knownClients) {
+    const k = typeof knownClients === 'number' && Number.isFinite(knownClients) && knownClients > 0 ? Math.floor(knownClients) : 0;
+    return Math.min(k, KNOWN_CLIENT_ROSTER_SATURATION) * 2 + 4;
+}
 let lastSync = null;
 /** 上次同步状态（null = 尚未同步过 —— 诚实面，不臆造） */
 export function lastFederationSync() {
@@ -389,9 +531,51 @@ export function federationSync(opts = {}) {
     }
     const endpoint = typeof opts.endpoint === 'string' ? opts.endpoint : '';
     const ledger = opts.ledger ?? evidenceLedger; // 缺省全局单例；可注入（测试/多账本）
-    // 种子：给定用给定；缺省由 now 派生 —— 每次同步的噪声流独立（DP 的跨次纪律）
-    const seed = typeof opts.seed === 'number' && Number.isFinite(opts.seed) ? opts.seed : nowMs >>> 0;
-    const digest = mintEvidenceDigest(ledger, { epsilon: opts.epsilon, seed, now: () => nowMs });
+    // ΠΑΝ-70 fail-closed（config ε 范围校验的对接点）：显式给出的 ε 越界
+    // （≤0 / 非有限 / 超单次上限 PRIVACY_BUDGET_EPSILON_TOTAL）⇒ 拒绝铸造 ——
+    // 绝不静默回落缺省（「配置错当没配」是隐私面的 fail-open）
+    if (opts.epsilon !== undefined && !validFederationEpsilon(opts.epsilon)) {
+        const note = `ε 非法（${String(opts.epsilon)}：须为 (0, 10] 的有限数）：拒绝铸造（ΠΑΝ-70 fail-closed），零网络零应用`;
+        lastSync = { at: nowMs, network: 'off', applied: 0, note };
+        return {
+            ok: false,
+            digest: null,
+            network: 'off',
+            endpoint,
+            applied: null,
+            settled: Promise.resolve(),
+        };
+    }
+    // ΠΑΝ-70：种子三律 —— ①显式注入（手递手/确定性测试缝）用之；②否则 K_fed 在场
+    // ⇒ seed = HMAC(K_fed, digest_id)（digest_id 绑定时刻+进程内序号+endpoint，
+    // 公开面推不出）；③两者皆缺席 ⇒ 诚实拒绝 mint（隐私面 fail-closed —— 绝不
+    // 退化为旧律的 nowMs>>>0 公开可推种子，那等于真值明文出境）
+    let seed = typeof opts.seed === 'number' && Number.isFinite(opts.seed) ? opts.seed : null;
+    if (seed === null) {
+        const dpKeyMaterial = resolveFederationDpKeyMaterial(opts.dpKey);
+        mintSequence += 1n;
+        seed = federationDpSeed(dpKeyMaterial, `${nowMs}|${mintSequence.toString(36)}|${endpoint}`);
+        if (seed === null) {
+            const note = `${FEDERATION_DP_KEY_ENV} 未配置且未注入 dpKey/seed：DP 噪声种子密钥缺席，拒绝铸造（ΠΑΝ-70 fail-closed —— 绝不以公开可推种子出境），零网络零应用`;
+            lastSync = { at: nowMs, network: 'off', applied: 0, note };
+            return {
+                ok: false,
+                digest: null,
+                network: 'off',
+                endpoint,
+                applied: null,
+                settled: Promise.resolve(),
+            };
+        }
+    }
+    // ΠΑΝ-71：记账主体 = endpoint（离线手递手铸造记 'local' 账）—— 同主体同键的
+    // 滑窗重叠释放组合记账（digest 侧按「主体 # 键」开账）
+    const digest = mintEvidenceDigest(ledger, {
+        epsilon: opts.epsilon,
+        seed,
+        now: () => nowMs,
+        subject: endpoint !== '' ? endpoint : 'local',
+    });
     const result = {
         ok: digest !== null,
         digest,
@@ -443,8 +627,10 @@ export function federationSync(opts = {}) {
     // 签名故障 ⇒ 诚实降级发未签件（绝不抛、不带弱签名上路）
     const signedUplink = signing === null ? null : signEvidenceDigest(digest, signingMaterial);
     const body = JSON.stringify(signedUplink ?? digest); // 上行载荷只有摘要（密钥卫生：无凭据无文本无截图；pubkey/sig 是摘要自带域）
-    // W6R-A5：共享密钥在场 ⇒ 附 HMAC 签名头（token 绝不进载荷 —— 只发派生签名）
-    const authHeaders = federationAuthHeaders(body, resolveFederationAuthToken(opts.authToken), nowMs);
+    // W6R-A5：共享密钥在场 ⇒ 附 HMAC 签名头（token 绝不进载荷 —— 只发派生签名）。
+    // ΤΕΛ-6（D-G29）：authNonce 开 ⇒ v2 推荐协议（+x-dsh-fed-nonce，签名输入
+    // `${ts}.${nonce}.${body}`）；缺省 v1 逐字节（向后兼容零漂移）。
+    const authHeaders = federationAuthHeaders(body, resolveFederationAuthToken(opts.authToken), nowMs, mintFederationNonce(opts.authNonce));
     result.settled = (async () => {
         try {
             const res = await fetchFn(endpoint, {
@@ -464,23 +650,38 @@ export function federationSync(opts = {}) {
             }
             if (opts.robust === true) {
                 // ── Μ2 鲁棒臂：只收多源原始摘要，本地逐格中位数聚合（数学执法代替对聚合端的信任）──
-                const remotes = extractDigestList(payload);
-                if (remotes.length === 0) {
-                    lastSync = { at: nowMs, network: 'fired', applied: 0, note: '响应不含可用的多源摘要（鲁棒臂只收 digests 原始数组）：只上传未掺入' };
+                // ΠΑΝ-74：新鲜度过滤先行（验签/聚合之前的便宜数值闸）—— mintedAt 过期/
+                // 缺席/非法的远端件按缺席剔除并计数（新鲜度不可判 = 没有掺入资格）
+                const { kept: freshRemotes, stale: staleSources } = filterFreshRemotes(extractDigestList(payload), nowMs);
+                if (freshRemotes.length === 0) {
+                    lastSync = {
+                        at: nowMs,
+                        network: 'fired',
+                        applied: 0,
+                        note: freshRemotes.length === 0 && staleSources === 0
+                            ? '响应不含可用的多源摘要（鲁棒臂只收 digests 原始数组）：只上传未掺入'
+                            : `响应远端摘要全部过期/无时间锚（ΠΑΝ-74 stale=${staleSources}）：只上传未掺入`,
+                    };
                 }
                 else if (signing === null) {
-                    // ΝΩ-19：未配置签名密钥 ⇒ 旧路径逐字节（remote-N 标签 + 端点集体账）。
+                    // ΝΩ-19：未配置签名密钥 ⇒ 旧路径（remote-N 标签 + 端点集体账）。
                     // 迁移期哨兵：同侪已升级（响应带签名域）而本机未配钥 ⇒ 一次性提示生成命令
                     try {
-                        if (remotes.some(digestCarriesSignature))
+                        if (freshRemotes.some(digestCarriesSignature))
                             logFederationSigningKeyHint();
                     }
                     catch {
                         /* 提示面故障不挡同步 */
                     }
+                    // ΠΑΝ-74：端点撤销闸（未签名臂没有指纹粒度 —— 裸 endpoint 即账键）：
+                    // 本地撤销表命中 ⇒ 整轮不掺入（被撤销的端点连回环掺入赚干净轮的资格都没有）
+                    if (isFederationSourceRevoked(endpoint) || isFederationSourceRevoked(typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : endpoint)) {
+                        lastSync = { at: nowMs, network: 'fired', applied: 0, note: `端点命中本地撤销表（ΠΑΝ-74 revocation list）：只上传未掺入` };
+                        return;
+                    }
                     // 本机摘要作为第一源参与聚合（中位数对本机+诚实同侪有结构性保护 —— 毒未过半即被隔离）
-                    const rr = robustMergeDigests([digest, ...remotes], {
-                        sourceIds: ['local', ...remotes.map((_, idx) => `remote-${idx}`)],
+                    const rr = robustMergeDigests([digest, ...freshRemotes], {
+                        sourceIds: ['local', ...freshRemotes.map((_, idx) => `remote-${idx}`)],
                     });
                     // 检疫有牙齿（先检疫后掺入 —— 同一轮就咬合）：远端源的检疫票折算 regressed 记到
                     // endpoint 账上（端点为它交出的每一份摘要集体负责 —— 激励端点清洗毒源；
@@ -504,6 +705,7 @@ export function federationSync(opts = {}) {
                             mergedFrom: rr.merged.mergedFrom,
                             quarantined: rr.quarantined,
                             excluded: rr.excluded,
+                            ...(staleSources > 0 ? { staleSources } : {}),
                         };
                         lastSync = {
                             at: nowMs,
@@ -517,14 +719,14 @@ export function federationSync(opts = {}) {
                     }
                 }
                 else {
-                    // ── ΝΩ-19 签名链路：逐源验签 → 止血护栏 → 指纹粒度账 → 本地中位数聚合 ──
+                    // ── ΝΩ-19 签名链路：逐源验签 → 撤销/止血护栏 → 指纹粒度账 → 本地中位数聚合 ──
                     const ownFp = signing.identity.fingerprint;
                     const fpAccount = (fp) => federationFingerprintSourceId(endpoint, fp);
                     // ①逐源验签：验不过（含无签名旧格式）按缺席剔除并计数 —— 假源绝不混入中位数
                     const kept = [];
                     const keptFps = [];
                     let unverifiableSources = 0;
-                    for (const d of remotes) {
+                    for (const d of freshRemotes) {
                         const verdict = verifyEvidenceDigestSignature(d);
                         if (verdict.ok && typeof verdict.fingerprint === 'string' && verdict.fingerprint !== '') {
                             kept.push(d);
@@ -534,11 +736,26 @@ export function federationSync(opts = {}) {
                             unverifiableSources += 1;
                         }
                     }
-                    // 止血①：响应源数上限 = 本地已知客户端数（含本机）×2+4 —— 超额源拒绝并计数
+                    // ①' ΠΑΝ-74 撤销闸：验签过的源命中本地撤销表（revocation list）⇒ 按缺席
+                    // 剔除并计数 —— 被撤销的源连中位数都进不了（比检疫票硬一档：票是缓慢
+                    // 折减，撤销是立即出局）；纯指纹键与 endpoint#指纹键都查（调用方按自己
+                    // 的账键口径撤销，两口径都咬合）
+                    let revokedSources = 0;
+                    for (let i = kept.length - 1; i >= 0; i--) {
+                        const fp = keptFps[i];
+                        if (isFederationSourceRevoked(fp) || isFederationSourceRevoked(fpAccount(fp))) {
+                            revokedSources += 1;
+                            kept.splice(i, 1);
+                            keptFps.splice(i, 1);
+                        }
+                    }
+                    // 止血①：响应源数上限 = 本地已知客户端数（含本机）×2+4（ΠΑΝ-74 饱和律：
+                    // 名册学习不再放松上限 —— min(已知, ROSTER_SATURATION)×2+4，攻击者批量
+                    // 换钥撑大名册也抬不动限额）—— 超额源拒绝并计数
                     let knownClients = knownClientFingerprints.size;
                     if (!knownClientFingerprints.has(ownFp))
                         knownClients += 1; // 本机也是已知客户端
-                    const maxRemotes = knownClients * 2 + 4;
+                    const maxRemotes = federationMaxRemotes(knownClients);
                     let excessiveSources = 0;
                     if (kept.length > maxRemotes) {
                         excessiveSources = kept.length - maxRemotes;
@@ -581,11 +798,23 @@ export function federationSync(opts = {}) {
                     }
                     if (kept.length === 0) {
                         // 全剔除 ⇒ 只上传未掺入：恶意端点不得经由"本地摘要回环掺入"给端点账赚干净轮
+                        //（ΠΑΝ-74：剔除计数照发 —— 审计面不因全剔除而失明）
+                        result.robust = {
+                            method: 'none',
+                            mergedFrom: 0,
+                            quarantined: {},
+                            excluded: [],
+                            unverifiableSources,
+                            excessiveSources,
+                            batchedSources,
+                            staleSources,
+                            revokedSources,
+                        };
                         lastSync = {
                             at: nowMs,
                             network: 'fired',
                             applied: 0,
-                            note: `响应源全部剔除（验签不过 ${unverifiableSources}、同毫秒批量 ${batchedSources}、超额 ${excessiveSources}）：只上传未掺入（ΝΩ-19）`,
+                            note: `响应源全部剔除（验签不过 ${unverifiableSources}、同毫秒批量 ${batchedSources}、超额 ${excessiveSources}、过期 ${staleSources}、撤销 ${revokedSources}）：只上传未掺入（ΝΩ-19/ΠΑΝ-74）`,
                         };
                     }
                     else {
@@ -601,24 +830,49 @@ export function federationSync(opts = {}) {
                         }
                         if (Object.keys(votesByFp).length > 0)
                             applyQuarantineToTrust(votesByFp, recordFederationTrust);
-                        // 已知客户端名册：只学经验签+护栏存活的指纹（下一轮止血限额①的基数）
-                        for (const fp of keptFps) {
-                            try {
-                                knownClientFingerprints.add(fp);
-                            }
-                            catch {
-                                /* 绝不抛 */
+                        // 已知客户端名册：只学经验签+护栏存活的指纹（下一轮止血限额①的基数）。
+                        // ΠΑΝ-74：名册记忆有容量上界 —— 满员停学（不逐出：逐出会重置既有指纹
+                        // 的已知性；饱和律已保证上限不随名册增长）
+                        if (knownClientFingerprints.size < KNOWN_CLIENT_ROSTER_CAPACITY) {
+                            for (const fp of keptFps) {
+                                try {
+                                    knownClientFingerprints.add(fp);
+                                    if (knownClientFingerprints.size >= KNOWN_CLIENT_ROSTER_CAPACITY)
+                                        break;
+                                }
+                                catch {
+                                    /* 绝不抛 */
+                                }
                             }
                         }
                         if (rr.merged !== null) {
+                            // ΠΑΝ-72（检疫账对齐）：掺入配额的信任查询与检疫票同账 —— 签名路径的
+                            // 票记在 endpoint#指纹账上，掺入信任也按**参与本次合并的指纹账**取
+                            // 最弱链（min）：旧律查裸 endpoint 账（掺入侧从不记 regressed ⇒ 裸账
+                            // 3 轮毕业恒 1.0），指纹账上累积的 regressed 衰减没有任何闸门消费 ——
+                            // 签名链路作为最强演化反而拆掉了检疫的牙齿。显式 sourceId 在场则尊重
+                            // 调用方的账键口径（旧语义），且掺入记账同步走该账。
+                            const explicitSource = typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : null;
+                            let blendTrust = 1;
+                            if (explicitSource === null) {
+                                for (const fp of keptFps) {
+                                    const t = federationTrustOf(fpAccount(fp));
+                                    if (Number.isFinite(t) && t > 0 && t < blendTrust)
+                                        blendTrust = t; // 最弱链治理混合摘要
+                                }
+                            }
                             const report = applyFederatedEvidence(ledger, rr.merged, {
                                 maxRemoteShare: opts.maxRemoteShare,
-                                sourceId: typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : endpoint,
+                                ...(explicitSource !== null
+                                    ? { sourceId: explicitSource }
+                                    : { sourceId: '', trust: Math.min(1, blendTrust) }), // 匿名掺入 + 显式混合信任：票账与配额闸同键咬合
                                 now: () => nowMs,
                             });
                             result.applied = report;
                             // R6 干净轮进度 → 指纹账：真实掺入的合并轮才计，且仅 0 票源（带票源已在
-                            // 上面立污点/回退 —— recordFederationTrust 的既有结算律，无需新法）
+                            // 上面立污点/回退 —— recordFederationTrust 的既有结算律，无需新法；
+                            // ΠΑΝ-72：applied 只记指纹账 —— 裸 endpoint 账不再被签名路径的掺入
+                            // 轮记账，端点不为指纹源的合并背书，指纹票也不再被裸账稀释）
                             if (report.ok) {
                                 for (const fp of keptFps) {
                                     if ((rr.quarantined[fpAccount(fp)] ?? 0) === 0) {
@@ -634,6 +888,8 @@ export function federationSync(opts = {}) {
                                 unverifiableSources,
                                 excessiveSources,
                                 batchedSources,
+                                staleSources,
+                                revokedSources,
                             };
                             lastSync = {
                                 at: nowMs,
@@ -641,8 +897,8 @@ export function federationSync(opts = {}) {
                                 applied: report.applied,
                                 note: !report.ok
                                     ? `鲁棒合并摘要掺入被拒：${report.notes[0] ?? '原因未注记'}`
-                                    : unverifiableSources + excessiveSources + batchedSources > 0
-                                        ? `ΝΩ-19 剔除：验签不过 ${unverifiableSources}、同毫秒批量 ${batchedSources}、超额 ${excessiveSources}`
+                                    : unverifiableSources + excessiveSources + batchedSources + staleSources + revokedSources > 0
+                                        ? `ΝΩ-19/ΠΑΝ-74 剔除：验签不过 ${unverifiableSources}、同毫秒批量 ${batchedSources}、超额 ${excessiveSources}、过期 ${staleSources}、撤销 ${revokedSources}`
                                         : undefined,
                             };
                         }
@@ -653,23 +909,30 @@ export function federationSync(opts = {}) {
                 }
             }
             else {
-                const candidate = extractDigest(payload);
-                if (candidate !== null) {
-                    const report = applyFederatedEvidence(ledger, candidate, {
-                        maxRemoteShare: opts.maxRemoteShare,
-                        sourceId: typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : endpoint,
-                        now: () => nowMs,
-                    });
-                    result.applied = report;
-                    lastSync = {
-                        at: nowMs,
-                        network: 'fired',
-                        applied: report.applied,
-                        note: report.ok ? undefined : `响应摘要掺入被拒：${report.notes[0] ?? '原因未注记'}`,
-                    };
+                // ΠΑΝ-74：legacy 臂的端点撤销闸（预合并摘要直接掺入的最弱路径更要有撤销通道）
+                const legacySource = typeof opts.sourceId === 'string' && opts.sourceId !== '' ? opts.sourceId : endpoint;
+                if (isFederationSourceRevoked(endpoint) || isFederationSourceRevoked(legacySource)) {
+                    lastSync = { at: nowMs, network: 'fired', applied: 0, note: '端点命中本地撤销表（ΠΑΝ-74 revocation list）：只上传未掺入' };
                 }
                 else {
-                    lastSync = { at: nowMs, network: 'fired', applied: 0, note: '响应不含可用的合并摘要：只上传未掺入' };
+                    const candidate = extractDigest(payload);
+                    if (candidate !== null) {
+                        const report = applyFederatedEvidence(ledger, candidate, {
+                            maxRemoteShare: opts.maxRemoteShare,
+                            sourceId: legacySource,
+                            now: () => nowMs,
+                        });
+                        result.applied = report;
+                        lastSync = {
+                            at: nowMs,
+                            network: 'fired',
+                            applied: report.applied,
+                            note: report.ok ? undefined : `响应摘要掺入被拒：${report.notes[0] ?? '原因未注记'}`,
+                        };
+                    }
+                    else {
+                        lastSync = { at: nowMs, network: 'fired', applied: 0, note: '响应不含可用的合并摘要：只上传未掺入' };
+                    }
                 }
             }
         }

@@ -134,7 +134,7 @@ const state: BackendState = {
   health: null, screen: null, displays: null,
 };
 
-// W6-2（doctor smell.over-engineering 清偿）：私有生命周期小件（unwrap/probeAlive/versionLt）
+// W6-2（doctor smell.over-engineering 清偿）：私有生命周期小件（probeAlive/versionLt）
 // 已分区提取至 physicalBackend.internal.ts；Surface 方言与 diff_view 帧环 →
 // physicalBackend.surface.ts。行为零变化；导入面不变 —— 再分发。
 import { probeAlive, versionLt } from './physicalBackend.internal';
@@ -157,7 +157,7 @@ export class PhysicalBackendError extends Error {
   }
 }
 
-/** ΝΩ-25：unwrap 的 kind 透传版（消息格式与 physicalBackend.internal.unwrap 逐字节一致） */
+/** ΝΩ-25：unwrap 的 kind 透传版（消息格式与既有 unwrap 方言逐字节一致） */
 function unwrapK<T>(result: { ok: true; value: T } | { ok: false; error: { kind: string; detail: string } }, what: string): T {
   if (result.ok) return result.value;
   throw new PhysicalBackendError(`[physicalBackend] ${what} failed: ${result.error.kind}: ${result.error.detail}`, result.error.kind);
@@ -376,39 +376,42 @@ export async function captureCleanPng(region?: { x: number; y: number; width: nu
 }
 
 // ─── 键鼠动作 ───
+// ΤΕΛ-5 D-G23：门面函数补可选 signal 透传面（adapter 侧 ΠΑΝ-64 管线已在：
+// signal → microFetch options.signal 断流）。缺席 ⇒ JSON 丢键 ⇒ 请求字节等同
+// 现状（零回归）；system.ts 的 ioMutex 取消端口经此抵达 D-5 HTTP 调用。
 
-export async function clickMouse(x: number, y: number, button: 'left' | 'right' | 'middle' = 'left', dryRun = false, surface?: string): Promise<void> {
+export async function clickMouse(x: number, y: number, button: 'left' | 'right' | 'middle' = 'left', dryRun = false, surface?: string, signal?: AbortSignal): Promise<void> {
   const a = await adapter();
   // W4-5：surface 经 impl 扩展参数面透传（Σ-5 的 display 同型 —— contracts
   // 接口签名未含，桥接断言到 impl；undefined ⇒ JSON 丢键 ⇒ 请求字节等同现状）
-  unwrapK(await (a as PhysicalExecutionAdapterImpl).clickMouse({ x, y, button, dryRun, surface }), 'click_mouse');
+  unwrapK(await (a as PhysicalExecutionAdapterImpl).clickMouse({ x, y, button, dryRun, surface, signal }), 'click_mouse');
 }
 
-export async function typeText(text: string, clearFirst = false, dryRun = false, surface?: string): Promise<number> {
+export async function typeText(text: string, clearFirst = false, dryRun = false, surface?: string, signal?: AbortSignal): Promise<number> {
   const a = await adapter();
-  const r = unwrapK(await (a as PhysicalExecutionAdapterImpl).typeText({ text, clearFirst, dryRun, surface }), 'type_text');
+  const r = unwrapK(await (a as PhysicalExecutionAdapterImpl).typeText({ text, clearFirst, dryRun, surface, signal }), 'type_text');
   return r.typed_chars;
 }
 
-export async function scrollPage(direction: 'up' | 'down' | 'left' | 'right', amount: number, dryRun = false, surface?: string): Promise<void> {
+export async function scrollPage(direction: 'up' | 'down' | 'left' | 'right', amount: number, dryRun = false, surface?: string, signal?: AbortSignal): Promise<void> {
   const a = await adapter();
-  unwrapK(await (a as PhysicalExecutionAdapterImpl).scrollPage({ direction, amount, dryRun, surface }), 'scroll_page');
+  unwrapK(await (a as PhysicalExecutionAdapterImpl).scrollPage({ direction, amount, dryRun, surface, signal }), 'scroll_page');
 }
 
-export async function pressHotkey(keys: string[], dryRun = false, surface?: string): Promise<void> {
+export async function pressHotkey(keys: string[], dryRun = false, surface?: string, signal?: AbortSignal): Promise<void> {
   const a = await adapter();
-  unwrapK(await (a as PhysicalExecutionAdapterImpl).pressHotkey({ keys, dryRun, surface }), 'press_hotkey');
+  unwrapK(await (a as PhysicalExecutionAdapterImpl).pressHotkey({ keys, dryRun, surface, signal }), 'press_hotkey');
 }
 
-export async function dragMouse(start: { x: number; y: number }, end: { x: number; y: number }, dryRun = false, surface?: string): Promise<void> {
+export async function dragMouse(start: { x: number; y: number }, end: { x: number; y: number }, dryRun = false, surface?: string, signal?: AbortSignal): Promise<void> {
   const a = await adapter();
-  unwrapK(await (a as PhysicalExecutionAdapterImpl).dragMouse({ start, end, dryRun, surface }), 'drag_mouse');
+  unwrapK(await (a as PhysicalExecutionAdapterImpl).dragMouse({ start, end, dryRun, surface, signal }), 'drag_mouse');
 }
 
 /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
-export async function moveMouse(x: number, y: number, durationMs = 0, dryRun = false): Promise<void> {
+export async function moveMouse(x: number, y: number, durationMs = 0, dryRun = false, signal?: AbortSignal): Promise<void> {
   const a = await adapter();
-  unwrapK(await a.moveMouse({ x, y, durationMs, dryRun }), 'move_mouse');
+  unwrapK(await a.moveMouse({ x, y, durationMs, dryRun, signal }), 'move_mouse');
 }
 
 /** 当前全局光标形态 —— Z-1 交互性探针的 OS 判决通道 */
@@ -426,6 +429,13 @@ export async function hitTest(x: number, y: number): Promise<import('./physicalE
 export async function switchWindow(keyword: string): Promise<{ method: string; matched: string | null; next_step?: string }> {
   const a = await adapter();
   return unwrapK(await a.switchWindow({ keyword }), 'switch_window');
+}
+
+// ─── R2-3（焦点保卫）：前台窗口只读探测（type_text 前置校验的数据源） ───
+
+export async function getActiveWindow(): Promise<{ method: 'native'; title: string | null }> {
+  const a = await adapter();
+  return unwrapK(await a.getActiveWindow(), 'active_window');
 }
 
 // ─── 感知辅助 ───
@@ -540,17 +550,8 @@ export async function stopBackend(): Promise<void> {
   }
 }
 
-export function _reset_forTests(): void {
-  state.starting = null;
-  state.adapter = null;
-  state.manager = null;
-  state.health = null;
-  state.screen = null;
-  state.displays = null;
-}
-
 /** Σ-5 测试面：假 adapter 直入 state（免 spawn —— CaptureOptions 透传的纯逻辑测试）。
- *  传 null 等效 _reset_forTests 的 adapter 清除（不 dispose manager —— 测试自管）。 */
+ *  传 null 清除 adapter（不 dispose manager —— 测试自管）。 */
 export function _setAdapterForTests(a: PhysicalExecutionAdapter | null): void {
   state.starting = null;
   state.adapter = a;

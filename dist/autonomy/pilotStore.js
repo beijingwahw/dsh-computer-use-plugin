@@ -17,7 +17,7 @@
 //    重写压缩，重写后文件只含幸存档案快照行（type:'snapshot'，旧读方按垃圾
 //    行静默忽略 —— 与断尾容忍读兼容）；驱逐/压缩计数经 dump() 审计可见。
 // 铁律：公共方法绝不抛异常（内部异常吞掉并记 lastError）。
-import { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync, } from 'fs';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync, } from 'fs';
 import { randomBytes } from 'crypto';
 import path from 'path';
 /** 异常归因为安全字符串（绝不二次抛出） */
@@ -416,6 +416,41 @@ export class PilotStore {
         // ΑΩ-R17：重放可能超限（盘上死行未压缩 / 宿主调小 maxRuns）—— 重放毕即守恒
         this.enforceCapacity();
     }
+    /**
+     * ΠΑΝ-60（压缩不吞档）：并档 —— 重读盘面，把**内存账上没有的 token** 的
+     * 快照档并入 this.runs（他进程并发追加的档案）。只补缺席：内存已有的 token
+     * 以内存为准（本进程的最新账不回退）；读失败/垃圾行静默跳过（断尾容忍同
+     * replay 律）。绝不抛。
+     */
+    mergeForeignDiskRecords() {
+        try {
+            const text = readFileSync(this.filePath, 'utf8');
+            for (const raw of text.split('\n')) {
+                const line = raw.trim();
+                if (line === '')
+                    continue;
+                let ev;
+                try {
+                    ev = JSON.parse(line);
+                }
+                catch {
+                    continue; // 断尾行容忍
+                }
+                if (ev === null || typeof ev !== 'object')
+                    continue;
+                const e = ev;
+                if (e.type !== 'snapshot')
+                    continue; // 追加事件行不并（属其属主的活跃账）
+                const rec = reviveRecord(e.record);
+                if (rec && !this.runs.has(rec.token))
+                    this.runs.set(rec.token, rec);
+            }
+        }
+        catch {
+            // 读失败（他进程 rename 竞态窗等）⇒ 放弃本轮并档 —— 压缩体照旧铸造
+            //（不吞自家档；他进程档至多晚一轮再并）
+        }
+    }
     /** 单事件铸态（垃圾事件静默忽略） */
     applyEvent(ev) {
         if (ev === null || typeof ev !== 'object')
@@ -485,7 +520,11 @@ export class PilotStore {
             return;
         }
     }
-    /** 追加事件行（目录一次保证；写失败 ⇒ 永久降级内存并留痕） */
+    /** 追加事件行（目录一次保证；写失败 ⇒ 永久降级内存并留痕）
+     * ΠΑΝ-60（写入原子性）：appendFileSync 改为显式 'a' 追加模式句柄 +
+     * writeSync + fsyncSync —— 追加模式由内核保证写偏移的原子定位（Windows
+     * 上 appendFileSync 的多次打开-写-关在同文件双进程并发时可交错撕裂行尾，
+     * 单句柄单写调用 + fsync 把「整行原子落盘」钉死）；失败降级律不变。 */
     appendEvent(line) {
         if (!this.diskEnabled || this.filePath === '')
             return;
@@ -494,7 +533,15 @@ export class PilotStore {
                 mkdirSync(path.dirname(this.filePath), { recursive: true });
                 this.dirEnsured = true;
             }
-            appendFileSync(this.filePath, JSON.stringify(line) + '\n', 'utf8');
+            const chunk = Buffer.from(JSON.stringify(line) + '\n', 'utf8');
+            const fd = openSync(this.filePath, 'a');
+            try {
+                writeSync(fd, chunk);
+                fsyncSync(fd);
+            }
+            finally {
+                closeSync(fd);
+            }
         }
         catch (err) {
             // 降级律：磁盘故障 ⇒ 此后纯内存（内存档仍完整），错误留痕供运维取证
@@ -538,6 +585,10 @@ export class PilotStore {
      * —— 重写后文件只含幸存档快照行（startedAt 升序），与断尾容忍读兼容（快照
      * 行本身即完整行；旧读方对未知 type 按垃圾行静默忽略）。失败 ⇒ 同降级律：
      * 永久纯内存 + lastError 留痕（内存档与驱逐政策不受影响）。
+     * ΠΑΝ-60（写入原子性）：压缩前先**并档** —— 重读盘面快照行，把本进程内存
+     * 账上没有的 token（他进程并发追加的档案）并入内存后再铸压缩体。单进程视角
+     * 的压缩重写自此不会吞掉他进程追加的事件（跨进程互斥锁不在本层立法面 ——
+     * 并档把「丢档」降级为「晚一轮驱逐」，与容量驱逐的最终一致语义同向）。
      */
     compactFile() {
         if (!this.diskEnabled || this.filePath === '') {
@@ -550,6 +601,8 @@ export class PilotStore {
                 mkdirSync(path.dirname(this.filePath), { recursive: true });
                 this.dirEnsured = true;
             }
+            // ΠΑΝ-60：并档 —— 盘上存在而内存没有的 token（他进程追加）先入内存账
+            this.mergeForeignDiskRecords();
             const body = [...this.runs.values()]
                 .sort((a, b) => a.startedAt - b.startedAt || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0))
                 .map(rec => JSON.stringify({ type: 'snapshot', record: copyRecord(rec) }))

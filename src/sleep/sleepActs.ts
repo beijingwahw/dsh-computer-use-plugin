@@ -144,7 +144,7 @@ async function dreamSidecar(
     trajectories = mod.dreamTrajectories(dream.failures());
   } catch (e) {
     out.dream = {
-      watermark: '', attempted: 0, replayed: 0, successes: 0, divergences: 0, lessons: [], entries: [],
+      watermark: '', attempted: 0, replayed: 0, successes: 0, divergences: 0, lessons: [], lessonMeta: [], entries: [],
       budget: { maxDreams: 0, maxStepsPerDream: 0, truncated: false, reason: 'none' },
       kernelEvidence: [],
       note: `失败轨迹源故障（旁路吸收）：${errText(e)}`,
@@ -192,7 +192,9 @@ export async function deferredDreamSidecar(
   const d = out.dream;
   if (!d || !replayAct || replayAct.status === 'timeout') return;
   mergeDreamCounts(d, replayAct.counts);
-  const head = `梦回放：${d.replayed}/${d.attempted} 条重放（分歧 ${d.divergences}、成功 ${d.successes}、反事实教训 ${d.lessons.length}）`;
+  // ΠΑΝ-113：晨报文案与教训证据强度对齐 —— 「heuristic」标注进账面，消费方
+  // （模型读晨报）不再把同构世界教训当硬规则
+  const head = `梦回放：${d.replayed}/${d.attempted} 条重放（分歧 ${d.divergences}、成功 ${d.successes}、反事实教训 ${d.lessons.length} 条（heuristic —— 提示性参考，非硬规则））`;
   const tail: string[] = [];
   if (d.note) tail.push(d.note);
   if (!d.note && d.budget.truncated) tail.push(`预算截断（${d.budget.reason}）`);

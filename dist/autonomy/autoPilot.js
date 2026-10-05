@@ -11,7 +11,7 @@ import { extractGoalKeywords } from './policyEngine.js';
 import { actionSignature } from './counterfactual.js';
 // W8-B4（判据证伪能力）：终局判据独立评估器官（否定判据 + fuzzy 容错 + OCR 缺席
 // 诚实降级 —— 三态判决纪律；⑧′ 处消费）。autonomy 包内模块，零回路。
-import { buildCriteriaPairs, evaluateCriteria } from './criteriaEval.js';
+import { buildCriteriaPairs, evaluateCriteria, parseCriterion } from './criteriaEval.js';
 // ΑΩ-R13（W6-1 债清偿 · 汉明方言归一）：W1-3 免看门控的 dHash 汉明距离从本文件
 // 私有表（原 gateHexHamming/GATE_NIBBLE_POPCOUNT）迁往跨器官方言单一事实源
 //（nibble popcount 查表 + null 不可比语义，逐字节同律）。
@@ -33,25 +33,84 @@ export function bindSteerSessionFactory(factory) {
 export function boundSteerSessionFactory() {
     return w8SteerFactory.factory;
 }
-/** W4-0（B）：在役 steer 会话（driveLoop 铸、跨环存续至下一环替换 —— 出题升级后
- *  用户的单字符应答经 steer_choice/steer_answer 工具对**同一会话**结算，环终清账
- *  会把「升级提问」变成死信；持有者只暴露只读出口，绝不炸） */
-const w4ActiveSteer = { session: null };
-/** W4-0（B）：当前/最近一次 steer 会话（无 ⇒ null；工具转发面消费） */
-export function activeSteerSession() {
-    return w4ActiveSteer.session;
+/**
+ * W4-0（B）：在役 steer 会话（driveLoop 铸、跨环存续至下一环替换 —— 出题升级后
+ * 用户的单字符应答经 steer_choice/steer_answer 工具对**同一会话**结算，环终清账
+ * 会把「升级提问」变成死信）；持有者只暴露只读出口，绝不炸。
+ * ΠΑΝ-60（多 pilot 隔离）：单注册位改 per-pilot 域 —— Map keyed by pilotId
+ * （deps.pilotId，缺省共享域 ''）。并发 pilot 的会话互不覆盖（后铸栈不再清掉
+ * 在飞 run 的会话）；**无参读取取最近登记的域**（单 pilot / 既有工具转发面的
+ * 语义与旧单注册位逐字节一致）；pilot 结束经 releasePilotW4Wire(pilotId) 清账
+ * （防 Map 无界生长，容量上限外最旧域整域驱逐）。
+ */
+const w4ActiveSteerByPilot = new Map();
+/** ΠΑΝ-60：最近岔路卡的 per-pilot 域（goal failed/aborted 时铸造；供换支重放/审计消费） */
+const w4LastCardByPilot = new Map();
+/** ΠΑΝ-60：域登记的近序账（无参读取的「最近登记优先」事实源） */
+const w4PilotRecency = [];
+/** ΠΑΝ-60：per-pilot 域数量上限（超限驱逐最旧域 —— 有界律） */
+const W4_PILOT_DOMAIN_CAP = 16;
+/** ΠΑΝ-60：域键登记（近序账维护 + 容量驱逐；纯记账绝不抛） */
+function w4TouchPilotDomain(pilotId) {
+    const i = w4PilotRecency.indexOf(pilotId);
+    if (i >= 0)
+        w4PilotRecency.splice(i, 1);
+    w4PilotRecency.push(pilotId);
+    while (w4PilotRecency.length > W4_PILOT_DOMAIN_CAP) {
+        const evict = w4PilotRecency.shift();
+        if (evict === undefined)
+            break;
+        w4ActiveSteerByPilot.delete(evict);
+        w4LastCardByPilot.delete(evict);
+    }
 }
-/** W4-0（B）：最近一张岔路卡（goal failed/aborted 时铸造；供换支重放/审计消费） */
-const w4LastCard = { card: null };
-/** W4-0（B）：最近一张岔路卡的只读出口（未铸 ⇒ null） */
-export function lastBranchCard() {
-    return w4LastCard.card;
+/** ΠΑΝ-60：解析读取键 —— 显式非空串用之；无参/空串 ⇒ 最近登记域（旧单位语义） */
+function w4ResolvePilotKey(pilotId) {
+    if (typeof pilotId === 'string' && pilotId !== '')
+        return pilotId;
+    return w4PilotRecency.length > 0 ? w4PilotRecency[w4PilotRecency.length - 1] : '';
 }
-/** W4-0（B）：接线持有者归零（测试隔离缝 —— 会话/卡片跨 run 存续是设计语义，
- *  生产代码不需要调用） */
-export function resetW4PilotWire() {
-    w4ActiveSteer.session = null;
-    w4LastCard.card = null;
+/**
+ * W4-0（B）：当前/最近一次 steer 会话（无 ⇒ null；工具转发面消费）。
+ * ΠΑΝ-60：可携 pilotId 读该 pilot 域；无参读最近登记域（单 pilot 语义零回归）。
+ */
+export function activeSteerSession(pilotId) {
+    return w4ActiveSteerByPilot.get(w4ResolvePilotKey(pilotId)) ?? null;
+}
+/**
+ * W4-0（B）：最近一张岔路卡的只读出口（未铸 ⇒ null）。
+ * ΠΑΝ-60：同 activeSteerSession —— 可携 pilotId 定向读取。
+ */
+export function lastBranchCard(pilotId) {
+    return w4LastCardByPilot.get(w4ResolvePilotKey(pilotId)) ?? null;
+}
+/**
+ * W4-0（B）：接线持有者归零（测试隔离缝 —— 会话/卡片跨 run 存续是设计语义，
+ * 生产代码不需要调用）。ΠΑΝ-60：无参 ⇒ 全域归零（旧语义）；携 pilotId ⇒ 仅清
+ * 该域。
+ */
+export function resetW4PilotWire(pilotId) {
+    if (typeof pilotId === 'string' && pilotId !== '') {
+        w4ActiveSteerByPilot.delete(pilotId);
+        w4LastCardByPilot.delete(pilotId);
+        const i = w4PilotRecency.indexOf(pilotId);
+        if (i >= 0)
+            w4PilotRecency.splice(i, 1);
+        return;
+    }
+    w4ActiveSteerByPilot.clear();
+    w4LastCardByPilot.clear();
+    w4PilotRecency.length = 0;
+}
+/**
+ * ΠΑΝ-60（多 pilot 隔离）：pilot 结束的显式清账面 —— 接线层（或测试）在某
+ * pilot 生命周期结束时调用，释放其 steer 会话/岔路卡域（不清共享域 ''）。与
+ * resetW4PilotWire(pilotId) 同执法点；独立命名供接线层语义化调用。
+ */
+export function releasePilotW4Wire(pilotId) {
+    if (typeof pilotId !== 'string' || pilotId === '')
+        return;
+    resetW4PilotWire(pilotId);
 }
 /** 终局相集合 —— goal.evaluate() 落入即熔断循环 */
 const TERMINAL_PHASES = new Set([
@@ -176,12 +235,106 @@ function w4DecisionCandidates(decision, action) {
         return [action]; // 防御读取绝不抛（岔路账是旁路簿记）
     }
 }
+// ─── ΠΑΝ-119（F2-6 移交 · C1-4 中-2）：弹窗确认点击的落点 bounds 校验 ───
+//
+// 病灶：policyEngine ① 级弹窗优先律在全屏元素里挑 POPUP_CONFIRM_RE 命中者
+// （「是/确定/ok/allow…」）—— 判据只看 label 词面，不看落点；主界面上任何
+// 确认类按钮（对话气泡的「确定」、工具栏的「OK」）都会以「弹窗确认」身份
+// 被点掉。ΠΑΝ-57 接通生产 popups 后该路径在生产可达，误点面从 gym 训练分布
+// 变成真实风险（F2-6 报告遗留与移交项）。
+//
+// 修法（本文件单点）：弹窗确认动作（payload.popup 在场 = ① 级方言标记）在
+// 派发前校验落点在弹窗栖息地（popupDetector 几何/语义双通道共同的中央 40%
+// 带假设 —— centerRegionNorm(0.4) 的本文件镜像，单源立法在 popupDetector）。
+// 落点在带外 / 落点不可解析（center 与 bbox 双缺席）/ 陷阱属性 ⇒ 该点击
+// 不可信，降级为 Esc 热键先行关闭（policyEngine ① 级无确认元素臂的同一回退
+// 方言）—— 弹窗照常被处置，但绝不派发弹窗外点击。纯函数、绝不抛（故障面
+// fail-closed：校验面读不出落点 = 落点不可信 = 不点）。
+/** ΠΑΝ-119：弹窗栖息地（归一化域）—— popupDetector centerRegionNorm(0.4) 的
+ *  镜像（源常量非导出且彼件非本工单领地；镜像关系由执法测试锁死：改任一侧
+ *  而不同步 ⇒ 测试红）。inset = (1 − 0.4)/2 = 0.3。 */
+export const POPUP_HABITAT_NORM = Object.freeze({ x0: 0.3, y0: 0.3, x1: 0.7, y1: 0.7 });
+/** ΠΑΝ-119：弹窗确认 bounds 闸的回退 Esc 动作（policyEngine ① 级回退臂同方言） */
+function pan119EscFallback(popupName, reason) {
+    return {
+        kind: 'hotkey',
+        payload: { keys: ['esc'] },
+        rationale: `弹窗「${popupName}」的确认类点击被拒（${reason}，ΠΑΝ-119 bounds 校验）——回退按 Esc 关闭，绝不派发弹窗外点击`,
+        expectedEffect: '弹窗关闭，下一帧快照 popups 为空',
+        utility: 0.9,
+        riskTier: 'benign',
+    };
+}
 /**
- * W1-3：动作的预期视觉效应三档标注（C1 规格第一项，纯函数、绝不抛）。
+ * ΠΑΝ-119：弹窗确认点击的 bounds 闸（纯函数、绝不抛、fail-closed）。
+ * 输入 = policy 决策的 (decision, action)；输出 note === null ⇒ 原动作透传
+ * （非弹窗方言 / 落点在栖息地内）；note !== null ⇒ action 已替换为 Esc 回退
+ * （落点在带外 / 落点不可解析 / 校验面故障），note 为决策注记（随本步入账）。
+ */
+export function pan119PopupConfirmBoundsGate(action) {
+    try {
+        const a = (action ?? {});
+        if (a.kind !== 'click')
+            return { action, note: null };
+        const payload = a.payload && typeof a.payload === 'object' ? a.payload : null;
+        const popupName = payload ? payload.popup : undefined;
+        if (typeof popupName !== 'string' || popupName === '')
+            return { action, note: null }; // 非弹窗方言：零行为
+        const label = typeof a.target?.label === 'string'
+            ? a.target.label
+            : '(未名确认钮)';
+        // 落点解析：target.center 优先，bbox 中点回退（center/bbox 双缺席 = 不可解析）
+        const t = a.target;
+        let px;
+        let py;
+        const c = t?.center;
+        if (c && typeof c === 'object' && typeof c.x === 'number' && Number.isFinite(c.x) &&
+            typeof c.y === 'number' && Number.isFinite(c.y)) {
+            px = c.x;
+            py = c.y;
+        }
+        else {
+            const b = t?.bbox;
+            if (b && typeof b === 'object' && typeof b.x0 === 'number' && Number.isFinite(b.x0) &&
+                typeof b.y0 === 'number' && Number.isFinite(b.y0) &&
+                typeof b.x1 === 'number' && Number.isFinite(b.x1) &&
+                typeof b.y1 === 'number' && Number.isFinite(b.y1)) {
+                px = (b.x0 + b.x1) / 2;
+                py = (b.y0 + b.y1) / 2;
+            }
+        }
+        if (px === undefined || py === undefined) {
+            return {
+                action: pan119EscFallback(popupName, `确认钮「${label}」落点不可解析`),
+                note: `ΠΑΝ-119 弹窗确认「${label}」落点不可解析 ⇒ 回退 Esc（fail-closed）`,
+            };
+        }
+        const inHabitat = px >= POPUP_HABITAT_NORM.x0 && px <= POPUP_HABITAT_NORM.x1 &&
+            py >= POPUP_HABITAT_NORM.y0 && py <= POPUP_HABITAT_NORM.y1;
+        if (inHabitat)
+            return { action, note: null }; // 弹窗内确认钮：照常派发
+        return {
+            action: pan119EscFallback(popupName, `确认钮「${label}」落点 (${px.toFixed(3)}, ${py.toFixed(3)}) 在弹窗栖息地之外`),
+            note: `ΠΑΝ-119 弹窗确认「${label}」落点在弹窗矩形外 ⇒ 回退 Esc，防误点弹窗外`,
+        };
+    }
+    catch {
+        // 校验面故障（陷阱属性等）⇒ fail-closed：落点不可信 = 不点（Esc 回退，
+        // 与落点不可解析同律 —— 绝不让一个读不出来的目标成为派发依据）
+        return {
+            action: pan119EscFallback('(popup)', '校验面故障'),
+            note: 'ΠΑΝ-119 弹窗确认 bounds 校验故障 ⇒ 回退 Esc（fail-closed）',
+        };
+    }
+}
+/**
+ * W1-3：动作的预期视觉效应标注（C1 规格第一项，纯函数、绝不抛）。
  * 从动作种类 × 风险档推导（详见 ExpectedVisualEffect 的 JSDoc）：高风险世界
  * 动作 ⇒ 必变（后果必须目击）；良性有效世界动作 ⇒ 可能变（如 type 后大概率变）；
  * 观察性动作与参数无效不会落地的动作（如无效坐标点击）⇒ 无影响；未知种类 ⇒
  * 必变（保守红律：不确定 ⇒ 必看）。
+ * ΠΑΝ-56：recall_skill 自 W4-1 起经宏执行器落地为真实键鼠序列 ⇒ 新档
+ * 'macro-impact'（免看门控不可跳过、prophecy 开始铸造 —— 详见类型 JSDoc）。
  */
 export function classifyExpectedVisualEffect(action) {
     const a = (action ?? {});
@@ -216,8 +369,12 @@ export function classifyExpectedVisualEffect(action) {
         case 'inspect':
         case 'declare':
         case 'ask_vlm':
-        case 'recall_skill':
             return 'no-impact'; // 观察性动作：只看不改世界
+        case 'recall_skill':
+            // ΠΑΝ-56：宏冲击档 —— 召回即经宏执行器落地为逐步键鼠（不再「只报到达」）。
+            // 免看门控的 eligibility 只认 'no-impact'（见 recordStep）⇒ 宏后必完整
+            // 感知（效果探测）；prophecyMint 只跳过 'no-impact' ⇒ 宏的转移开始入账。
+            return 'macro-impact';
         case 'wait':
             return 'may-change'; // 等待的语义就是预期变化 —— dHash 值守轮询覆盖（⑥ 不经 execute）
         default:
@@ -330,6 +487,9 @@ async function driveLoop(deps, opts) {
     });
     const constitution = deps.constitution ?? PERMISSIVE_CONSTITUTION;
     const startAt = now();
+    // ΠΑΝ-60：本 run 的 pilot 域键（deps.pilotId 非空串 ⇒ 定向域；缺席 ⇒ 共享域 ''
+    // —— 单 pilot 语义与接线前逐字节一致）
+    const pan60PilotKey = typeof deps.pilotId === 'string' && deps.pilotId.trim() !== '' ? deps.pilotId : '';
     const trajectory = [];
     const criteriaStatus = new Map();
     let stepsTaken = 0;
@@ -343,6 +503,9 @@ async function driveLoop(deps, opts) {
     // W8-B4（判据证伪面）：判据对（原文 + 原始下标锚定 —— 非法条目剔除但不下标平移，
     // 与 execute 侧判据对铸造同律）。⑧′ 独立评估的物料；空判据账 ⇒ ⑧′ 整段零执行。
     const w8CriteriaPairs = buildCriteriaPairs(spec.successCriteria);
+    // ΠΑΝ-61：否定判据在场预判（预解析极性一次）—— ⑧′ 重采端口的成本闸：无
+    // 否定判据的 run 零重采零额外截屏（行为与接线前逐字节一致）。
+    const w8HasNegative = w8CriteriaPairs.some(p => parseCriterion(p.text).polarity === 'must-not-appear');
     // maxSteps 同律防御（与 goalState 构造器「非法 ⇒ 降级 24」一致）：stub 依赖给出
     // NaN/0/非数会把 stepCap 变 NaN（保险丝永不熔断 ⇒ 挂死）或 0（秒中止）
     const specMaxSteps = typeof spec.maxSteps === 'number' && Number.isFinite(spec.maxSteps) && spec.maxSteps >= 1
@@ -471,6 +634,10 @@ async function driveLoop(deps, opts) {
     let prophecyArmed = false;
     let prophecyStepIndex = null;
     let prophecyStepSuccess = false;
+    // ΤΕΛ-5 D-G21①：铸造号（mint 返回的 prophecyId —— 严格配对的身份源）。mint
+    // 捕获、settle 消费：号透传引擎侧 ΠΑΝ-54 严格配对面（号缺席/null = 未铸 ⇒
+    // 引擎走 LIFO 兼容面 —— 与旧方言逐字节等价）。
+    let prophecyArmedId = null;
     // W1-3（C1 免看门控）状态：基线快照（最近一次完整感知 —— 弹窗标志与旧元素/
     // 文本的出处）、上步门控语境（null = 世界状态未知或非最窄类 ⇒ 必看）、四本
     // 记账（触发/跳过/唤醒/连续跳过）与待搭车的步注记。
@@ -484,6 +651,10 @@ async function driveLoop(deps, opts) {
     // W3-7（R2 探索前沿策略）记账：本 run 探索建议替代升级步的次数（>0 才追加
     // 总汇报 —— 未触发 ⇒ summary 逐字节不变，零回归红律）
     let w3ExploreSubs = 0;
+    // ΠΑΝ-59：构造降级 blocker 清账的一次性闸与总汇报注记（清账发生 ⇒ summary
+    // 追加放行留痕；未发生 ⇒ summary 逐字节不变）
+    let pan59Cleared = false;
+    let pan59Note = '';
     /**
      * W1-3：单次哈希探测（三态）：true = 屏未变（距离 ≤ 容差）、false = 屏已变、
      * null = 不可判（端口缺席/抛异常/垃圾返回/指纹不可比）—— null 一律按「照旧
@@ -627,8 +798,11 @@ async function driveLoop(deps, opts) {
         catch {
             w4SteerSession = null; // 铸造故障吞掉 —— 漂移检查是旁路，绝不炸环
         }
-        if (w4SteerSession !== null)
-            w4ActiveSteer.session = w4SteerSession;
+        if (w4SteerSession !== null) {
+            // ΠΑΝ-60：per-pilot 域登记（并发 pilot 互不覆盖；共享域 '' 即旧单注册位）
+            w4ActiveSteerByPilot.set(pan60PilotKey, w4SteerSession);
+            w4TouchPilotDomain(pan60PilotKey);
+        }
     }
     // ─── ΑΩ-R13（W6-1 债清偿）：环体相位函数族 —— 循环律 ⓪-⑩ 各段拆出的具名局部
     // 函数（定义序即执行序）；闭包状态保留在 driveLoop 内就地读写，相位间数据经
@@ -650,8 +824,38 @@ async function driveLoop(deps, opts) {
      * ΑΩ-R13 相位 ①′：环顶终局相位预判（纪元 Δ 修律）—— 每轮 perceive 前先问
      * 目标机，已终局（预置 blocker ⇒ blocked、判据已全 met ⇒ achieved 等）即熔断
      * 收场，零感知零判断零执行。true ⇒ 熔断收场。
+     * ΠΑΝ-59（clearBlockers 接线）：零步 blocked 且阻塞全为**构造期降级 blocker**
+     * （goal 截断/空判据降级/非法预算等 —— goalState 构造降级律的产物）⇒ 相位
+     * 转换处清账重评估：clearConstructionBlockers() 放行后以降级规格继续跑（降级
+     * 值本身合法可用 —— 「非法输入值得一次显式驻足」已完成，驻足不该变成 0 步
+     * 死循环；autonomy_resume 以同 spec 重铸的断点续跑就此不再上膛自毙）。仅此
+     * 窄类放行：运行期 addBlocker 的阻塞**不**清（人工/外因阻塞仍须显式
+     * clearBlockers）；目标机无该结构面（旧桩/自定义实现）⇒ 行为与接线前逐字节
+     * 一致。每 run 至多清一次（清后如再 blocked ⇒ 照旧熔断）。
      */
-    const preVerdict = () => evaluateGoal();
+    const preVerdict = () => {
+        if (!evaluateGoal())
+            return false;
+        if (lastPhase !== 'blocked' || stepsTaken > 0 || pan59Cleared)
+            return true;
+        const g = deps.goal;
+        if (typeof g.clearConstructionBlockers !== 'function')
+            return true;
+        let removed = [];
+        try {
+            const r = g.clearConstructionBlockers();
+            if (Array.isArray(r))
+                removed = r.filter((x) => typeof x === 'string');
+        }
+        catch {
+            removed = [];
+        }
+        if (removed.length === 0)
+            return true; // 全为运行期阻塞 ⇒ 照旧 blocked 熔断
+        pan59Cleared = true;
+        pan59Note = `ΠΑΝ-59 构造降级阻塞 ${removed.length} 项已清账放行（${removed.join('；')}）`;
+        return evaluateGoal(); // 重评估：清账后仍终局（如另被 addBlocker）⇒ 熔断
+    };
     /**
      * ΑΩ-R13 相位 ①″：W1-3（C1 Act-Expectation 免看门控）—— ② 感知步之前的免看
      * 裁决：最窄类（无影响 + 双层 benign / benign wait 值守）屏未变 ⇒ 返回合成轻量
@@ -758,7 +962,15 @@ async function driveLoop(deps, opts) {
                     const nextType = snapshot && typeof snapshot.dhash === 'string' && snapshot.dhash !== ''
                         ? snapshot.dhash
                         : null;
-                    const settled = prophecy.settle(nextType, prophecyStepIndex === null ? undefined : prophecyStepSuccess);
+                    const settled = prophecy.settle(nextType, prophecyStepIndex === null ? undefined : prophecyStepSuccess, 
+                    // ΤΕΛ-5 D-G21①：携号严格配对（mint 返回号透传）—— 乱序到达的见证
+                    // 落引擎侧 no-match 诚实降级，绝不转嫁给其他挂起预言。
+                    prophecyArmedId === null ? undefined : prophecyArmedId);
+                    // ΤΕΛ-5 D-G21①：真见证到达即消费铸造号 —— 结算成功或 no-match 都算
+                    // 一次完整对账，留号重试只会在后续感知重复累计 noMatch 噪声；见证
+                    // 缺席（nextType null —— 引擎挂起待证）保留号供下一感知重试同号结算。
+                    if (nextType !== null)
+                        prophecyArmedId = null;
                     if (settled !== null) {
                         const rec = trajectory.length > 0 ? trajectory[trajectory.length - 1] : null;
                         if (rec !== null && rec.stepIndex === prophecyStepIndex) {
@@ -824,6 +1036,8 @@ async function driveLoop(deps, opts) {
                     steps: Math.max(0, stepCap - stepsTaken),
                     ms: timeBudgetMs === null ? Number.POSITIVE_INFINITY : timeBudgetMs - (now() - startAt),
                 },
+                // ΠΑΝ-60：pilot 域键透传（破平带评分上下文据此按域回落世界模型接线）
+                ...(pan60PilotKey !== '' ? { pilotId: pan60PilotKey } : {}),
             };
             decision = await deps.policy.decide(ctx);
         }
@@ -887,6 +1101,8 @@ async function driveLoop(deps, opts) {
                 goalKeywords: extractGoalKeywords(spec),
                 snapshot: (snapshot ?? { takenAt: 0, width: 0, height: 0, dhash: null, elements: [], textDigest: '', popups: [], focusedRegion: null, sceneLabel: '', degraded: [] }),
                 triedActionKeys: trajectory.map(r => actionSignature(r.action)),
+                // ΠΑΝ-60：评分上下文携带 pilot 域键（世界模型回落按域取接线）
+                ...(pan60PilotKey !== '' ? { pilotId: pan60PilotKey } : {}),
             };
             if (w5Bias !== null) {
                 try {
@@ -989,15 +1205,55 @@ async function driveLoop(deps, opts) {
      * ΑΩ-R13 相位 ④：宪法裁决 —— consecutiveNoEffect 现场账目 + constitution.check：
      * 异常/空裁决 ⇒ error 步收敛；allowed=false ⇒ constitution-veto 否决终局；
      * requiresApproval ⇒ approval-required 审批终局（被拦动作不入轨迹不执行不 tick）。
+     * ΠΑΝ-56（宏执行入宪）：动作属 recall_skill / macro 且 deps.macroRiskScan 端口
+     * 在场 ⇒ 先解析宏链拼步骤词面串，以「申报 tier 不变 + payload 增补
+     * macroStepScan 词面串」的**判决专用副本**喂宪法 —— 律③文本扫描律照旧全功率
+     * 扫该串：危险步词面命中 ⇒ destructive ⇒ 硬法恒审批（与直接点击 label 扫描
+     * 同级同律的审批路径）；扫描缺席/端口故障 ⇒ 原动作判决逐字节不变（副本不
+     * 落轨迹不进执行 —— StepRecord 与 execute 消费的仍是原动作）。
+     * ΠΑΝ-61（探索证据申报）：payload.exploration.unknown === true 的探索步 ⇒
+     * ConstitutionContext.unknownTarget 注记（宪法 backgroundRisk 审计留痕）。
      */
     const constitutionVerdict = (action) => {
         let consecutiveNoEffect = 0;
         for (let i = trajectory.length - 1; i >= 0 && trajectory[i].outcome === 'no_effect'; i--) {
             consecutiveNoEffect++;
         }
+        // ΠΑΝ-56：宏步词面预扫描（判决专用副本 —— 原动作分毫不动）。'macro' 是
+        // runtime 方言的联合扩展字（PolicyAction 闭集外）—— 字符串面比较收口。
+        let checkAction = action;
+        if ((action.kind === 'recall_skill' || action.kind === 'macro') &&
+            typeof deps.macroRiskScan === 'function') {
+            try {
+                const scanText = deps.macroRiskScan(action, { goalText: spec.goal });
+                if (typeof scanText === 'string' && scanText.trim() !== '') {
+                    const basePayload = action.payload && typeof action.payload === 'object'
+                        ? action.payload
+                        : {};
+                    checkAction = { ...action, payload: { ...basePayload, macroStepScan: scanText } };
+                }
+            }
+            catch {
+                checkAction = action; // 预扫描故障 ⇒ 按缺席（旁路义务，绝不炸环）
+            }
+        }
+        // ΠΑΝ-61：探索步的未知性标注 → 宪法 backgroundRisk 审计面
+        let unknownTarget = false;
+        try {
+            const ep = action?.payload?.exploration;
+            unknownTarget = ep !== null && typeof ep === 'object' && ep.unknown === true;
+        }
+        catch {
+            unknownTarget = false;
+        }
         let verdict;
         try {
-            verdict = constitution.check(action, { goalText: spec.goal, consecutiveNoEffect, stepsTaken });
+            verdict = constitution.check(checkAction, {
+                goalText: spec.goal,
+                consecutiveNoEffect,
+                stepsTaken,
+                ...(unknownTarget ? { unknownTarget: true } : {}),
+            });
         }
         catch (err) {
             recordStep(action, 'error', lastDhash, `constitution: ${errText(err)}`);
@@ -1069,7 +1325,12 @@ async function driveLoop(deps, opts) {
         if (classifyExpectedVisualEffect(action) === 'no-impact')
             return;
         try {
-            prophecy.mint(lastDhash, prophecyActionKey(action, snapshot?.width, snapshot?.height));
+            // ΤΕΛ-5 D-G21①：捕获铸造号透传 settle —— 宿主接线后多挂起错配面消失
+            //（引擎侧 ΠΑΝ-54 严格配对：号不在挂起集 ⇒ no-match 诚实降级，绝不张冠
+            // 李戴）。mint 返回 null（未铸：盲屏/铸造故障）⇒ 号缺席，LIFO 兼容面不变。
+            const minted = prophecy.mint(lastDhash, prophecyActionKey(action, snapshot?.width, snapshot?.height));
+            prophecyArmedId =
+                typeof minted === 'number' && Number.isInteger(minted) && minted > 0 ? minted : null;
             prophecyArmed = true;
         }
         catch { /* 铸造故障吞掉 —— 预言是旁路，绝不炸环 */ }
@@ -1117,18 +1378,41 @@ async function driveLoop(deps, opts) {
         }
     };
     /**
-     * ΑΩ-R13 相位 ⑧′：W8-B4（判据证伪面）—— 以最近完整感知的 OCR 语料（textDigest，
-     * 本轮环顶感知的产物）对否定判据（mustNotAppear:/不得出现： 前缀）独立复核：
-     * 命中禁词（精确∪fuzzy）⇒ violated、语料在场未命中 ⇒ met、OCR 缺席 ⇒ 零证据
-     * （诚实降级，否定判据不自动为真）；肯定面归 execute 侧判据抽查通道。
+     * ΑΩ-R13 相位 ⑧′：W8-B4（判据证伪面）—— 否定判据独立复核。
+     * ΠΑΝ-61（瞬态违规逃逸封堵）：语料**强制重采当帧** —— deps.negativeRecheck
+     * 端口在场 ⇒ 每次复核强采当帧全量 OCR（未截断词面全文）：① 免看门控跳过
+     * 轮次里环顶 textDigest 不再被透支（旧账看不见「禁词弹窗出现→被点掉」的
+     * 瞬态违规）；② 2000 字截断不再吞禁词（全文先于截断被扫描）。端口缺席 /
+     * 返回 null / 抛异常 ⇒ 诚实回落环顶 textDigest（旧路径逐字节一致）；语料
+     * 缺席 ⇒ evaluateCriteria 整体降级零证据（否定判据不自动为真）。命中禁词
+     * （精确 ∪ 收紧后的 fuzzy，见 criteriaEval ΠΑΝ-61 立法）⇒ violated、语料在场
+     * 未命中 ⇒ met；肯定面归 execute 侧判据抽查通道。
      */
-    const negativeCriteriaReview = () => {
-        if (w8CriteriaPairs.length === 0)
+    const negativeCriteriaReview = async () => {
+        if (w8CriteriaPairs.length === 0 || !w8HasNegative)
             return;
-        const w8Corpus = lastFullSnapshot !== null && typeof lastFullSnapshot === 'object' &&
-            typeof lastFullSnapshot.textDigest === 'string'
-            ? lastFullSnapshot.textDigest
-            : null;
+        let w8Corpus = null;
+        let w8Fresh = false;
+        if (typeof deps.negativeRecheck === 'function') {
+            try {
+                const fresh = await deps.negativeRecheck();
+                if (typeof fresh === 'string' && fresh !== '') {
+                    w8Corpus = fresh;
+                    w8Fresh = true;
+                }
+            }
+            catch {
+                w8Corpus = null; // 重采故障 ⇒ 诚实回落旧 digest（旁路义务，绝不炸环）
+            }
+        }
+        if (w8Corpus === null) {
+            w8Corpus =
+                lastFullSnapshot !== null && typeof lastFullSnapshot === 'object' &&
+                    typeof lastFullSnapshot.textDigest === 'string'
+                    ? lastFullSnapshot.textDigest
+                    : null;
+        }
+        void w8Fresh; // （审计面：当帧重采已发生 —— 证据注记在 evaluateCriteria notes）
         const w8Eval = evaluateCriteria(w8CriteriaPairs, w8Corpus);
         for (const evidence of w8Eval.evidence) {
             if (evidence.polarity !== 'must-not-appear')
@@ -1179,6 +1463,15 @@ async function driveLoop(deps, opts) {
         const intercepted = explorationIntercept(decision, action, snapshot);
         decision = intercepted.decision;
         action = intercepted.action;
+        // ③″′ ΠΑΝ-119（F2-6 移交 · C1-4 中-2）：弹窗确认点击的落点 bounds 闸 ——
+        // 确认类点击（payload.popup 在场 = policyEngine ① 级弹窗方言）落点必须在
+        // 弹窗栖息地内才派发；带外/不可解析 ⇒ 替换为 Esc 回退（同 ① 级无确认元素
+        // 臂方言）+ 决策注记入账。非弹窗动作零行为（零回归律）。
+        const pan119 = pan119PopupConfirmBoundsGate(action);
+        if (pan119.note !== null) {
+            action = pan119.action;
+            decision = { ...decision, note: decision.note !== undefined ? `${decision.note}；${pan119.note}` : pan119.note };
+        }
         // ③¼ W4-0/W5-5 岔路账落账（评分上下文铸偏置 + 支点锚；ΝΩ-11 候选面接 decision）
         branchLedgerStep(decision, action, snapshot);
         // ③′ 纪元 Η-1/Ι 认识论闸门：四维裁决（置信×代价×云脑×预算）
@@ -1209,8 +1502,8 @@ async function driveLoop(deps, opts) {
             continue;
         // ⑧ 验证：步入轨迹（分层盖章）+ 判据证据逐条回填目标机
         criteriaRecord(action, executed.value, decision, verdict);
-        // ⑧′ W8-B4 否定判据独立复核（OCR 语料三态判决）
-        negativeCriteriaReview();
+        // ⑧′ W8-B4 否定判据独立复核（ΠΑΝ-61：当帧强制重采 + 全文未截断语料）
+        await negativeCriteriaReview();
         // ⑨ 进化位：tick 后终局评估（终局相即熔断）
         if (finalEvaluation())
             break;
@@ -1227,19 +1520,26 @@ async function driveLoop(deps, opts) {
     if (w4Branch !== null && typeof w4Branch.generateCard === 'function' &&
         (w4FinalPhase === 'failed' || w4FinalPhase === 'aborted')) {
         try {
-            w4LastCard.card = w4Branch.generateCard({ phase: w4FinalPhase, reason: lastReason, now });
+            // 铸卡 null（无可岔步）⇒ 清域不留旧卡（无卡不伪造 —— 诚实降级）
+            const minted = w4Branch.generateCard({ phase: w4FinalPhase, reason: lastReason, now });
+            if (minted !== null)
+                w4LastCardByPilot.set(pan60PilotKey, minted);
+            else
+                w4LastCardByPilot.delete(pan60PilotKey);
+            w4TouchPilotDomain(pan60PilotKey);
         }
         catch {
-            w4LastCard.card = null; // 铸卡故障吞掉 —— 无卡不伪造（诚实降级）
+            w4LastCardByPilot.delete(pan60PilotKey); // 铸卡故障吞掉 —— 无卡不伪造（诚实降级）
         }
         // W5-5（缝3）：铸卡同步注入在役 steer 会话（steer_answer 岔路模式的持有面 ——
         // 无持有面则 W4-0 的卡只能经 lastBranchCard() 出口审计，用户单键换支的通道
         // 断头）。会话在场且持有面可用才注入；注入是旁路（换支是增益不是依赖），
         // 故障吞掉绝不炸环。steer 未点亮 ⇒ 无会话 ⇒ 卡仍在册（审计面不受影响）。
-        if (w4LastCard.card !== null && w4SteerSession !== null &&
+        const w4MintedCard = w4LastCardByPilot.get(pan60PilotKey) ?? null;
+        if (w4MintedCard !== null && w4SteerSession !== null &&
             typeof w4SteerSession.holdBranchCard === 'function') {
             try {
-                w4SteerSession.holdBranchCard(w4LastCard.card);
+                w4SteerSession.holdBranchCard(w4MintedCard);
             }
             catch {
                 /* 持有面故障吞掉 —— 卡仍在 lastBranchCard() 出口在册 */
@@ -1270,6 +1570,10 @@ async function driveLoop(deps, opts) {
     // —— 零回归红律（端口缺席/关闭的生产路径恒零触发）
     if (w3ExploreSubs > 0) {
         result.summary += `W3-7 探索拦截：替代升级 ${w3ExploreSubs} 次。`;
+    }
+    // ΠΑΝ-59 记账出口：构造降级阻塞清账发生过才追加总汇报（放行留痕）
+    if (pan59Cleared && pan59Note !== '') {
+        result.summary += pan59Note + '。';
     }
     return result;
 }

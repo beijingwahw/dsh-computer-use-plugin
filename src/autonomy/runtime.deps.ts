@@ -31,6 +31,34 @@ export interface RuntimeDeps {
   groundVlm?: (buf: Buffer, question?: string) => Promise<GroundedElement[]>;
   /** 词级 OCR 语言（缺省 'eng'；透传 textReader.readText） */
   ocrLang?: string;
+  /**
+   * ΠΑΝ-58（OCR 接线）：服务端 L2 优先开关 —— true ⇒ 缺省词级 OCR 先走
+   * readTextAny 的服务端路径（服务端自截读屏，缺席回退 legacy tesseract）；
+   * false/缺席 ⇒ legacy 直读传入 buf（与接线前逐字节一致 —— 零回归红律）。
+   * 由 buildAutonomyStack 以 config.enableOcr 铸入（OCR 总开关即本开关的
+   * 既有 config 门控，缺省关）。
+   */
+  ocrServerFirst?: boolean;
+  /**
+   * ΠΑΝ-57（生产 popup 供方）：弹窗注记供给端口 —— 截屏帧 + 全帧 OCR 语料 ⇒
+   * 弹窗注记清单（null = 证据缺席不产注记）。缺席 ⇒ buildAutonomyStack 铸入的
+   * 缺省供方（popupDetector 几何通道 + OCR 词证通道 + 施密特迟滞滤波）；
+   * 显式注入（含 popupKeywords 缺席时）按注入面供给（离线测试生命线）。
+   */
+  popupNotes?: (buf: Buffer, ocrText: string) => Promise<string[] | null>;
+  /**
+   * ΠΑΝ-57：弹窗语义词表 CSV（config.popupKeywords 同源；缺省供方的语义通道
+   * 判据）。非空 ⇒ 感知链的弹窗通道点亮（buildAutonomyStack 以 config.enableOcr
+   * 门控铸入 —— 缺省关，感知行为与接线前逐字节一致）；空/缺席 ⇒ 缺省供方整体
+   * 不点亮（几何通道随供方一并关 —— 见 runtime.perceive 的接线律）。
+   */
+  popupKeywords?: string;
+  /**
+   * ΠΑΝ-60（多 pilot 隔离）：本栈所属的 pilot 域键（非空串 ⇒ 探索账本等进程级
+   * 共享单例按域分持；缺席 ⇒ 共享域 —— 单 pilot 语义与接线前逐字节一致）。
+   * buildAutonomyStack 透传调用方注入；AutonomyDeps.pilotId 同键（闭环侧）。
+   */
+  pilotId?: string;
   /** 云脑 client（ask_vlm 问答与 grounding 的注入位；测试假件由此进） */
   client?: GlmClient;
   /**

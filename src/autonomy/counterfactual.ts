@@ -115,6 +115,12 @@ export interface ScoringContext {
    * 旧路径）。键方言与 prophecy 单源对齐（counterfactualUtil 的同律小函数）。
    */
   worldModel?: WorldModelReadPort;
+  /**
+   * ΠΑΝ-60（多 pilot 隔离）：本评分上下文所属的 pilot 域键（非空串 ⇒ 世界模型
+   * 只读面回落时按该域取接线；缺席 ⇒ 回落最近登记域 —— 单 pilot 语义零回归）。
+   * 铸造点（autoPilot 岔路账 / policyEngine 破平带）从各自的 pilot 语境透传。
+   */
+  pilotId?: string;
 }
 
 // ─── 常量 ───
@@ -160,38 +166,83 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
  * 生产决策面（policyEngineUtil.breakTieBand / autoPilot 岔路账的 ScoringContext
  * 铸造点）不携带 worldModel 字段——只读面经接线层（autonomy/index.ts 的
  * buildAutonomyStack）一次性注入此处，评分内核 scoreAll 对缺席字段回落本默认
- * ⇒ 真实转移分布进决策面而无需改动任何调用方。实验室 gym 不经 buildAutonomy
+ * ⇒ 真实转移分布进决策面而无需改动任何调用方。实验室 gym 不经 buildAutonomyStack
  * 铸栈 ⇒ 本默认恒 null（确定性不变）；未接线进程同律（零回归红律）。
  * 最新铸栈胜出：off 栈（enableProphecy=false）铸栈即清除旧接线。
+ * ΠΑΝ-60（多 pilot 隔离）：单持有者改 per-pilot 域 —— Map keyed by pilotId
+ * （缺省共享域 ''）。后铸栈只覆盖**自己域**的接线（enableProphecy=false 的栈
+ * 不再清掉 true 栈的接线 —— 「最新铸栈胜出」收敛为「同域最新胜出」）；无
+ * pilotId 语境的解析回落共享域（单 pilot 语义与旧单位逐字节一致）；pilot
+ * 结束经 releaseCounterfactualWorldModel(pilotId) 清账（容量上限外最旧域驱逐）。
  */
-let wiredWorldModel: WorldModelReadPort | null = null;
+const wiredWorldModelByPilot = new Map<string, WorldModelReadPort>();
+/** ΠΑΝ-60：域登记近序账（「最近登记域」的回落事实源 + 容量驱逐序） */
+let wiredWorldModelRecency: string[] = [];
+/** ΠΑΝ-60：per-pilot 域数量上限（有界律 —— 接线泄漏不至于无界生长） */
+const WIRED_MODEL_PILOT_CAP = 16;
 
-/**
- * ΝΩ-46：注入（或清除）模块默认世界模型只读面（纯赋值，绝不抛）。
- * 脏端口（null / 非对象 / 无 predict 函数）按清除记。测试隔离：传 null 复位。
- */
-export function wireCounterfactualWorldModel(port: WorldModelReadPort | null | undefined): void {
-  wiredWorldModel =
-    port !== null && port !== undefined && typeof port === 'object' && typeof port.predict === 'function'
-      ? port
-      : null;
+/** ΠΑΝ-60：域键解析 —— 显式非空串用之；无参/空串 ⇒ 最近登记域（旧单位语义） */
+function wiredModelPilotKey(pilotId?: string): string {
+  if (typeof pilotId === 'string' && pilotId !== '') return pilotId;
+  return wiredWorldModelRecency.length > 0 ? wiredWorldModelRecency[wiredWorldModelRecency.length - 1] : '';
 }
 
-/** ΝΩ-46：模块默认只读面是否在场（接线开关的观察位 —— w4wire 两向断言用） */
-export function counterfactualWorldModelWired(): boolean {
-  return wiredWorldModel !== null;
+/**
+ * ΝΩ-46/ΠΑΝ-60：注入（或清除）默认世界模型只读面（纯赋值，绝不抛）。
+ * 脏端口（null / 非对象 / 无 predict 函数）按清除记（只清指定域）。测试隔离：
+ * 传 null 复位（缺省域）。pilotId 缺席 ⇒ 共享域 ''（旧单持有者语义）。
+ */
+export function wireCounterfactualWorldModel(
+  port: WorldModelReadPort | null | undefined,
+  pilotId?: string,
+): void {
+  const key = typeof pilotId === 'string' && pilotId !== '' ? pilotId : '';
+  const valid =
+    port !== null && port !== undefined && typeof port === 'object' && typeof port.predict === 'function';
+  if (valid) {
+    wiredWorldModelByPilot.set(key, port as WorldModelReadPort);
+    const i = wiredWorldModelRecency.indexOf(key);
+    if (i >= 0) wiredWorldModelRecency.splice(i, 1);
+    wiredWorldModelRecency.push(key);
+  } else {
+    // 清除态：Map 值缺席 = 未接线（get ?? null 收口，不存 null 值）
+    wiredWorldModelByPilot.delete(key);
+    const i = wiredWorldModelRecency.indexOf(key);
+    if (i >= 0) wiredWorldModelRecency.splice(i, 1);
+  }
+  while (wiredWorldModelRecency.length > WIRED_MODEL_PILOT_CAP) {
+    const evict = wiredWorldModelRecency.shift();
+    if (evict === undefined) break;
+    wiredWorldModelByPilot.delete(evict);
+  }
+}
+
+/** ΝΩ-46/ΠΑΝ-60：默认只读面是否在场（接线开关的观察位 —— w4wire 两向断言用） */
+export function counterfactualWorldModelWired(pilotId?: string): boolean {
+  return (wiredWorldModelByPilot.get(wiredModelPilotKey(pilotId)) ?? null) !== null;
 }
 
 /**
- * ΝΩ-46：世界模型只读面解析 —— ctx 显式注入优先，缺席回落模块默认接线；
- * 两层都缺席/脏形 ⇒ null（中性因子，逐字节旧路径）。
+ * ΠΑΝ-60：pilot 结束清账 —— 释放该 pilot 域的世界模型接线（共享域 '' 不清）。
  */
-function resolveWorldModelPort(explicit: unknown): WorldModelReadPort | null {
+export function releaseCounterfactualWorldModel(pilotId: string): void {
+  if (typeof pilotId !== 'string' || pilotId === '') return;
+  wiredWorldModelByPilot.delete(pilotId);
+  const i = wiredWorldModelRecency.indexOf(pilotId);
+  if (i >= 0) wiredWorldModelRecency.splice(i, 1);
+}
+
+/**
+ * ΝΩ-46/ΠΑΝ-60：世界模型只读面解析 —— ctx 显式注入优先，缺席回落模块默认
+ * 接线（pilotId 域优先，缺省回落最近登记域）；两层都缺席/脏形 ⇒ null
+ * （中性因子，逐字节旧路径）。
+ */
+function resolveWorldModelPort(explicit: unknown, pilotId?: string): WorldModelReadPort | null {
   if (explicit !== null && explicit !== undefined && typeof explicit === 'object' &&
       typeof (explicit as WorldModelReadPort).predict === 'function') {
     return explicit as WorldModelReadPort;
   }
-  return wiredWorldModel;
+  return wiredWorldModelByPilot.get(wiredModelPilotKey(pilotId)) ?? null;
 }
 
 /**
@@ -283,8 +334,9 @@ function scoreAll(actions: PolicyAction[], c: Partial<ScoringContext>): ScoredEn
       ? (c.preferredActionKeys.filter(k => typeof k === 'string' && k !== '') as string[])
       : [],
   );
-  // ΝΩ-46：世界模型只读面 —— 显式注入优先，缺席回落模块默认接线（均缺席 ⇒ null 中性）
-  const worldModel = resolveWorldModelPort(c.worldModel);
+  // ΝΩ-46：世界模型只读面 —— 显式注入优先，缺席回落模块默认接线（均缺席 ⇒ null 中性）。
+  // ΠΑΝ-60：回落按 ctx.pilotId 域优先（缺省回落最近登记域 —— 单 pilot 零回归）。
+  const worldModel = resolveWorldModelPort(c.worldModel, typeof c.pilotId === 'string' ? c.pilotId : undefined);
   const w = resolveWeights(c.weights);
 
   return actions.map((action, index) => {

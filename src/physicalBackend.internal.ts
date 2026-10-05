@@ -1,12 +1,7 @@
 // src/physicalBackend.internal.ts
 // W6-2（doctor smell.over-engineering 清偿）：自 physicalBackend.ts 低风险分区提取 ——
-// 模块私有生命周期小件（Result 解包 / 端口探活 / 语义化版本比较）。纯函数，行为零变化；
+// 模块私有生命周期小件（端口探活 / 语义化版本比较）。纯函数，行为零变化；
 // 仅 physicalBackend.ts 消费（不进公开再分发面）。
-
-export function unwrap<T>(result: { ok: true; value: T } | { ok: false; error: { kind: string; detail: string } }, what: string): T {
-  if (result.ok) return result.value;
-  throw new Error(`[physicalBackend] ${what} failed: ${result.error.kind}: ${result.error.detail}`);
-}
 
 /** 端口占用探测：健康端点有响应即视为「已有服务存活」 */
 export async function probeAlive(port: number): Promise<boolean> {

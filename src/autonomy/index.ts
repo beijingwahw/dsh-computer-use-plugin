@@ -38,6 +38,14 @@ import { errText } from './runtime.utils';
 // elementTracker/failureMemory/riskGate 只读）。
 import { branchLedger as branchLedgerSingleton, generateBranchCard } from '../branchCards';
 import { ExplorationLedger } from './exploration';
+// ΠΑΝ-56（宏执行入宪）：宏步词面预扫描的缺省供方物料 —— 宏解析纯编排 +
+// 技能库（runtime.ts 已同路 import，零新回路）。
+import { skillLibrary } from '../skillLibrary';
+import { resolveMacroChain, type MacroResolveInput } from '../macroExecutor';
+// ΠΑΝ-58/ΠΑΝ-61：缺省词级 OCR 工厂（服务端优先路径）与 RuntimeWord 词面。
+import { makeDefaultReadWords } from './runtime.perceive';
+import type { RuntimeWord } from './runtime.types';
+import type { PolicyAction } from './policyEngine';
 // ΝΩ-46（model-based 反事实接线）：Φ-9 评分内核的世界模型只读面注入面 ——
 // counterfactual 的模块默认持有者（结构端口 WorldModelReadPort 见其注释）。
 import { wireCounterfactualWorldModel, type WorldModelReadPort } from './counterfactual';
@@ -180,34 +188,96 @@ function resetFocusForRun(): void {
  * 含 persistPath；首铸（或换路重铸）显式 beginSession('restore') 读盘一次
  * （该 API 的本义即会话起点的恢复），后续同路径铸栈 attach 共享实例，只走
  * beginSession('reset') 归零 run 级状态（纯内存零 IO —— beginSession('restore'）
- * 不再被逐栈滥用为读档器）。路径变化 ⇒ 键失效重铸重读；进程退出即弃（本桶与
- * 宿主均无探索账本卸载钩子 —— 账本生命周期与进程同尽，persist 节流落盘语义
- * 不变）。首铸恢复失败只缓存负面结果（空账实例照常共享），防御恢复语义不变：
+ * 不再被逐栈滥用为读档器）。路径变化 ⇒ 键失效重铸重读；进程退出即弃（卸载钩
+ * 子 ΤΕΛ-10（D-G31）起在案：组合根 UNLOAD_CHECKLIST 'explorationLedger.release'
+ * 经 releaseAllExplorationLedgers 释放全部 pilot 域，共享域与进程同尽，persist
+ * 节流落盘语义不变）。首铸恢复失败只缓存负面结果（空账实例照常共享），防御恢复语义不变：
  * 绝不抛、垃圾格弃置、后续铸栈不重读坏档。
+ * ΠΑΝ-60（多 pilot 隔离）：单例改 per-pilot 域 —— Map keyed by
+ * `${pilotId}\u0000${persistPath}`。并发 pilot 各持独立账本（后铸栈的
+ * beginSession('reset') 不再清掉在飞 run 的建议预算与交替律状态）；pilotId
+ * 缺席 ⇒ 共享域（键 '\0<persistPath>'）—— 单 pilot 语义与旧单例逐字节一致
+ * （零回归红律）。域数量有界（超限驱逐最旧域）；pilot 结束经
+ * releaseExplorationLedger(pilotId) 显式清账。
  */
-let w4SharedExploration: ExplorationLedger | null = null;
-let w4SharedExplorationKey = '';
+const w4ExplorationByPilot = new Map<string, ExplorationLedger>();
+/** ΠΑΝ-60：域登记近序账（容量驱逐序） */
+const w4ExplorationRecency: string[] = [];
+/** ΠΑΝ-60：探索账本域数量上限（有界律） */
+const W4_EXPLORATION_PILOT_CAP = 8;
 
 /**
- * W4-0（C）/ ΑΩ-R23：取（或铸）共享探索账本并归零 run 级状态；绝不抛（内部
- * 自带契约）。同路径缓存命中 ⇒ attach 共享实例零读盘；缺席/换路 ⇒ 首铸恰一次
- * 显式恢复（全档同步读盘至多一次）。
+ * W4-0（C）/ ΑΩ-R23 / ΠΑΝ-60：取（或铸）该 pilot 域的探索账本并归零 run 级
+ * 状态；绝不抛（内部自带契约）。同域缓存命中 ⇒ attach 共享实例零读盘；
+ * 缺席/换路 ⇒ 首铸恰一次显式恢复（全档同步读盘至多一次）。
  */
-function w4ExplorationFor(persistPath: unknown): ExplorationLedger {
+function w4ExplorationFor(persistPath: unknown, pilotId?: string): ExplorationLedger {
   const p = typeof persistPath === 'string' && persistPath !== '' ? persistPath : '';
-  if (w4SharedExploration === null || w4SharedExplorationKey !== p) {
-    w4SharedExploration = new ExplorationLedger('', {
+  const pk = typeof pilotId === 'string' && pilotId !== '' ? pilotId : '';
+  const key = `${pk}\u0000${p}`;
+  let ledger = w4ExplorationByPilot.get(key);
+  if (ledger === undefined) {
+    ledger = new ExplorationLedger('', {
       enabled: true,
       ...(p !== '' ? { persistPath: p } : {}),
     });
-    // ΑΩ-R23：首铸/换路重铸恰一次显式恢复 —— 后续同路径铸栈不再触盘
-    w4SharedExploration.beginSession(p !== '' ? 'restore' : 'reset');
-    w4SharedExplorationKey = p;
+    // ΑΩ-R23：首铸/换路重铸恰一次显式恢复 —— 后续同域铸栈不再触盘
+    ledger.beginSession(p !== '' ? 'restore' : 'reset');
+    w4ExplorationByPilot.set(key, ledger);
+    const i = w4ExplorationRecency.indexOf(key);
+    if (i >= 0) w4ExplorationRecency.splice(i, 1);
+    w4ExplorationRecency.push(key);
+    while (w4ExplorationRecency.length > W4_EXPLORATION_PILOT_CAP) {
+      const evict = w4ExplorationRecency.shift();
+      if (evict === undefined) break;
+      w4ExplorationByPilot.delete(evict);
+    }
   } else {
-    // ΑΩ-R23：同路径复铸 ⇒ attach 共享实例，仅归零 run 级态（纯内存零 IO）
-    w4SharedExploration.beginSession('reset');
+    // ΑΩ-R23：同域复铸 ⇒ attach 共享实例，仅归零 run 级态（纯内存零 IO）
+    ledger.beginSession('reset');
   }
-  return w4SharedExploration;
+  return ledger;
+}
+
+/**
+ * ΠΑΝ-60：pilot 结束清账 —— 释放该 pilot 名下全部探索账本域（共享域 '' 不清）。
+ * 接线层（或测试）在 pilot 生命周期结束时调用；与 releasePilotW4Wire /
+ * releaseCounterfactualWorldModel 同执法点族。
+ */
+export function releaseExplorationLedger(pilotId: string): void {
+  if (typeof pilotId !== 'string' || pilotId === '') return;
+  const prefix = `${pilotId}\u0000`;
+  for (const key of [...w4ExplorationByPilot.keys()]) {
+    if (key.startsWith(prefix)) {
+      w4ExplorationByPilot.delete(key);
+      const i = w4ExplorationRecency.indexOf(key);
+      if (i >= 0) w4ExplorationRecency.splice(i, 1);
+    }
+  }
+}
+
+/**
+ * ΤΕΛ-10（D-G31 三单例归零缝）：探索账本的卸载链全域释放面 —— 组合根
+ * UNLOAD_CHECKLIST 'explorationLedger.release' 键的消费物料。会话终界
+ * （热重载）释放全部 **pilot 域**账本；共享域（pilotId ''）不清——ΠΑΝ-60
+ * 语义：一进程一账的共享档寿命与进程同尽，其 run 级状态（建议预算/交替律）
+ * 由下次铸栈的 beginSession('reset') 自行归零（纯内存零 IO，ΑΩ-R23 同律）。
+ * pilotId 不外泄组合根（铸栈时内部解析）⇒ 按域键前缀整清（键形
+ * `${pilotId}\u0000${path}`，共享域键以 \u0000 起头）。纯内存清账（persist
+ * 节流语义不变 —— 与 releaseExplorationLedger 同律：释放即弃，至多丢未及
+ * 节流落盘的尾部观察，属 ΠΑΝ-60 释放语义的既定诚实边界）。绝不抛。
+ * 返回释放的域数（测试观察面）。
+ */
+export function releaseAllExplorationLedgers(): number {
+  let released = 0;
+  for (const key of [...w4ExplorationByPilot.keys()]) {
+    if (key.startsWith('\u0000')) continue; // 共享域（pilotId ''）不清
+    w4ExplorationByPilot.delete(key);
+    const i = w4ExplorationRecency.indexOf(key);
+    if (i >= 0) w4ExplorationRecency.splice(i, 1);
+    released += 1;
+  }
+  return released;
 }
 
 // ─── W8-C1（惊异喂养生接线 · D-G2 清偿）：栈内 prophecy → EvolutionEngine ───
@@ -262,6 +332,98 @@ function counterfactualPredictFace(
  * ΝΩ-46：世界模型只读面（单例适配——与 prophecyWorldModel 同源）。
  */
 const counterfactualWorldModelPort: WorldModelReadPort = { predict: counterfactualPredictFace };
+
+// ─── ΠΑΝ-56 / ΠΑΝ-61：环级安全与判据复核端口的缺省供方 ───
+
+/**
+ * ΠΑΝ-56（宏执行入宪）：宏步词面预扫描的缺省供方 —— 解析 recall_skill / macro
+ * 动作指向的宏链（skillId/templateId 直取；无定位的 recall_skill 与
+ * runtime.handleRecallSkill 同律按 goal 召回最佳），把全部步骤的「工具 + 参数
+ * 词面」拼成扫描串。闭环 ④ 宪法裁决相位以判决专用副本携带该串过律③文本扫描
+ * —— 危险词命中 ⇒ destructive ⇒ 硬法恒审批（宏序列不再以 benign 身份绕宪，
+ * 与直接点击的 label 扫描同律同档）。解析失败 / 空链 / 任何异常 ⇒ null（按
+ * 缺席处理，判决回旧路径 —— 绝不炸环；执行层 macroDispatch 的逐步闸仍是末道闸）。
+ */
+function defaultMacroRiskScan(action: PolicyAction, ctx: { goalText: string }): string | null {
+  try {
+    const payload =
+      action && typeof action.payload === 'object'
+        ? (action.payload as { skillId?: unknown; templateId?: unknown; args?: unknown })
+        : null;
+    const skillId =
+      payload && typeof payload.skillId === 'number' && Number.isFinite(payload.skillId)
+        ? payload.skillId
+        : undefined;
+    const templateId =
+      payload && typeof payload.templateId === 'number' && Number.isFinite(payload.templateId)
+        ? payload.templateId
+        : undefined;
+    let input: MacroResolveInput | null = null;
+    if (skillId !== undefined || templateId !== undefined) {
+      const argsRaw = payload && payload.args && typeof payload.args === 'object'
+        ? (payload.args as { target?: unknown; text?: unknown })
+        : {};
+      input = {
+        ...(skillId !== undefined ? { skillId } : {}),
+        ...(templateId !== undefined ? { templateId } : {}),
+        args: {
+          ...(typeof argsRaw.target === 'string' && argsRaw.target !== '' ? { target: argsRaw.target } : {}),
+          ...(typeof argsRaw.text === 'string' && argsRaw.text !== '' ? { text: argsRaw.text } : {}),
+        },
+      };
+    } else if (action.kind === 'recall_skill') {
+      const m = skillLibrary.match(typeof ctx.goalText === 'string' ? ctx.goalText : '', undefined, 1);
+      if (!Array.isArray(m) || m.length === 0) return null;
+      input = { skillId: m[0].id };
+    }
+    if (input === null) return null;
+    const resolved = resolveMacroChain(input);
+    if (!resolved || resolved.ok !== true || !Array.isArray(resolved.steps) || resolved.steps.length === 0) {
+      return null;
+    }
+    const parts: string[] = [];
+    for (const s of resolved.steps) {
+      if (!s || typeof s.tool !== 'string') continue;
+      let argsText = '';
+      try {
+        argsText = JSON.stringify(s.args ?? {});
+      } catch {
+        argsText = '';
+      }
+      parts.push(argsText !== '' ? `${s.tool} ${argsText}` : s.tool);
+    }
+    const scanText = parts.join(' ');
+    return scanText.trim() !== '' ? scanText : null;
+  } catch {
+    return null; // 预扫描是安全旁路 —— 故障按缺席（绝不炸环）
+  }
+}
+
+/**
+ * ΠΑΝ-61（否定判据·瞬态逃逸）：⑧′ 当帧重采的缺省供方 —— 截屏 + 词级 OCR ⇒
+ * 未截断的词面全文（截断前先扫禁词的执行面）。OCR 读不出（空语料）⇒ null
+ * （诚实缺席 —— evaluateCriteria 对缺席语料整体降级零证据，否定判据不自动
+ * 为真）；截屏/OCR 任何异常 ⇒ null（回落旧 digest 路径）。语言与服务端优先
+ * 随 resolved（ΠΑΝ-58 接线）同源 —— 重采语料与感知语料同一方言。
+ */
+function makeDefaultNegativeRecheck(resolved: RuntimeDeps): () => Promise<string | null> {
+  const capture = resolved.capture ?? ((): Promise<Buffer> => backend.captureCleanPng());
+  const readWords =
+    resolved.readWords ?? makeDefaultReadWords(resolved.ocrLang, { serverFirst: resolved.ocrServerFirst === true });
+  return async (): Promise<string | null> => {
+    try {
+      const buf = await capture();
+      const words = await readWords(buf).catch((): RuntimeWord[] => []);
+      const text = words
+        .map(w => (w && typeof w.label === 'string' ? w.label : ''))
+        .filter(s => s !== '')
+        .join(' ');
+      return text !== '' ? text : null;
+    } catch {
+      return null; // 重采故障 ⇒ 诚实缺席（回落旧 digest）
+    }
+  };
+}
 
 /**
  * 宿主血脉接线：以插件 Config 铸造自主闭环栈（perceive / policy / constitution）。
@@ -350,6 +512,26 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
     }
   });
 
+  // ΠΑΝ-58（OCR 接线）：config.ocrLang → RuntimeDeps.ocrLang —— 词级 OCR 语言
+  // 自此进自主环血脉（缺省 'eng' 与旧硬编码同值 ⇒ 缺省行为零变化；用户改
+  // chi_sim+eng 即生效 —— 中文判据链恢复的前提）。config 缺该键（旧调用方/
+  // 测试桩）⇒ 不补挂（变异面不添 undefined 键）。config.enableOcr（OCR 总开
+  // 关，缺省关）⇒ ocrServerFirst（缺省词级 OCR 优先走服务端 L2 readTextAny，
+  // 缺席回退 legacy —— 既有 config 门控，缺省旧路径）。
+  if (typeof config?.ocrLang === 'string' && config.ocrLang.trim() !== '') {
+    fill('ocrLang', config.ocrLang);
+  }
+  if (config?.enableOcr === true) {
+    fill('ocrServerFirst', true);
+    // ΠΑΝ-57（生产 popup 供方）：OCR 总开 ⇒ 弹窗语义词表随栈入感知（感知链的
+    // 弹窗通道点亮 —— 几何 + 词证双模经施密特迟滞产 popupNotes，策略①弹窗
+    // 优先律与免看门控红线在生产可达）；缺省关 ⇒ 通道缺席，感知行为与接线前
+    // 逐字节一致（零回归红律）。
+    if (typeof config?.popupKeywords === 'string' && config.popupKeywords.trim() !== '') {
+      fill('popupKeywords', config.popupKeywords);
+    }
+  }
+
   // W2-0（B）：W1 执行层四连改接线 —— 补挂进副本（ΑΩ-R44 后出口随 attachedKeys
   // 回写原 deps；调用方随后以同一 deps 铸 createExecute({...deps, spec})，
   // probe/focus/w1 三注入位即随行生效；与 lastSnapshotRef 同一补挂回传模式）。
@@ -414,6 +596,8 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
   // 实验室 gym 不经本函数铸栈 ⇒ 永不注入（确定性不变）。
   wireCounterfactualWorldModel(
     config?.enableProphecy !== false ? counterfactualWorldModelPort : null,
+    // ΠΑΝ-60：本栈的 pilot 域键（off 栈只清自己域 —— 不再误伤并发 pilot 的接线）
+    typeof resolved.pilotId === 'string' && resolved.pilotId !== '' ? resolved.pilotId : undefined,
   );
 
   return {
@@ -509,7 +693,25 @@ export function buildAutonomyStack(config: Config, deps: RuntimeDeps = {}): Auto
     // 择路 + 步落账回报）；false ⇒ 端口缺席，升级路径逐字节旧路（零回归红律）。
     // run 级状态（建议预算/交替律）随每次铸栈归零；persistPath 在场 ⇒ 跨会话恢复。
     ...(config?.enableExploration === true
-      ? { exploration: w4ExplorationFor(config?.explorationPersistPath) }
+      ? { exploration: w4ExplorationFor(config?.explorationPersistPath, resolved.pilotId) }
+      : {}),
+    // ΠΑΝ-56（宏执行入宪）：宏步词面预扫描端口 —— ④ 宪法裁决相位对
+    // recall_skill/macro 解析宏链拼词面串过律③（危险步 ⇒ destructive ⇒
+    // 硬法恒审批，与直接点击同级）。安全修复：缺省接线直接生效（调用方显式
+    // 注入优先 —— 只填缺席位律）。
+    ...( !(resolved as RuntimeDeps & Partial<AutonomyDeps>).macroRiskScan
+      ? { macroRiskScan: defaultMacroRiskScan }
+      : {}),
+    // ΠΑΝ-61（否定判据·瞬态逃逸）：⑧′ 当帧重采端口 —— 安全修复：缺省接线
+    // 直接生效（每步执行后的否定判据复核强采当帧全量 OCR，旧 digest 不再被
+    // 透支；调用方显式注入优先）。
+    ...( !(resolved as RuntimeDeps & Partial<AutonomyDeps>).negativeRecheck
+      ? { negativeRecheck: makeDefaultNegativeRecheck(resolved) }
+      : {}),
+    // ΠΑΝ-60（多 pilot 隔离）：pilot 域键随栈入环（steer 会话/岔路卡/世界模型
+    // 接线回落/评分上下文按域分持；缺席 ⇒ 共享域，单 pilot 语义零回归）
+    ...(typeof resolved.pilotId === 'string' && resolved.pilotId !== ''
+      ? { pilotId: resolved.pilotId }
       : {}),
     // W4-0（B 接线）：活意图漂移（W3-5 H2）—— autonomySteerEnabled（缺省 false）
     // 为真 ⇒ steer 端口点亮（driveLoop 环内铸会话逐步出题，出题 ⇒ steer-drift

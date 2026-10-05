@@ -196,6 +196,18 @@ export interface SleepConfig {
   budgetMs?: number;
   /** 时钟注入（确定性测试；缺省 Date.now） */
   now?: () => number;
+  /**
+   * ΠΑΝ-29（睡眠/dispose 竞速立法）：卸载中止信号（AbortSignal 的结构子集
+   * `{ aborted: boolean }` —— 生产传 AbortController.signal，测试传可翻转假件）。
+   * 语义：信号已中止 ⇒ ①未演的幕**不再消费任何依赖**（卸载 disposer 已同步
+   * 跑完一切 reset，微任务恢复后读到的账本是被清空的空账 —— 消费它就是把
+   * 「已复位」误当「无事可做」）；②迟到梦幕一并跳过（梦是唯一申报的异步
+   * 消化面，dispose 后重放只会污染进化账）；③晨报行照铸但**不携带水位线**
+   *（timeout:true + interrupted 注记 —— readTail 跳过无水印行，下次同状态
+   * 实睡，宁可重复归纳不可漏睡）；④内存水位线**不前滚**（本睡未完成消化，
+   * 不得记账）。缺席 ⇒ 逐字节零漂移（既有预算执法接管）。
+   */
+  disposeSignal?: { readonly aborted: boolean };
 }
 
 /** 单幕报告条目 */
@@ -211,6 +223,10 @@ export interface SleepActReport {
   detail?: string;
   /** 标定建议书（纪元 Ζ，仅校准幕携带；0 项建议 ⇒ 字段缺席 —— 不伪造空册） */
   calibrationAdvice?: CalibrationAdvice[];
+  /** ΠΑΝ-113：单幕耗时（ms —— 事后记账面；同步幕无法中途打断，耗时可见） */
+  elapsedMs?: number;
+  /** ΠΑΝ-113：单幕超限标记（耗时 > 单幕上限 ⇒ true；detail 携带超限注记） */
+  overActCap?: boolean;
 }
 
 /** 晨报：一次认知睡眠周期的总汇报 */

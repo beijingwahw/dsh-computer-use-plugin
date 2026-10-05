@@ -143,12 +143,20 @@ export interface ProphecyLedgerSnapshot {
 /**
  * 闭环消费面（结构性端口）：真实 ProphecyEngine 天然满足，测试桩只须实现
  * 同名两面（与 PolicyPort/ConstitutionPort/SelfModelPort 同律）。
+ * ΠΑΝ-54：mint 返回预言号（prophecyId —— 严格配对的身份源；null = 未铸：
+ * 盲屏/铸造故障）；settle 第三参可选 prophecyId —— 在场 ⇒ 按号严格配对
+ *（乱序到达的见证落 no-match 诚实降级，绝不张冠李戴）。
  */
 export interface ProphecyPort {
-  /** 动作执行前铸预言（屏型指纹缺席 ⇒ 不铸 —— 盲屏不可预言） */
-  mint(screenType: string | null | undefined, actionKey: string): void;
-  /** 动作执行后拿真实下一屏型结算；返回结算记录（null = 无待结算/仍挂起） */
-  settle(actualType: string | null | undefined, success?: boolean): ProphecyRecord | null;
+  /** 动作执行前铸预言（屏型指纹缺席 ⇒ 不铸 —— 盲屏不可预言）；返回预言号（null = 未铸） */
+  mint(screenType: string | null | undefined, actionKey: string): number | null;
+  /**
+   * 动作执行后拿真实下一屏型结算；返回结算记录（null = 无待结算/仍挂起/
+   * ΠΑΝ-54 no-match —— prophecyId 在场但该号已结算/作废/未知）。
+   * success：动作执行结局（true = 有效执行）—— ΠΑΝ-54：无效动作（success === false）
+   * 的观察不回灌世界模型（结算记录照铸 —— 审计与学习分道）。
+   */
+  settle(actualType: string | null | undefined, success?: boolean, prophecyId?: number): ProphecyRecord | null;
 }
 
 // W6-2（doctor smell.over-engineering 清偿）：内部纯工具已分区提取至 internal.ts
@@ -419,10 +427,22 @@ export interface ProphecyEngineOptions {
  *   · mint（ΑΩ-R18 有界 keyed pending）：先作废超时挂起，再铸新预言（盲屏
  *     指纹 ⇒ 不铸）；各铸造各占一槽（按铸造序键控，缺省 8 槽）—— 并发/跨
  *     run 边界的铸造不再静默覆盖未结算预言，溢出最旧作废计入 expired（作废
- *     有痕，绝不无痕丢件）；
- *   · settle（ΑΩ-R18 LIFO 配对）：结算见证恒属最近执行的动作 ⇒ 配对最近铸造
- *     （后进先出）；actualType 缺席 ⇒ 挂起保持（60s 后作废计数，绝不伪造
- *     见证）；结算成功 ⇒ 记录入环形账本（500 封顶，逐出最旧）+（learn 时）
+ *     有痕，绝不无痕丢件）；ΠΑΝ-54：返回铸造号（prophecyId）—— 结算严格
+ *     配对的身份源；
+ *   · settle（ΠΑΝ-54 严格配对）：prophecyId 在场 ⇒ 按号配对 —— 该号在挂起集
+ *     ⇒ 结算之；不在（已结算/作废/未知号）⇒ **no-match 诚实降级**（计数
+ *     noMatch、返回 null，见证绝不转嫁给别的挂起预言 —— 旧 LIFO 配对的前提
+ *     「见证恒属最近铸造」无任何 enforcement，乱序到达（动作失败后补截屏、
+ *     上层重试、跨 run 滞留）会把 A 动作的结果记到 B 动作的预言上，错误转移
+ *     回灌世界模型且不可撤销[C1-9 M5]）。prophecyId 缺席 ⇒ 保留 LIFO 配对
+ *     （铸造→结算严格交替的既有宿主[autoPilot 单挂起形态]零改动；多挂起下
+ *     的 LIFO 是已申报的遗留语义，宿主接线 prophecyId 后即消失）；
+ *   · observe 前校验动作有效性（ΠΑΝ-54）：success === false（动作无效/失败）
+ *     ⇒ 结算记录照铸（审计面完整）但**不回灌世界模型** —— 无效动作后的屏幕
+ *     状态不是该动作的转移证据，旧口径「success 缺省按成功入账」会让停滞
+ *     世界学出「屏不变」高概率转移（命中率虚高、两条反馈回路都往「别动」
+ *     偏[C1-9 M7]）。自此只有**有效执行**的观察入模型；
+ *   · 结算成功 ⇒ 记录入环形账本（500 封顶，逐出最旧）+（learn 且动作有效时）
  *     observe 回灌世界模型三写 {原始, 量化, 粗格}（先 surprise 后 observe ——
  *     与 D-7 回路同序，误差先于学习；目的地一律量化身份 ⇒ 表内键与目的地
  *     粒度同律，结算比对两侧一致不串味）；
@@ -448,6 +468,8 @@ export class ProphecyEngine implements ProphecyPort {
   private mintSeq = 0;
   /** 挂起作废累计（诚实计数 —— TTL 超时与容量逐出同律入账：取不到真实下一屏型的预言归宿） */
   private expiredCount = 0;
+  /** ΠΑΝ-54：严格配对 no-match 累计（prophecyId 在场但该号不在挂起集 —— 乱序/重复/滞留见证的诚实计数，错配可观测） */
+  private noMatchCount = 0;
   /** 已扫视入账总数（喂养水位线 —— 与 evictedTotal 的差即当前未扫视起点） */
   private fedCursor = 0;
   /** 环形逐出累计（水位线的驱逐补偿 —— 索引平移不改扫视史） */
@@ -486,11 +508,15 @@ export class ProphecyEngine implements ProphecyPort {
     }
   }
 
-  /** 铸造面（ProphecyPort）：盲屏不铸；任何故障只丢预言。永不抛。 */
-  mint(screenType: string | null | undefined, actionKey: string): void {
+  /**
+   * 铸造面（ProphecyPort）：盲屏不铸；任何故障只丢预言。永不抛。
+   * ΠΑΝ-54：返回铸造号 prophecyId（mintSeq —— 单调发号，绝不用时钟充当 id）；
+   * 未铸（盲屏/空键/铸造故障）⇒ null。宿主把号透传给 settle 即获得严格配对。
+   */
+  mint(screenType: string | null | undefined, actionKey: string): number | null {
     try {
       this.voidStalePending();
-      if (!nonEmptyStr(screenType) || !nonEmptyStr(actionKey)) return; // 盲屏/空键不可预言
+      if (!nonEmptyStr(screenType) || !nonEmptyStr(actionKey)) return null; // 盲屏/空键不可预言
       // ΑΩ-R18：容量律 —— 溢出最旧作废（expired 有痕），铸造各占一槽不覆盖
       while (this.pending.size >= this.pendingSlots) {
         const oldest = this.pending.keys().next();
@@ -500,26 +526,41 @@ export class ProphecyEngine implements ProphecyPort {
       }
       const seq = ++this.mintSeq;
       this.pending.set(seq, mintProphecy(this.worldModel, String(screenType), String(actionKey), safeNow(this.now)));
+      return seq;
     } catch {
       this.pending.clear(); // 铸造故障吞掉 —— 丢预言不炸环
+      return null;
     }
   }
 
   /**
    * 结算面（ProphecyPort）：新屏型指纹 = actualType（结算见证）。
-   * ΑΩ-R18 LIFO 配对：见证恒属最近执行的动作 ⇒ 结算最近铸造（早铸预言留待
-   * 各自结算或作废律收口 —— 并发双预言各得其所，绝不互相顶掉）。
-   * 返回结算记录（null = 无待结算 / 见证缺席仍挂起 / 已作废）。永不抛。
-   * learn 时结算后回灌 observe（success 由闭环传执行结局 —— 缺省按成功入账）。
+   * ΠΑΝ-54 严格配对：prophecyId 在场 ⇒ 只结算该号 —— 号不在挂起集（已结算/
+   * 作废/未知）⇒ no-match 诚实降级（noMatch 计数、返回 null，见证绝不转嫁给
+   * 其他挂起预言 —— 乱序到达的世界转移不再错配入账[C1-9 M5]）。prophecyId
+   * 缺席 ⇒ LIFO 配对（ΑΩ-R18 既有语义，服务铸造→结算严格交替的单挂起宿主；
+   * 「见证恒属最近铸造」在多挂起下无 enforcement —— 宿主应接线 mint 返回号）。
+   * 见证缺席 ⇒ 挂起保持（60s 后作废计数，绝不伪造见证）。
+   * ΠΑΝ-54 动作有效性：success === false ⇒ 结算记录照铸（审计完整）但 observe
+   * 不回灌（无效动作后的屏幕不是该动作的转移证据[C1-9 M7]）。
+   * 返回结算记录（null = 无待结算 / 见证缺席仍挂起 / 已作废 / no-match）。永不抛。
    */
-  settle(actualType: string | null | undefined, success?: boolean): ProphecyRecord | null {
+  settle(actualType: string | null | undefined, success?: boolean, prophecyId?: number): ProphecyRecord | null {
     try {
       this.voidStalePending();
-      // LIFO：插入序末位 = 最近铸造（Map 迭代序保证）
-      let lastSeq: number | null = null;
-      for (const seq of this.pending.keys()) lastSeq = seq;
-      if (lastSeq === null) return null;
-      const pending = this.pending.get(lastSeq) ?? null;
+      // ΠΑΝ-54：配对选槽 —— 有号按号（严格），无号 LIFO（插入序末位 = 最近铸造）
+      let seq: number | null = null;
+      if (prophecyId !== undefined) {
+        if (!Number.isInteger(prophecyId) || prophecyId <= 0 || !this.pending.has(prophecyId)) {
+          this.noMatchCount++; // 诚实降级可观测（错配维度入统计面）
+          return null;
+        }
+        seq = prophecyId;
+      } else {
+        for (const k of this.pending.keys()) seq = k; // LIFO：Map 迭代序末位
+      }
+      if (seq === null) return null;
+      const pending = this.pending.get(seq) ?? null;
       if (pending === null) return null;
       if (!nonEmptyStr(actualType)) return null; // 见证缺席 ⇒ 挂起（60s 作废律收口）
       const settled = settleProphecy(pending, String(actualType), this.worldModel);
@@ -529,7 +570,9 @@ export class ProphecyEngine implements ProphecyPort {
       // 合一即单写，旧方言观察计数不翻倍）；to 侧一律量化身份 —— 表内目的地
       // 与铸造梯级、结算比对共用同一把量化尺（键粒度两侧一致，方言不串）。
       // 原始键一写是 D-G2 既有积累面的延续（字节级复现通道的证据源）。
-      if (this.learn && this.worldModel && typeof this.worldModel.observe === 'function') {
+      // ΠΑΝ-54：回灌闸 = 动作有效性（success === true 才回灌；缺省 undefined
+      // 视为未证有效 —— 与旧「缺省按成功入账」决裂，停滞世界不再学自我转移）。
+      if (success === true && this.learn && this.worldModel && typeof this.worldModel.observe === 'function') {
         try {
           const witness = quantizedScreenType(String(actualType));
           const fromKeys = new Set([
@@ -538,11 +581,11 @@ export class ProphecyEngine implements ProphecyPort {
             coarseScreenType(settled.screenType),
           ]);
           for (const key of fromKeys) {
-            this.worldModel.observe(key, settled.actionKey, witness, success !== false);
+            this.worldModel.observe(key, settled.actionKey, witness, true);
           }
         } catch { /* 回灌故障吞掉 */ }
       }
-      this.pending.delete(lastSeq);
+      this.pending.delete(seq);
       this.ledger.push(settled);
       if (this.ledger.length > this.capacity) {
         const evicted = this.ledger.length - this.capacity;
@@ -603,21 +646,24 @@ export class ProphecyEngine implements ProphecyPort {
     }
   }
 
-  /** 统计面 = prophecyStats(账本) + 引擎生命体征（挂起/作废/容量） */
-  stats(): ProphecyStats & { pending: number; expired: number; capacity: number } {
+  /** 统计面 = prophecyStats(账本) + 引擎生命体征（挂起/作废/严格配对失配/容量） */
+  stats(): ProphecyStats & { pending: number; expired: number; noMatch: number; capacity: number } {
     try {
       this.voidStalePending();
       return {
         ...prophecyStats(this.ledger),
         pending: this.pending.size,
         expired: this.expiredCount,
+        // ΠΑΝ-54：严格配对的失配计数（错配维度自此可观测 —— C1-9 M5「错配
+        // 完全不可观测」清偿；与 expired 同律的诚实计数）
+        noMatch: this.noMatchCount,
         capacity: this.capacity,
       };
     } catch {
       return {
         settled: 0, hits: 0, misses: 0, noModel: 0,
         hitRate: 0, missRate: 0, avgMissSurpriseBits: 0, coarseAssisted: 0, topMisses: [],
-        pending: 0, expired: 0, capacity: this.capacity,
+        pending: 0, expired: 0, noMatch: 0, capacity: this.capacity,
       };
     }
   }
@@ -676,6 +722,8 @@ export class ProphecyEngine implements ProphecyPort {
         this.expiredCount = Math.floor(s.expired);
       }
       this.pending.clear(); // 挂起不可序列化 —— 水合即清（诚实：跨进程的未验预言作废）
+      // ΠΑΝ-54：严格配对失配计数是运行时账（挂起集既清，旧号的失配不再可解）
+      this.noMatchCount = 0;
       // D-G2：水合后喂养水位线直抵账尾（已在册记录视为已消化 —— 与「挂起不可
       // 序列化 ⇒ 水合即清」同律：跨进程的喂养账不复存在，保守不重喂；重喂会使
       // 进化侧失手双计。dump/restore 消费面如需重喂自可直调 surpriseRunRecord）。
@@ -690,5 +738,21 @@ export class ProphecyEngine implements ProphecyPort {
  * observe 回灌在此累积，模型逐步走出无知（第二次遇见同一条路就有预言）。
  * 零持久化（与 InMemoryWorldModel 同律 —— 落盘是留白，checkpoint 消费
  * dump/restore 面）。
+ * ΤΕΛ-10（D-G31 三单例归零缝）：声明放宽为 let —— 卸载链的重铸面需要
+ * 换新实例（见 resetProphecyWorldModel）；ES 活绑定保证一切 import 方在
+ * 重铸后即刻读到新实例（消费面 autonomy/index.ts 均为调用点读值，无
+ * 模块装载期捕获）。
  */
-export const prophecyWorldModel: WorldModel = new InMemoryWorldModel();
+export let prophecyWorldModel: WorldModel = new InMemoryWorldModel();
+
+/**
+ * ΤΕΛ-10（D-G31 三单例归零缝）：预言世界模型单例的卸载归零面 —— 组合根
+ * UNLOAD_CHECKLIST 'prophecy.worldModel' 键的消费物料。InMemoryWorldModel
+ * 无公开 reset 委员面（fork/merge/snapshot/hydrate 是其立法的生命周期律，
+ * 不为卸载另开门）⇒ 重铸新实例（T1-6 移交方案 (a) 的「重铸」支）。零持久化
+ * 单源语义保持：本模型设计上不落盘，重铸零数据损失；热重载后新会话从无知
+ * 重新出发（W-1 单例隔离律 —— 不跨会话混账）。绝不抛（构造无抛路径）。
+ */
+export function resetProphecyWorldModel(): void {
+  prophecyWorldModel = new InMemoryWorldModel();
+}

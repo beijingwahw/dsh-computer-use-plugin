@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 import { reversibilityRegistry } from './riskGate';
 import type { ActionShape } from './approval.shapes';
-import type { ApprovalAmendment } from './approval.security';
+import type { ApprovalAmendment, TargetHint } from './approval.security';
 import type { PendingApproval } from './approval.registry';
 
 /** Τ 纪元：示范事件（审批事件的蒸馏载荷） */
@@ -81,11 +81,20 @@ export function emitDemonstration(pa: PendingApproval, kind: DemonstrationEvent[
   try {
     demoObserver({
       kind,
-      actionShape: pa.actionShape,
-      sceneFingerprint: pa.sceneFingerprint,
+      // ΠΑΝ-8：载荷一律拷贝出栈 —— 旧实现把 pa.actionShape / pa.amendment 的内部
+      // 可变引用直接交给外部观察者（C1-1 L3 同族），观察者原地改写即毒化审批簿记
+      //（令牌还挂在 pending 上）。旁路面的契约是「只读观察」，拷贝是该契约的执法。
+      ...(pa.actionShape !== undefined ? { actionShape: { ...pa.actionShape } } : {}),
+      ...(pa.sceneFingerprint !== undefined ? { sceneFingerprint: pa.sceneFingerprint } : {}),
       tokenId: createHash('sha256').update(pa.token).digest('hex').slice(0, 8),
       amended: pa.amendment ? true : undefined,
-      amendment: pa.amendment,
+      ...(pa.amendment !== undefined ? {
+        amendment: {
+          ...pa.amendment,
+          targetDescriptionDelta: { ...pa.amendment.targetDescriptionDelta },
+          actionShapeCorrection: { ...pa.amendment.actionShapeCorrection },
+        },
+      } : {}),
     });
   } catch {
     /* 旁路义务：教育失败=跳过（此处无下游注记消费方，静默即诚实） */
@@ -135,9 +144,12 @@ export type DispatchEscrowVerdict =
     detail?: string;
   };
 
-/** beginAttempt 的托管 opts（缺省 undefined ⇒ 零行为 —— 正交性的执法面） */
+/** beginAttempt 的托管 opts（缺省 undefined ⇒ 零行为 —— 正交性的执法面）。
+ *  ΠΑΝ-5：target —— 兑换时点的目标提示（携带绑定的令牌强制比对；不携带
+ *  绑定的令牌 ⇒ 此字段零行为 —— 兼容律）。 */
 export interface BeginAttemptOpts {
   escrow?: { planId?: string; semantics?: string };
+  target?: TargetHint;
 }
 
 /** 派发前置闸门（null = 未注册 ⇒ beginAttempt 的托管面缺席，零行为） */
@@ -146,6 +158,12 @@ let dispatchEscrowHook: ((check: DispatchEscrowCheck) => DispatchEscrowVerdict) 
 let escrowSettlementHook: ((token: string, verdict: 'verified' | 'attempt-failed', reason?: string) => void) | null = null;
 /** 最近一次托管拦截（透明化面 —— 派发层组装拒绝指引的事实源） */
 let lastEscrowBlock: EscrowBlockInfo | null = null;
+
+/** ΠΑΝ-8：托管闸门武装探针（reversalEscrow.arm 注册 hook 后为 true）——
+ *  「闸门已武装 ⇒ 不可逆动作绝无裸派发」反向验证的事实源。 */
+export function escrowGateArmed(): boolean {
+  return dispatchEscrowHook !== null;
+}
 
 /** 挂载/卸载派发前置闸门（fn=null 卸载）。钩子由 reversalEscrow.arm 单点注册。 */
 export function setDispatchEscrowHook(fn: ((check: DispatchEscrowCheck) => DispatchEscrowVerdict) | null): void {
@@ -188,11 +206,32 @@ export function fireEscrowSettlement(token: string, verdict: 'verified' | 'attem
 /** W3-1（S1）：派发前置闸门（W8-B3 拆分缝 —— 原为 beginAttempt 体内的守卫块，
  *  逐字提取；返回 true = 拦截（fail-closed 拒绝），false = 放行/零行为）。
  *  「没有逆转预案就绝无派发预留」的执法点。策略表查不到补偿路径的拒绝发生在
- *  铸造面（reversalEscrow.mintPlan fail-closed），此处兜底的是「跳过铸造直接
- *  派发」的路径：钩子未注册或不携预案 ⇒ 零行为；携预案但预案无效/错配 ⇒
- *  记 lastEscrowBlock 并拦截（拒绝置于一切簿记变异之前 —— 不烧预算与令牌）。 */
-export function escrowBlockedByGate(token: string, escrow: BeginAttemptOpts['escrow']): boolean {
-  if (dispatchEscrowHook === null || escrow === undefined) return false;
+ *  铸造面（reversalEscrow.mintPlan fail-closed），此处兜底的是「跳过铸造直接派发」
+ *  的路径：钩子未注册或不携预案 ⇒ 零行为；携预案但预案无效/错配 ⇒
+ *  记 lastEscrowBlock 并拦截（拒绝置于一切簿记变异之前 —— 不烧预算与令牌）。
+ *  ΠΑΝ-8（bypass 面复审 · M6 死闸门复活）：requirePlan=true 时「闸门已武装而
+ *  调用方裸派发」不再零行为放行 —— 旧实现里 escrow===undefined ⇒ 直接 false
+ *  （放行），而全部生产调用点（clickMouse/clickElement/replayActions）都不携
+ *  escrow opts，托管前置闸门沦为纯配置摆设：enableReversibilityLanes 开启
+ *  （hook 已注册）+ 令牌携带 irreversible 分级 + 裸调用 ⇒ 现在记 lastEscrowBlock
+ *  并拦截（reason='plan-required'，方向与 mintPlan 同律 —— fail-closed）。
+ *  兼容律：hook 未注册（缺省部署）或令牌非 irreversible 携带 ⇒ 行为逐位不变。 */
+export function escrowBlockedByGate(token: string, escrow: BeginAttemptOpts['escrow'], requirePlan = false): boolean {
+  if (dispatchEscrowHook === null) return false;
+  if (escrow === undefined) {
+    if (requirePlan) {
+      // ΠΑΝ-8：反向验证 —— 闸门已武装的部署里，不可逆动作的裸派发（未铸预案、
+      // 也未携预案调用）是「配置承诺了保护、运行时实际没有」的 fail-open 缝。
+      lastEscrowBlock = {
+        token,
+        reason: 'plan-required',
+        detail: 'irreversible-carry token dispatched without any escrow plan while the escrow gate is armed — naked dispatch refused (ΠΑΝ-8)',
+        at: Date.now(),
+      };
+      return true;
+    }
+    return false;
+  }
   let verdict: DispatchEscrowVerdict;
   try {
     verdict = dispatchEscrowHook({

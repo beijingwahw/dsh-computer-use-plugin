@@ -27,6 +27,7 @@
 // 纠正计划），批注内容随事件对蒸馏下游可见。
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { CONFIRM_CODE_SPACE, AMENDMENT_NOTE_MAX } from './approval.constants.js';
+import { sanitizeActionShape } from './approval.shapes.js';
 export function newToken() {
     // CSPRNG（对齐 capToken.ensureKey 的密钥强度标准）：令牌门禁的是不可逆操作，
     // Math.random 可预测且 8 字符 base36 空间在高频下可碰撞（静默顶掉待审批项）
@@ -62,6 +63,87 @@ export function codeMatches(provided, storedHash) {
     catch {
         return false;
     }
+}
+/** ΠΑΝ-5：目标摘要的规范化管道 —— 与 sanitizeActionShape 同律（坐标千分位量化
+ *  = 抖动容忍带；目标描述截 200；type_text 只余工具名+长度桶 —— 文本绝不入档，
+ *  代价是 type_text 绑定粒度为长度桶级，绑定面文档明示）。
+ *  域分隔前缀防跨协议摘要碰撞。防御式绝不抛；target 无可用身份（tool 非非空
+ *  字符串）⇒ undefined（诚实拒绝绑定，绝不铸造「看似绑定实则空」的摘要）。 */
+export function computeTargetDigest(target) {
+    try {
+        if (!target || typeof target !== 'object')
+            return undefined;
+        const tool = typeof target.tool === 'string' ? target.tool.trim() : '';
+        if (tool === '')
+            return undefined; // 无动作身份 ⇒ 无可绑定的能力边界
+        const sanitized = sanitizeActionShape({
+            tool,
+            ...(typeof target.x === 'number' ? { x: target.x } : {}),
+            ...(typeof target.y === 'number' ? { y: target.y } : {}),
+            ...(typeof target.target_description === 'string' ? { target_description: target.target_description } : {}),
+            ...(typeof target.text === 'string' ? { text: target.text } : {}),
+        });
+        return createHash('sha256').update('PAN5:v1:' + JSON.stringify(sanitized)).digest('hex');
+    }
+    catch {
+        return undefined; // 防御式：规范化管道故障 = 无法绑定（绝不炸铸造/校验主流程）
+    }
+}
+/** ΠΑΝ-5：摘要恒定时间比较（对齐 codeMatches 的纪律；hex→Buffer 等长 ⇒
+ *  timingSafeEqual 不抛）。任何异常 ⇒ false（绝不抛）。 */
+export function digestsEqual(storedDigest, providedDigest) {
+    try {
+        return timingSafeEqual(Buffer.from(storedDigest, 'hex'), Buffer.from(providedDigest, 'hex'));
+    }
+    catch {
+        return false;
+    }
+}
+// ΠΑΝ-5 绑定簿记：token → targetDigest（pending Map 在 approval.registry——共享
+// 下层；本表是安全原语区的私属伴随账，key 为 CSPRNG 令牌 ⇒ 无碰撞面。
+// 清扫：ledger.sweep 随 pending 过期清扫；resetApproval 整面归零。）
+const targetBindings = new Map();
+export function bindTokenTarget(token, digest) {
+    try {
+        targetBindings.set(token, digest);
+    }
+    catch { /* 防御式：Map 故障 = 绑定缺席（fail-closed 方向：未绑定走兼容面） */ }
+}
+export function boundTargetOf(token) {
+    return targetBindings.get(token);
+}
+export function forgetTokenTarget(token) {
+    try {
+        targetBindings.delete(token);
+    }
+    catch { /* 防御式 */ }
+}
+/** ΠΑΝ-5/6 簿记卫生：随 ledger.sweep 清扫已离场令牌的伴随记录（残迹无消费方，
+ *  纯内存卫生 —— 查找面已由 pending 在场性前置兜底）。绝不抛。 */
+export function sweepApprovalSecurityState(liveTokens) {
+    try {
+        const live = new Set(liveTokens);
+        for (const k of targetBindings)
+            if (!live.has(k[0]))
+                targetBindings.delete(k[0]);
+        lastTargetRejection = lastTargetRejection !== null && live.has(lastTargetRejection.token)
+            ? lastTargetRejection : null;
+    }
+    catch {
+        /* 防御式：清扫故障不影响任何行为面 */
+    }
+}
+export let lastTargetRejection = null;
+export function recordTargetRejection(info) {
+    lastTargetRejection = info;
+}
+export function targetRejectionOf() {
+    return lastTargetRejection;
+}
+/** W-1 隔离缝的安全原语面归零（resetApproval 组合面调用）。 */
+export function resetApprovalSecurityState() {
+    targetBindings.clear();
+    lastTargetRejection = null;
 }
 // ─── W1-2（S2）：带外投递通道（模块级可注入缝；null = 通道缺席 ⇒ fail-closed） ───
 //
@@ -110,9 +192,13 @@ export function castAmendment(pa, note) {
 /** W2-1（H4）：批注铸造的描述参数化面 —— 队列条目没有 PendingApproval 宿主，
  *  以条目自身的 description 为「铸造时自述」。协议与 W1-2 完全同律
  *  （note 截 200 / 差异双面 / 字段级形状 patch），一次批注对多项裁决时
- *  每个条目各铸一份（original = 各自的条目描述）。 */
+ *  每个条目各铸一份（original = 各自的条目描述）。
+ *  ΠΑΝ-7：note 非字符串（模型输出的任意 JSON 真值）防御式字符串化 ——
+ *  旧实现 note.slice 对非字符串抛 TypeError，grant_approval 把 args.note
+ *  原样透传 ⇒ 违反「运行层绝不抛」宪。绝不抛。 */
 export function castAmendmentFor(originalDescription, note, now) {
-    const clamped = note.slice(0, AMENDMENT_NOTE_MAX);
+    const src = typeof note === 'string' ? note : String(note ?? '');
+    const clamped = src.slice(0, AMENDMENT_NOTE_MAX);
     return {
         note: clamped,
         targetDescriptionDelta: { original: originalDescription, corrected: clamped },

@@ -11,8 +11,14 @@
 //        下次会话 predict() 预补偿。官方更新前的全局预测需群体中心（未来基建）。
 // 工程铁律：上报异步非阻塞（fire-and-forget + AbortSignal.timeout），
 //        热路径（截图/点击）永不 await 网络 —— 遥测是旁路义务，不是主路债主。
+// ΠΑΝ-75（swarm 隐私）：层二上行的 driftEvents 场景指纹经本地盐 HMAC 私有标签
+//        出境（privateSceneTag）—— sceneHash 不再裸出境，群体中心无法用已知
+//        屏幕 dHash 做匹配识别；本地漂移模型保持真值（盐只划在上行面）。
 import { journal, type JournalEntry } from './journal';
 import { Telemetry } from './telemetry';
+// ΠΑΝ-75（swarm 隐私）：driftEvents 上行的 sceneHash 加本地哈希盐 —— HMAC 私有
+// 场景标签（node:crypto，进程内一次性随机密钥；与联邦 DP 种子的 HMAC 方言同族）
+import { createHmac, randomBytes } from 'node:crypto';
 // W4-2（G3 策略联邦）：仅类型借用（编译期擦除）—— 技能联邦段的载荷与账目形状。
 // 运行时零依赖（skillFederation → swarm 是单向的；本行不产生模块环）。
 import type { SkillFederationUpload, SkillFederationLedgerStats } from './skillFederation';
@@ -84,6 +90,42 @@ interface KalmanDrift {
 }
 
 const INSTANCE_ID = 'inst-' + Math.random().toString(36).slice(2, 10);
+
+// ─── ΠΑΝ-75（swarm 隐私）：上行 sceneHash 的 HMAC 私有标签 ───
+//
+// 缝隙（C1-3 M-8）：buildPacket 的 driftEvents 携带**全量 dHash 场景指纹明文**
+// 上行 —— 群体中心拿已知屏幕的 dHash 即可匹配识别「某实例访问过哪些屏幕」，跨
+// 周期（INSTANCE_ID 稳定）还能重建指纹序列；H-5 差分隐私只盖晶体 successRate，
+// driftEvents 的 dx/dy 是 Kalman 均值、sceneHash 裸奔。
+// 修复律：sceneHash 出境前经本地盐 HMAC（keyed pseudonym）——
+//   · 密钥 = 进程启动时一次性 randomBytes(32)（模块私有，绝不外发；公开面
+//     （INSTANCE_ID/标签值/dx/dy）推不出）；
+//   · 标签 = HMAC-SHA256(key, sceneHash) 前 16 hex —— 同场景同标签（进程内
+//     稳定可聚合），异场景异标签（雪崩），**不可与已知屏幕的 dHash 匹配**（无钥
+//     的攻击者对标签做字典匹配的路径被 HMAC 摘断 —— 与联邦 DP 种子的
+//     HMAC(K_fed, digest_id) 同方言）；
+//   · 本地 drifts 数组保持真值（predict/dump/restore 语义零变化 —— 盐只划在
+//     上行面，与 H-5「隐私边界只划在上传面」同律）；
+//   · 诚实边界：跨实例的场景聚合随私有盐失效（各实例标签不可互对）—— 这是
+//     「不再裸出境」的直接代价，群体中心的跨机漂移聚合留待共享盐的部署选项。
+
+/** ΠΑΝ-75：sceneHash 私有标签的 HMAC 密钥（进程一次性随机 —— 模块私有绝不外发） */
+const scenePrivacyKey = randomBytes(32);
+
+/**
+ * ΠΑΝ-75：上行场景标签（纯函数、绝不抛）：HMAC-SHA256(进程私有盐, sceneHash)
+ * 前 16 hex。同输入恒同输出（进程内稳定）；密钥缺席/故障 ⇒ 确定性降级标签
+ *（'salted-err'，绝不裸回原 dHash —— 出境方向宁可废标签不泄指纹）。导出为
+ * 公开面：执法测试与聚合端文档共用同一实现。
+ */
+export function privateSceneTag(sceneHash: string): string {
+  try {
+    if (typeof sceneHash !== 'string' || sceneHash === '') return 'salted-void';
+    return createHmac('sha256', scenePrivacyKey).update(sceneHash).digest('hex').slice(0, 16);
+  } catch {
+    return 'salted-err'; // 防御带：绝不裸回原指纹
+  }
+}
 
 /**
  * G-4 经验贝叶斯收缩（第七维·过程感知）：稀疏成功率的防过信回撤。
@@ -283,7 +325,9 @@ class Swarm {
           attempts: c.attempts,
         };
       });
-    const driftEvents = this.drifts.slice(-20).map(d => ({ sceneHash: d.sceneHash, dx: Math.round(d.x * 1000) / 1000, dy: Math.round(d.y * 1000) / 1000 }));
+    // ΠΑΝ-75：sceneHash 经本地盐 HMAC 私有标签出境（不再裸 dHash —— 群体中心
+    // 无法与已知屏幕字典匹配识别；本地 drifts 保持真值，盐只划在上行面）
+    const driftEvents = this.drifts.slice(-20).map(d => ({ sceneHash: privateSceneTag(d.sceneHash), dx: Math.round(d.x * 1000) / 1000, dy: Math.round(d.y * 1000) / 1000 }));
     // W4-2：技能联邦段（提供者在场才铸；防御式 —— 提供者任何故障都吞掉成
     // 「无技能段」，绝不炸 packet：联邦是增益不是依赖）。ε 与随机流与晶体噪声
     // 同源透传（同一次 buildPacket 的 DP 纪律与确定性测试缝统一）。

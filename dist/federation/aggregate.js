@@ -5,10 +5,11 @@
 //   · 逐格中位数（≥3 源）代替求和：k 个坏源 < 一半时，毒被结构性隔离（中位数对
 //     <50% 的任意篡改有精确的崩溃点 —— Byzantine-robust aggregation 的教科书律）；
 //     偶数源取中间两数均值；=2 源退化为均值（诚实注记：无鲁棒性）；=1 源直通；
-//   · 离群检疫：某源在某格与鲁棒值的偏差超阈（缺省阈 = max(3, 2×该 key 16 格鲁棒
-//     值的四分位距 —— 格间离散度的自适应尺度，地板 3 容忍 DP 噪声）⇒ 该源该格计
-//     1 票 quarantine；票经 applyQuarantineToTrust 折算 regressed 事件喂 Μ 的
-//     信任账（每 5 票 1 次）—— 检疫结果有牙齿，不只是注记；
+//   · 离群检疫：某源在某格与鲁棒值的偏差超阈（缺省阈 = max(按源 ε 校准的 DP
+//     噪声地板〔ΠΑΝ-117：max(3, 3/ε_i)〕, 2×该 key 16 格鲁棒值的四分位距 ——
+//     格间离散度的自适应尺度）⇒ 该源该格计 1 票 quarantine；票经
+//     applyQuarantineToTrust 折算 regressed 事件喂 Μ 的信任账（每 5 票 1 次）
+//     —— 检疫结果有牙齿，不只是注记；
 //   · 贡献份额帽（contributionCap）：单源每格贡献封顶 capShare×鲁棒值（先帽后并，
 //     防洪泛）—— 与鲁棒合并正交：给 Μ 的旧求和路径（mergeDigests）也提供防洪闸。
 // 全部纯函数、确定性（同输入同输出，零随机源）、永不抛（坏源按缺席处理并注记 ——
@@ -30,10 +31,38 @@ const AGG_DIGEST_BINS = 8;
 /** ε 缺省镜像（各源 ε 全部非法/缺席时的保守申报 —— 与 index.ts DEFAULT_FEDERATION_EPSILON 同律） */
 const AGG_DEFAULT_EPSILON = 1;
 // ─── 检疫与份额帽的算法常量（形状字面量 —— 非旋钮） ───
-/** 离群阈地板：|源值−鲁棒值| ≤ 3 恒不检疫（ε=1 的 Laplace 噪声中位 |noise|≈0.69、P(|noise|>3)≈5% —— DP 噪声容限） */
+/**
+ * 离群阈地板：|源值−鲁棒值| ≤ 3 恒不检疫（ε=1 的 Laplace 噪声中位 |noise|≈0.69、
+ * P(|noise|>3)≈5% —— DP 噪声容限）。
+ * ΠΑΝ-117（C2-1 F7 / F2-9 移交项④）：地板是**按源 ε 校准的下限**而非常数 ——
+ * 携带 ε<1 的源其噪声尺度 1/ε 更大，地板随 dpNoiseFloorOf 抬到 3/ε（见
+ * OUTLIER_NOISE_SCALES）；ε≥1（或缺席/非法 ⇒ ε=1 镜像）时 3/ε ≤ 3 ⇒ 本常数
+ * 兜底 —— 旧律逐字节保持。乘性误伤病灶：旧地板对一切 ε 固定 3，ε=0.1 的源
+ * 中位 |noise|≈6.9 > 3 ⇒ 机制自己加的 DP 噪声逐格计票 ⇒ 诚实源每轮吃票、
+ * 信任账 1/(1+regressed) 持续折减 ——「永试用期」（F2-9 报告的移交论证）。
+ */
 export const OUTLIER_FLOOR = 3;
+/**
+ * ΠΑΝ-117：DP 噪声尺度倍数 —— 校准地板 = OUTLIER_NOISE_SCALES / ε_i。
+ * 倍数取 3 与 OUTLIER_FLOOR 的 ε=1 立法同源（Laplace 尾 P(|noise|>3b)≈5%：
+ * 诚实源单格吃票概率与 ε=1 旧律完全一致，不同 ε 同一尾纪律）。与 F2-8 typed
+ * channels 的值域方言协同：本模块的格值是整数计数域（skillFederation 的
+ * coord/hash 通道域在彼件立法），地板按**源自己的 ε**（digest.epsilon）取值
+ * —— 各源各的噪声尺度，不用全网最小 ε 一刀切（诚实小 ε 源不受大 ε 源牵连）。
+ */
+export const OUTLIER_NOISE_SCALES = 3;
 /** 离群阈的格间尺度：T = max(OUTLIER_FLOOR, OUTLIER_IQR_SCALE × 该 key 16 格鲁棒值的 IQR) */
 export const OUTLIER_IQR_SCALE = 2;
+/**
+ * ΠΑΝ-117：按源 ε 铸 DP 噪声校准地板（纯函数）：max(OUTLIER_FLOOR, 3/ε)。
+ * ε 缺席/非法（≤0/非有限）⇒ OUTLIER_FLOOR（ε=1 镜像，与 AGG_DEFAULT_EPSILON
+ * 同律的保守申报）—— 零回归：既有 ε=1/缺席路径的地板逐字节不变。
+ */
+export function dpNoiseFloorOf(eps) {
+    if (typeof eps !== 'number' || !Number.isFinite(eps) || eps <= 0)
+        return OUTLIER_FLOOR;
+    return Math.max(OUTLIER_FLOOR, OUTLIER_NOISE_SCALES / eps);
+}
 /** 检疫票折算律：每 5 票 = 1 次 regressed（喂 Μ 信任账 1/(1+regressed)）—— 单票噪声不立脏账 */
 export const QUARANTINE_VOTES_PER_REGRESSED = 5;
 /** 贡献份额帽缺省：单源每格 ≤ 2×鲁棒值（「至多是共识的两倍」—— 诚实源坐在共识上永不被削） */
@@ -80,6 +109,31 @@ export function iqrOf(xs) {
         return s[lo] + (s[hi] - s[lo]) * (idx - lo);
     };
     return q(0.75) - q(0.25);
+}
+/**
+ * 绝对中位差（MAD）：|x − 中位数| 的中位数 —— 与中位数同 50% 崩溃点的离散
+ * 尺度估计。ΤΕΛ-5 D-G25③：iqrOf 在极小源数下的致命面是**线性插值四分位**——
+ * 3 值时 q3 = s[1] + 0.5×(s[2]−s[1])，单条毒值把上四分位拉出「半程毒隙」⇒
+ * IQR ≈ gap/2 ⇒ 2×IQR ≈ gap ⇒ 真离群偏差（≈gap）反被阈吞掉（检疫失明）；
+ * MAD 的尺度估计本身取中位数 —— 毒源的巨大偏差进不了 devs 的中位，单条毒值
+ * 拉不动尺度（诚实簇 ≥2 即稳）。空集 ⇒ 0。
+ */
+function madOf(xs) {
+    if (xs.length === 0)
+        return 0;
+    const m = medianOf(xs);
+    return medianOf(xs.map(x => Math.abs(x - m)));
+}
+/**
+ * ΤΕΛ-5 D-G25③：检疫离散臂的 MAD 口径（IQR 等价换算）—— 对称分布下
+ * IQR ≈ 2×MAD（正态：1.349σ vs 2×0.6745σ），臂 = OUTLIER_IQR_SCALE ×
+ * robustDispersionOf(·) 与旧 2×IQR 律同尺度（≥4 诚实源域的既有回归锚数值
+ * 不动），崩溃面从「插值入毒隙」换为「中位数隔离」—— <4 诚实源 + 1 毒源
+ * 时阈不再被拉爆（毒源照常计票、诚实源零票）。供 robustMergeDigests 与
+ * skillFederation.aggregateSkillShares 两面同律消费（检疫口径全网一致）。
+ */
+export function robustDispersionOf(xs) {
+    return 2 * madOf(xs);
 }
 /** 逐格鲁棒值：0 源 ⇒ 0；1 源 ⇒ 直通；≥2 源 ⇒ 中位数（=2 亦即均值，见 medianOf） */
 function robustOf(values) {
@@ -213,6 +267,26 @@ export function robustMergeDigests(digests, opts) {
         const explicitT = typeof opts?.outlierThreshold === 'number' && Number.isFinite(opts.outlierThreshold) && opts.outlierThreshold >= 0
             ? opts.outlierThreshold
             : null;
+        // ΠΑΝ-117（乘性误伤校准）：按源 ε 铸 DP 噪声校准地板 —— 机制给源 i 加的
+        // 噪声尺度是 1/ε_i，检疫判据必须比这个尺度宽（floor = max(3, 3/ε_i)），
+        // 否则 DP 噪声本身逐格计票 = 诚实源永试用期（C2-1 F7）。ε 缺席/非法 ⇒
+        // ε=1 镜像（地板 3 —— 旧律逐字节）。
+        const floorBySource = new Map();
+        const floorHistogram = new Map(); // 地板值 → 受该地板辖的源数（校准注记）
+        for (const { i, d } of valid) {
+            const floor = dpNoiseFloorOf(d.epsilon);
+            floorBySource.set(i, floor);
+            floorHistogram.set(floor, (floorHistogram.get(floor) ?? 0) + 1);
+        }
+        const calibratedFloors = [...floorHistogram.entries()]
+            .filter(([floor]) => floor > OUTLIER_FLOOR)
+            .sort((a, b) => a[0] - b[0]);
+        if (calibratedFloors.length > 0 && explicitT === null) {
+            // 诚实注记：校准地板在册（透明面 —— 宿主可审计哪些源在 ε<1 噪声带下被放宽）
+            notes.push(`ΠΑΝ-117 检疫地板按源 ε 校准：${calibratedFloors
+                .map(([floor, n]) => `floor=${Math.round(floor * 100) / 100}×${n}源`)
+                .join('、')}（诚实源的 DP 噪声不吃票 —— 不进永试用期）`);
+        }
         const quarantined = {};
         const outKeys = [];
         for (const [key, agg] of keyMap) {
@@ -222,7 +296,11 @@ export function robustMergeDigests(digests, opts) {
                 for (let col = 0; col < 2; col++)
                     robustCells.push(robustOf(agg.cells[b][col].map(c => c.v)));
             }
-            const T = explicitT !== null ? explicitT : Math.max(OUTLIER_FLOOR, OUTLIER_IQR_SCALE * iqrOf(robustCells));
+            // ΠΑΝ-117：IQR 臂每 key 一算；地板臂每源一算（各源各的 ε）—— T = 两臂取大。
+            // ΤΕΛ-5 D-G25③：离散臂换 robustDispersionOf（IQR 等价 MAD 口径 —— 少源
+            // 时四分位插值不再把毒隙半程混进阈；见 madOf 头注）。
+            // 显式注入 explicitT ⇒ 全权接管（测试缝方言，源 ε 不参与）。
+            const iqrArm = OUTLIER_IQR_SCALE * robustDispersionOf(robustCells);
             // 逐 key 方法与全局不同 ⇒ 诚实注记（该 key 只有 fewer 源在场）
             const kMethod = methodOfCount(agg.sources.size);
             if (kMethod !== method) {
@@ -234,6 +312,9 @@ export function robustMergeDigests(digests, opts) {
                     const r = robustCells[b * 2 + col];
                     bins[b][col] = r;
                     for (const { i, v } of agg.cells[b][col]) {
+                        // ΠΑΝ-117：按源地板（floorBySource）× 格间尺度（iqrArm）—— 判据比
+                        // 该源自己的 DP 噪声尺度宽 ⇒ 机制加的噪声绝不给自己源计票。
+                        const T = explicitT !== null ? explicitT : Math.max(floorBySource.get(i) ?? OUTLIER_FLOOR, iqrArm);
                         if (Math.abs(v - r) > T) {
                             const label = labelOf(sourceIds, i);
                             quarantined[label] = (quarantined[label] ?? 0) + 1;

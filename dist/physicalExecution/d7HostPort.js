@@ -1,20 +1,77 @@
-import { faultPatches, dispatchElementsToGrid } from '../knowledge/stations.js';
-import { createPhysicalExecution, PhysicalActionRouterImpl, CapabilityCache, syncCapabilityFromHealth, } from './index.js';
+// ΠΑΝ-127（D-F5 清偿）：网格分派改自零环基座 knowledge/gridDispatch.ts 导入
+//（原借 knowledge/stations 构成 knowledge↔physicalExecution value 环的一臂；
+// stations 面同名符号仍经再导出可用）。
+import { faultPatches, dispatchElementsToGrid } from '../knowledge/gridDispatch.js';
+// ΠΑΝ-127（D-F5 清偿）：value 符号改自各源件导入（原经桶 './index' 回借构成
+// d7↔index value 二环 —— 桶-卫星互指同病）；类型面（PhysicalExecutionAdapter/
+// PhysicalExecutionConfig/UiTreeResult）仍 type-import 自桶（type 边豁免）。
+import { createPhysicalExecution } from './compose.js';
+import { PhysicalActionRouterImpl } from './router.js';
+import { CapabilityCache, syncCapabilityFromHealth } from './capabilityCache.js';
 import { PhysicalServiceManager, } from './serviceManager.js';
-/** 翻译层：orchestration ExecutionFailureKind → knowledge failure kind */
-function translateFailureKind(kind) {
+/**
+ * 翻译层：orchestration ExecutionFailureKind → knowledge failure kind。
+ * ΠΑΝ-65（错误细分折叠修复）：旧实现 default 整体折叠 host-error —— router
+ * 的 ΝΩ-27 十四种细分透传在本翻译层全部湮灭（unauthorized/element-not-found/
+ * transport-error 不可区分，上层重试策略失去判据），故先按可重试/不可重试/
+ * 认证三类语义保义落位（折叠过渡期）。
+ * ΤΕΛ-4（D-G20 清偿）：knowledge 词表已扩容（contracts 的 D7FailureKind
+ * = D-6 ExecutionFailureKind 全量 ∪ {'timed-out'}）⇒ 本表**退化为恒等直通**：
+ *   - 全部已知 kind 独立 case 恒等返回（ΠΑΝ-65 结构承诺的兑现——无隐藏
+ *     类别耦合，细分值不再折叠，可观测面零损失）；
+ *   - 唯 default 兜底保留：版本漂移的未知运行时值（wire 上 Python 升版引入
+ *     新错误种）→ 'host-error'（保守可重试；router.mapErrorKind 已在其侧
+ *     fold 未知 snake_case，本兜底是防御纵深第二层，非常规路径）；
+ *   - 'timeout-aborted' 不再折到 'timeout'（D-7 超时预算语义负载在两个值上
+ *     各自可见——knowledge 流水线对二者同入重试循环，行为面零变化）。
+ * 导出：执法测试矩阵直接点名（physicalExecution 词表锁）。
+ */
+export function translateFailureKind(kind) {
     switch (kind) {
+        // —— 基础六态 + ΝΩ-27 十四细分：恒等直通（无折叠）——
         case 'gate-rejected': return 'gate-rejected';
         case 'host-error': return 'host-error';
         case 'timeout': return 'timeout';
-        // ΝΩ-8：止损型超时（编排器主动 abort 后的归因）—— 本端口只翻译不产生；
-        // 防御性映射为 timeout（主动叫停的超时仍是超时，绝不误归 host-error）
-        case 'timeout-aborted': return 'timeout';
+        case 'timeout-aborted': return 'timeout-aborted';
         case 'timed-out': return 'timed-out';
         case 'sandbox-degraded': return 'sandbox-degraded';
         case 'cancelled': return 'cancelled';
+        case 'invalid-args': return 'invalid-args';
+        case 'out-of-bounds': return 'out-of-bounds';
+        case 'unknown-button': return 'unknown-button';
+        case 'unknown-key': return 'unknown-key';
+        case 'element-not-found': return 'element-not-found';
+        case 'screen-capture-failed': return 'screen-capture-failed';
+        case 'ocr-unavailable': return 'ocr-unavailable';
+        case 'vlm-unavailable': return 'vlm-unavailable';
+        case 'window-unavailable': return 'window-unavailable';
+        case 'unauthorized': return 'unauthorized';
+        case 'internal-error': return 'internal-error';
+        case 'transport-error': return 'transport-error';
+        // —— 版本漂移的未知 kind：可重试泛型（保守 —— 服务升级引入新错误种时
+        //    宁可重试也不误判终局；detail 前缀保真原值供人工归类）——
         default: return 'host-error';
     }
+}
+// ─── ΠΑΝ-67（连接韧性）：Python 崩溃后的重生治理 ───
+/** ΠΑΝ-67：重生预算 —— 崩溃后最多自动 respawn 次数（有限次，不是无限重启循环） */
+export const RESPAWN_MAX_ATTEMPTS = 3;
+/** ΠΑΝ-67：重生退避基值（ms）—— 500 → 1000 → 2000（指数退避，封顶 4s） */
+export const RESPAWN_BACKOFF_BASE_MS = 500;
+/** ΠΑΝ-67：重生退避封顶（ms） */
+export const RESPAWN_BACKOFF_CAP_MS = 4_000;
+/**
+ * ΠΑΝ-67：重生裁决（纯函数，导出为执法测试面）—— 已失败 N 次重生后：
+ *   - N < max  ⇒ 允许再试，且下一次前须退避 min(cap, base·2^(N-1)) ms
+ *     （N=0 即首次启动，零退避）；
+ *   - N ≥ max ⇒ 拒绝（预算耗尽 —— 调用方诚实降级 transport 事件，绝不
+ *     无限重启循环吞噬宿主资源）。
+ */
+export function respawnRuling(failures, max = RESPAWN_MAX_ATTEMPTS, baseMs = RESPAWN_BACKOFF_BASE_MS, capMs = RESPAWN_BACKOFF_CAP_MS) {
+    if (!Number.isFinite(failures) || failures < 0 || failures >= max)
+        return { allow: false };
+    const backoffMs = failures === 0 ? 0 : Math.min(capMs, baseMs * 2 ** Math.min(failures - 1, 16));
+    return { allow: true, backoffMs };
 }
 /**
  * D7PhysicalHostPort —— D-7 工位直连 D-5 物理微服务的双端口躯体：
@@ -70,6 +127,9 @@ export class D7PhysicalHostPort {
     seqCounter = 0;
     initPromise = null;
     disposed = false;
+    /** ΠΑΝ-67：本生命周期内已失败的重生次数（成功初始化后归零 —— 预算按
+     *  「连续崩溃episode」计，稳定运行一段后再次崩溃重新获预算） */
+    respawnFailures = 0;
     static _finalizer = new FinalizationRegistry((holdings) => {
         // GC 兜底：若调用方忘记 dispose，FinalizationRegistry 尽量关停子进程
         void holdings.mgr.dispose().catch(() => { });
@@ -225,31 +285,77 @@ export class D7PhysicalHostPort {
         await this.mgr.dispose();
     }
     async _ensureInitialized() {
-        if (this.router)
-            return this.router;
-        if (this.initPromise) {
-            try {
-                await this.initPromise;
-            }
-            catch (e) {
-                // J 纪元修正：初始化失败可重试 —— 旧实现 rejected promise 永久缓存，
-                // 此后每次 execute/perceive/prewarm 都 await 同一 rejected promise，
-                // 实例永久失效（Python 临时起不来 = 终身瘫痪，只能 dispose 重建）。
-                this.initPromise = null;
-                throw e;
-            }
-            if (this.router)
+        if (this.router) {
+            if (this.mgr.isRunning)
                 return this.router;
-            throw new Error('D7PhysicalHostPort init failed (router still null)');
+            // ΠΑΝ-67（连接韧性）：Python 进程已崩溃但路由还挂着 —— 旧实现无条件
+            // `return this.router`，此后所有 execute/perceive 对着死端口发请求，
+            // transport-error 永续直至插件重载。拆除陈旧路由/适配器，走重生路径。
+            this._teardownStaleRouter();
+        }
+        if (this.initPromise)
+            return this._awaitExistingInit();
+        // ΠΑΝ-67：重生裁决 —— 有限次 + 指数退避；超限诚实降级（transport 事件
+        // 归因的失败回执，绝不无限重启循环，也绝不假装路由可用）。首次尝试零
+        // 退避；失败在 catch 计数，下一次尝试前按 min(cap, base·2^(n-1)) 退避。
+        if (this.mgr.disposed) {
+            // manager 已显式 dispose（外部经 manager getter 直呼）：终态意图，不做重生
+            throw new Error('D7PhysicalHostPort manager disposed (no respawn)');
+        }
+        const ruling = respawnRuling(this.respawnFailures);
+        if (!ruling.allow) {
+            throw new Error(`python service crashed or failed to start; respawn budget exhausted (${RESPAWN_MAX_ATTEMPTS} retries) — ` +
+                'transport unavailable (honest degradation; dispose and recreate the port to retry)');
+        }
+        if (ruling.backoffMs > 0) {
+            await new Promise(r => setTimeout(r, ruling.backoffMs));
+            // ΠΑΝ-67：退避窗内的并发调用可能已完成初始化 —— 汇流到既有 promise
+            //（防退避窗造成双 _doInitialize：check→set 之间新增了 await 间隙）。
+            if (this.initPromise)
+                return this._awaitExistingInit();
         }
         this.initPromise = this._doInitialize().catch(e => {
             this.initPromise = null; // 失败即清：下次调用重新初始化
+            this.respawnFailures += 1; // ΠΑΝ-67：失败计数（下次尝试前按指数退避）
             throw e;
         });
         await this.initPromise;
         if (!this.router)
             throw new Error('D7PhysicalHostPort init failed silently');
+        this.respawnFailures = 0; // ΠΑΝ-67：成功即重置预算（新崩溃 episode 重新计数）
         return this.router;
+    }
+    /** 汇流到在飞初始化 promise（J 纪元语义保持：失败即清零可重试） */
+    async _awaitExistingInit() {
+        const p = this.initPromise;
+        if (!p)
+            throw new Error('D7PhysicalHostPort init failed (router still null)');
+        try {
+            await p;
+        }
+        catch (e) {
+            // J 纪元修正：初始化失败可重试 —— 旧实现 rejected promise 永久缓存，
+            // 此后每次 execute/perceive/prewarm 都 await 同一 rejected promise，
+            // 实例永久失效（Python 临时起不来 = 终身瘫痪，只能 dispose 重建）。
+            if (this.initPromise === p)
+                this.initPromise = null;
+            throw e;
+        }
+        if (this.router)
+            return this.router;
+        throw new Error('D7PhysicalHostPort init failed (router still null)');
+    }
+    /** ΠΑΝ-67：崩溃后拆除陈旧路由面 —— adapter.reset 归零连接状态、路由/适配器
+     *  置空（下一次调用经 _ensureInitialized 重生；manager.start 的 respawn
+     *  路径自会清理旧临时密钥/mmap 目录并重新 spawn + 探活）。 */
+    _teardownStaleRouter() {
+        try {
+            this.adapter?.reset?.();
+        }
+        catch { /* noop：reset 失败不阻断重生 */ }
+        this.adapter = null;
+        this.router = null;
+        this.initPromise = null;
     }
     async _doInitialize() {
         // 1. 启动 Python 微服务

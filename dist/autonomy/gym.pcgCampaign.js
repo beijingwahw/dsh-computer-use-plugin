@@ -7,7 +7,12 @@
 // 有界消费留在馆本体 —— 闭环器官不动，本件是独立的 campaign 入口）。缺省值
 // （种子 4242 / 步数 12 / 虚拟时钟步进 5ms）全部自 gym.ts 立法在源导入 ——
 // 与训练营缺省同源同义。防弹：垃圾输入收敛为空报告/截断，绝不抛异常。
-import { AutonomyGym, CLOCK_STEP_MS, DEFAULT_MAX_STEPS, DEFAULT_SEED, fnv1a } from './gym.js';
+// ΠΑΝ-127（D-F5 清偿）：fnv1a 改自零出边叶 gym.rng.ts 导入；AutonomyGym 与
+// 立法缺省（DEFAULT_SEED/DEFAULT_MAX_STEPS/CLOCK_STEP_MS）经端口注入
+//（runPcgCampaign 增收 ports 参数，注入方 = 桶 gym.ts 的公开包装 —— 原自桶
+// 回借构成桶-卫星 value 二环；类型面仍 type-import 自桶，type 边豁免）。
+// 行为零变化。
+import { fnv1a } from './gym.rng.js';
 import { pcgEffectiveWeights, updatePcgCurriculum } from './gym.pcgGrammar.js';
 import { gymWorldFactory } from './gym.pcgWorld.js';
 /**
@@ -22,12 +27,13 @@ import { gymWorldFactory } from './gym.pcgWorld.js';
  *   · 确定性：全注入虚拟时钟 + 钉死种子流 ⇒ 同 opts 重放逐字段一致；
  *   · 防弹：垃圾输入收敛为空报告/截断，绝不抛异常。
  */
-export async function runPcgCampaign(opts = {}) {
+export async function runPcgCampaign(opts = {}, ports) {
     const o = opts && typeof opts === 'object' ? opts : {};
     const seedNum = Number(o.seed);
-    const master = Number.isFinite(seedNum) ? Math.floor(seedNum) : DEFAULT_SEED;
+    // ΠΑΝ-127：立法缺省经端口注入（原直接回借 gym.ts 立法常量 —— 拆环）
+    const master = Number.isFinite(seedNum) ? Math.floor(seedNum) : ports.defaultSeed;
     const msNum = Number(o.maxSteps);
-    const maxSteps = Number.isFinite(msNum) && msNum >= 1 ? Math.floor(msNum) : DEFAULT_MAX_STEPS;
+    const maxSteps = Number.isFinite(msNum) && msNum >= 1 ? Math.floor(msNum) : ports.defaultMaxSteps;
     const b = o.budget && typeof o.budget === 'object' ? o.budget : {};
     const wRaw = Number(b.maxWorlds);
     const maxWorlds = Number.isFinite(wRaw) && wRaw >= 1 ? Math.min(4096, Math.floor(wRaw)) : 8;
@@ -39,8 +45,9 @@ export async function runPcgCampaign(opts = {}) {
     const curOn = cur.enabled === true;
     // 虚拟时钟（零真钟；与馆内实验室校准报告同源确定）
     let t = 1_000_000;
-    const clock = () => (t += CLOCK_STEP_MS);
-    const gym = new AutonomyGym({ seed: master, maxSteps, kernel: o.kernel, now: clock });
+    // ΠΑΝ-127：时钟步进与训练营构造经端口注入（原直接回借 gym.ts —— 拆环）
+    const clock = () => (t += ports.clockStepMs);
+    const gym = ports.createGym({ seed: master, maxSteps, kernel: o.kernel, now: clock });
     const labLedger = (() => {
         try {
             return gym.lab?.ledger ?? undefined;

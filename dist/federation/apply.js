@@ -8,6 +8,10 @@
 // 内均匀抖动恢复分布形状；ts 不再全批共享同一时钟，改按源摘要 mintedAt 邻域
 // （±APPLY_TS_SCATTER_MS）散布；抖动 rng 用确定性种子派生自记录坐标（源
 // mintedAt + key + 坨 + 列 + 记录序号）。配额决算三道闸与信任账语义零变化。
+// ΠΑΝ-73（回声环与稀释）：掺入上限的本地证据计数排除联邦记录（entries 端口
+// 在场时）—— 掺入量不再自增下一轮配额；回铸侧的 origin 过滤在 digest.ts。
+// ΠΑΝ-74（新鲜度）：摘要携带 mintedAt + FEDERATION_DIGEST_TTL_MS 短 TTL，
+// 过期/无时间锚 ⇒ 整份拒绝掺入（fail-closed）。
 import { DIGEST_VERSION, DIGEST_BINS, DIGEST_MARGIN_CLIP, DEFAULT_MAX_REMOTE_SHARE, numOr, binCenter, cleanCell, mulberry32, fnv1a32, } from './digest.js';
 import { federationTrustOf, recordFederationTrust } from './trust.js';
 /**
@@ -16,6 +20,57 @@ import { federationTrustOf, recordFederationTrust } from './trust.js';
  * mintedAt 邻域恢复时间分布形状（掺入证据本就代表源端铸造时刻前后的活动）。
  */
 export const APPLY_TS_SCATTER_MS = 5 * 60_000;
+/**
+ * ΠΑΝ-74：摘要新鲜度 TTL（1 小时 —— 常量冻结）。摘要携带 mintedAt，掺入时
+ * `now − mintedAt > TTL` ⇒ 整份拒绝（stale-digest）；mintedAt 非法/缺席 ⇒ 同拒
+ * （新鲜度不可判的摘要没有掺入资格 —— fail-closed）。被捕获的旧签名摘要从此
+ * 不能无限重放（旧律无时效上限：过期分布持续进入逐格中位数为旧密钥积累信任）。
+ * 1h 的量纲依据：同步节拍 5 分钟级（swarm timer 同律）、掺入 ts 散布 ±5 分钟 ——
+ * TTL 是散布半径的 12 倍，容纳时钟偏移（FEDERATION_AUTH_SKEW_MS ±5min）与
+ * 离线补同步，同时把重放窗压到「小时」而非「永远」。
+ */
+export const FEDERATION_DIGEST_TTL_MS = 60 * 60_000;
+/**
+ * ΠΑΝ-74：新鲜度的时钟容差（±5 分钟 —— FEDERATION_AUTH_SKEW_MS 同值）。mintedAt
+ * 指向「未来且超出容差」的摘要同样拒绝：`now − t` 为负会使 TTL 检查恒过 —— 恶意
+ * 源把 mintedAt 定到远未来即可获得「永不过期」的摘要（重放通道换个方向又开了）。
+ * 新鲜度不可判（含未来锚）= 没有掺入资格，fail-closed。
+ */
+export const FEDERATION_FRESHNESS_SKEW_MS = 5 * 60_000;
+/**
+ * ΠΑΝ-73：key 的**本地**证据计数（掺入上限的分子）。entries 端口在场 ⇒ 过滤
+ * origin === 'federation' 后计数（掺入记录不撑大下一轮的掺入配额 —— 迭代稀释
+ * 就此封顶）；缺席/故障 ⇒ 回落 stats().n（防御式：读账故障按零证据走「不掺」
+ * 臂是安全方向，但能力降级不改变「至少不高于旧律」的方向）。
+ */
+function localEvidenceCount(target, key) {
+    try {
+        if (typeof target.entries === 'function') {
+            const es = target.entries(key);
+            if (Array.isArray(es)) {
+                let local = 0;
+                for (const e of es) {
+                    if (!e || typeof e.success !== 'boolean')
+                        continue; // 垃圾条目不计数
+                    if (e.origin === 'federation')
+                        continue; // 掺入记录不撑配额（ΠΑΝ-73）
+                    local += 1;
+                }
+                return local;
+            }
+        }
+    }
+    catch {
+        /* entries 故障 ⇒ 回落 stats 面 */
+    }
+    try {
+        const s = target.stats(key);
+        return Number.isFinite(s?.n) ? s.n : 0;
+    }
+    catch {
+        return 0; // stats 故障按零证据 ⇒ 走「不掺」臂（安全方向）
+    }
+}
 /**
  * 整数配额按坨质量成比例分配（最大余数法，纯函数、确定性）：quota 条按 16 格的
  * 质量占比分摊，整数化余数按「小数部分大者优先、平票按格序（坨↑、success 先于
@@ -86,11 +141,20 @@ function jitteredTs(srcMintedAt, rng) {
  *   真实观察在账本内**可分离**（本地记录缺省缺席 origin = local），事后审计能
  *   区分「自己试出来的」与「联邦学来的」。只立账不立规：calibrator / 统计 /
  *   摘要铸造等读路径对 origin 零行为区分（掺入证据与本地证据同权入闸 —— 未来
- *   若要按来源加权，账已就绪）；来源纪要（sourceId）不进记录，只打布尔级来源。
+ *   若要按来源加权，账已就绪）。来源纪要（sourceId）不进记录，只打布尔级来源。
  *   ΝΩ-20 锚（calibrator 消费面）：掺入 margin 是 DP 噪声后的坨坐标反演 + 坨宽
  *   内抖动 —— 本地 KernelCalibrator 消费这些 margins 时把它们当真值校准；
  *   **噪声感知加权待后续**（按 origin:'federation' 与远端 ε 降权消费 —— 账已
  *   就绪，本工单只立锚不实现加权）。
+ *
+ *   ΠΑΝ-73（回声环与迭代稀释）：① mint 侧（digest.ts）——掺入记录不进本地
+ *   摘要（origin 过滤），联邦证据不再被重新铸成摘要重新上传；② 本侧 ——闸②
+ *   份额上限的本地 n 只数**本地**条目（entries 端口在场时过滤 origin），掺入
+ *   记录不撑大下一轮的掺入配额（旧律 cap 随掺入量自增：本地纯度每轮 ×0.5、
+ *   200 条 FIFO 窗下 ~8 轮后本地证据 <1%）。
+ *   ΠΑΝ-74（新鲜度）：摘要必须携带合法 mintedAt 且 `now − mintedAt ≤
+ *   FEDERATION_DIGEST_TTL_MS`，过期/无时间锚 ⇒ 整份拒绝（stale-digest ——
+ *   被捕获的旧签名摘要不得无限重放）。
  *
  *   逐 key 配额决算（三道闸，缺一不掺）：
  *   ① 本地零证据的 key 不掺 —— 本地没见过的参数不引入外源漂移（诚实注记）；
@@ -124,15 +188,6 @@ export function applyFederatedEvidence(target, merged, opts) {
         if (!Array.isArray(mm.keys)) {
             return reject('摘要 keys 非数组：拒绝掺入');
         }
-        const share = numOr(opts?.maxRemoteShare, DEFAULT_MAX_REMOTE_SHARE, 0, 1);
-        // 信任解析：显式 trust 优先（消毒到 (0,1]）；否则查 sourceId 信任账；再否则 1（初见全信）
-        let trust = 1;
-        if (typeof opts?.trust === 'number' && Number.isFinite(opts.trust) && opts.trust > 0) {
-            trust = Math.min(1, opts.trust);
-        }
-        else if (typeof opts?.sourceId === 'string' && opts.sourceId !== '') {
-            trust = federationTrustOf(opts.sourceId);
-        }
         let nowMs = Date.now();
         if (typeof opts?.now === 'function') {
             try {
@@ -144,9 +199,32 @@ export function applyFederatedEvidence(target, merged, opts) {
                 /* 时钟故障保持 Date.now */
             }
         }
+        // ΠΑΝ-74 新鲜度闸（fail-closed）：摘要必须携带合法 mintedAt 且 `now − mintedAt ≤
+        // FEDERATION_DIGEST_TTL_MS` —— 过期/无时间锚的摘要没有掺入资格（旧签名摘要的
+        // 无限重放通道就此关闭；mintedAt 非法不可判新鲜度 ⇒ 同拒，绝不猜）。
+        if (typeof mm.mintedAt !== 'number' || !Number.isFinite(mm.mintedAt) || mm.mintedAt < 0) {
+            return reject('摘要缺合法 mintedAt（新鲜度不可判）：拒绝掺入（ΠΑΝ-74 fail-closed）');
+        }
+        if (nowMs - mm.mintedAt > FEDERATION_DIGEST_TTL_MS) {
+            return reject(`摘要已过期（age=${Math.round((nowMs - mm.mintedAt) / 60_000)}min > TTL=${FEDERATION_DIGEST_TTL_MS / 60_000}min）：拒绝掺入（ΠΑΝ-74 —— 旧摘要不得无限重放）`);
+        }
+        // ΠΑΝ-74：未来锚同拒 —— now−t 为负会使 TTL 检查恒过，远未来 mintedAt = 永不过期
+        // 的重放通道；容差内（时钟偏移）照收
+        if (mm.mintedAt > nowMs + FEDERATION_FRESHNESS_SKEW_MS) {
+            return reject('摘要 mintedAt 指向未来（超时钟容差）：新鲜度不可判，拒绝掺入（ΠΑΝ-74 fail-closed）');
+        }
         // ΝΩ-20：掺入 ts 散布的邻域中心 = 源摘要 mintedAt（掺入证据代表源端铸造时刻
-        // 前后的活动）；mintedAt 非法/缺席 ⇒ 回落注入时钟（旧律 ts = nowMs 只作降级臂）
-        const srcMintedAt = typeof mm.mintedAt === 'number' && Number.isFinite(mm.mintedAt) && mm.mintedAt >= 0 ? mm.mintedAt : nowMs;
+        // 前后的活动）；ΠΑΝ-74 闸已保证合法，此处仅防御式回落
+        const srcMintedAt = mm.mintedAt;
+        const share = numOr(opts?.maxRemoteShare, DEFAULT_MAX_REMOTE_SHARE, 0, 1);
+        // 信任解析：显式 trust 优先（消毒到 (0,1]）；否则查 sourceId 信任账；再否则 1（初见全信）
+        let trust = 1;
+        if (typeof opts?.trust === 'number' && Number.isFinite(opts.trust) && opts.trust > 0) {
+            trust = Math.min(1, opts.trust);
+        }
+        else if (typeof opts?.sourceId === 'string' && opts.sourceId !== '') {
+            trust = federationTrustOf(opts.sourceId);
+        }
         const notes = [];
         const perKey = [];
         let applied = 0;
@@ -158,14 +236,9 @@ export function applyFederatedEvidence(target, merged, opts) {
             }
             const entry = raw;
             const key = entry.key;
-            let localN = 0;
-            try {
-                const s = target.stats(key);
-                localN = Number.isFinite(s?.n) ? s.n : 0;
-            }
-            catch {
-                localN = 0; // stats 故障按零证据 ⇒ 走「不掺」臂（安全方向）
-            }
+            // ΠΑΝ-73：本地证据计数只数本地条目（entries 端口在场时过滤 origin ===
+            // 'federation' —— 掺入记录不撑大下一轮掺入配额；端口缺席回落 stats().n）
+            const localN = localEvidenceCount(target, key);
             // 闸①：本地零证据不掺（本地没见过的参数不引入外源漂移）
             if (localN <= 0) {
                 notes.push(`${key}: 本地零证据不掺入（防外源漂移）`);

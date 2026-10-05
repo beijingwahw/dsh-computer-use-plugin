@@ -34,7 +34,7 @@
 // 的托管结算钩子是 fire-and-forget 旁路（异常全吞、无计划 ⇒ no-op）。
 // undo 先例：environmentShaper.UndoRecord/undoLog（改变世界的权力与复原世界
 // 的义务对称）；本模块把它推广到一切危险派发，并加上 saga 的验证与升级语义。
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { similarity } from './perceptualHash.js';
@@ -179,6 +179,19 @@ const DEFAULT_VERIFY_THRESHOLD = 0.9;
 const MAX_LEDGER_ENTRIES = 256;
 /** WAL 档版本（旧整档格式 v1 —— ΝΩ-22 起写入行式事件流，读取面兼容两代） */
 const ESCROW_WAL_VERSION = 1;
+// ΠΑΝ-34（C1-2 H1/C2-9 主题 5）：在途预案容量封顶 —— mintPlan 的无界累积上界。
+// arm 缺席/结算钩子未接线的年代，危险点击铸出的预案只进内存 Map 永不结算
+//（sweep 不运行 ⇒ TTL 到期也无人收割）⇒ 随危险点击单调累积。四条命脉接线后
+// 正常流「铸造→结算」窗口极短，但防御底线仍须立：溢出时先收割已过期预案
+//（fire-and-forget 补偿 —— 与 sweep 同律，不丢补偿义务），全部在 TTL 内仍满
+// ⇒ fail-closed 拒绝铸造（64 个真实在途的不可逆动作已远超合理并发面）。
+const MAX_IN_FLIGHT_PLANS = 64;
+// ΠΑΝ-35（C1-2 H2）：screen-hash 验证阈值的合理性下限。夹取域是 (0,1]，但
+// 接近 0 的阈值（损坏档注入 1e-9）使任何屏幕都「算回到预案态」= 验证恒真。
+// 0.5 = 「回到预案态」判定的最低可信相似度（dHash 64 位下相似度低于一半
+// 的世界绝不可能是预案态）；合法部署的抖动容忍带在 0.9 附近，0.5 下限
+// 对合法值零影响、对病态值 fail-closed。
+const VERIFY_THRESHOLD_FLOOR = 0.5;
 // ─── ΝΩ-22（热路径 IO 放大②）：行式 append-only WAL ───
 //
 // 问题：closePlan / mintPlan 每次触发 persistWal 全量重写（整档
@@ -202,8 +215,13 @@ const ESCROW_WAL_VERSION = 1;
 //    （不改写则后续追加会污染旧档语义；改写是整档原子换名，数据零丢失）。
 /** ΝΩ-22：行式 WAL 魔数头（与旧整档 JSON 分流的探测锚） */
 const ESCROW_WAL_MAGIC = 'dsh-escrow-wal';
-/** ΝΩ-22：行式 WAL 档版本 */
-const ESCROW_WAL_EVENTS_VERSION = 2;
+/** ΝΩ-22：行式 WAL 档版本
+ *  ΠΑΝ-35（C1-2 H2）：v2 → v3 —— 事件行升级为带链行（prev + hash 的 SHA-256
+ *  哈希链，journal.ts 同律方言）。v2 旧档（无链行）重放时降级读（事件照常
+ *  应用、链校验缺席），下次落盘点全量原子重写升格为 v3 —— 升级部署零丢失。 */
+const ESCROW_WAL_EVENTS_VERSION = 3;
+/** ΠΑΝ-35：链式行的创世常量（journal.GENESIS 同律 —— 首行的 prev 锚点） */
+const ESCROW_WAL_GENESIS = 'GENESIS';
 /** ΝΩ-22：压缩阈值 —— 追加行数超过 2×(账册+在途)+256 ⇒ 触发一次全量压缩重写 */
 const WAL_COMPACT_OVERHEAD = 256;
 // ─── 文件存储实现（tmp + fsync + rename —— checkpoint.ts / approval.ts 同律） ───
@@ -303,6 +321,14 @@ let walPersistError;
 let walFormat = 'none';
 /** 重放防御观测：坏行/半行跳过计数（透明化面 stats() 暴露） */
 let walSkippedLines = 0;
+// ── ΠΑΝ-35：行式 WAL 哈希链簿记 ──
+/** 当前链尖端（GENESIS 起步；追加/全量重写时前滚；重放时逐行验证推进） */
+let walChainTip = ESCROW_WAL_GENESIS;
+/** 当前档是否为带链行式（v3）。false = 无档 / 旧整档滞留 / v2 无链行式档
+ *  （降级读 —— 事件照常应用，下次落盘点全量原子重写升格 v3）。 */
+let walChainArmed = false;
+/** 链校验失败行计数（本地篡改/损坏的观测面 —— stats() 暴露；篡改行弃置不应用） */
+let walTamperedLines = 0;
 /** 压缩阈值簿记：上次压缩以来的追加行数 */
 let walLinesSinceCompact = 0;
 /** approval 钩子注册标记（arm 注册 / escrow.reset 后回 false —— 透明化事实源） */
@@ -330,6 +356,63 @@ function newPlanId() {
 /** 字符串净化：非字符串/空 ⇒ undefined；否则截断（Token 纪律与隐私截断） */
 function strOrUndef(v, max) {
     return typeof v === 'string' && v.trim() !== '' ? v.slice(0, max) : undefined;
+}
+// ─── ΠΑΝ-35（C1-2 H2）：行式 WAL 的哈希链原语（journal.ts 同律方言） ───
+/** sha256（十六进制）—— 链指纹的唯一摘要函数（方言单源律） */
+function walSha256(s) {
+    return createHash('sha256').update(s).digest('hex');
+}
+/** 稳定序列化（键排序 + 深度上限）：同一对象永远同一字符串 —— 链的前提。
+ *  载荷全部来自 sanitizePlan/sanitizeLedgerRecord/内存构造的纯数据（无环、
+ *  深度有限），深度上限 32 是对恢复面注入污染的防御性兜底（journal 的
+ *  CANONICAL_MAX_DEPTH 同律；undefined 值键与缺键同域 —— 与 JSON.stringify
+ *  落盘语义一致，往返重算不断链）。绝不抛（原始值 JSON.stringify 异常时
+ *  退化为 'null' 哨兵 —— 摘要稳定优先于保真，重放侧同函数重算同哨兵）。 */
+function walCanonical(v, depth = 0) {
+    if (v === null || typeof v !== 'object') {
+        try {
+            return JSON.stringify(v) ?? 'null';
+        }
+        catch {
+            return 'null';
+        }
+    }
+    if (depth > 32)
+        return '"#escrow-wal-depth"';
+    if (Array.isArray(v))
+        return '[' + v.map(x => walCanonical(x, depth + 1)).join(',') + ']';
+    const r = v;
+    return '{' + Object.keys(r).sort()
+        .filter(k => r[k] !== undefined)
+        .map(k => {
+        try {
+            return JSON.stringify(k) + ':' + walCanonical(r[k], depth + 1);
+        }
+        catch {
+            return JSON.stringify(k) + ':null';
+        }
+    }).join(',') + '}';
+}
+/** 行内容域（哈希域 = {planId, event, ts, payload}，不含 prev/hash 自身） */
+function walLineContent(planId, event, ts, payload) {
+    return walCanonical({ planId, event, ts, payload });
+}
+/**
+ * ΠΑΝ-35：铸造一枚带链行 —— 从当前链尖接续（写入面唯一入口：serializeEventWal
+ * 全量重写 / appendWalEvent 增量追加）。返回带 prev/hash 的行文本；链尖前滚。
+ */
+function sealWalLine(evt) {
+    const prev = walChainTip;
+    const hash = walSha256(prev + walLineContent(evt.planId, evt.event, evt.ts, evt.payload));
+    walChainTip = hash;
+    return JSON.stringify({ ...evt, prev, hash });
+}
+/** ΠΑΝ-35：verifyThreshold 夹取（[VERIFY_THRESHOLD_FLOOR, 1]；非有限数 ⇒ undefined
+ *  = 诚实缺席，消费面回落缺省值）。铸造快照面与恢复净化面共用。 */
+function clampVerifyThreshold(v) {
+    if (typeof v !== 'number' || !Number.isFinite(v))
+        return undefined;
+    return Math.min(1, Math.max(VERIFY_THRESHOLD_FLOOR, v));
 }
 // ─── WAL 装载 / 净化 / 落盘 ───
 /** 补偿步骤净化（垃圾 ⇒ null 弃置） */
@@ -411,9 +494,12 @@ function sanitizePlan(raw) {
     const clip = strOrUndef(r.clipboardBackupHandle, 256);
     if (clip !== undefined)
         plan.clipboardBackupHandle = clip;
-    if (typeof r.verifyThreshold === 'number' && Number.isFinite(r.verifyThreshold)) {
-        plan.verifyThreshold = r.verifyThreshold;
-    }
+    // ΠΑΝ-35（C1-2 H2）：恢复面阈值夹取 —— 损坏档可把阈值改成 1e-9 使补偿验证
+    // 恒 verified；夹取 [VERIFY_THRESHOLD_FLOOR, 1]（合法域 (0,1] 内的病态小值
+    // 一并收编到合理性下限 —— 假验证与真验证不可区分时按真验证收费是 fail-open）。
+    const vt = clampVerifyThreshold(r.verifyThreshold);
+    if (vt !== undefined)
+        plan.verifyThreshold = vt;
     if (Array.isArray(r.degraded)) {
         const tags = r.degraded.filter((d) => typeof d === 'string').slice(0, 16);
         if (tags.length > 0)
@@ -440,6 +526,10 @@ function ensureWalLoaded() {
     walFormat = 'none';
     walSkippedLines = 0;
     walLinesSinceCompact = 0;
+    // ΠΑΝ-35：链簿记随装载归零（重放中按头行版本决定是否武装链校验）
+    walChainTip = ESCROW_WAL_GENESIS;
+    walChainArmed = false;
+    walTamperedLines = 0;
     if (escrowStorage === null)
         return; // 仅内存（跨进程不保 —— 诚实降级）
     try {
@@ -475,6 +565,15 @@ function ensureWalLoaded() {
  * ΝΩ-22：行式事件流重放 —— 逐行解析重建内存态（在途表/令牌索引/账册）。
  * 防御式：坏行（垃圾/崩溃尾部半行）跳过计数，好行不连坐；重放后账册封顶
  * 与旧档装载同律；在途残留 ⇒ 崩溃恢复语义（recoverInFlight）。
+ * ΠΑΝ-35：v3 头 ⇒ 逐行链校验（prev 衔接 + 指纹重算）。校验失败的行
+ * （本地篡改/损坏）计数并**弃置不应用**——该行的事件不进内存态：
+ *   · 被篡改的是 mint 行 ⇒ 预案不复活（无从补偿 —— 保守向）；
+ *   · 被篡改的是 settle/compensate/close 行 ⇒ 预案滞留在途 ⇒ recoverInFlight
+ *     醒目转人工（in-doubt 向）—— 两个方向都 fail-closed。
+ * 链尖推进到被弃置行的**存储指纹**（而非滞留）：后继好行以该存储值为 prev
+ * 自证内容完整性，仅篡改行自身出局 —— 好行不连坐（与坏行跳过同律）。
+ * 边界（诚实申报，journal M2 同律）：持文件写权限者可从任一点整尾重算重写，
+ * 链防的是局部篡改与磁盘损坏，不防全知情重写 —— 那需要密钥/外锚，超出本工单。
  */
 function replayEventWal(text) {
     walFormat = 'events';
@@ -495,11 +594,28 @@ function replayEventWal(text) {
             continue;
         }
         const r = parsed;
-        if (r.wal === ESCROW_WAL_MAGIC)
-            continue; // 魔数头行（非事件）
+        if (r.wal === ESCROW_WAL_MAGIC) {
+            // 魔数头行（非事件）：ΠΑΝ-35 —— 版本 ≥3 ⇒ 本档为带链行式，链校验武装
+            walChainArmed = walChainArmed || (typeof r.version === 'number' && r.version >= 3);
+            continue;
+        }
         if (typeof r.planId !== 'string' || typeof r.event !== 'string') {
             walSkippedLines++;
             continue;
+        }
+        // ΠΑΝ-35：链校验（仅带链档；v2 无链旧档降级读 —— 下次落盘点全量重写升格）
+        if (walChainArmed) {
+            const storedPrev = typeof r.prev === 'string' ? r.prev : '';
+            const storedHash = typeof r.hash === 'string' ? r.hash : '';
+            const recomputed = storedPrev !== ''
+                ? walSha256(storedPrev + walLineContent(r.planId, r.event, r.ts, r.payload)) : '';
+            if (storedPrev === '' || storedHash === '' || storedPrev !== walChainTip || recomputed !== storedHash) {
+                walTamperedLines++;
+                if (storedHash !== '')
+                    walChainTip = storedHash; // 后继好行以其存储 prev 自证（好行不连坐）
+                continue; // 篡改/损坏行弃置（fail-closed 方向见函数头注）
+            }
+            walChainTip = storedHash;
         }
         applyWalEvent(r);
     }
@@ -739,14 +855,17 @@ function eventLabelOf(outcome) {
     return 'close'; // recovered-human-attention 等兜底关闭
 }
 /** ΝΩ-22：当前内存态 → 行式 WAL 全量文本（首写建档 / 旧档迁移 / 压缩的
- *  原子重写面 —— 头行魔数 + 在途 mint 行 + 账册结算行） */
+ *  原子重写面 —— 头行魔数 + 在途 mint 行 + 账册结算行）。
+ *  ΠΑΝ-35：全量重写 = 链的重新铸造面（GENESIS 起步逐行 seal —— 无论此前
+ *  档是 v2 无链还是 v3 带链，重写产物恒为自洽 v3 链）。 */
 function serializeEventWal() {
     const lines = [JSON.stringify({ wal: ESCROW_WAL_MAGIC, version: ESCROW_WAL_EVENTS_VERSION }) + '\n'];
+    walChainTip = ESCROW_WAL_GENESIS; // 重写从创世重铸链（内容 = 当前内存态，无历史丢失）
     for (const p of inFlightPlans.values()) {
-        lines.push(JSON.stringify({ planId: p.planId, event: 'mint', ts: p.mintedAt, payload: { plan: p } }) + '\n');
+        lines.push(sealWalLine({ planId: p.planId, event: 'mint', ts: p.mintedAt, payload: { plan: p } }) + '\n');
     }
     for (const rec of ledger) {
-        lines.push(JSON.stringify({
+        lines.push(sealWalLine({
             planId: rec.planId, event: eventLabelOf(rec.outcome), ts: rec.settledAt, payload: { record: rec },
         }) + '\n');
     }
@@ -761,12 +880,21 @@ function persistWal() {
     if (escrowStorage === null)
         return { ok: true };
     try {
+        // ΠΑΝ-35：serializeEventWal 会从创世重铸链（推进 walChainTip）—— 落盘失败
+        // 时必须还原链簿记，否则下次追加 seal 出的 prev 与盘上实链断裂（事件被
+        // 误判篡改弃置 = 数据丢失）。成功才提交新链。
+        const prevTip = walChainTip;
+        const prevArmed = walChainArmed;
         const r = escrowStorage.save(serializeEventWal());
-        if (!r.ok)
+        if (!r.ok) {
+            walChainTip = prevTip;
+            walChainArmed = prevArmed;
             walPersistError = r.error ?? 'unknown storage error';
+        }
         else {
             walPersistError = undefined;
             walFormat = 'events';
+            walChainArmed = true; // ΠΑΝ-35：全量重写产物是 v3 带链档（serializeEventWal 已铸链）
             walLinesSinceCompact = 0;
         }
         return r;
@@ -778,20 +906,23 @@ function persistWal() {
 }
 /**
  * ΝΩ-22：追加单事件行（O(1) —— 行式 WAL 的增量面；调用点内存态已提交）。
- * 分流：尚未是行式格式（无档/旧整档滞留）或存储无 append 面 ⇒ 全量原子重写
- * （首写建档 / 迁移重试 / 旧注入面等效语义）；已是行式 ⇒ 单行追加 + 独立
- * fsync，追加行数超压缩阈值 ⇒ 同点位做一次全量压缩重写（亡账与跳过行挤出，
- * 摊还后仍 O(增量)）。绝不抛。
+ * 分流：尚未是行式格式（无档/旧整档滞留）、存储无 append 面，或 **ΠΑΝ-35：
+ * 当前档还是 v2 无链行式（walChainArmed=false）** ⇒ 全量原子重写（首写建档 /
+ * 迁移重试 / 旧注入面等效 / 无链档升格 v3）；已是 v3 带链行式 ⇒ 单行追加
+ * （sealWalLine 接续链尖）+ 独立 fsync，追加行数超压缩阈值 ⇒ 同点位做一次
+ * 全量压缩重写（亡账与跳过行挤出，摊还后仍 O(增量)；压缩重铸链）。绝不抛。
  */
 function appendWalEvent(evt) {
     if (escrowStorage === null)
         return { ok: true };
-    if (walFormat !== 'events' || typeof escrowStorage.append !== 'function') {
-        return persistWal(); // 首写建档 / 旧档迁移重试 / 旧存储注入面 —— 全量重写
+    if (walFormat !== 'events' || !walChainArmed || typeof escrowStorage.append !== 'function') {
+        return persistWal(); // 首写建档 / 旧档迁移重试 / v2 无链档升格 / 旧存储注入面 —— 全量重写
     }
     try {
-        const r = escrowStorage.append(JSON.stringify(evt) + '\n');
+        const prevTip = walChainTip; // ΠΑΝ-35：追加失败时还原链尖（行未落盘 ⇒ 链不许前滚）
+        const r = escrowStorage.append(sealWalLine(evt) + '\n');
         if (!r.ok) {
+            walChainTip = prevTip;
             walPersistError = r.error ?? 'unknown storage error';
             return r;
         }
@@ -821,6 +952,21 @@ function track(p) {
     void p.finally(() => { activeWork.delete(p); }).catch(() => { });
     return p;
 }
+/**
+ * ΠΑΝ-34：容量压力收割 —— 收割一枚已过期的在途预案（claim + fire-and-forget
+ * 补偿，与 sweep() 的 TTL 臂逐字同律：过期预案的补偿义务不因容量压力丢失，
+ * 只是把「等下一次巡检」提前到「铸造腾位的此刻」）。返回是否腾出容量。
+ * 全部在 TTL 内 ⇒ false（调用方 fail-closed 拒绝铸造）。
+ */
+function reapExpiredInFlight() {
+    for (const plan of inFlightPlans.values()) {
+        if (eNow() > plan.expiresAt && claimPlan(plan)) {
+            void track(runCompensation(plan, 'ttl-expired', 'capacity sweep at mint time — plan TTL elapsed while the in-flight table is at cap'));
+            return true;
+        }
+    }
+    return false;
+}
 // ─── 预案铸造 ───
 /**
  * 铸造逆转预案（危险动作派发**之前**调用 —— approval.beginAttempt 的前置挂点）。
@@ -848,8 +994,25 @@ async function mintPlan(info) {
         if (strategy.kind === 'manual-only') {
             return { ok: false, reason: 'manual-only', detail: strategy.reason };
         }
+        // ΠΑΝ-34：在途容量执法（C1-2 H1「随危险点击无限累积」的上界兜底）。
+        // 溢出时先收割已过期预案（fire-and-forget 补偿 —— 与 sweep 的 TTL 臂同律，
+        // 补偿义务不因容量压力丢失），腾出容量 ⇒ 新预案诚实携带降级标注；全部
+        // 在 TTL 内仍满 ⇒ fail-closed 拒绝铸造（派发层会转为 ACTION_REQUIRED）。
+        let capacityPressure = false;
+        if (inFlightPlans.size >= MAX_IN_FLIGHT_PLANS) {
+            if (!reapExpiredInFlight()) {
+                return {
+                    ok: false, reason: 'capacity-exceeded',
+                    detail: `${MAX_IN_FLIGHT_PLANS} in-flight escrow plans (none expired) — refusing to mint another (fail-closed): ` +
+                        'an unbounded in-flight table is a memory leak and a compensation-obligation black hole; settle or let TTL elapse first',
+                };
+            }
+            capacityPressure = true;
+        }
         // 端口采集（逐个防御：故障 = 缺席 + degraded 标记 —— 可用性优先）
         const degraded = [];
+        if (capacityPressure)
+            degraded.push('inflight-capacity-pressure');
         const focusWindow = await captureFromPort('focus', () => focusPort?.current() ?? Promise.resolve(null), degraded, 'no-focus-port');
         const preActionHash = await captureFromPort('hash', () => hashPort?.capture() ?? Promise.resolve(null), degraded, 'no-hash-port');
         const clipboardBackupHandle = await captureFromPort('clipboard', () => clipboardPort?.backup() ?? Promise.resolve(null), degraded, 'no-clipboard-port');
@@ -882,7 +1045,7 @@ async function mintPlan(info) {
             ...(preActionHash !== undefined ? { preActionHash } : {}),
             ...(clipboardBackupHandle !== undefined ? { clipboardBackupHandle } : {}),
             ...(strategy.verify.mode === 'screen-hash'
-                ? { verifyThreshold: strategy.verify.threshold ?? DEFAULT_VERIFY_THRESHOLD } : {}),
+                ? { verifyThreshold: clampVerifyThreshold(strategy.verify.threshold) ?? DEFAULT_VERIFY_THRESHOLD } : {}),
             ...(degraded.length > 0 ? { degraded } : {}),
         };
         // 同令牌旧在途预案流产（见函数头注释的论证）。
@@ -1093,6 +1256,40 @@ async function runCompensation(plan, trigger, reason) {
             ...(reason !== undefined ? { reason: `${reason ?? ''}${reason ? '; ' : ''}no compensation executor port — record only (degraded)` } : { reason: 'no compensation executor port — record only (degraded)' }),
         });
         return;
+    }
+    // ΠΑΝ-35（C1-2 H3 根修）：补偿执行前的焦点窗口校验 —— 补偿动作的寻址锚点。
+    // 预案携带 focusWindow（铸造时端口在场且采集成功）且焦点端口在场 ⇒ 补偿前
+    // 比对当前焦点：不匹配（用户已切窗 —— 30s TTL 内是常态）即**拒绝补偿并转
+    // 人工**（fail-closed）：把 Ctrl+Z/Backspace 打进用户当前聚焦的无关应用是
+    // 第二次事故，不是补救。采集失败（端口故障/返回垃圾）同样拒绝 —— 锚点在
+    // 场而无法确认 = 无法安全寻址。预案无 focusWindow（铸造时端口缺席 ⇒ 诚实
+    // 缺席）或端口缺席 ⇒ 跳过校验（可用性优先的降级方向，与模块头论证同律）。
+    if (plan.focusWindow !== undefined && focusPort !== null) {
+        let currentFocus = null;
+        try {
+            currentFocus = await focusPort.current();
+        }
+        catch {
+            currentFocus = null;
+        }
+        const cur = typeof currentFocus === 'string' ? currentFocus.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+        const ref = plan.focusWindow.replace(/\s+/g, ' ').trim().toLowerCase();
+        // 匹配 = 归一化后相等或互为包含（标题栏动态后缀/前缀容忍）；大小写与
+        // 空白差异不算切窗。
+        const focusMatches = cur !== '' && (cur === ref || cur.includes(ref) || ref.includes(cur));
+        if (!focusMatches) {
+            closePlan(plan, {
+                outcome: 'compensation-failed',
+                trigger,
+                ...(reason !== undefined ? { reason } : {}),
+                escalation: buildEscalation(plan, `Dangerous "${plan.semantics}" action failed acceptance (trigger: ${trigger}) and automated compensation was REFUSED: ` +
+                    `the plan was minted while window "${plan.focusWindow}" had focus, but focus is now ${cur === '' ? 'UNVERIFIABLE (focus port failed)' : `"${currentFocus}"`}` +
+                    ' (the user may have switched windows). Sending undo hotkeys to the wrong window would be a SECOND incident, not a remedy (fail-closed).', [], cur === '' ? 'focus window could not be verified at compensation time' : `focus moved from "${plan.focusWindow}" to "${currentFocus}"`, plan.description
+                    ? `Bring window "${plan.focusWindow}" to front, inspect: ${plan.description}, and compensate BY HAND: ${plan.compensation.map(s => s.label).join('; ')}.`
+                    : `Bring window "${plan.focusWindow}" to front and compensate BY HAND: ${plan.compensation.map(s => s.label).join('; ')}.`),
+            });
+            return;
+        }
     }
     const attempted = [];
     const degraded = [...(plan.degraded ?? [])];
@@ -1337,6 +1534,10 @@ export const reversalEscrow = {
             walFormat = 'none';
             walSkippedLines = 0;
             walLinesSinceCompact = 0;
+            // ΠΑΝ-35：链簿记随武装归零（重放按头行版本重新武装）
+            walChainTip = ESCROW_WAL_GENESIS;
+            walChainArmed = false;
+            walTamperedLines = 0;
             // 单点接线：approval 的托管钩子（缺省武装后即接管 fail-closed 派发闸门）
             setDispatchEscrowHook(dispatchGate);
             setEscrowSettlementHook((token, verdict, reason) => {
@@ -1436,6 +1637,9 @@ export const reversalEscrow = {
             builtinStrategies: BUILTIN_STRATEGIES.size,
             extensionStrategies: extensionStrategies.size,
             walSkippedLines,
+            walTamperedLines,
+            walChainArmed,
+            inFlightCap: MAX_IN_FLIGHT_PLANS,
         };
     },
     /** 隔离缝（测试 beforeEach / 插件卸载）：一切模块态归零回缺省。
@@ -1460,6 +1664,10 @@ export const reversalEscrow = {
         walFormat = 'none';
         walSkippedLines = 0;
         walLinesSinceCompact = 0;
+        // ΠΑΝ-35：链簿记随隔离缝归零
+        walChainTip = ESCROW_WAL_GENESIS;
+        walChainArmed = false;
+        walTamperedLines = 0;
         hooksRegistered = false;
         activeWork.clear();
     },

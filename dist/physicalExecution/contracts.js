@@ -12,10 +12,15 @@ export const PhysicalErrorKind = {
     WINDOW_UNAVAILABLE: 'window_unavailable',
     UNAUTHORIZED: 'unauthorized',
     INTERNAL_ERROR: 'internal_error',
+    // ΠΑΝ-128: 与 Python 端 errors.py ErrorKind 闭集对齐（additive —— 旧 kind 语义不变）
+    DEVICE_UNREACHABLE: 'device_unreachable',
+    BUSY: 'busy',
     TRANSPORT_ERROR: 'transport_error',
     CLIENT_TIMEOUT: 'client_timeout',
 };
 export const ALL_CAPS = [
     'click', 'type', 'scroll', 'hotkey', 'drag',
     'screenshot', 'ui_tree', 'switch_window', 'shm_delete',
+    // ΠΑΝ-128: 与 Python auth.ALL_CAPS 闭集同源镜像（程序化对账：test/pan128.capContract.test.ts）
+    'admin', 'observe',
 ];

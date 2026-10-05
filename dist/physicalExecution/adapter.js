@@ -66,15 +66,24 @@ export class PhysicalExecutionAdapterImpl {
         if (this.state.key) {
             return { ok: true, value: undefined };
         }
+        // 与 loadKey 同律：await 期间 reset()/二次 configure 可能换掉 state ——
+        // 只写回快照，绝不把旧配置的密钥写进新 state（或写进 null 抛 TypeError）
+        const state = this.state;
+        const key = state.keyPromise ?? (state.keyPromise = this.loadKey());
         try {
-            // 与 loadKey 同律：await 期间 reset()/二次 configure 可能换掉 state ——
-            // 只写回快照，绝不把旧配置的密钥写进新 state（或写进 null 抛 TypeError）
-            const state = this.state;
-            const key = state.keyPromise ?? (state.keyPromise = this.loadKey());
             state.key = await key;
             return { ok: true, value: undefined };
         }
         catch (e) {
+            // ΠΑΝ-67（连接韧性）：拒绝的 keyPromise 不得永久缓存 —— 旧实现失败后
+            // state.keyPromise 仍是同一 rejected promise，此后每次 init()/call() 都
+            // await 它 ⇒ 密钥文件迟到/暂时 EACCES 的一次瞬态失败 = 适配器终身瘫痪
+            //（之后所有请求带空 token ⇒ 永久 unauthorized，只能重建实例）。清零后
+            // 下一次调用重新 loadKey（d7HostPort._ensureInitialized 的 J 纪元同款
+            // 修正回扫到本类）。只清仍属于自己的 state/promise（await 期间
+            // reset/二次 configure 已换 state 的场合不动新 state 的 promise）。
+            if (this.state === state && state.keyPromise === key)
+                state.keyPromise = null;
             return {
                 ok: false,
                 error: { kind: PhysicalErrorKind.INTERNAL_ERROR, detail: `key load failed: ${e.message}` },
@@ -138,7 +147,7 @@ export class PhysicalExecutionAdapterImpl {
             dry_run: args.dryRun ?? false,
             // W4-5：undefined ⇒ JSON 序列化丢键 ⇒ 请求字节与现状等同（兼容铁律）
             surface: args.surface,
-        });
+        }, args.signal);
     }
     async typeText(args) {
         return this.call('/type_text', {
@@ -146,7 +155,7 @@ export class PhysicalExecutionAdapterImpl {
             clear_first: args.clearFirst ?? false,
             dry_run: args.dryRun ?? false,
             surface: args.surface, // W4-5
-        });
+        }, args.signal);
     }
     async scrollPage(args) {
         return this.call('/scroll_page', {
@@ -154,14 +163,14 @@ export class PhysicalExecutionAdapterImpl {
             amount: args.amount,
             dry_run: args.dryRun ?? false,
             surface: args.surface, // W4-5
-        });
+        }, args.signal);
     }
     async pressHotkey(args) {
         return this.call('/press_hotkey', {
             keys: args.keys,
             dry_run: args.dryRun ?? false,
             surface: args.surface, // W4-5
-        });
+        }, args.signal);
     }
     async dragMouse(args) {
         return this.call('/drag_mouse', {
@@ -169,7 +178,7 @@ export class PhysicalExecutionAdapterImpl {
             end: args.end,
             dry_run: args.dryRun ?? false,
             surface: args.surface, // W4-5
-        });
+        }, args.signal);
     }
     /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体 */
     async moveMouse(args) {
@@ -178,7 +187,7 @@ export class PhysicalExecutionAdapterImpl {
             duration_ms: args.durationMs ?? 0,
             dry_run: args.dryRun ?? false,
             surface: args.surface, // W4-5
-        });
+        }, args.signal);
     }
     async takeScreenshot(args) {
         return this.call('/take_screenshot', {
@@ -302,11 +311,19 @@ export class PhysicalExecutionAdapterImpl {
         return this.call('/get_ui_tree', {
             source: args?.source ?? 'auto',
             region: args?.region,
-            funnel_ceiling: args?.funnelCeiling ?? 'L3',
+            // ΠΑΝ-68（缺省花钱权对齐）：缺省 ceiling 改 'L2' —— D-6 立法
+            // 「funnelCeiling 是唯一闸门、L3 治理归属中枢、缺省授权 L2」；旧缺省
+            // 'L3' 是 D-5 层自铸花钱权（任何漏传 ceiling 的调用方即获 L3 授权，
+            // 外接真 VLM 后端时是计划外花钱口）。消费方显式要 L3 才花钱。
+            funnel_ceiling: args?.funnelCeiling ?? 'L2',
         }, args?.signal);
     }
     async switchWindow(args) {
-        return this.call('/switch_window', { keyword: args.keyword });
+        return this.call('/switch_window', { keyword: args.keyword }, args.signal);
+    }
+    /** 感知辅助（R2-3 焦点保卫）：前台窗口标题只读探测（GET /active_window） */
+    async getActiveWindow() {
+        return this.callGet('/active_window');
     }
     async releaseShm(name) {
         if (!this.state) {

@@ -277,7 +277,12 @@ export function composeSnapshot(inputs: PerceptionInputs): WorldSnapshot {
   // OCR：缺席记降级；在场截 2000（上下文带宽礼仪）
   const ocrRaw = inputs?.ocrText
   if (typeof ocrRaw !== 'string') degraded.push('ocr')
+  // ΠΑΝ-61（截断盲区的诚实申报）：语料超限时记 'digest-truncated' —— 截断后
+  // 的 textDigest 是**部分证据**（2000 字后的禁词不可见），消费方（否定判据
+  // 复核等）据此不得把「语料在场未命中」当「确认不存在」；⑧′ 的当帧重采端口
+  //（autoPilot ΠΑΝ-61）供未截断全文，本标记是其降级路径的留痕面。
   const textDigest = typeof ocrRaw === 'string' ? ocrRaw.slice(0, TEXT_DIGEST_MAX) : ''
+  if (typeof ocrRaw === 'string' && ocrRaw.length > TEXT_DIGEST_MAX) degraded.push('digest-truncated')
 
   // dhash：透传；无效指纹按 null 记并降级
   const dhash = validDhash(inputs?.dhash)

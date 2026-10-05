@@ -50,3 +50,12 @@ export function sanitizeActionShape(raw) {
 export function strOrUndef(v, max) {
     return typeof v === 'string' && v.trim() !== '' ? v.slice(0, max) : undefined;
 }
+/** ΠΑΝ-7（宪法违例修复）：令牌入参的类型收口 —— 非字符串（数字/对象/Symbol/
+ *  任意模型输出的 JSON 真值）⇒ ''（= 簿记里必然缺席 ⇒ 结构化拒绝），绝不抛。
+ *  旧实现 `(token || '').trim()` 对非字符串真值抛 TypeError（.trim 不是函数），
+ *  而 grant_approval 等模型可调工具把 args.token 原样透传 —— 违反「运行层
+ *  绝不抛」宪（C1-5 M7 / 批判报告 ΠΑΝ-7）。主账本全方法经此 helper 收口；
+ *  actionGate.ts 已对同一威胁模型执行严格类型收口，库内自此两套标准合一。 */
+export function normalizeToken(v) {
+    return typeof v === 'string' ? v.trim() : '';
+}

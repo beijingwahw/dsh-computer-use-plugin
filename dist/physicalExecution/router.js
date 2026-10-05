@@ -14,8 +14,11 @@ export class PhysicalActionRouterImpl {
     get capability() {
         return this._capability;
     }
-    /** 运行层方法：永不抛错 —— 失败入 ExecutionResult.failure */
-    async dispatch(action, seq) {
+    /** 运行层方法：永不抛错 —— 失败入 ExecutionResult.failure。
+     *  ΠΑΝ-64（止损链断裂修复）：第三可选参 signal —— 接收（d7HostPort 经
+     *  SignalDispatch seam 下发的 ExecutionOrder.signal）并透传给全部动作方法
+     *  （→ adapter → microFetch 组合超时断流）。signal 缺席 ⇒ 旧路径逐字节。 */
+    async dispatch(action, seq, signal) {
         const startedAt = Date.now();
         // noop：直接返回，不调用微服务
         if (action.kind === 'noop') {
@@ -27,7 +30,7 @@ export class PhysicalActionRouterImpl {
             };
         }
         try {
-            const result = await this.route(action);
+            const result = await this.route(action, signal);
             const latencyMs = Date.now() - startedAt;
             if (!result.ok) {
                 return this.toFailureResult(seq, latencyMs, result.error);
@@ -54,8 +57,8 @@ export class PhysicalActionRouterImpl {
             };
         }
     }
-    /** 单动作路由 —— 派发到对应 adapter 方法 */
-    async route(action) {
+    /** 单动作路由 —— 派发到对应 adapter 方法（ΠΑΝ-64：signal 随路由透传全动作面） */
+    async route(action, signal) {
         switch (action.kind) {
             case 'click_mouse': {
                 const args = action.args ?? {};
@@ -77,6 +80,7 @@ export class PhysicalActionRouterImpl {
                     y: num(args.y, 0.5),
                     button: asButton(args.button),
                     dryRun: bool(args.dry_run),
+                    signal,
                 });
             }
             case 'type_text': {
@@ -94,6 +98,7 @@ export class PhysicalActionRouterImpl {
                     text: args.text,
                     clearFirst: bool(args.clear_first ?? args.clearFirst),
                     dryRun: bool(args.dry_run),
+                    signal,
                 });
             }
             case 'scroll_page': {
@@ -102,12 +107,13 @@ export class PhysicalActionRouterImpl {
                     direction: asDirection(args.direction),
                     amount: num(args.amount, 3),
                     dryRun: bool(args.dry_run),
+                    signal,
                 });
             }
             case 'press_hotkey': {
                 const args = action.args ?? {};
                 const keys = Array.isArray(args.keys) ? args.keys.filter((k) => typeof k === 'string') : [];
-                return this.adapter.pressHotkey({ keys, dryRun: bool(args.dry_run) });
+                return this.adapter.pressHotkey({ keys, dryRun: bool(args.dry_run), signal });
             }
             case 'drag_mouse': {
                 const args = action.args ?? {};
@@ -131,13 +137,14 @@ export class PhysicalActionRouterImpl {
                     start: { x: num(start?.x, 0), y: num(start?.y, 0) },
                     end: { x: num(end?.x, 0), y: num(end?.y, 0) },
                     dryRun: bool(args.dry_run),
+                    signal,
                 });
             }
             case 'switch_tab': {
                 // J 纪元修正：所有平台统一 Ctrl+Tab —— 注释自己写明"Cmd+Tab 切换
                 // 应用、Ctrl+Tab 切换标签页"，旧代码却在 darwin 选 cmd（switch_tab
                 // 实际切换应用，与动作名相悖；主流浏览器在 macOS 同样支持 Ctrl+Tab）。
-                return this.adapter.pressHotkey({ keys: ['ctrl', 'tab'] });
+                return this.adapter.pressHotkey({ keys: ['ctrl', 'tab'], signal });
             }
             case 'switch_window': {
                 const args = action.args ?? {};
@@ -146,7 +153,7 @@ export class PhysicalActionRouterImpl {
                 // 路径 1：hotkey_only 或缺 keyword —— 直接走 hotkey 快速路径（跳过一次网络往返）
                 if (route === 'hotkey_only' || !keyword) {
                     const mod = process.platform === 'darwin' ? 'cmd' : 'alt';
-                    return this.adapter.pressHotkey({ keys: [mod, 'tab'] });
+                    return this.adapter.pressHotkey({ keys: [mod, 'tab'], signal });
                 }
                 // 路径 2：unavailable —— 直接返回错误，不发请求
                 if (route === 'unavailable') {
@@ -159,7 +166,7 @@ export class PhysicalActionRouterImpl {
                     };
                 }
                 // 路径 3：native 或 unknown —— 调 /v1/switch_window，让 Python 端处理失败降级
-                const result = await this.adapter.switchWindow({ keyword });
+                const result = await this.adapter.switchWindow({ keyword, signal });
                 if (result.ok) {
                     // Reactive 同步：Python 端可能 fallback 到 hotkey_only（method 变化时立即更新缓存）
                     syncCapabilityFromSwitchWindowResult(this._capability, result.value);
@@ -177,7 +184,7 @@ export class PhysicalActionRouterImpl {
                         return result; // 服务已死：hotkey 走同一服务，发了也白发
                     }
                     const mod = process.platform === 'darwin' ? 'cmd' : 'alt';
-                    const hotkeyResult = await this.adapter.pressHotkey({ keys: [mod, 'tab'] });
+                    const hotkeyResult = await this.adapter.pressHotkey({ keys: [mod, 'tab'], signal });
                     if (hotkeyResult.ok) {
                         // 降级成功：标记能力为 hotkey_only（Reactive 同步）
                         this._capability.updateSwitchWindowMethod('hotkey_only');
@@ -188,7 +195,7 @@ export class PhysicalActionRouterImpl {
             }
             case 'dismiss_popup': {
                 // 降级为 Esc
-                return this.adapter.pressHotkey({ keys: ['esc'] });
+                return this.adapter.pressHotkey({ keys: ['esc'], signal });
             }
             // noop 在 dispatch() 入口已提前返回 —— 永不抵达此处（不可达分支已移除）
             default:

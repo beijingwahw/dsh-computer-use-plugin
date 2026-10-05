@@ -27,6 +27,13 @@ function b64urlDecode(s: string): Uint8Array {
  *
  * 字节一致性铁律：Python 端 ``secrets.token_bytes(32)`` 与 Node 端 ``randomBytes(32)``
  * 都是 CSPRNG；只要落盘文件被其中一端创建，另一端读取即可，不需两端各自生成。
+ *
+ * ΠΑΝ-129: **写后回读复核**（对齐 F1-7 在 Python 侧发现的同款地雷 —— Python 端
+ * 实测 raw write 约 1 成概率落盘字节漂移，且不回读则首启即"神秘 invalid signature"
+ * 且不可自愈）。Node 端 ``writeFile`` 为缓冲写，理论不受该 raw-write 漂移影响；
+ * 但两端共享同一密钥文件，防御必须对称：写后立即回读，失配 ⇒ 删掉重写，3 次
+ * 不成 ⇒ 加载层 throw（密钥落盘不稳定 = 拒绝带病上线）。顺带兑现 O_EXCL 竞态
+ * （``wx`` flag 撞上他进程刚建好的文件 ⇒ EEXIST ⇒ 重读即得合法密钥，不再抛）。
  */
 export async function ensureKey(path: string): Promise<Uint8Array> {
   if (existsSync(path)) {
@@ -40,8 +47,6 @@ export async function ensureKey(path: string): Promise<Uint8Array> {
   // 生成 32 字节随机密钥
   const key = randomBytes(32);
   await mkdir(dirname(path), { recursive: true });
-  // O_EXCL 等价：用 'wx' flag（写入时文件必须不存在）
-  await writeFile(path, key, { mode: 0o600, flag: 'wx' });
   // 父目录权限收口（与 Python 端一致）
   try {
     const { chmod } = await import('fs/promises');
@@ -49,7 +54,40 @@ export async function ensureKey(path: string): Promise<Uint8Array> {
   } catch {
     // 父目录非己有：只读使用，不强制改权限（CI 容器场景）
   }
-  return new Uint8Array(key);
+  // ΠΑΝ-129: 写后回读复核 —— 最多 3 轮「O_EXCL 写 + 回读比对」，失配删掉诚实
+  // 重写，绝不静默用漂移字节（对齐 Python 端 ensure_key 的 3 轮方言）。
+  const { unlink } = await import('fs/promises');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // O_EXCL 等价：用 'wx' flag（写入时文件必须不存在）
+      await writeFile(path, key, { mode: 0o600, flag: 'wx' });
+    } catch (e: any) {
+      if (e?.code === 'EEXIST') {
+        // O_EXCL 竞态：他进程刚建好密钥 —— 重读即得合法密钥（与 Python 端同款）
+        const raced = await readFile(path);
+        if (raced.length < 32) {
+          throw new Error(`auth key ${path} too short (${raced.length} bytes, need ≥32)`);
+        }
+        return new Uint8Array(raced);
+      }
+      throw e;
+    }
+    // 写后回读：盘上字节必须与内存副本逐字节一致
+    const onDisk = await readFile(path);
+    if (onDisk.length === key.length && timingSafeEqual(onDisk, key)) {
+      return new Uint8Array(key);
+    }
+    // 漂移落盘：删掉诚实重写
+    try {
+      await unlink(path);
+    } catch {
+      // 删除失败（如竞态被他进程接管）：下一轮 wx 会再撞 EEXIST 走重读路径
+    }
+  }
+  throw new Error(
+    `auth key ${path} persisted bytes diverge from generated key after 3 attempts — `
+    + 'refusing to start with a key whose on-disk form is unstable',
+  );
 }
 
 /** Cap Token 载荷 —— 与 Python 端 auth.mint_token payload 结构严格一致 */

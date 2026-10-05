@@ -49,9 +49,111 @@ import { errText, clamp01, clipNote, CRITERIA_SPOT_PERIOD, DEFAULT_SCROLL_AMOUNT
 // W9-1（D-G9 收口）：判据核对单一器官 —— runtime 主路径整体换用 criteriaEval
 //（肯定面 fuzzy 容错 + 否定面证伪 + 语料缺席诚实降级，全走同一 DSL 同一器官）
 import { evaluateCriteria, buildCriteriaPairs } from './criteriaEval.js';
+// ΠΑΝ-56（宏执行入宪）：宏步派发前的 actionGate 纯函数判定 —— F1 波（ΠΑΝ-12/14）
+// 已把 ActionKind 扩员为完整物理写通道闭集，此处 import 纯判定面无环
+//（actionGate → riskGate/fuzzy/approval/focusTracker/system.hotkeyPolicy，任一
+// 均不回依赖 autonomy）。宏的内部逐步键鼠操作自此与直接点击同过一道闸。
+import { assertActionAllowed } from '../tools/actionGate.js';
 import { finiteOrNull, w1HashDistance, pickClickPoint, gridRetryOffsets, combineRoiVerdict, judgeRoiOcr } from './runtime.verdict.js';
 import { makeDefaultReadWords } from './runtime.perceive.js';
 import { W1_EXEC_TUNING } from './runtime.tuning.js';
+// ─── ΠΑΝ-56（宏执行入宪）：宏步 actionGate 判定的模块级纯核（执法测试面） ───
+/**
+ * ΠΑΝ-56：宏步工具名 → actionGate 的 ActionKind 闭集映射。
+ * 宏执行器的沙箱词汇表（click_mouse/type_text/scroll_page/press_hotkey/
+ * drag_mouse）恰与 F1 波扩员后的物理写通道闭集一一对应；未登记工具返回
+ * undefined（宏派发面本就按 unresolved 不派发 —— 闸不重复执法）。
+ */
+const MACRO_STEP_KINDS = {
+    click_mouse: 'click_mouse',
+    type_text: 'type_text',
+    scroll_page: 'scroll_page',
+    press_hotkey: 'press_hotkey',
+    drag_mouse: 'drag_mouse',
+};
+/**
+ * ΠΑΝ-56：宏步落点的快照标签取证（纯函数、绝不抛）—— 归一化坐标落点在
+ * 感知快照元素 bbox 内者的 label（取中心最近者）。这是 click/drag 宏步的
+ * 独立证据通道：重锚定按 label 锚到元素，落点处读到的屏面标签就是「这一
+ * 步将作用在什么上」的当帧实读。快照缺席/坐标缺席/无元素覆盖 ⇒ null
+ * （通道诚实缺席，交 undescribed 前置执法）。
+ */
+export function macroStepPointLabel(stepTool, args, snapshot) {
+    if (stepTool !== 'click_mouse' && stepTool !== 'drag_mouse')
+        return null;
+    const a = args && typeof args === 'object' ? args : {};
+    const ax = a.x, ay = a.y;
+    if (typeof ax !== 'number' || !Number.isFinite(ax) || typeof ay !== 'number' || !Number.isFinite(ay))
+        return null;
+    const nx = Math.min(1, Math.max(0, ax));
+    const ny = Math.min(1, Math.max(0, ay));
+    const snap = snapshot;
+    if (!snap || !(snap.width > 0) || !(snap.height > 0))
+        return null;
+    if (!Array.isArray(snap.elements) || snap.elements.length === 0)
+        return null;
+    let best = null;
+    for (const el of snap.elements) {
+        if (!el || typeof el.label !== 'string' || el.label.trim() === '')
+            continue;
+        const b = el.bbox;
+        if (!b)
+            continue;
+        const x0 = Math.min(b.x0, b.x1) / snap.width, x1 = Math.max(b.x0, b.x1) / snap.width;
+        const y0 = Math.min(b.y0, b.y1) / snap.height, y1 = Math.max(b.y0, b.y1) / snap.height;
+        if (!Number.isFinite(x0) || !Number.isFinite(x1) || !Number.isFinite(y0) || !Number.isFinite(y1))
+            continue;
+        if (nx < x0 || nx > x1 || ny < y0 || ny > y1)
+            continue; // 落点不在框内
+        const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        const dist = Math.hypot(cx - nx, cy - ny);
+        if (best === null || dist < best.dist)
+            best = { label: el.label, dist };
+    }
+    return best !== null ? best.label : null;
+}
+/**
+ * ΠΑΝ-56：单条宏步的闸门判定（纯函数、绝不抛；执法测试的直通面）。
+ *
+ * 判定物料（与直接点击同级的证据面）：
+ *  · click/drag 步：落点当帧快照标签作为**自述通道**（target_description ——
+ *    重锚定的语义目标）与**公证通道**（evidence.ocrLabel —— 独立取证）双供；
+ *    宏步 args 自带的 target_description/expected_text 原样透传（历史宏自身
+ *    申报面优先，快照标签只补缺席）。任一通道经 riskGate 归一命中危险词表
+ *    ⇒ 危险步（requiresApproval —— 自主环内无审批令牌可消费 ⇒ 拒绝派发，
+ *    由环级宪法审批路径〔macroRiskScan 预扫描〕先行拦截）。
+ *  · type 步：text 超长 / 凭据风险词（与 typeText 工具同律）。
+ *  · hotkey 步：黑名单和弦（cfg 缺省不携带 —— 事实源仍是 system.pressHotkey
+ *    的 P1-3 执法点）/ 粘贴×敏感焦点 / 危险上下文（args 原样透传）。
+ *  · scroll 步：视口导航 ⇒ 恒放行。
+ * 未登记工具 ⇒ null（不判 —— 派发面自会 unresolved）。闸门自身异常 ⇒
+ * fail-closed 拒绝（宏步是最不透明的执行通道，宁可错杀一步宏绝不放过）。
+ */
+export function gateMacroStepFor(step, snapshot) {
+    try {
+        const tool = step?.tool;
+        const kind = typeof tool === 'string' ? MACRO_STEP_KINDS[tool] : undefined;
+        if (!kind)
+            return null;
+        const raw = step.args;
+        const a = raw && typeof raw === 'object' ? { ...raw } : {};
+        if (kind === 'click_mouse' || kind === 'drag_mouse') {
+            const label = macroStepPointLabel(tool, a, snapshot);
+            if (label !== null) {
+                // 证据双供：快照标签既是重锚定的语义目标（自述通道补缺席），又是
+                // 当帧屏读（公证通道）—— 通道来自感知快照，非宏自报。
+                if (typeof a.target_description !== 'string' || a.target_description.trim() === '') {
+                    a.target_description = label;
+                }
+                return assertActionAllowed(kind, a, undefined, { ocrLabel: label });
+            }
+        }
+        return assertActionAllowed(kind, a);
+    }
+    catch {
+        return { allowed: false, reason: 'unknown-action-kind', requiresApproval: false, dangerous: false };
+    }
+}
 // ─── 执行铸造厂 ───
 /**
  * 铸造 execute(action)：动作映射律 + 执行后验证 + 判据抽查。
@@ -105,6 +207,22 @@ import { W1_EXEC_TUNING } from './runtime.tuning.js';
  * 截屏）与每 3 个已验证步（用验证帧的 OCR）抽查；肯定判据未命中不产生
  * violated（宁缺毋错 ——「没找到」不是「被证伪」）。
  */
+// ─── R3-3（GAP-2 VlmBudget 可调）：任务级视觉预算的内核键解析面 ───
+//
+// 病灶（R2-8 §6 GAP-2）：createExecute 恒 `new VlmBudget()` 无参构造 ⇒ 每任务
+// 200 图/512MB 写死不可调。修法：构造期读内核键 codec.maxImagesPerTask /
+// codec.maxBytesPerTask（productionSpecs 入册，缺省 = codec.ts 的
+// DEFAULT_MAX_IMAGES=200 / DEFAULT_MAX_BYTES=512MB 字面量锚 —— 未注册/未 set
+// 时 getOrDefault 回声同值，行为逐字节不变；与 constitution.maxSteps /
+// world.hammingTolerance 的「消费方读键 + 字面量兜底」方言同律）。set 后
+// **新任务**生效（createExecute 每任务铸新闸，reset 语义不变）。绝不抛。
+// 导出面 = 生产消费（createExecute）+ 执法测试（预算生效的离线断言）。
+export function resolveVlmBudget() {
+    return new VlmBudget({
+        maxImagesPerTask: kernelRegistry.getOrDefault('codec.maxImagesPerTask', 200),
+        maxBytesPerTask: kernelRegistry.getOrDefault('codec.maxBytesPerTask', 512 * 1024 * 1024),
+    });
+}
 export function createExecute(deps) {
     const capture = deps.capture ?? (() => backend.captureCleanPng());
     const imageSize = deps.imageSize ??
@@ -122,7 +240,8 @@ export function createExecute(deps) {
                 return null;
             }
         });
-    const readWords = deps.readWords ?? makeDefaultReadWords(deps.ocrLang);
+    // ΠΑΝ-58：语言 + 服务端优先开关随 deps 接线（缺席 ⇒ legacy 直读，零回归）
+    const readWords = deps.readWords ?? makeDefaultReadWords(deps.ocrLang, { serverFirst: deps.ocrServerFirst === true });
     const now = deps.now ?? (() => Date.now());
     const sleep = deps.sleep ?? ((ms) => new Promise(resolve => { setTimeout(resolve, ms); }));
     const spec = deps.spec;
@@ -158,7 +277,9 @@ export function createExecute(deps) {
     // W2-0（D 接线）：任务级视觉预算（W1-9 C4）—— createExecute 每次铸造（runPilotLoop
     // 每 run 一 execute = 任务级生命周期）。只消费 requote 的**建议性**分档（original
     // 档不显式传参 ⇒ 缺省路径编码参数逐字节不变），绝不接 check/commit 的强制闸语义。
-    const vlmBudget = new VlmBudget();
+    // R3-3（GAP-2）：构造改经 resolveVlmBudget 读内核键（缺省 = codec 字面量锚，
+    // 零行为变化；set 后新任务生效）。
+    const vlmBudget = resolveVlmBudget();
     /**
      * W9-1（D-G9 收口 · 判据证伪·极性分工红线）：判据核对整体换用
      * criteriaEval.evaluateCriteria —— 折叠子串匹配方言就此退役，判据解析
@@ -518,13 +639,30 @@ export function createExecute(deps) {
             };
         });
     };
+    // ── ΠΑΝ-56（宏执行入宪）：宏步的 actionGate 逐步判定（纯核在模块级，见下） ──
+    /** ΠΑΝ-56：本条宏链被安全闸拦截的步数（runMacro 每次铸造时归零 —— note 留痕） */
+    let macroGateBlocked = 0;
     /**
      * W4-1：宏单步派发（system 键鼠 —— click/type case 的映射律宏方言）。
      * 坐标已由宏执行器重锚定为归一化值，此处只做 归一化 → 屏幕像素 的换算
      *（Math.round(nx * size.width)，与 clickMouse 工具同一换算链）。
      * 沙箱词汇表外的宿主工具（switch_tab 等）⇒ 诚实 unresolved（不派发）。
+     * ΠΑΝ-56：派发前逐步过 actionGate 纯函数判定（gateMacroStepFor）—— 危险步
+     * （审批域）/黑名单和弦/undescribed 落点 ⇒ 拒绝派发（与直接点击同级
+     * fail-closed），轨迹记 dispatch-failed；闸门判定不改变既有的派发换算律。
      */
     const macroDispatch = async (step) => {
+        const gateVerdict = gateMacroStepFor(step, deps.lastSnapshotRef?.current ?? null);
+        if (gateVerdict !== null && gateVerdict.allowed !== true) {
+            macroGateBlocked++;
+            const why = gateVerdict.reason ?? 'unknown';
+            const approval = gateVerdict.requiresApproval === true;
+            return {
+                ok: false,
+                note: clipNote(`ΠΑΝ-56 宏步安全闸拦截（${why}）：${step.tool} 步不派发` +
+                    (approval ? ' —— 危险步属审批域，须经宪法审批路径人工放行' : '')),
+            };
+        }
         const a = step.args ?? {};
         switch (step.tool) {
             case 'click_mouse': {
@@ -602,6 +740,7 @@ export function createExecute(deps) {
      * 技能账本（越用越准的闭环兑现）。防御式：宏执行器绝不抛，此处再兜一层。
      */
     const runMacro = async (input) => {
+        macroGateBlocked = 0; // ΠΑΝ-56：逐链归零（本链被闸拦截步数的 note 留痕基线）
         try {
             const anchors = macroAnchors();
             const baselineDhash = deps.lastSnapshotRef?.current?.dhash ?? null;
@@ -637,7 +776,10 @@ export function createExecute(deps) {
             }
             const outcome = {
                 outcome: trace.ok ? 'progress' : 'no_effect',
-                note: clipNote(`宏执行：${macroTraceSummary(trace)}`),
+                // ΠΑΝ-56：安全闸拦截步数入 note —— 逐链留痕（环级宪法审批路径在
+                // autoPilot ④ 相位经 macroRiskScan 预扫描先行拦截；此处是执行层末道闸）
+                note: clipNote(`宏执行：${macroTraceSummary(trace)}` +
+                    (macroGateBlocked > 0 ? `；ΠΑΝ-56 安全闸拦截 ${macroGateBlocked} 步未派发` : '')),
                 verification: {
                     roiChanged: null, expectedHit: null, roiOcrChanged: null, fullscreenChanged: null,
                     noise: false, steady: null, steadyPolls: 0, retries: 0,

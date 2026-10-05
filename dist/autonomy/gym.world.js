@@ -5,7 +5,9 @@
 // 整体搬迁。行为零变化（纯搬运，逐字节不改）；gym.ts 以再导出保持导入面不变。
 // 画布立法（GYM_W/GYM_H 800×600 —— 快照像素 = 世界像素，命中判定零换算）随
 // 世界本件走：gym.pcgWorld.ts 的文法合成帧同律消费（单一事实源不变）。
-import { fnv1a, mulberry32 } from './gym.js';
+// ΠΑΝ-127（D-F5 清偿）：rng 立法改自零出边叶 gym.rng.ts 导入（原自桶 gym.ts
+// 回借构成桶-卫星 value 二环；桶面同名符号仍经再导出可用）。
+import { fnv1a, mulberry32 } from './gym.rng.js';
 import { corruptOcrLabel, GYM_NOISY_OCR_CONF, resolveGymNoise } from './gym.noise.js';
 import { getSharp } from '../_legacyDeps.js';
 // ─── GymWorld：确定性虚拟世界（控件状态机 + sharp 合成帧） ───

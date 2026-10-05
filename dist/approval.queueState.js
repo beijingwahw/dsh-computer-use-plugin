@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 import { TTL_MS, MAX_ATTEMPTS, LIFETIME_MULTIPLIER, AMENDMENT_NOTE_MAX, DEFAULT_STAGING_TIMEOUT_MS, DEFAULT_QUEUE_TTL_MS, DEFAULT_DENIED_RETENTION_MS, APPROVAL_QUEUE_VERSION } from './approval.constants.js';
 import { strOrUndef, sanitizeActionShape } from './approval.shapes.js';
-import { newToken, castAmendmentFor } from './approval.security.js';
+import { newToken, castAmendmentFor, bindTokenTarget, boundTargetOf, forgetTokenTarget } from './approval.security.js';
 import { pending } from './approval.registry.js';
 // ── 队列模块态（全部经 armQueueState 注入；缺省 = 内存队列 + 真钟） ──
 /** 存储端口（null = 仅内存 —— 跨进程不保，诚实降级）；只读本绑定的面：
@@ -27,6 +27,34 @@ export let prunedDeniedTotal = 0;
 /** 队列条目（唯一事实源；数组内容的增删由 API 面经此绑定操作 —— 重赋值仅
  *  在本文件的装载/恢复/武装/归零四点）。 */
 export let queueEntries = [];
+const entryConfirmEvidence = new Map();
+/** ΠΑΝ-1：入队面锚定人证证据（hash 缺席 = 铸造即降级 ⇒ 条目永不可 grant） */
+export function anchorQueueConfirmEvidence(entryId, hash) {
+    try {
+        if (!entryId || !hash)
+            return;
+        entryConfirmEvidence.set(entryId, { hash, mismatches: 0 });
+    }
+    catch { /* 防御式：证据面故障绝不炸入队主流程 */ }
+}
+/** ΠΑΝ-1：裁决面读取证据锚（无锚 ⇒ grant 臂 fail-closed） */
+export function queueConfirmEvidenceOf(entryId) {
+    return entryConfirmEvidence.get(entryId);
+}
+/** ΠΑΝ-1：错码计数 +1（返回新计数；封顶判定在调用面 —— 与 ledger 同律） */
+export function bumpQueueConfirmMismatch(entryId) {
+    const ev = entryConfirmEvidence.get(entryId);
+    if (!ev)
+        return 0;
+    ev.mismatches += 1;
+    return ev.mismatches;
+}
+/** ΠΑΝ-1：匹配即清零（错误计数是尝试簇，不是终身累计 —— 与 ledger 同律） */
+export function clearQueueConfirmMismatch(entryId) {
+    const ev = entryConfirmEvidence.get(entryId);
+    if (ev)
+        ev.mismatches = 0;
+}
 /** 惰性装载标志（首次触及队列面前从存储读档） */
 let queueLoaded = false;
 /** 最近一次持久化错误（queueStats 透明化面） */
@@ -104,7 +132,9 @@ export function sanitizeQueueEntry(raw) {
     const d = r.decision;
     if (d && typeof d === 'object') {
         const dd = d;
-        if (dd.verdict === 'granted' || dd.verdict === 'denied') {
+        // ΠΑΝ-4：'absorbed'（交互兑现终态）与 granted/denied 同为合法词表值 ——
+        // 恢复面照常接回（终态不可再 take 的语义由 takeGranted 的 granted 过滤执法）
+        if (dd.verdict === 'granted' || dd.verdict === 'denied' || dd.verdict === 'absorbed') {
             const at = dd.at;
             const decision = {
                 verdict: dd.verdict,
@@ -122,7 +152,11 @@ export function sanitizeQueueEntry(raw) {
     }
     return entry;
 }
-/** 惰性装载：首次触queue面前从存储读档（垃圾档 ⇒ 空队列归零 —— 绝不抛） */
+/** 惰性装载：首次触queue面前从存储读档（垃圾档 ⇒ 空队列归零 —— 绝不抛）。
+ *  ΠΑΝ-3：读回内容的完整性可信度经可选透明化面 lastLoadTrusted 判定 ——
+ *  不可信（无密钥降级档/旧版明文档/自定义存储未自证）⇒ granted 裁决一律
+ *  剥离降回待批（fail-closed：盘面上的「已授予」是预授权凭据，未经完整性
+ *  验证不可恢复；pending/denied 照常恢复供晨报 —— 拒绝路径不放大风险）。 */
 export function ensureQueueLoaded() {
     if (queueLoaded)
         return;
@@ -134,6 +168,16 @@ export function ensureQueueLoaded() {
         const text = queueStorage.load();
         if (text === null)
             return;
+        // ΠΑΝ-3：可信度探针（方法缺席/抛错 ⇒ 不可信 —— 防御式缺省 fail-closed）
+        let trusted = false;
+        try {
+            trusted = typeof queueStorage.lastLoadTrusted === 'function'
+                ? queueStorage.lastLoadTrusted() === true
+                : false;
+        }
+        catch {
+            trusted = false;
+        }
         const parsed = JSON.parse(text);
         if (!parsed || typeof parsed !== 'object')
             return; // 垃圾档 ⇒ 归零
@@ -152,6 +196,11 @@ export function ensureQueueLoaded() {
             if (e === null || seen.has(e.id))
                 continue; // 垃圾条目/重复 id 弃置
             seen.add(e.id);
+            // ΠΑΝ-3：不可信盘面 ⇒ granted 决不恢复（裁决剥回待批 —— 「恢复时全部
+            // 拒绝 granted 条目」的降级执法点；配合 ΠΑΝ-1 的证据仅内存驻留，重启后
+            // 该条目也无法再被批量裁决批准 —— 重走完整审批是唯一出路）
+            if (!trusted && e.decision?.verdict === 'granted')
+                delete e.decision;
             queueEntries.push(e);
         }
     }
@@ -192,9 +241,23 @@ function pruneDeniedEntries() {
     }
 }
 /** 队列落盘（存储缺席 = 仅内存恒 ok；失败记 queuePersistError —— 绝不抛）。
- *  W6-3：落盘前先执法 denied 保留期清理（见 pruneDeniedEntries）。 */
+ *  W6-3：落盘前先执法 denied 保留期清理（见 pruneDeniedEntries）。
+ *  ΠΑΝ-1：落盘前同步清扫已消失条目的人证证据行（内存驻留面不随队列收缩
+ *  泄漏增长 —— 一切移除条目的路径必经本函数）。 */
 export function persistQueue() {
     pruneDeniedEntries(); // W6-3：到期清理的统一执法点（一切落盘路径必经）
+    try {
+        if (entryConfirmEvidence.size > 0) {
+            const live = new Set(queueEntries.map(e => e.id));
+            for (const id of entryConfirmEvidence.keys()) {
+                if (!live.has(id))
+                    entryConfirmEvidence.delete(id);
+            }
+        }
+    }
+    catch {
+        /* 防御式：证据清扫故障绝不炸落盘主流程（残留行无安全语义 —— 条目已不在） */
+    }
     if (queueStorage === null)
         return { ok: true };
     try {
@@ -218,16 +281,31 @@ export function persistQueue() {
 }
 /** W2-1（H4）：grantDetailed 的裁决传播（旁路义务 —— 队列故障绝不炸审批主流程）。
  *  令牌在暂存后又被交互式 grant/deny ⇒ 在途条目同步裁决（amendment 同律铸入；
- *  Y-10 预算已在 grantDetailed 计费，此处不重复扣）。 */
+ *  Y-10 预算已在 grantDetailed 计费，此处不重复扣）。
+ *  ΠΑΝ-4（双通道双花封堵）：交互式 grant 的传播裁决为 'absorbed' 终态 ——
+ *  该份同意的执行载体就是交互令牌本尊（granted、TTL 内、beginAttempt→consume
+ *  验收式消费），队列条目进入不可再 takeGranted 的终态。旧实现传播为 granted
+ *  使同一份同意可经「交互令牌 + takeGranted 续跑令牌」两条通道各铸一枚执行
+ *  令牌 = 一次 Y-10 兑付两次不可逆派发，违反「一次同意恰一次兑现」的量化
+ *  承诺（C1-1 H3）。deny 传播不变（denied 本就是终态）。
+ *  ΠΑΝ-37（veto 撤销已批条目）：deny 传播的匹配域扩至 **granted** 在途条目 ——
+ *  用户对「已被 adjudicate 批准、正等续跑」的动作交互式喊停（grantDetailed
+ *  false）时，条目的 granted 裁决就地撤销改判 denied（F1-2 移交的残余窗口：
+ *  旧实现只传播 undecided 条目 ⇒ 已批条目在用户明确否决后仍可被 takeGranted
+ *  兑现）。grant 传播的匹配域不变（仅 undecided —— granted 条目是队列通道的
+ *  在途同意，不得被交互 grant 改写为 absorbed）。 */
 export function recordTokenDecision(token, granted, note) {
     try {
         ensureQueueLoaded();
-        const entry = queueEntries.find(e => e.token === token && e.decision === undefined);
+        // ΠΑΝ-37：deny 匹配 undecided ∪ granted（veto 撤销）；grant 匹配 undecided（ΠΑΝ-4）
+        const entry = queueEntries.find(e => e.token === token && (granted
+            ? e.decision === undefined
+            : (e.decision === undefined || e.decision.verdict === 'granted')));
         if (!entry)
             return;
         const now = qNow();
         entry.decision = {
-            verdict: granted ? 'granted' : 'denied',
+            verdict: granted ? 'absorbed' : 'denied',
             at: now,
             ...(note ? { amendment: castAmendmentFor(entry.description, note, now) } : {}),
         };
@@ -237,10 +315,49 @@ export function recordTokenDecision(token, granted, note) {
         /* 队列是审批的旁路：传播失败 = 条目留待批量裁决（保守方向） */
     }
 }
+/**
+ * ΠΑΝ-37：撤销已批条目（adjudicate veto 面的执法原语）—— 把目标 id（缺省全部）
+ * 中 verdict='granted' 的条目改判 denied 并落盘。调用方：adjudicate 工具的
+ * grant=false 臂（用户在晨报/队列面上明确喊停 ⇒ 已批未续跑的条目不得再被
+ * takeGranted 兑现）。'absorbed' 条目不撤（交互通道已物理执行，撤销无意义）；
+ * denied/undecided 不动（undecided 由随后的 adjudicate 正常裁决）。绝不抛。
+ */
+export function revokeGrantedEntries(ids) {
+    try {
+        ensureQueueLoaded();
+        const wanted = new Set(ids.filter(x => typeof x === 'string' && x.trim() !== ''));
+        const now = qNow();
+        let revoked = 0;
+        for (const e of queueEntries) {
+            if (e.decision?.verdict !== 'granted')
+                continue;
+            if (wanted.size > 0 && !wanted.has(e.id))
+                continue;
+            e.decision = { verdict: 'denied', at: now };
+            revoked++;
+        }
+        if (revoked > 0)
+            persistQueue();
+        return { revoked };
+    }
+    catch {
+        return { revoked: 0 }; // 防御式：撤销面故障 = 撤销数为 0（保守申报，绝不炸调用方）
+    }
+}
 /** 续跑执行令牌铸造：已授予（不扣 Y-10 —— 批量裁决时已扣）、amendment 随行、
- *  生命周期同常规铸造（V 纪元验收式消费照常执法）。 */
+ *  生命周期同常规铸造（V 纪元验收式消费照常执法）。
+ *  ΠΑΝ-36（F1-2 接线点③收尾）：续跑令牌继承原令牌的目标绑定 —— 原请求携带
+ *  macaroon 式 targetDigest 时（approval.request/mintBoundToken 铸入），续跑
+ *  令牌绑定**同一摘要**（不是重算：暂存语境的 actionShape.tool 可能是
+ *  'described-action'（非派发工具名），按它重算绑定会在续跑派发面制造确定性
+ *  target-mismatch；只有原令牌真携带的绑定才可继承 —— 无绑定 ⇒ 诚实缺席）。
+ *  ΠΑΝ-37（残余双花窗口闭合 · F1-2 移交）：续跑令牌铸造 = 原交互令牌的执行权
+ *  转移 —— 原令牌（entry.token）就地焚毁（pending 删除 + 绑定账离场），窄窗
+ *  内用户再交码交互式 grant 也不得武装第二条兑现通道（一次同意恰一次兑现）。 */
 export function mintResumedToken(entry) {
     const now = qNow();
+    // ΠΑΝ-36：先读原绑定再焚毁（焚毁会 forget 绑定账 —— 顺序即正确性）
+    const inheritedBinding = boundTargetOf(entry.token);
     const pa = {
         token: newToken(),
         description: entry.description,
@@ -255,7 +372,12 @@ export function mintResumedToken(entry) {
         ...(entry.decision?.amendment !== undefined ? { amendment: entry.decision.amendment } : {}),
         resumedFromQueue: entry.id,
     };
+    if (inheritedBinding !== undefined)
+        bindTokenTarget(pa.token, inheritedBinding);
     pending.set(pa.token, pa);
+    // ΠΑΝ-37：原交互令牌焚毁（执行权已转移给续跑令牌 —— 双通道双花的 take 面闭合）
+    pending.delete(entry.token);
+    forgetTokenTarget(entry.token);
     return pa.token;
 }
 /** 武装（幂等）：注入存储/时钟/超时（W8-B3 拆分缝 —— 原为 approvalQueue.arm
@@ -283,6 +405,8 @@ export function armQueueState(opts = {}) {
         queuePersistError = undefined;
         // W6-3：重新武装 = 新队列生命周期，累计清理数归零（跨进程续账由读档恢复）
         prunedDeniedTotal = 0;
+        // ΠΑΝ-1：人证证据随新生命周期归零（重新锚定须重新入队 —— 与条目账同律）
+        entryConfirmEvidence.clear();
     }
     catch {
         /* 武装失败 = 保持现状（阻塞审批原样 —— 诚实降级） */
@@ -322,4 +446,5 @@ export function resetQueueState() {
     queueEntries = [];
     queueLoaded = false;
     queuePersistError = undefined;
+    entryConfirmEvidence.clear(); // ΠΑΝ-1：人证证据归零
 }

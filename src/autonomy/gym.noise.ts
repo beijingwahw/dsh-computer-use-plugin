@@ -6,16 +6,28 @@
 // 噪声只坏「传感器读出」、世界 ground truth 分毫不动；三条独立种子流（fnv1a
 // 域分离永不串流）；脏值一律夹取收敛（GYM_NOISE_MAX_JITTER / GYM_NOISY_OCR_CONF
 // 单一事实源在此，世界铸造侧 gym.world.ts / gym.pcgWorld.ts 经导入消费）。
-import {
-  AutonomyGym,
-  castTask,
-  fnv1a,
-  KIND_ORDER,
-  mulberry32,
-  r2,
-  DEFAULT_MAX_STEPS,
-} from './gym';
-import type { GymTask, GymWorldKind } from './gym';
+// ΠΑΝ-127（D-F5 清偿）：rng 立法（fnv1a/mulberry32/r2）改自零出边叶 gym.rng.ts
+// 导入；AutonomyGym/DEFAULT_MAX_STEPS 与任务生立立法（castTask/KIND_ORDER——
+// w8gymsplit ②「export const KIND_ORDER」源级锁定不可搬）经端口注入
+//（noiseSweep 增收 ports 参数，注入方 = 桶 gym.ts 的公开包装 —— 原自桶回借
+// 构成桶-卫星 value 二环；类型面仍 type-import 自桶，type 边豁免）。行为零变化。
+import { fnv1a, mulberry32, r2 } from './gym.rng';
+import type { AutonomyGym, GymTask, GymWorldKind } from './gym';
+
+/**
+ * ΠΑΝ-127：noiseSweep 端口（训练营工厂 + 桶面立法的注入缝 —— 卫星不再回借
+ * 桶的类与常量；注入方 = gym.ts 公开包装，立法在源桶）。
+ */
+export interface GymSweepPorts {
+  /** 训练营构造工厂（观察式评估：runTasks 不喂进化引擎） */
+  createGym: (o: { seed: number; maxSteps: number }) => AutonomyGym;
+  /** 步数上限立法缺省（= gym.ts DEFAULT_MAX_STEPS，经包装注入） */
+  defaultMaxSteps: number;
+  /** 任务铸造核心（= gym.ts castTask —— 源级锁定留守桶，经包装注入） */
+  castTask: (index: number, kind: GymWorldKind, rng: () => number) => GymTask;
+  /** 四世界轮转立法（= gym.ts KIND_ORDER —— 源级锁定留守桶，经包装注入） */
+  kindOrder: readonly GymWorldKind[];
+}
 
 // ─── W1-4 病态感知诊所：噪声注入契约 ───
 //
@@ -197,18 +209,20 @@ const SWEEP_DEFAULT_MAX_ROUNDS = 48;
  * 用途：「完美感知下校准、噪声下退化」的可测量证据——固定策略在递增噪声档上
  * 的成功率单调性即诊所的分辨力。
  */
-export async function noiseSweep(opts: GymNoiseSweepOptions = {}): Promise<GymNoiseSweepResult> {
+export async function noiseSweep(opts: GymNoiseSweepOptions = {}, ports: GymSweepPorts): Promise<GymNoiseSweepResult> {
   const o = opts && typeof opts === 'object' ? opts : ({} as GymNoiseSweepOptions);
   const seedNum = Number(o.seed);
   const master = Number.isFinite(seedNum) ? Math.floor(seedNum) : SWEEP_DEFAULT_SEED;
   const msNum = Number(o.maxSteps);
-  const maxSteps = Number.isFinite(msNum) && msNum >= 1 ? Math.floor(msNum) : DEFAULT_MAX_STEPS;
+  // ΠΑΝ-127：立法缺省经端口注入（原直接回借 gym.ts DEFAULT_MAX_STEPS —— 拆环）
+  const maxSteps = Number.isFinite(msNum) && msNum >= 1 ? Math.floor(msNum) : ports.defaultMaxSteps;
   const rplNum = Number(o.roundsPerLevel);
   const roundsPerLevel = Number.isFinite(rplNum) && rplNum >= 1 ? Math.min(64, Math.floor(rplNum)) : SWEEP_DEFAULT_ROUNDS_PER_LEVEL;
   const capNum = Number(o.maxTotalRounds);
   const cap = Number.isFinite(capNum) && capNum >= 1 ? Math.min(4096, Math.floor(capNum)) : SWEEP_DEFAULT_MAX_ROUNDS;
 
   // 基线任务：显式 task 优先；否则按世界种类铸 difficulty 1 任务（castTask 同律）
+  // ΠΑΝ-127：castTask/KIND_ORDER 经端口注入（原直接回借 gym.ts 立法 —— 拆环）
   const explicitTask =
     o.task !== null && typeof o.task === 'object' ? (o.task as Partial<GymTask>) : null;
   const kind: GymWorldKind =
@@ -218,12 +232,12 @@ export async function noiseSweep(opts: GymNoiseSweepOptions = {}): Promise<GymNo
     explicitTask?.kind === 'danger-gate'
       ? explicitTask.kind
       : typeof o.kind === 'string' &&
-          (KIND_ORDER as readonly string[]).includes(o.kind)
+          (ports.kindOrder as readonly string[]).includes(o.kind)
         ? (o.kind as GymWorldKind)
         : 'wizard';
   const baseTask: GymTask = explicitTask
     ? (explicitTask as GymTask)
-    : castTask(0, kind, mulberry32(fnv1a(`w1-4:sweep:task:${master}`)));
+    : ports.castTask(0, kind, mulberry32(fnv1a(`w1-4:sweep:task:${master}`)));
 
   const rawLevels = Array.isArray(o.levels) ? o.levels : [];
   const points: GymNoiseSweepPoint[] = [];
@@ -256,7 +270,8 @@ export async function noiseSweep(opts: GymNoiseSweepOptions = {}): Promise<GymNo
             : baseTask,
         );
       }
-      const gym = new AutonomyGym({ seed: master, maxSteps });
+      // ΠΑΝ-127：训练营经端口工厂构造（原直接 new AutonomyGym 回借桶 —— 拆环）
+      const gym = ports.createGym({ seed: master, maxSteps });
       const results = await gym.runTasks(tasks);
       const successes = results.filter(r => r.success === true).length;
       const avgSteps =

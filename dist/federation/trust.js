@@ -364,4 +364,212 @@ export function resetTrustRuntime() {
     trustStore = null;
     trustFlushEvery = DEFAULT_TRUST_FLUSH_EVERY;
     trustMutations = 0;
+    revokedSources.clear(); // ΠΑΝ-74：撤销表一并复位（测试隔离缝；生产代码无理由调用）
+    revocationStore = null;
+}
+// ─── ΠΑΝ-74（新鲜度与撤销）：联邦源撤销表（revocation list —— 本地文件） ───
+//
+// 立法背景：Ed25519 验签只证「签名者持钥」，不证「该源仍被信任」—— 被检疫源
+// （连续吃票的指纹）与已知被 compromise 的客户端指纹需要一个**本地撤销通道**
+// （信任账的 1/(1+regressed) 是缓慢折减，撤销是立即出局）。设计：
+//   · 账面是模块级 Set（进程内即时生效）；持久化走可选的文件存储端口
+//     （armFederationRevocationList 武装 —— 原子写 tmp+fsync+rename，信任账
+//     createFederationTrustFileStore 同律）；缺省不武装 = 纯内存（重启即空，
+//     与信任账持久化同款纪律）。
+//   · 撤销键域 = 信任账同域的自由字符串：签名链路的 `endpoint#指纹`、裸
+//     endpoint、或纯指纹（调用方按自己的账键口径撤销；sync 侧对两者都查）。
+//   · 消费点在 sync.ts：验签后的指纹（或裸 endpoint）命中撤销表 ⇒ 该源按缺席
+//     剔除并计数 revokedSources —— 被撤销的源连中位数都进不了（比检疫票硬一档）。
+//   · 绝不抛：一切面防御式；撤销/恢复/落盘失败 = 诚实 false / 状态不变。
+/** ΠΑΝ-74：撤销档 schema 版本（版本错配 ⇒ 整档拒绝恢复） */
+export const FEDERATION_REVOCATION_STORE_VERSION = 1;
+/** 撤销表真值源（模块级 Set —— 进程生命周期；持久化可选武装） */
+const revokedSources = new Set();
+/** 已武装的撤销表存储端口（armFederationRevocationList 注入；null = 纯内存） */
+let revocationStore = null;
+/** ΠΑΝ-74：文件存储实现（原子写：tmp + fsync + rename —— 信任账同律，绝不抛） */
+export function createFederationRevocationFileStore(filePath) {
+    return {
+        load() {
+            try {
+                if (!filePath || !existsSync(filePath))
+                    return null;
+                const text = readFileSync(filePath, 'utf8');
+                return typeof text === 'string' && text.trim() !== '' ? text : null;
+            }
+            catch {
+                return null; // 读故障（含 ENOENT 竞态）= 无撤销档（诚实方向）
+            }
+        },
+        save(text) {
+            if (!filePath)
+                return { ok: false, error: 'revocation-store path is empty' };
+            const tmp = filePath + '.tmp';
+            try {
+                mkdirSync(path.dirname(filePath), { recursive: true });
+                const fd = openSync(tmp, 'w');
+                try {
+                    writeSync(fd, Buffer.from(text, 'utf8'));
+                    fsyncSync(fd);
+                }
+                finally {
+                    closeSync(fd);
+                }
+                renameSync(tmp, filePath); // 原子换名：要么完整旧档要么完整新档，绝无半档
+                return { ok: true };
+            }
+            catch (e) {
+                try {
+                    unlinkSync(tmp);
+                }
+                catch { /* tmp 可能未创建 */ }
+                return { ok: false, error: e instanceof Error ? e.message : String(e) };
+            }
+        },
+    };
+}
+/** ΠΑΝ-74：撤销一个联邦源（账键口径自由字符串：endpoint#指纹 / 裸 endpoint / 指纹）。
+ *  幂等；武装了持久化则立即落盘（撤销是安全事件，不走节流）。绝不抛。 */
+export function revokeFederationSource(sourceId) {
+    try {
+        if (typeof sourceId !== 'string' || sourceId === '')
+            return false;
+        revokedSources.add(sourceId);
+        if (revocationStore)
+            flushFederationRevocations();
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** ΠΑΝ-74：恢复一个被撤销的源（误撤销的补救通道；撤销面在内存立即可逆） */
+export function unrevokeFederationSource(sourceId) {
+    try {
+        if (typeof sourceId !== 'string' || sourceId === '')
+            return false;
+        revokedSources.delete(sourceId);
+        if (revocationStore)
+            flushFederationRevocations();
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** ΠΑΝ-74：源是否被撤销（缺省 false；绝不抛） */
+export function isFederationSourceRevoked(sourceId) {
+    try {
+        return typeof sourceId === 'string' && revokedSources.has(sourceId);
+    }
+    catch {
+        return false;
+    }
+}
+/** ΠΑΝ-74：撤销表快照（字典序防御副本 —— 观测面） */
+export function federationRevocationList() {
+    try {
+        return [...revokedSources].sort();
+    }
+    catch {
+        return [];
+    }
+}
+/** ΠΑΝ-74：撤销表序列化（落盘形态；字典序 ⇒ 同态同字节） */
+export function serializeFederationRevocations(now) {
+    let savedAt = Date.now();
+    if (typeof now === 'function') {
+        try {
+            const t = now();
+            if (Number.isFinite(t))
+                savedAt = t;
+        }
+        catch { /* 时钟故障保持 Date.now —— 绝不抛 */ }
+    }
+    const doc = {
+        v: FEDERATION_REVOCATION_STORE_VERSION,
+        savedAt,
+        revoked: federationRevocationList(),
+    };
+    return JSON.stringify(doc);
+}
+/** ΠΑΝ-74：防御恢复（垃圾归先验、绝不抛）—— 档整体替换内存撤销表；档级垃圾
+ *  （非对象/版本错配/revoked 非数组）⇒ 整档拒绝（内存表不动）。 */
+export function restoreFederationRevocations(payload) {
+    try {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return { restored: 0, skipped: 0, note: '撤销档非对象：整档拒绝（内存表不动）' };
+        }
+        const doc = payload;
+        if (doc.v !== FEDERATION_REVOCATION_STORE_VERSION) {
+            return { restored: 0, skipped: 0, note: `撤销档版本不符（期望 v=${FEDERATION_REVOCATION_STORE_VERSION}）：整档拒绝` };
+        }
+        if (!Array.isArray(doc.revoked)) {
+            return { restored: 0, skipped: 0, note: '撤销档 revoked 非数组：整档拒绝' };
+        }
+        let skipped = 0;
+        const next = new Set();
+        for (const raw of doc.revoked) {
+            if (typeof raw !== 'string' || raw === '') {
+                skipped++;
+                continue;
+            } // 垃圾键跳过
+            next.add(raw);
+        }
+        revokedSources.clear();
+        for (const k of next)
+            revokedSources.add(k);
+        return { restored: next.size, skipped };
+    }
+    catch {
+        return { restored: 0, skipped: 0, note: '恢复过程异常：整档拒绝（防御式兜底）' };
+    }
+}
+/** ΠΑΝ-74：武装撤销表持久化（幂等）。store 结构非法 ⇒ false（保持纯内存）。 */
+export function armFederationRevocationList(store) {
+    try {
+        if (!store || typeof store.load !== 'function' || typeof store.save !== 'function')
+            return false;
+        revocationStore = store;
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** ΠΑΝ-74：立即落盘撤销表（未武装 ⇒ ok:true + written:0 —— 纯内存是合法配置态） */
+export function flushFederationRevocations() {
+    try {
+        if (!revocationStore)
+            return { ok: true, written: 0 };
+        const text = serializeFederationRevocations();
+        const res = revocationStore.save(text);
+        if (res.ok)
+            return { ok: true, written: revokedSources.size };
+        return { ok: false, written: 0, error: res.error ?? 'save failed' };
+    }
+    catch (e) {
+        return { ok: false, written: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+}
+/** ΠΑΝ-74：从存储端口读档并恢复（生产接线的一步调用；档缺席/坏 JSON ⇒ 冷启动空表） */
+export function loadFederationRevocations(store) {
+    try {
+        if (!store || typeof store.load !== 'function') {
+            return { restored: 0, skipped: 0, note: '存储端口缺席：无持久化撤销表可恢复' };
+        }
+        const text = store.load();
+        if (text === null || text === '') {
+            return { restored: 0, skipped: 0, note: '无持久化档：冷启动空撤销表' };
+        }
+        try {
+            return restoreFederationRevocations(JSON.parse(text));
+        }
+        catch {
+            return { restored: 0, skipped: 0, note: '撤销档坏 JSON：整档拒绝（冷启动空表）' };
+        }
+    }
+    catch {
+        return { restored: 0, skipped: 0, note: '读档异常：整档拒绝（防御式兜底）' };
+    }
 }

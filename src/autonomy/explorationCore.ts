@@ -384,10 +384,29 @@ export interface ExplorationCandidate {
 /**
  * 候选生成（确定性序）：快照元素（interactive !== false，前 64 个）各铸一个
  * click 候选（区域 = 中心落格），随后全局轮换候选（scroll down / scroll up /
- * hotkey tab —— 区域 = 视口中心格）。建议动作一律 benign（探索是低风险增益）。
+ * hotkey tab —— 区域 = 视口中心格）。
+ * ΠΑΝ-61（探索步证据申报）：click 候选的 riskTier 不再一律自报 benign —— 按
+ * label 词法证据申报（危险词 ⇒ destructive〔宪法硬法恒审批〕/ 凭据风险词 ⇒
+ * sensitive / 干净 ⇒ benign），并对**无标签的未名元素**携带未知性标注
+ * （payload.exploration.unknown: true —— 闭环 ④ 相位转宪法 backgroundRisk
+ * 审计留痕）。「对未知元素的点击自我申报无害」违背诚实申报宪法的旧律就此
+ * 废止；全局轮换候选（scroll/hotkey tab）无可点词面，保持 benign。
  * W6-1：原 ExplorationLedger 私有方法 buildCandidates（零 this 引用）逐字节
- * 搬运为自由函数 —— 行为零变化。
+ * 搬运为自由函数 —— 行为零变化（ΠΑΝ-61 的申报面变更除外，见上）。
  */
+export function explorationEvidenceTier(label: string): 'benign' | 'sensitive' | 'destructive' {
+  try {
+    if (typeof label !== 'string' || label === '') return 'benign';
+    // 词表与 riskGate 缺省不可逆/凭据表同源（'' ⇒ 缺省词表 —— 与
+    // explorationRiskCostOf 同律），归一化匹配在 riskGate 内完成。
+    if (matchesDangerPatterns(label, '')) return 'destructive';
+    if (matchesRiskPatterns(label, '')) return 'sensitive';
+    return 'benign';
+  } catch {
+    return 'benign'; // 词法分层失败 = 无词法证据（旧律兜底）
+  }
+}
+
 export function buildExplorationCandidates(
   snapshot: WorldSnapshot | null | undefined,
   viewport: { width: number; height: number },
@@ -421,11 +440,20 @@ export function buildExplorationCandidates(
           },
           label,
         },
-        payload: { exploration: { region, modality: 'click', strategy } },
+        payload: {
+          exploration: {
+            region, modality: 'click', strategy,
+            // ΠΑΝ-61：未名元素的未知性标注（label 词面缺席 ⇒ 语义未知 —— 交宪法
+            // backgroundRisk 审计留痕，认识论闸门与审计面可见）
+            ...(label === '' ? { unknown: true } : {}),
+          },
+        },
         rationale: `W3-7 探索：${regionLabel(region)}探索度最低，以 click 探测元素「${label || '未名元素'}」`,
         expectedEffect: `「${label || '未名元素'}」被激活，${regionLabel(region)}产生新的世界证据`,
         utility: 0.45,
-        riskTier: 'benign',
+        // ΠΑΝ-61：证据申报 —— label 词法分层（危险 ⇒ destructive / 凭据 ⇒
+        // sensitive / 干净或未名 ⇒ benign），不再一律自报 benign
+        riskTier: explorationEvidenceTier(label),
       },
     });
   }

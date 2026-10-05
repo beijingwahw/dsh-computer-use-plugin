@@ -81,6 +81,14 @@ export interface ConstitutionContext {
   consecutiveNoEffect: number;
   /** 已执行步数 */
   stepsTaken: number;
+  /**
+   * ΠΑΝ-61（探索证据申报）：动作目标是**语义未知**的探索步（label 词面缺席、
+   * payload.exploration.unknown 标注在场）。true ⇒ 判决书 backgroundRisk 至少
+   * 'elevated' + reason 注记（审计留痕面 —— 探索的本义就是点「从没点过的
+   * 东西」，语义未知的点击不该在判决书上冒充已知晓的良性动作）。纯审计标注：
+   * 不顶格 tier、不改裁决（风险档仍由律②③的证据决定）。
+   */
+  unknownTarget?: boolean;
 }
 
 // ─── 常量与纯工具 ───
@@ -372,20 +380,28 @@ export class AutonomyConstitution {
       // ΑΩ-R43 审计标注（零行为）：goalText 自身的词族别 —— high = 命中不可逆词族；
       // elevated = 仅命中一般危险词表。动作面自带不可逆证据的路径判决逐字节冻结
       // （无字段、无注记）；goalText 干净 ⇒ 无字段无注记（判决形态与旧律一致）。
+      // ΠΑΝ-61：探索步的未知性标注（ctx.unknownTarget）⇒ 背景风险至少 'elevated'
+      //（语义未知的目标在判决书留痕 —— 纯审计，不顶格 tier）。
       const goalIrreversible = matchesDangerPatterns(goalText, irreversibleCsv);
       const backgroundRisk: 'elevated' | 'high' | undefined = goalIrreversible
         ? 'high'
         : matchesDangerPatterns(goalText, unionCsv)
           ? 'elevated'
-          : undefined;
+          : c.unknownTarget === true
+            ? 'elevated'
+            : undefined;
       const note = (reason: string): string =>
         actionIrreversible || backgroundRisk === undefined
           ? reason
           : appendNote(
               reason,
-              `ΑΩ-R43 背景风险 backgroundRisk=${backgroundRisk}（goalText 命中${
-                goalIrreversible ? '不可逆词族' : '危险词表'
-              }，已按旧律并入本步扫描面保守顶格，此标注仅供审计留痕）`,
+              `ΑΩ-R43 背景风险 backgroundRisk=${backgroundRisk}（${
+                goalIrreversible
+                  ? 'goalText 命中不可逆词族'
+                  : matchesDangerPatterns(goalText, unionCsv)
+                    ? 'goalText 命中危险词表'
+                    : 'ΠΑΝ-61 探索目标语义未知（unknown 标注）'
+              }，${goalIrreversible || matchesDangerPatterns(goalText, unionCsv) ? '已按旧律并入本步扫描面保守顶格' : '纯审计留痕不顶格'}，此标注仅供审计留痕）`,
             );
       const backgroundRiskField: { backgroundRisk?: 'elevated' | 'high' } =
         actionIrreversible || backgroundRisk === undefined ? {} : { backgroundRisk };

@@ -11,7 +11,7 @@
 import * as backend from '../physicalBackend';
 import { getSharp } from '../_legacyDeps';
 import { dhash } from '../perceptualHash';
-import { readText } from '../textReader';
+import { readText, readTextAny } from '../textReader';
 import { getGlmClient, isGlmConfigured, type GlmClient } from '../vlm/glmClient';
 import { groundElements } from '../vlm/grounding';
 import type { GroundedElement } from '../vlm/grounding';
@@ -20,6 +20,9 @@ import { composeSnapshot, snapshotChanged, type WorldSnapshot } from './worldSna
 import { SceneSemanticsCache } from './sceneSemantics';
 import { kernelRegistry } from '../kernel/registry';
 import { contextManager } from '../contextManager';
+// ΠΑΝ-57（生产 popup 供方）：popupDetector 的纯函数面 —— 几何启发式 + 施密特
+// 迟滞滤波器（src 根既有器官，import 零环：popupDetector 不依赖 autonomy）。
+import { detectPopupHeuristic, SchmittPopupFilter } from '../popupDetector';
 // W4-1（顺带接线）：增量账本消费 —— ScreenStateLedger.ingest → deliverIncremental
 import { ScreenStateLedger, incrementalEncodingEnabled } from '../visualDiff';
 import { deliverIncremental, type IncrementalDelivery } from '../imageDelivery';
@@ -68,9 +71,22 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
         return null; // 指纹失败 = 无指纹（快照 degraded 记 'dhash'）
       }
     });
-  const readWords = deps.readWords ?? makeDefaultReadWords(deps.ocrLang);
+  const readWords = deps.readWords ?? makeDefaultReadWords(deps.ocrLang, { serverFirst: deps.ocrServerFirst === true });
   const groundVlm = deps.groundVlm ?? makeDefaultGroundVlm(deps.client, deps.verifyTaskId);
   const now = deps.now ?? ((): number => Date.now());
+  // ΠΑΝ-57（生产 popup 供方）：弹窗注记通道 —— 显式注入端口优先（离线测试生命
+  // 线）；缺席且 popupKeywords 词表在场（buildAutonomyStack 以 config.enableOcr
+  // 门控铸入，缺省关 ⇒ 缺席 ⇒ 感知行为与接线前逐字节一致）⇒ 缺省供方：
+  // popupDetector 几何启发式 + 全帧 OCR 词证（语义通道复用本帧已跑的 OCR 全文
+  // —— 零二次 OCR）+ 施密特迟滞滤波（**本感知工厂私有实例** —— 不与
+  // take_screenshot 的模块级单例互喂，两条观察流各自记账互不污染）。迟滞 ON ⇒
+  // 快照 popups 产注记（策略①弹窗优先律与免看门控的弹窗红线自此在生产可达）。
+  const popupNotesPort: ((buf: Buffer, ocrText: string) => Promise<string[] | null>) | null =
+    typeof deps.popupNotes === 'function'
+      ? deps.popupNotes
+      : typeof deps.popupKeywords === 'string' && deps.popupKeywords.trim() !== ''
+        ? makeDefaultPopupNotes(deps.popupKeywords)
+        : null;
   // 纪元 Η（Η-5 感知缓存接线）：Φ-6 场景语义读屏缓存 —— dhash 相同（汉明距离 ≤ 容差）
   // 的屏在 TTL 内零重拨（内建 LRU-16）。离线（未注入 client 且未配置 GLM）时 read
   // 立即诚实降级：零网络、零编码、sceneLabel 保持 ''，与接线前逐字节同行为。
@@ -121,6 +137,21 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
       }));
     const ocrText = words.map(w => (typeof w.label === 'string' ? w.label : '')).filter(Boolean).join(' ');
 
+    // ΠΑΝ-57（生产 popup 供方）：弹窗注记生产 —— 通道在场才跑（缺席 ⇒ 本段
+    // 整跳过，感知行为与接线前逐字节一致）；供方任何故障 ⇒ null 降级（弹窗是
+    // 感知增益不是依赖，绝不拖垮主感知 —— 次级传感器纪律）。
+    let popupNotes: string[] | null = null;
+    if (popupNotesPort !== null) {
+      try {
+        const notes = await popupNotesPort(buf, ocrText);
+        if (Array.isArray(notes)) {
+          popupNotes = notes.filter((n): n is string => typeof n === 'string' && n !== '');
+        }
+      } catch {
+        popupNotes = null; // 供方故障吞掉 —— 诚实缺席
+      }
+    }
+
     // 纪元 Η（Η-5）：同屏语义复用 —— 指纹在场才读（无键不读，dhash 相同直接命中
     // 缓存语义）；失败/降级零影响（sceneLabel 维持缺省 ''）。ΝΩ-14：屏未变时
     // 此读走 sceneSemantics 组合键缓存命中（零 VLM 零编码），与 grounding 门控
@@ -152,6 +183,9 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
       dhash: fingerprint,
       localElements,
       ocrText,
+      // ΠΑΝ-57：弹窗注记入快照（迟到于 0 步的弹窗在场证据 —— 策略①级与免看
+      // 门控红线的生产供血；缺席 ⇒ 键不入场，composeSnapshot 行为同旧律）
+      ...(popupNotes !== null && popupNotes.length > 0 ? { popupNotes } : {}),
       ...(sceneLabel !== '' ? { sceneLabel } : {}),
       now: now(),
     };
@@ -204,12 +238,21 @@ export function createPerceive(deps: RuntimeDeps = {}): () => Promise<WorldSnaps
   };
 }
 
-/** 缺省词级 OCR：textReader.readText（归一化 bbox → 像素换算，confidence/100 夹 [0,1]） */
+/**
+ * 缺省词级 OCR（textReader 双路径）：legacy readText（归一化 bbox → 像素换算，
+ * confidence/100 夹 [0,1]）。
+ * ΠΑΝ-58（OCR 接线）：opts.serverFirst === true ⇒ 先走 readTextAny 的服务端
+ * L2 路径（服务端自截读屏 —— region 缺省全屏，bbox_normalized 即全屏归一域，
+ * 与本帧捕获图同域换算）；服务端/链路失败 ⇒ 诚实回退 legacy 直读传入 buf
+ * （行为与旧缺省逐字节一致）。缺席/关 ⇒ legacy 直读（零回归红律）。
+ * 服务端词置信刻度（0-100）与 tesseract 同域 —— /100 夹取律共用。
+ */
 export function makeDefaultReadWords(
   lang: string | undefined,
+  opts?: { serverFirst?: boolean },
 ): (buf: Buffer) => Promise<RuntimeWord[]> {
+  const langUse = typeof lang === 'string' && lang.trim() !== '' ? lang : 'eng';
   return async (buf: Buffer): Promise<RuntimeWord[]> => {
-    const result = await readText(buf, typeof lang === 'string' && lang.trim() !== '' ? lang : 'eng');
     const meta = await (async (): Promise<{ width: number; height: number }> => {
       const sharp = await getSharp();
       const m = await sharp(buf).metadata();
@@ -217,6 +260,29 @@ export function makeDefaultReadWords(
     })();
     const W = meta.width > 0 ? meta.width : 1;
     const H = meta.height > 0 ? meta.height : 1;
+    if (opts?.serverFirst === true) {
+      try {
+        const r = await readTextAny(undefined, langUse);
+        if (r && Array.isArray(r.words)) {
+          return r.words.map(w => {
+            const b = w.bbox_normalized ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
+            return {
+              label: w.text,
+              bbox: {
+                x0: Math.round(clamp01(b.x0) * W),
+                y0: Math.round(clamp01(b.y0) * H),
+                x1: Math.round(clamp01(b.x1) * W),
+                y1: Math.round(clamp01(b.y1) * H),
+              },
+              confidence: clamp01((typeof w.confidence === 'number' && Number.isFinite(w.confidence) ? w.confidence : 0) / 100),
+            };
+          });
+        }
+      } catch {
+        // 服务端/双路径链失败 ⇒ 回退 legacy 直读传入 buf（诚实降级）
+      }
+    }
+    const result = await readText(buf, langUse);
     return result.words.map(w => {
       const b = w.bbox_normalized ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
       return {
@@ -230,6 +296,53 @@ export function makeDefaultReadWords(
         confidence: clamp01((typeof w.confidence === 'number' && Number.isFinite(w.confidence) ? w.confidence : 0) / 100),
       };
     });
+  };
+}
+
+/**
+ * ΠΑΝ-57（生产 popup 供方）：缺省弹窗注记供方 —— popupDetector 的双模证据 +
+ * 施密特迟滞滤波，铸成 (buf, ocrText) ⇒ string[] | null 端口形态。
+ *  · 几何通道：detectPopupHeuristic（弹窗几何特征 —— 纯函数，frameId 语义通道
+ *    不消费故传 null）；
+ *  · 语义通道：词表（popupKeywords CSV）对**全帧 OCR 语料**的子串命中 —— 复用
+ *    感知链本帧已跑的 OCR（popupDetector 语义通道的中央带裁剪读是 take_screenshot
+ *    侧的方言；此处全帧语料是其中央带的超集，零二次 OCR）；
+ *  · 滤波：SchmittPopupFilter 私有实例（per 感知工厂）—— 单帧强证据立即 ON、
+ *    单帧清洁不立即 OFF（迟滞带），与 take_screenshot 的模块级单例互不喂账。
+ * 迟滞 active ⇒ 返回一句注记（含证据通道与信念后验）；inactive ⇒ null
+ * （不产注记 —— 弹窗不在场不是证据）。任何通道故障 ⇒ null（诚实缺席）。
+ */
+export function makeDefaultPopupNotes(
+  keywordsCsv: string,
+): (buf: Buffer, ocrText: string) => Promise<string[] | null> {
+  const keywords = (typeof keywordsCsv === 'string' ? keywordsCsv : '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(s => s !== '');
+  const filter = new SchmittPopupFilter();
+  return async (buf: Buffer, ocrText: string): Promise<string[] | null> => {
+    try {
+      const geometric = await detectPopupHeuristic(null, buf && buf.length > 0 ? buf : null);
+      const hay = typeof ocrText === 'string' ? ocrText.toLowerCase() : '';
+      const matched: string[] = [];
+      for (const kw of keywords) {
+        if (hay.includes(kw)) matched.push(kw);
+        if (matched.length >= 3) break; // 证据上限与 popupDetector 同律（锚点不因词表膨胀）
+      }
+      const { belief, active } = filter.update({
+        geometric,
+        semantic: matched.length > 0,
+      });
+      if (!active) return null;
+      const via = matched.length > 0
+        ? `语义词证 ${matched.join('/')}`
+        : geometric
+          ? '几何证据'
+          : '迟滞保持（前帧证据在带内）';
+      return [`弹窗在场（${via}，belief ${belief}）`];
+    } catch {
+      return null; // 供方故障 ⇒ 诚实缺席（弹窗是感知增益不是依赖）
+    }
   };
 }
 

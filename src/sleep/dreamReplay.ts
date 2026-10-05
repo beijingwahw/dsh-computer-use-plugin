@@ -125,8 +125,15 @@ export interface DreamReplayEntry {
    *  立法：步序不是裕量 —— 账本 margin 通道不再装步序（防 calibrator 把步序学
    *  成判决边距的伪结构）；步序在梦侧注记备查，margin 通道留给未来的真裕量。 */
   cfLedger?: { key: string; divergenceStep: number };
-  /** 反事实教训（重放成功且历史失败 ⇒ 在场；进晨报） */
+  /** 反事实教训（重放成功且历史失败 ⇒ 在场；进晨报）。
+   *  ΠΑΝ-113（语义降格）：教训是**提示性启发**（heuristic），不是硬规则 ——
+   *  证据强度 = 单条轨迹 × 单座同构（PCG 文法）世界 × 单次重放（n=1、合成
+   *  世界、输入冻结），lessonKind 恒 'heuristic' 与文案强度对齐；消费方
+   *  （晨报/进化面）不得当规定性规则执行。 */
   lesson?: string;
+  /** ΠΑΝ-113：教训的证据强度标注（lesson 在场 ⇒ 恒 'heuristic' —— 同构世界
+   *  单次重放的证据等级；结构化面供消费方编程判读，不靠文案解析） */
+  lessonKind?: 'heuristic';
   /** ΑΩ-R40：预算感知选梦标记（'short' = PER 队首装不下而本条为装得下的最短梦
    *  —— PER 序让位的审计面；缺席 = PER 序正常取队首） */
   pick?: 'short';
@@ -143,8 +150,12 @@ export interface DreamReplayReport {
   replayed: number;
   successes: number;
   divergences: number;
-  /** 反事实教训清单（重放成功而历史失败 —— 晨报消费面） */
+  /** 反事实教训清单（重放成功而历史失败 —— 晨报消费面）。
+   *  ΠΑΝ-113：教训恒为提示性启发（heuristic）—— lessonMeta 逐条携带证据
+   *  强度标注（kind/evidence/sample），消费方编程判读「这不是硬规则」。 */
   lessons: string[];
+  /** ΠΑΝ-113：教训元数据（与 lessons 逐条平行 —— 结构化的证据强度面） */
+  lessonMeta: Array<{ kind: 'heuristic'; evidence: 'isomorphic-world-replay'; sample: number }>;
   entries: DreamReplayEntry[];
   budget: { maxDreams: number; maxStepsPerDream: number; truncated: boolean; reason: 'none' | 'count' | 'time' };
   /** 实验室 kernel 证据摘要（现有 lab 记账通道的产出对账面） */
@@ -367,7 +378,8 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
     report: {
       watermark: '',
       attempted: 0, replayed: 0, successes: 0, divergences: 0,
-      lessons: [], entries: [],
+      lessons: [], lessonMeta: [],
+      entries: [],
       budget: { ...resolveDreamBudget(deps?.budget), truncated: false, reason: 'none' },
       kernelEvidence: [],
     },
@@ -443,6 +455,9 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
 
     const entries: DreamReplayEntry[] = [];
     const lessons: string[] = [];
+    // ΠΑΝ-113：教训元数据（与 lessons 平行 —— 恒 heuristic：单条轨迹 × 单座
+    // 同构世界 × 单次重放的证据等级）
+    const lessonMeta: DreamReplayReport['lessonMeta'] = [];
     let replayed = 0;
     let successes = 0;
     let divergences = 0;
@@ -588,14 +603,21 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
           entry.note = 'evolution 面缺席 —— EXP4 双写缺席（诚实注记）';
         }
         // 反事实教训：重放成功而历史失败（失败轨迹恒历史失败 —— 梦的全部前提）
+        // ΠΑΝ-113（语义降格）：教训文案与证据强度对齐 —— 同构世界单次重放
+        // （n=1、PCG 合成世界、输入冻结）产出的只是**提示性启发**，不是
+        // 「重试前优先/勿原样重试」的规定性规则（旧文案的强度超出证据等级，
+        // 消费方会当硬规则执行）。lessonKind='heuristic' 结构化标注 + 文案
+        // 降格双面执法。
         if (replayView.success) {
           const histKind = s.t.history?.[divergence]?.kind ?? '?';
           const replayKind = strategies[divergence] ?? '?';
           const lesson =
-            `反事实教训：任务「${s.t.query.slice(0, 60)}」第 ${divergence + 1} 步的决策「${histKind}」在同构世界（指纹 ${entry.world.fingerprint.slice(0, 12)}、seed ${entry.world.seed}）本可被纠正 —— ` +
-            `当前策略改走「${replayKind}」后重放成功（${replayView.steps} 步）；同类场景重试前优先考虑 ${replayKind}，勿原样重试 ${histKind}。`;
+            `反事实教训（heuristic —— 提示性参考，非硬规则）：任务「${s.t.query.slice(0, 60)}」第 ${divergence + 1} 步的决策「${histKind}」在同构世界（指纹 ${entry.world.fingerprint.slice(0, 12)}、seed ${entry.world.seed}）本可被纠正 —— ` +
+            `当前策略改走「${replayKind}」后重放成功（${replayView.steps} 步）。同类场景可考虑尝试 ${replayKind}（证据强度：单次同构世界重放，样本 n=1 —— 仅供参考，请结合现场判断，勿机械套用）。`;
           entry.lesson = lesson;
+          entry.lessonKind = 'heuristic';
           lessons.push(lesson);
+          lessonMeta.push({ kind: 'heuristic', evidence: 'isomorphic-world-replay', sample: 1 });
         }
       }
       entries.push(entry);
@@ -630,6 +652,7 @@ export async function runDreamReplay(deps: DreamReplayDeps): Promise<DreamReplay
         successes,
         divergences,
         lessons,
+        lessonMeta,
         entries,
         budget: { ...budget, truncated, reason },
         kernelEvidence,

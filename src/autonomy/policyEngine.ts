@@ -74,6 +74,13 @@ export interface PolicyContext {
   history: Array<{ action: PolicyAction; outcome: StepOutcome }>;
   skills?: Array<{ id: string; description: string; reliability: number }>;
   budgetRemaining?: { steps: number; ms: number };
+  /**
+   * ΠΑΝ-60（多 pilot 隔离）：本决策所属的 pilot 域键（非空串 ⇒ 破平带的评分
+   * 上下文携带该键，世界模型只读面回落按域取接线；缺席 ⇒ 最近登记域 —— 单
+   * pilot 语义零回归）。由闭环驱动器（autoPilot policyDecide）从 deps.pilotId
+   * 透传；不设此键的既有调用方逐字节不变。
+   */
+  pilotId?: string;
 }
 
 /** 一次裁决的产出：动作 + 置信/降级标记（note 记录云脑裁决或回退原因） */
@@ -105,7 +112,8 @@ export interface PolicyEngineOptions {
 export { extractGoalKeywords } from './policyEngineUtil';
 import {
   BUDGET_MS_LOW, BUDGET_STEPS_LOW, MATCH_CONFIDENT, POPUP_CONFIRM_RE, TIE_GAP, VLM_CANDIDATE_CAP,
-  buildCandidates, buildPickPrompt, breakTieBand, candidatesToActions, classifyClickRisk, clamp01,
+  buildCandidates, buildPickPrompt, breakTieBand, candidatesToActions, centerInPopupHabitat,
+  classifyClickRisk, clamp01,
   composeTypeOrDragAction, detectStagnation, digestHas, extractGoalKeywords, nextSwitchKind,
   normalizeWs, round2, skillOverlap, tokenizeCached, unmetCriteria,
 } from './policyEngineUtil';
@@ -225,12 +233,18 @@ export class PolicyEngine {
       const goalText = typeof spec.goal === 'string' ? spec.goal : '';
 
       // ① 弹窗优先：弹窗遮挡下的其余决策都不可信，先恢复主界面
+      // ΤΕΛ-5 D-G22（弹窗确认点击限定）：确认类元素还须落弹窗栖息地（中央 40%
+      // 带 —— popupDetector 同一几何先验，popupHabitatNorm 单源方言）。弹窗注记
+      // 无真 bounds，此为诚实代位：弹窗外任意同词位置（主界面角落的「确定/是」）
+      // 不再被点击；栖息地外/几何缺席 ⇒ 无确认候选 ⇒ 退 Esc（benign，fail-closed
+      // 方向：宁可取消也不点未知目标）。
       if (popups.length > 0) {
         const popupName = popups[0];
         const confirmEl = elements
           .filter(
             e => e.interactive !== false && POPUP_CONFIRM_RE.test(normalizeWs(e.label)),
           )
+          .filter(e => centerInPopupHabitat(e, snapshot.width, snapshot.height))
           .sort((a, b) => clamp01(b.confidence) - clamp01(a.confidence))[0];
         if (confirmEl) {
           return {
@@ -272,6 +286,8 @@ export class PolicyEngine {
         spec,
         snapshot,
         history,
+        // ΠΑΝ-60：pilot 域键透传（世界模型回落按域取接线；缺席 ⇒ 旧律）
+        typeof ctx?.pilotId === 'string' && ctx.pilotId !== '' ? ctx.pilotId : undefined,
       );
       // ΝΩ-10（候选透出）：② 级裁决随行携带排名候选（岔路账消费面，其余级缺席）
       const candidateActions = candidatesToActions(candidates);

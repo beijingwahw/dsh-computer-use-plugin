@@ -315,6 +315,21 @@ class Notary {
             return { status: 'red', detail: `journal chain broken at entry ${v.brokenAt} — history tampered (add/delete/modify)` };
         });
         // ② MMR 在册：末锚覆盖的最后一条 journal 条目铸造包含证明并验证（免整链重放 —— O(log n)）
+        // ΠΑΝ-51（驱逐边界双错判修复）：旧判据用 entries.length 与 last.seq 的相对大小
+        // 猜「静止/增长世界」，在容量驱逐边界有两个相反错判（C1-9 H3）：
+        //   · 驱逐+回长（锚 seq=500，灌满驱逐回长到 1000 > 500）⇒ 误走增长分支：对
+        //     **当前存活** index 499（早已是另一条全局条目）铸证对当前根验证 ⇒ 任何
+        //     存活叶恒绿（空洞绿 —— 被锚条目根本不在窗口，恰好盖住 ΝΩ-21 要堵的攻击面）；
+        //   · 满容锚定后等长回长（锚 seq=1000=容量，任一新条驱逐一条、长度仍 1000）
+        //     ⇒ 误走静止分支：对回长段的新末条以**旧锚根**验证 ⇒ 必败恒红（误报篡改）。
+        // 根因：锚的 mmrRoot 盖的是「锚定时刻的存活叶袋」，驱逐把存活窗口→全局序号的
+        // 映射销毁后，旧锚对回长段（新前缀）既不可证绿也不可证红。修复语义：章②的
+        // 判据锚定锚记录时刻的链状态 —— 链基（chainBase）前滚即驱逐事实（与 ③-b 同一
+        // 判据源），base ≠ GENESIS ⇒ 诚实 n/a（被锚条目的在册性不可判，取证面移交
+        // 磁盘 JSONL / journalDisk 旁链，并提示重新锚定开新前缀）；base = GENESIS ⇒
+        // 映射精确，静止/增长分支语义照旧。length < seq 且 base=GENESIS ⇒ 未驱逐却
+        // 变少 = 账本被清空/回滚（与 ③-b 同判：红，而非旧的「驱逐」n/a —— 未驱逐时
+        // 该形态只有回滚一种解释，旧注记把回滚误标成驱逐）。
         guard('mmr-membership', () => {
             const last = this.anchors.at(-1);
             if (!last)
@@ -322,8 +337,16 @@ class Notary {
             if (last.seq === 0)
                 return { status: 'n/a', detail: 'anchor covers an empty journal (seq=0) — no entry to include' };
             const entries = ledger.entries();
+            const base = ledger.base(); // ΠΑΝ-51：驱逐事实的判据源（链基前滚 = 驱逐发生过）
+            if (base !== 'GENESIS') {
+                return {
+                    status: 'n/a',
+                    detail: `journal capacity eviction advanced the chain base — the anchored entry's liveness in the regrown window is not determinable (the anchor's MMR root covers the leaf bag AT ANCHOR TIME; a regrown prefix is a new prefix the old anchor can neither prove green nor red). Membership forensics live on the disk JSONL / journalDisk aux chain; mint a fresh anchor to re-attest the current prefix (live ${entries.length} entries, anchor seq ${last.seq})`,
+                };
+            }
             if (entries.length < last.seq) {
-                return { status: 'n/a', detail: `anchored entry #${last.seq - 1} evicted from the live window (${entries.length} entries left) — membership forensics live on the disk JSONL` };
+                // ΠΑΝ-51：base=GENESIS（驱逐从未发生）却条数少于誓言 ⇒ 唯一解释是清空/回滚
+                return { status: 'red', detail: `journal holds ${entries.length} entries but the anchor swears over ${last.seq} with no eviction on record (chainBase=GENESIS) — ledger rolled back or reset below the anchored watermark` };
             }
             const proof = ledger.mmrProof(last.seq - 1);
             if (!proof) {
@@ -346,8 +369,13 @@ class Notary {
         //    重算比对（注记级 —— 沙箱账本可经 opts.sandboxLedger 注入，缺省自动发现
         //    沙箱单例；与重放章④共享同一注入面）。ΝΩ-21：journalDisk 旁链同段重算
         //    （opts.journalDiskPath 注入优先，缺省 configure 登记路径）；genTime 与
-        //    anchoredAt 的 |Δ| ≤ 1h 校验同章注记（genTime-skew —— 注记级不翻章）。
-        guard('timestamp-anchor', () => this.verifyTimestampAnchor(ledger, opts.sandboxLedger, opts.journalDiskPath !== undefined ? opts.journalDiskPath : this.diskPath));
+        //    anchoredAt 的 |Δ| ≤ 1h 校验同章注记（genTime-skew）。
+        //    ΠΑΝ-53（分级执法）：TSA 签名验证失败 / pin 不命中 ⇒ 章③ **degraded 黄章**
+        //    （不再注记级不翻 —— 绑定事实在场、背书维度如实降级）；时间回拨
+        //    （genTime 与本地钟偏差超阈且倒退）⇒ 注记 + 顶层 clockRollback 字段披露；
+        //    disk/aux 漂移保持注记级（锚定 ≠ 内容为真的保守取舍不动）。
+        const tsNotes = { clockRollback: null };
+        guard('timestamp-anchor', () => this.verifyTimestampAnchor(ledger, opts.sandboxLedger, opts.journalDiskPath !== undefined ? opts.journalDiskPath : this.diskPath, tsNotes));
         // ④ 重放一致性（Χ 纪元升级：Π 的 n/a 承诺兑现为可执法的三态）。沙箱段在
         //    场 ⇒ 确定性重放逐位执法；真机段保持诚实 n/a（世界不可复现）；旧格式
         //    无指纹 ⇒ n/a(legacy)。attestReplayConsistency 自身永不抛 —— guard 双保险
@@ -382,6 +410,8 @@ class Notary {
             badges,
             anchors: this.anchors.length,
             anchorCadence,
+            // ΠΑΝ-53：时间回拨的顶层披露（章③检测面透传 —— 不读 detail 的下游可见）
+            clockRollback: tsNotes.clockRollback,
             lastAnchor: last ? {
                 seq: last.seq,
                 chainTip: last.chainTip,
@@ -407,8 +437,10 @@ class Notary {
     }
     /** 章③实现：三段核验 —— 任一段硬失败 ⇒ 红；前缀重走不可得（驱逐）⇒ 整章诚实 n/a；
      *  ΑΩ-R42 追加 ③-d 旁链重算比对（注记级 —— 绝不翻红，判据论证见该段注释）；
-     *  ΝΩ-21 追加 journalDisk 旁链重算（同 ③-d 段）与 genTime 偏差注记（③-c 段） */
-    verifyTimestampAnchor(ledger, sandboxLedger, journalDiskPath) {
+     *  ΝΩ-21 追加 journalDisk 旁链重算（同 ③-d 段）与 genTime 偏差注记（③-c 段）。
+     *  ΠΑΝ-53：tsNotes 是章③的顶层披露面（时间回拨检测经此透传到 NotaryReport.
+     *  clockRollback）；TSA 签名失败/pin 不命中 ⇒ 章③ degraded（黄）。 */
+    verifyTimestampAnchor(ledger, sandboxLedger, journalDiskPath, tsNotes) {
         if (this.anchors.length === 0) {
             return { status: 'n/a', detail: 'no anchors on the notarial chain' };
         }
@@ -558,8 +590,16 @@ class Notary {
         // imprint/nonce（零网络 —— 回执是留存物证，复核不依赖 TSA 在线；token 是
         // ContentInfo 不含 PKIStatusInfo —— 信封级结论在领取时已下，此处只核物证）
         // ΑΩ-R5：物证核验升级为两维度 —— 绑定（imprint+nonce，既有判据不动）+
-        // TSA 签名判决（signatureVerified，注记/报告如实上报、保守不翻红）
+        // TSA 签名判决（signatureVerified）
+        // ΠΑΝ-53（分级执法）：签名维度自此分级 —— signatureVerified=false（验过而败
+        // ⇒ 第三方背书未证/伪造嫌疑）与 'unpinned-key'（签名数学成立但签名者不在
+        // pin 表 ⇒ 信任锚拒绝）⇒ 章③ degraded 黄章；'unsupported-alg'/
+        // 'unparseable'（没验成的诚实边界）保持注记（无证据不降级）。判绿只认 true
+        // 的铁律不动 —— degraded ≠ 绿；黄 ≠ 红（不指控篡改 —— 绑定维度仍绿）。
+        // 时间回拨：genTime 与 anchoredAt 偏差超容差且倒退（genTime 落后本地钟 ⇒
+        // 本地钟被回拨/前拨的时钟证据）⇒ 注记 + tsNotes.clockRollback 顶层披露。
         let sawRfc = false;
+        let degradedSig = null;
         for (let i = 0; i < this.anchors.length && !red; i++) {
             const a = this.anchors[i];
             if (a.timestamp.source !== 'rfc3161')
@@ -590,15 +630,21 @@ class Notary {
                 details.push(`anchor #${i}: token imprint+nonce re-verified offline (receipt on record)`);
                 // ΝΩ-21：genTime 执法 —— TSA 权威时刻（token 内被签的 GeneralizedTime）与
                 // 锚本地钟 anchoredAt 的偏差校验（容差 GEN_TIME_SKEW_TOLERANCE_MS = 1h）。
-                // 注记级不翻章（保守取舍，与 signatureVerified/aux-chain-drift 同律）：超差
-                // 否定的是「TSA 钟与本地钟一致」这一新增旁证维度，不是物证绑定本身 —— 翻红
-                // 等于用新证据改判旧罪。失败绝不静默：genTime-skew 注记 + 报告 lastAnchor.
-                // genTime 字段透传，下游可独立执法。genTime 不可提取 ⇒ 诚实 n/a 注记。
+                // 注记级不翻章（保守取舍）：超差否定的是「TSA 钟与本地钟一致」这一新增
+                // 旁证维度，不是物证绑定本身 —— 翻红等于用新证据改判旧罪。失败绝不静默：
+                // genTime-skew 注记 + 报告 lastAnchor.genTime 字段透传，下游可独立执法。
+                // ΠΑΝ-53：偏差超容差**且方向为倒退**（genTime 落后 anchoredAt ⇒ 本地钟被
+                // 回拨/前拨的时钟证据）⇒ 另经 tsNotes.clockRollback 顶层披露（不读 detail
+                // 的下游不再盲区）。genTime 不可提取 ⇒ 诚实 n/a 注记。
                 const genTime = verified.genTime ?? null;
                 if (genTime !== null) {
                     const skew = genTime - a.timestamp.anchoredAt;
                     if (Math.abs(skew) > GEN_TIME_SKEW_TOLERANCE_MS) {
                         details.push(`anchor #${i}: genTime-skew — TSA genTime ${new Date(genTime).toISOString()} vs anchoredAt ${new Date(a.timestamp.anchoredAt).toISOString()} (|Δ| ${Math.round(Math.abs(skew) / 60000)} min > ${GEN_TIME_SKEW_TOLERANCE_MS / 60000} min tolerance); badge criteria unchanged (reported, downstream may enforce)`);
+                        // ΠΑΝ-53：倒退方向的超差 = 时间回拨证据 —— 顶层 verdict 字段披露
+                        if (skew < 0 && tsNotes && tsNotes.clockRollback === null) {
+                            tsNotes.clockRollback = { anchorIndex: i, genTime, anchoredAt: a.timestamp.anchoredAt, skewMs: skew };
+                        }
                     }
                     else {
                         details.push(`anchor #${i}: TSA genTime ${new Date(genTime).toISOString()} within ±${GEN_TIME_SKEW_TOLERANCE_MS / 60000}min of anchoredAt (skew ${skew >= 0 ? '+' : ''}${Math.round(skew / 1000)}s)`);
@@ -607,23 +653,27 @@ class Notary {
                 else {
                     details.push(`anchor #${i}: genTime not extractable from the retained token (non-CMS shape or malformed TSTInfo) — honest n/a`);
                 }
-                // ΑΩ-R5：签名判决如实入注记 —— 保守取舍：signatureVerified=false 不翻红章。
-                // 理由：① 章③既有判据是「物证绑定」（imprint+nonce 对上 = 回执在册且绑定
-                // 本锚）—— 签名失败否定的是「TSA 背书」这一新增维度，不是绑定事实本身，
-                // 翻红等于用新证据改判旧罪（既有时序下的锚不因此变伪证）；② 判绿只认
-                // true —— false/边界值都进 detail 与报告字段（lastAnchor.signatureVerified），
-                // 失败绝不被静默，下游（宿主/外部审计）可据此独立执法。若未来工单决定
-                // 翻红，只动此分支 —— 判据面已隔离。
+                // ΑΩ-R5 + ΠΑΝ-53：签名判决分级执法。
+                //   · true ⇒ 注记（背书已证，绿不受影响）；
+                //   · false（验过而败：伪造/损坏）与 'unpinned-key'（数学成立但信任锚拒绝）
+                //     ⇒ 章③ **degraded 黄章**（ΠΑΝ-53 —— 此前注记级不翻是「ok 聚合面对
+                //     持写权限者全绿」落差[C1-9 H2]的一角：自造 token 只需绑定成立，签名
+                //     失败被一行注记吞掉。黄章保持「不指控篡改」（绑定维度在场），但把
+                //     「背书未证」升到章状态面 —— 下游不读 detail 也看得见）；
+                //   · 'unsupported-alg' / 'unparseable'（没验成的诚实边界）⇒ 注记（无证据
+                //     不降级）；判绿只认 true 的铁律不动。
                 if (verified.signatureVerified === true) {
                     details.push(`anchor #${i}: TSA signature verified offline against the embedded signer certificate (RSA PKCS#1 v1.5 / ECDSA over sha256/384/512)`);
                 }
                 else if (verified.signatureVerified === false) {
-                    details.push(`anchor #${i}: TSA signature verification FAILED (${verified.signatureError ?? 'reason unknown'}) — imprint+nonce binding holds but the third-party attestation is UNPROVEN (reported, badge criteria unchanged)`);
+                    details.push(`anchor #${i}: TSA signature verification FAILED (${verified.signatureError ?? 'reason unknown'}) — imprint+nonce binding holds but the third-party attestation is UNPROVEN (badge DEGRADED, ΠΑΝ-53: attestation dimension escalated from note-level)`);
+                    degradedSig ??= `anchor #${i}: TSA signature verification FAILED — third-party attestation unproven while imprint+nonce binding holds`;
                 }
                 else if (verified.signatureVerified === 'unpinned-key') {
                     // ΝΩ-21：pin 部署在场时的新判决 —— 签名数学成立但签名者不在 pin 表。
-                    // 同律注记级（不翻红）：判绿只认 true，'unpinned-key' 保守呈现供下游执法。
-                    details.push(`anchor #${i}: TSA signer key NOT pinned — signature math holds but the signer SPKI is outside the DSH_TSA_PIN_SHA256 pin table (${verified.signatureError ?? 'reason unknown'}); receipt binding stands, trust anchor refused (reported, badge criteria unchanged)`);
+                    // ΠΑΝ-53：自注记级升 degraded 黄章（信任锚拒绝是可执法的负面证据）。
+                    details.push(`anchor #${i}: TSA signer key NOT pinned — signature math holds but the signer SPKI is outside the DSH_TSA_PIN_SHA256 pin table (${verified.signatureError ?? 'reason unknown'}); receipt binding stands, trust anchor refused (badge DEGRADED, ΠΑΝ-53)`);
+                    degradedSig ??= `anchor #${i}: TSA signer key NOT pinned — trust anchor refused while signature math holds`;
                 }
                 else {
                     details.push(`anchor #${i}: TSA signature NOT verified — ${verified.signatureVerified ?? 'not attempted'} (${verified.signatureError ?? 'honest boundary'}); receipt binding stands, attestation unproven`);
@@ -638,6 +688,10 @@ class Notary {
         }
         if (red)
             return { status: 'red', detail: `${red}; ${details.join('; ')}` };
+        // ΠΑΝ-53：TSA 签名失败/pin 不命中 ⇒ 黄章（主判据全过 + 背书维度未证）
+        if (degradedSig !== null) {
+            return { status: 'degraded', detail: `${degradedSig}; ${details.join('; ')}` };
+        }
         return { status: 'green', detail: details.join('; ') };
     }
     // ─── JSONL 落盘（断尾容忍读 + 断尾治疗写 —— pilotStore 先例的公证版） ───

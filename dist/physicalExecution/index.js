@@ -13,15 +13,8 @@ export { CapabilityCache, syncCapabilityFromHealth, syncCapabilityFromSwitchWind
 // 批次 D：默认实现切换 —— Python 子进程生命周期 + D-7 HostExecutePort 适配
 export { PhysicalServiceManager, } from './serviceManager.js';
 export { D7PhysicalHostPort, sanitizeScreenSize, } from './d7HostPort.js';
-import { PhysicalExecutionAdapterImpl } from './adapter.js';
-/**
- * 适配器工厂 —— D-7 编排器侧的便捷入口。
- *
- * 加载层方法：configure 内部失败 throw —— 拒绝带病上线。
- * 返回的适配器尚未预热，调用方需 ``await adapter.init()`` 加载 HMAC 密钥。
- */
-export function createPhysicalExecution(config) {
-    const adapter = new PhysicalExecutionAdapterImpl();
-    adapter.configure(config);
-    return adapter;
-}
+// ΠΑΝ-127（D-F5 清偿）：组合工厂 createPhysicalExecution 已下沉卫星
+// physicalExecution/compose.ts —— 卫星 d7HostPort.ts 曾回借本桶该工厂构成
+// d7↔index value 二环；此处再导出保导入面零破坏（physicalBackend 等消费点
+// 零改动）。行为零变化 —— 纯结构搬家。
+export { createPhysicalExecution } from './compose.js';

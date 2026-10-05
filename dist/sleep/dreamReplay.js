@@ -233,7 +233,8 @@ export async function runDreamReplay(deps) {
         report: {
             watermark: '',
             attempted: 0, replayed: 0, successes: 0, divergences: 0,
-            lessons: [], entries: [],
+            lessons: [], lessonMeta: [],
+            entries: [],
             budget: { ...resolveDreamBudget(deps?.budget), truncated: false, reason: 'none' },
             kernelEvidence: [],
         },
@@ -306,6 +307,9 @@ export async function runDreamReplay(deps) {
         const gym = new AutonomyGym({ seed: gymSeed, maxSteps: budget.maxStepsPerDream, now: () => (dreamClock += 5) });
         const entries = [];
         const lessons = [];
+        // ΠΑΝ-113：教训元数据（与 lessons 平行 —— 恒 heuristic：单条轨迹 × 单座
+        // 同构世界 × 单次重放的证据等级）
+        const lessonMeta = [];
         let replayed = 0;
         let successes = 0;
         let divergences = 0;
@@ -458,13 +462,20 @@ export async function runDreamReplay(deps) {
                     entry.note = 'evolution 面缺席 —— EXP4 双写缺席（诚实注记）';
                 }
                 // 反事实教训：重放成功而历史失败（失败轨迹恒历史失败 —— 梦的全部前提）
+                // ΠΑΝ-113（语义降格）：教训文案与证据强度对齐 —— 同构世界单次重放
+                // （n=1、PCG 合成世界、输入冻结）产出的只是**提示性启发**，不是
+                // 「重试前优先/勿原样重试」的规定性规则（旧文案的强度超出证据等级，
+                // 消费方会当硬规则执行）。lessonKind='heuristic' 结构化标注 + 文案
+                // 降格双面执法。
                 if (replayView.success) {
                     const histKind = s.t.history?.[divergence]?.kind ?? '?';
                     const replayKind = strategies[divergence] ?? '?';
-                    const lesson = `反事实教训：任务「${s.t.query.slice(0, 60)}」第 ${divergence + 1} 步的决策「${histKind}」在同构世界（指纹 ${entry.world.fingerprint.slice(0, 12)}、seed ${entry.world.seed}）本可被纠正 —— ` +
-                        `当前策略改走「${replayKind}」后重放成功（${replayView.steps} 步）；同类场景重试前优先考虑 ${replayKind}，勿原样重试 ${histKind}。`;
+                    const lesson = `反事实教训（heuristic —— 提示性参考，非硬规则）：任务「${s.t.query.slice(0, 60)}」第 ${divergence + 1} 步的决策「${histKind}」在同构世界（指纹 ${entry.world.fingerprint.slice(0, 12)}、seed ${entry.world.seed}）本可被纠正 —— ` +
+                        `当前策略改走「${replayKind}」后重放成功（${replayView.steps} 步）。同类场景可考虑尝试 ${replayKind}（证据强度：单次同构世界重放，样本 n=1 —— 仅供参考，请结合现场判断，勿机械套用）。`;
                     entry.lesson = lesson;
+                    entry.lessonKind = 'heuristic';
                     lessons.push(lesson);
+                    lessonMeta.push({ kind: 'heuristic', evidence: 'isomorphic-world-replay', sample: 1 });
                 }
             }
             entries.push(entry);
@@ -497,6 +508,7 @@ export async function runDreamReplay(deps) {
                 successes,
                 divergences,
                 lessons,
+                lessonMeta,
                 entries,
                 budget: { ...budget, truncated, reason },
                 kernelEvidence,

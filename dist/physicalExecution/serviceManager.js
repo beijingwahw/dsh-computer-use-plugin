@@ -23,6 +23,7 @@ import { dirname, resolve as pathResolve } from 'node:path';
 import { resolvePythonBin } from './pythonBin.js';
 import { ensureKey, mintToken } from './capToken.js';
 import { ALL_CAPS } from './contracts.js';
+import { allowMmapRoot } from './shmReader.js'; // ΠΑΝ-66：spawn 时登记 mmap 白名单根
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // ─── ΑΩ-R27 端口策略单源 —— 全库唯一的 D-5 微服务 TCP 端口/跨度事实源 ───
 // 双策略有意并存（不合并 —— 消费场景与密钥形态不同，统一即回归，证据见表下）：
@@ -340,6 +341,14 @@ export class PhysicalServiceManager {
         else {
             this._mmapDir = mkdtempSync(join(tmpdir(), 'dsh-physical-mmap-'));
         }
+        // ΠΑΝ-66（mmap-file 路径校验）：manager 明知 mmapDir ⇒ spawn 即登记进
+        // shmReader 读取侧白名单 —— 服务端返回的截图路径必须落在该目录内才可
+        // fs.open（fail-closed；缺省传输的路径遍历防线由此闭合）。登记幂等、
+        // 失败无害（读取侧仍有约定根 + fail-closed 兜底）。
+        try {
+            allowMmapRoot(this._mmapDir);
+        }
+        catch { /* noop */ }
         // 3. 端口（单一端口，无自动重试 —— 占用时如实快报；缺省值单源于
         //    ΑΩ-R27 端口策略常量，策略对照见文件头注释块）
         const port = this.opts.tcpPort ?? PHYSICAL_TCP_BASE_PORT;

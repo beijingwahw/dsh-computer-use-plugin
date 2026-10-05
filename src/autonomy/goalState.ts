@@ -98,6 +98,10 @@ export class GoalStateMachine {
   private readonly _now: () => number;
   private _criteria: CriterionStatus[];
   private _blockers: string[];
+  // ΠΑΝ-59（clearBlockers 接线）：构造期降级 blocker 的留档 —— 与 _blockers
+  // 同源铸成但单独持有，供「零步 blocked 时只清构造降级阻塞」的窄类放行
+  // （运行期 addBlocker 的阻塞仍须显式 clearBlockers —— 人工/外因阻塞不清）。
+  private readonly _constructionBlockers: string[];
   private _begun = false;
   private _startedAt = 0;
   private _stepIndex = 0;
@@ -178,6 +182,7 @@ export class GoalStateMachine {
     this._timeBudgetSec = timeBudgetSec;
     this._criteria = criteria.map(criterion => ({ criterion, status: 'unverified' as const }));
     this._blockers = blockers; // 降级 blocker 记入常规阻塞账（见类 JSDoc 注意项）
+    this._constructionBlockers = [...blockers]; // ΠΑΝ-59：构造降级留档（只读面）
     this._now = typeof now === 'function' ? now : () => Date.now();
     this._lastUpdateAt = this.nowSafe();
   }
@@ -295,6 +300,36 @@ export class GoalStateMachine {
     if (this._blockers.length === 0) return;
     this._blockers = [];
     this._lastUpdateAt = this.nowSafe();
+  }
+
+  /**
+   * ΠΑΝ-59（clearBlockers 接线）：构造期降级 blocker 的只读留档面 —— 本机
+   * 构造降级律（goal 截断/空判据/非法预算等）铸下的阻塞清单副本。闭环驱动器
+   * 据此在「零步 blocked」的窄类下只放行构造降级阻塞（运行期 addBlocker 的
+   * 阻塞不在其列）。纯读、绝不抛。
+   */
+  constructionBlockers(): readonly string[] {
+    return [...this._constructionBlockers];
+  }
+
+  /**
+   * ΠΑΝ-59：只清构造期降级 blocker（仍在阻塞账内的那些），返回实际清掉的
+   * 清单（空数组 = 无可清 —— 阻塞全为运行期 addBlocker 所加，照旧须人工
+   * clearBlockers 放行）。清除后 blocked 相由判定律自动回归（纯推导），
+   * 绝不抛异常。
+   */
+  clearConstructionBlockers(): string[] {
+    const removed: string[] = [];
+    if (this._constructionBlockers.length === 0) return removed;
+    this._blockers = this._blockers.filter(b => {
+      if (this._constructionBlockers.includes(b)) {
+        removed.push(b);
+        return false;
+      }
+      return true;
+    });
+    if (removed.length > 0) this._lastUpdateAt = this.nowSafe();
+    return removed;
   }
 
   /**

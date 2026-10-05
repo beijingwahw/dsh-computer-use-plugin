@@ -94,13 +94,48 @@ export interface CriteriaEvaluation {
 const FUZZY_MIN_PATTERN_LEN = 3;
 
 /**
+ * ΠΑΝ-61（否定面容错收紧）：否定判据的 fuzzy 容差推导 —— 在 fuzzy.ts 立法
+ * ⌈m/6⌉ 之上叠加两道收紧闸：
+ *   · 硬证据闸：容差 ≤ m−2（fuzzy 命中须留下 ≥2 字的精确一致证据 —— 两字禁词
+ *     的「一字噪声即可假 violated」病理就此封堵：m=2 ⇒ 容差 0 ⇒ 只走精确，
+ *     「册除」不再误判「删除」在场）；
+ *   · 占比闸：容差 ≤ ⌊m/3⌋（错误占比 ≤ 1/3 —— 否定面是证伪通道，宽容是
+ *     误杀；肯定面的 ⌈m/6⌉ 宽容不受影响〔肯定面宽容是美德，否定面宽容是
+ *     假 violated 的温床〕）。
+ * 纯函数：m ≤ 2 ⇒ 0（精确）；随 m 增长逐渐放回到 ⌈m/6⌉ 原律（m ≥ 6 时三闸
+ * 同值 —— 长禁词的既有容错不收紧）。
+ */
+export function negativeFuzzyTolerance(m: number): number {
+  if (typeof m !== 'number' || !Number.isFinite(m) || m <= 0) return 0;
+  const base = Math.ceil(m / 6);
+  return Math.max(0, Math.min(base, m - 2, Math.floor(m / 3)));
+}
+
+/**
  * 折叠语料上的命中判决（exact 优先、fuzzy 兜底 —— 容错阈值沿用 fuzzy.ts 立法）。
  * 短模式（< 3 字符）只走精确匹配：单字符模式在 ⌈1/6⌉=1 容差下对空串也命中，
  * 会把否定判据变成「必 violated」的伪证（actionGate 已立此律，此处同律收口）。
+ * ΠΑΝ-61：否定面（must-not-appear）改用 negativeFuzzyTolerance 的收紧容差
+ *（opts.negative === true 时）—— 肯定面沿用 ⌈m/6⌉ 原律（零回归）。
  */
-function textHits(needle: string, foldedCorpus: string, tolerance?: number): boolean {
+function textHits(
+  needle: string,
+  foldedCorpus: string,
+  tolerance?: number,
+  negative?: boolean,
+): boolean {
   if (foldedCorpus.includes(needle)) return true;
   if (needle.length < FUZZY_MIN_PATTERN_LEN) return false;
+  if (negative === true) {
+    // ΠΑΝ-61：否定面收紧容差（调用方覆写不 loosening 否定面 —— 证伪通道从严）
+    const t = negativeFuzzyTolerance(needle.length);
+    if (t <= 0) return false; // 收紧到 0 ⇒ 只走精确
+    try {
+      return fuzzyIncludes(needle, foldedCorpus, t);
+    } catch {
+      return false;
+    }
+  }
   try {
     return fuzzyIncludes(needle, foldedCorpus, tolerance);
   } catch {
@@ -151,7 +186,7 @@ export function evaluateCriteria(
       notes.push(`第 ${pair.index + 1} 条判据非法（非字符串/空白/空禁词），整条跳过`);
       continue;
     }
-    const hit = textHits(parsed.needle, foldedCorpus, tolerance);
+    const hit = textHits(parsed.needle, foldedCorpus, tolerance, parsed.polarity === 'must-not-appear');
     if (parsed.polarity === 'must-not-appear') {
       evidence.push({ index: pair.index, status: hit ? 'violated' : 'met', polarity: 'must-not-appear' });
       notes.push(

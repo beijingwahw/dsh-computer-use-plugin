@@ -7,6 +7,8 @@ import { createHash } from 'crypto';
 import type { JournalEntry } from '../journal';
 // ΑΩ-R5：TSA 签名判决类型（rfc3161.ts 单一事实源 —— 纯类型导入，零运行时耦合）
 import type { SignatureVerdict } from './rfc3161';
+// ΠΑΝ-49：canonical 单源消费（dialects/canonical.ts —— ΝΩ-24 守卫形态唯一出处）
+import { canonicalJson } from '../dialects';
 
 // ─── 锚记录（可序列化数据面 —— 跨进程/跨会话可独立复核） ───
 
@@ -133,9 +135,13 @@ export interface AnchorRecord {
 
 /** 公证章：green=已验 / red=发现不一致（篡改或损坏）/ n/a=诚实降级（无法核验，
  *  绝不虚绿）/ n/a(legacy)=旧格式记录在场但取证字段缺席（Χ 纪元重放章专用 ——
- *  无屏指纹的旧排练行不可重放，诚实标注而非误红） */
+ *  无屏指纹的旧排练行不可重放，诚实标注而非误红）。
+ *  ΠΑΝ-53（分级执法）：新增 degraded=黄章 —— 章的可核验主体成立，但第三方
+ *  信任维度（TSA 签名验证失败 / pin 不命中）未证：绑定事实（imprint+nonce）
+ *  依旧在场，背书维度如实降级。黄 ≠ 红（不指控篡改），黄 ≠ 绿（「可公证」的
+ *  表达不得再对持写权限者全绿 —— C1-9 H2 的 ok 聚合面落差就此分级披露）。 */
 export interface BadgeStatus {
-  status: 'green' | 'red' | 'n/a' | 'n/a(legacy)';
+  status: 'green' | 'red' | 'n/a' | 'n/a(legacy)' | 'degraded';
   detail: string;
 }
 
@@ -171,20 +177,32 @@ export interface NotaryReport {
    * 提示（quality_checkup notarize 输出面即可见），判据面不动。
    */
   anchorCadence?: { entriesSinceLastAnchor: number; threshold: number; due: boolean } | null;
+  /**
+   * ΠΑΝ-53：时间回拨检测的顶层披露（章③注记之上的 verdict 字段 —— 下游不读
+   * detail 也能看到）。某枚 rfc3161 锚的 TSA 权威时刻 genTime 与本地铸锚钟
+   * anchoredAt 的偏差超容差（GEN_TIME_SKEW_TOLERANCE_MS）**且方向为倒退**
+   * （genTime 落后 anchoredAt ⇒ 本地钟被前拨/回拨的时钟证据）⇒ 在场披露该锚
+   * 的三方读数（genTime / anchoredAt / skewMs）。未检出 / 无 rfc3161 锚 ⇒ null。
+   * 注记级不翻章（回拨否定的是「本地钟与 TSA 钟一致」维度，不是物证绑定 ——
+   * 但顶行披露使「不读 detail 的下游」不再盲区）。
+   */
+  clockRollback?: { anchorIndex: number; genTime: number; anchoredAt: number; skewMs: number } | null;
 }
 
-// ─── 密码学原语复刻（journal.ts 模块私有 —— 复刻非复制实现，先例：sandbox/log.ts） ───
+// ─── 密码学原语（canonical 已收编单源，ΠΑΝ-49）───
 // 前缀重走（章③）必须逐字节复算 journal 的链哈希：canonical 键排序 + 过滤
 // undefined 值（journal 的哈希域语义：值为 undefined 的自有键与缺键同域）。
-// 若两者漂移，重走必然误报断链 —— 此处的逐字节一致是公证有效性的前提。
+// 若两者漂移，重走必然误报断链 —— 逐字节一致是公证有效性的前提。
+// ΠΑΝ-49：本件曾是 journal.canonical 的无守卫复刻（C1-9 H1 实证漂移：journal
+// 的 ΝΩ-24 病态载荷守卫未随迁 ⇒ 深/环 args 在此重算出不同字节 ⇒ 章③永久误红）。
+// 现收编为 dialects/canonical.ts 单源的薄再导出 —— 守卫（深度上限+环检测）随
+// 单源自动到位，且未来加固只落一处。
 
-/** 稳定序列化：键排序 + undefined 值过滤（与 journal.canonical 同律） */
+// ΠΑΝ-49：canonical 单源消费（见文件头 import —— dialects/canonical.ts）
+
+/** 稳定序列化：键排序 + undefined 值过滤 + 病态载荷守卫（dialects 单源薄代理） */
 export function canonical(obj: any): string {
-  if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
-  if (Array.isArray(obj)) return '[' + obj.map(canonical).join(',') + ']';
-  return '{' + Object.keys(obj).sort()
-    .filter(k => obj[k] !== undefined)
-    .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
+  return canonicalJson(obj);
 }
 
 export function sha256Hex(s: string): string {

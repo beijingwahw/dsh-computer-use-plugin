@@ -25,6 +25,12 @@ export type PhysicalErrorKind =
   | 'element_not_found' | 'screen_capture_failed' | 'ocr_unavailable'
   | 'vlm_unavailable' | 'action_timeout' | 'window_unavailable'
   | 'unauthorized' | 'internal_error'
+  /** ΠΑΝ-128（镜像 ΠΑΝ-95）：设备级失败（adb 离线/未授权/USB 抖动）——
+   *  高频可预期失败，Node 端可据此与 internal_error 区分做重试/重连策略 */
+  | 'device_unreachable'
+  /** ΠΑΝ-128（镜像 ΠΑΝ-93）：池背压拒绝（队列深度达上界）——不是失败是"忙"，
+   *  调用方按退避重试（排队被拒时尚未开始执行，无部分副作用） */
+  | 'busy'
   /** Node 端独有：HTTP 传输层失败（连接拒绝 / DNS 失败 / 网络断开） */
   | 'transport_error'
   /** Node 端独有：超时（AbortController 触发） */
@@ -44,6 +50,9 @@ export const PhysicalErrorKind = {
   WINDOW_UNAVAILABLE: 'window_unavailable' as PhysicalErrorKind,
   UNAUTHORIZED: 'unauthorized' as PhysicalErrorKind,
   INTERNAL_ERROR: 'internal_error' as PhysicalErrorKind,
+  // ΠΑΝ-128: 与 Python 端 errors.py ErrorKind 闭集对齐（additive —— 旧 kind 语义不变）
+  DEVICE_UNREACHABLE: 'device_unreachable' as PhysicalErrorKind,
+  BUSY: 'busy' as PhysicalErrorKind,
   TRANSPORT_ERROR: 'transport_error' as PhysicalErrorKind,
   CLIENT_TIMEOUT: 'client_timeout' as PhysicalErrorKind,
 } as const;
@@ -96,11 +105,18 @@ export interface PhysicalExecutionConfig {
 
 export type Capability =
   | 'click' | 'type' | 'scroll' | 'hotkey' | 'drag'
-  | 'screenshot' | 'ui_tree' | 'switch_window' | 'shm_delete';
+  | 'screenshot' | 'ui_tree' | 'switch_window' | 'shm_delete'
+  // ΠΑΝ-128（镜像 ΠΑΝ-25）：管理面能力位 —— shutdown 独立 admin 位（关停是
+  // 最高权动作，与读写动作位隔离）；stats/input_events/devices 归 observe
+  // （只读观测；input_events 是键盘 vk 审计流，敏感度独立于截图位）。
+  // additive：既有九位语义不变；全权 token（ALL_CAPS）自此含新位。
+  | 'admin' | 'observe';
 
 export const ALL_CAPS: readonly Capability[] = [
   'click', 'type', 'scroll', 'hotkey', 'drag',
   'screenshot', 'ui_tree', 'switch_window', 'shm_delete',
+  // ΠΑΝ-128: 与 Python auth.ALL_CAPS 闭集同源镜像（程序化对账：test/pan128.capContract.test.ts）
+  'admin', 'observe',
 ] as const;
 
 // ─── 4. 响应 DTO（镜像 Python 端 routes 响应）───
@@ -120,7 +136,12 @@ export interface HealthInfo {
     l3_arbitration_enabled: boolean;
   };
   screenshot_transport: 'shm' | 'mmap-file' | 'base64';
-  auth: { pid_attestation: boolean; capability_token: boolean };
+  /** ΠΑΝ-128: auth 面增补 attestation_mode（镜像 Python 端 auth.attestation_mode()
+   *  的诚实形态申报：proc_* / win_* 为真实信号，loopback_hmac_only 为降级）。
+   *  可选字段 —— 旧服务无此键照常工作（防御解析容忍缺席）。
+   *  ΠΑΝ-127: 注释内星斜线序列曾提前终结块注释致 tsc 解析失败——已改写
+   *  （纯注释文本修复，行为零变化）。 */
+  auth: { pid_attestation: boolean; capability_token: boolean; attestation_mode?: string };
 }
 
 export interface ClickResult {
@@ -237,6 +258,16 @@ export interface SwitchWindowResult {
 }
 
 /**
+ * R2-3（焦点保卫）：前台窗口只读探测的结果契约。
+ * title=null ⇒ 无前台窗口可读（桌面焦点/枚举拒绝）—— 诚实缺席，调用方
+ * 按「不可校验」降级，绝不猜。
+ */
+export interface ActiveWindowResult {
+  method: 'native';
+  title: string | null;
+}
+
+/**
  * ScreenshotHandle 的结构化契约 —— 用于接口定义（避免循环 import）。
  *
  * 真实实现见 `screenshotHandle.ts` 的 `ScreenshotHandle` 类（含 FinalizationRegistry 兜底）。
@@ -274,22 +305,26 @@ export interface PhysicalExecutionAdapter {
   health(): Promise<Result<HealthInfo, PhysicalError>>;
 
   // 下列方法均运行层（异常诚实第二条）：永不抛错，失败入 Result.error
-  clickMouse(args: { x: number; y: number; button?: 'left' | 'right' | 'middle'; dryRun?: boolean }):
+  // ΠΑΝ-64（止损链断裂修复）：全部动作方法增补可选 signal（ExecutionOrder.signal
+  // 的下游通道 —— 与内部超时组合断流，消灭「超时后幽灵动作落地」）；
+  // 兼容式可选字段，缺席 ⇒ 请求字节与现状等同（兼容铁律）。
+  clickMouse(args: { x: number; y: number; button?: 'left' | 'right' | 'middle'; dryRun?: boolean; signal?: AbortSignal }):
     Promise<Result<ClickResult, PhysicalError>>;
-  typeText(args: { text: string; clearFirst?: boolean; dryRun?: boolean }):
+  typeText(args: { text: string; clearFirst?: boolean; dryRun?: boolean; signal?: AbortSignal }):
     Promise<Result<TypeResult, PhysicalError>>;
-  scrollPage(args: { direction: 'up' | 'down' | 'left' | 'right'; amount: number; dryRun?: boolean }):
+  scrollPage(args: { direction: 'up' | 'down' | 'left' | 'right'; amount: number; dryRun?: boolean; signal?: AbortSignal }):
     Promise<Result<ScrollResult, PhysicalError>>;
-  pressHotkey(args: { keys: string[]; dryRun?: boolean }):
+  pressHotkey(args: { keys: string[]; dryRun?: boolean; signal?: AbortSignal }):
     Promise<Result<HotkeyResult, PhysicalError>>;
   dragMouse(args: {
     start: { x: number; y: number };
     end: { x: number; y: number };
     dryRun?: boolean;
+    signal?: AbortSignal;
   }): Promise<Result<DragResult, PhysicalError>>;
   /** 移动鼠标（无点击）—— Z-1 交互性探针的悬停躯体（归一化坐标） */
   moveMouse(args: {
-    x: number; y: number; durationMs?: number; dryRun?: boolean;
+    x: number; y: number; durationMs?: number; dryRun?: boolean; signal?: AbortSignal;
   }): Promise<Result<MoveResult, PhysicalError>>;
   takeScreenshot(args?: {
     format?: 'png' | 'jpeg';
@@ -318,8 +353,10 @@ export interface PhysicalExecutionAdapter {
     /** 外部止损信号（流水线感知步超时 abort）—— 与内部超时组合断流 */
     signal?: AbortSignal;
   }): Promise<Result<UiTreeResult, PhysicalError>>;
-  switchWindow(args: { keyword: string }):
+  switchWindow(args: { keyword: string; signal?: AbortSignal }):  // ΠΑΝ-64：动作方法同律增补 signal
     Promise<Result<SwitchWindowResult, PhysicalError>>;
+  /** R2-3（焦点保卫）：前台窗口标题只读探测（type_text 前置校验的数据源） */
+  getActiveWindow(): Promise<Result<ActiveWindowResult, PhysicalError>>;
 
   // ─── 感知辅助端点（D-1 工具层接线 —— 只读，与截图同能力位）───
   /** 当前鼠标位置（全屏像素）—— SoM 准星与多屏感知的数据源 */
@@ -360,6 +397,9 @@ export interface PhysicalExecutionAdapter {
 // ─── 6. SandboxAction 路由契约（D-7 SandboxAction → 微服务调用）───
 
 export interface PhysicalActionRouter {
-  /** 运行层方法：永不抛错 —— 失败入 ExecutionResult.failure */
-  dispatch(action: SandboxAction, seq: number): Promise<ExecutionResult>;
+  /** 运行层方法：永不抛错 —— 失败入 ExecutionResult.failure。
+   *  ΠΑΝ-64（止损链断裂修复）：第三可选参 signal —— 编排器 ExecutionOrder.signal
+   *  经 d7HostPort → dispatch → adapter 动作方法 → microFetch 直达 HTTP 层断流。
+   *  兼容式可选参数：既有两参调用方零改动（signal 缺席 ⇒ 旧路径逐字节）。 */
+  dispatch(action: SandboxAction, seq: number, signal?: AbortSignal): Promise<ExecutionResult>;
 }

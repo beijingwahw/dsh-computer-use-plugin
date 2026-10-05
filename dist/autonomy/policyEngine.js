@@ -26,7 +26,7 @@ import { kernelRegistry } from '../kernel/registry.js';
 // 词法风险预分类/候选构建/并列破平/僵局探测/提示词铸造）逐字节搬至
 // ./policyEngineUtil —— 导入面不变（extractGoalKeywords 原位再导出）。
 export { extractGoalKeywords } from './policyEngineUtil.js';
-import { BUDGET_MS_LOW, BUDGET_STEPS_LOW, MATCH_CONFIDENT, POPUP_CONFIRM_RE, TIE_GAP, VLM_CANDIDATE_CAP, buildCandidates, buildPickPrompt, breakTieBand, candidatesToActions, classifyClickRisk, clamp01, composeTypeOrDragAction, detectStagnation, digestHas, nextSwitchKind, normalizeWs, round2, skillOverlap, tokenizeCached, unmetCriteria, } from './policyEngineUtil.js';
+import { BUDGET_MS_LOW, BUDGET_STEPS_LOW, MATCH_CONFIDENT, POPUP_CONFIRM_RE, TIE_GAP, VLM_CANDIDATE_CAP, buildCandidates, buildPickPrompt, breakTieBand, candidatesToActions, centerInPopupHabitat, classifyClickRisk, clamp01, composeTypeOrDragAction, detectStagnation, digestHas, nextSwitchKind, normalizeWs, round2, skillOverlap, tokenizeCached, unmetCriteria, } from './policyEngineUtil.js';
 // ─── 决策中枢 ───
 /**
  * Φ-3 自主判断中枢 —— 无状态、确定性优先、绝不抛异常。
@@ -128,10 +128,16 @@ export class PolicyEngine {
             const unmetTexts = unmet.map(u => u.criterion);
             const goalText = typeof spec.goal === 'string' ? spec.goal : '';
             // ① 弹窗优先：弹窗遮挡下的其余决策都不可信，先恢复主界面
+            // ΤΕΛ-5 D-G22（弹窗确认点击限定）：确认类元素还须落弹窗栖息地（中央 40%
+            // 带 —— popupDetector 同一几何先验，popupHabitatNorm 单源方言）。弹窗注记
+            // 无真 bounds，此为诚实代位：弹窗外任意同词位置（主界面角落的「确定/是」）
+            // 不再被点击；栖息地外/几何缺席 ⇒ 无确认候选 ⇒ 退 Esc（benign，fail-closed
+            // 方向：宁可取消也不点未知目标）。
             if (popups.length > 0) {
                 const popupName = popups[0];
                 const confirmEl = elements
                     .filter(e => e.interactive !== false && POPUP_CONFIRM_RE.test(normalizeWs(e.label)))
+                    .filter(e => centerInPopupHabitat(e, snapshot.width, snapshot.height))
                     .sort((a, b) => clamp01(b.confidence) - clamp01(a.confidence))[0];
                 if (confirmEl) {
                     return {
@@ -167,7 +173,9 @@ export class PolicyEngine {
             }
             // ② 判据匹配点击：未达成判据的关键词在可交互元素标签上的最佳覆盖
             //    （纪元 Η-4：并列带内经 Φ-9 反事实效用分破平 —— 见 breakTieBand）
-            const candidates = breakTieBand(buildCandidates(elements, unmet), spec, snapshot, history);
+            const candidates = breakTieBand(buildCandidates(elements, unmet), spec, snapshot, history, 
+            // ΠΑΝ-60：pilot 域键透传（世界模型回落按域取接线；缺席 ⇒ 旧律）
+            typeof ctx?.pilotId === 'string' && ctx.pilotId !== '' ? ctx.pilotId : undefined);
             // ΝΩ-10（候选透出）：② 级裁决随行携带排名候选（岔路账消费面，其余级缺席）
             const candidateActions = candidatesToActions(candidates);
             // ②′ ΝΩ-10（type/drag 产生通道）：type 此前只在行动词汇表、无产生路径 ——

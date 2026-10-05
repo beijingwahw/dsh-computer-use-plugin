@@ -27,6 +27,7 @@
 // 纠正计划），批注内容随事件对蒸馏下游可见。
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { CONFIRM_CODE_SPACE, AMENDMENT_NOTE_MAX } from './approval.constants';
+import { sanitizeActionShape, type RawActionShape } from './approval.shapes';
 import type { ActionShape } from './approval.shapes';
 import type { PendingApproval } from './approval.registry';
 
@@ -70,7 +71,12 @@ export type GrantOutcome =
       | 'confirm-code-required'    // 带码审批但调用未携码（非错误尝试，不计封顶）
       | 'confirm-code-mismatch'    // 码不匹配（计一次错误尝试）
       | 'code-attempts-exhausted'  // 错码次数封顶：令牌已焚毁（防暴力枚举）
-      | 'rate-limited';            // Y-10 同意预算耗尽（令牌保留，冷静期后重试）
+      | 'rate-limited'             // Y-10 同意预算耗尽（令牌保留，冷静期后重试）
+      | 'queue-granted-already';   // ΠΑΝ-6：该同意已由队列裁决面兑付在途（adjudicate
+                                   // 已置条目 granted，续跑面 takeGranted 是唯一兑现
+                                   // 通道）—— 交互面不得再武装第二条兑现通道
+                                   //（一次同意恰好一次物理兑现；队列面 ΠΑΝ-4 以
+                                   // 'absorbed' 终态封堵了反向窗口，本面封堵正向窗口）
     retryInMs?: number;
   };
 
@@ -114,6 +120,114 @@ export function codeMatches(provided: string, storedHash: string): boolean {
   } catch {
     return false;
   }
+}
+
+// ─── ΠΑΝ-5（能力限缩令牌）：目标绑定原语（macaroon 式 caveat） ───
+//
+// 批判报告 C1-5 H1：审批令牌是**不记名能力**——validate/beginAttempt/consume 三处
+// 均不比对令牌与实际派发目标，用户为「发送邮件给 Alice」批准的令牌在 TTL 内可
+// 授权任何命中危险词的点击。修复思想（macaroon caveat）：铸造时把目标摘要嵌进
+// 令牌的簿记（targetDigest = 目标描述 + 动作 + 坐标域的规范化哈希），兑换时
+// （validate/beginAttempt/consume 携 targetHint）强制比对，不匹配即结构化拒绝
+// （fail-closed）。
+// 兼容律：绑定信息只在新的铸造路径写入（request 的 opts.target / mintBoundToken）——
+// 既有铸造 ⇒ 无绑定 ⇒ 一切既有调用方（测试/未升级工具）行为逐位不变；反之令牌
+// 携带绑定时 targetHint 缺席同样拒绝（能力已限缩的令牌不允许「无凭据兑现」）。
+
+/** ΠΑΝ-5：兑换时点的目标提示（派发层从实际动作携带 —— 与铸造侧 target 同一
+ *  规范化管道）。type_text 类的 text 只在此瞬态计算长度桶，绝不驻留。 */
+export type TargetHint = RawActionShape;
+
+/** ΠΑΝ-5：目标摘要的规范化管道 —— 与 sanitizeActionShape 同律（坐标千分位量化
+ *  = 抖动容忍带；目标描述截 200；type_text 只余工具名+长度桶 —— 文本绝不入档，
+ *  代价是 type_text 绑定粒度为长度桶级，绑定面文档明示）。
+ *  域分隔前缀防跨协议摘要碰撞。防御式绝不抛；target 无可用身份（tool 非非空
+ *  字符串）⇒ undefined（诚实拒绝绑定，绝不铸造「看似绑定实则空」的摘要）。 */
+export function computeTargetDigest(target: TargetHint): string | undefined {
+  try {
+    if (!target || typeof target !== 'object') return undefined;
+    const tool = typeof target.tool === 'string' ? target.tool.trim() : '';
+    if (tool === '') return undefined; // 无动作身份 ⇒ 无可绑定的能力边界
+    const sanitized = sanitizeActionShape({
+      tool,
+      ...(typeof target.x === 'number' ? { x: target.x } : {}),
+      ...(typeof target.y === 'number' ? { y: target.y } : {}),
+      ...(typeof target.target_description === 'string' ? { target_description: target.target_description } : {}),
+      ...(typeof target.text === 'string' ? { text: target.text } : {}),
+    });
+    return createHash('sha256').update('PAN5:v1:' + JSON.stringify(sanitized)).digest('hex');
+  } catch {
+    return undefined; // 防御式：规范化管道故障 = 无法绑定（绝不炸铸造/校验主流程）
+  }
+}
+
+/** ΠΑΝ-5：摘要恒定时间比较（对齐 codeMatches 的纪律；hex→Buffer 等长 ⇒
+ *  timingSafeEqual 不抛）。任何异常 ⇒ false（绝不抛）。 */
+export function digestsEqual(storedDigest: string, providedDigest: string): boolean {
+  try {
+    return timingSafeEqual(Buffer.from(storedDigest, 'hex'), Buffer.from(providedDigest, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+// ΠΑΝ-5 绑定簿记：token → targetDigest（pending Map 在 approval.registry——共享
+// 下层；本表是安全原语区的私属伴随账，key 为 CSPRNG 令牌 ⇒ 无碰撞面。
+// 清扫：ledger.sweep 随 pending 过期清扫；resetApproval 整面归零。）
+const targetBindings = new Map<string, string>();
+
+export function bindTokenTarget(token: string, digest: string): void {
+  try { targetBindings.set(token, digest); } catch { /* 防御式：Map 故障 = 绑定缺席（fail-closed 方向：未绑定走兼容面） */ }
+}
+
+export function boundTargetOf(token: string): string | undefined {
+  return targetBindings.get(token);
+}
+
+export function forgetTokenTarget(token: string): void {
+  try { targetBindings.delete(token); } catch { /* 防御式 */ }
+}
+
+/** ΠΑΝ-5/6 簿记卫生：随 ledger.sweep 清扫已离场令牌的伴随记录（残迹无消费方，
+ *  纯内存卫生 —— 查找面已由 pending 在场性前置兜底）。绝不抛。 */
+export function sweepApprovalSecurityState(liveTokens: Iterable<string>): void {
+  try {
+    const live = new Set(liveTokens);
+    for (const k of targetBindings) if (!live.has(k[0])) targetBindings.delete(k[0]);
+    lastTargetRejection = lastTargetRejection !== null && live.has(lastTargetRejection.token)
+      ? lastTargetRejection : null;
+  } catch {
+    /* 防御式：清扫故障不影响任何行为面 */
+  }
+}
+
+/** ΠΑΝ-5：最近一次目标绑定拒绝的透明化记录（派发层组装结构化拒绝指引的事实源；
+ *  与 escrowBlockOf 同形态）。digest 只出前 8 位 hex（对齐 tokenId 隐私律 ——
+ *  虽然摘要非机密，保持与旁路面一致的脱敏纪律）。 */
+export interface TargetRejectionInfo {
+  token: string;
+  reason: 'target-hint-required' | 'target-mismatch';
+  /** 期望摘要前 8 位（铸造侧绑定） */
+  expectedPrefix: string;
+  /** 提示摘要前 8 位（缺席/无法规范化 ⇒ 'n/a'） */
+  receivedPrefix: string;
+  at: number;
+}
+
+export let lastTargetRejection: TargetRejectionInfo | null = null;
+
+export function recordTargetRejection(info: TargetRejectionInfo): void {
+  lastTargetRejection = info;
+}
+
+export function targetRejectionOf(): TargetRejectionInfo | null {
+  return lastTargetRejection;
+}
+
+/** W-1 隔离缝的安全原语面归零（resetApproval 组合面调用）。 */
+export function resetApprovalSecurityState(): void {
+  targetBindings.clear();
+  lastTargetRejection = null;
 }
 
 // ─── W1-2（S2）：带外投递通道（模块级可注入缝；null = 通道缺席 ⇒ fail-closed） ───
@@ -167,9 +281,13 @@ export function castAmendment(pa: PendingApproval, note: string): ApprovalAmendm
 /** W2-1（H4）：批注铸造的描述参数化面 —— 队列条目没有 PendingApproval 宿主，
  *  以条目自身的 description 为「铸造时自述」。协议与 W1-2 完全同律
  *  （note 截 200 / 差异双面 / 字段级形状 patch），一次批注对多项裁决时
- *  每个条目各铸一份（original = 各自的条目描述）。 */
+ *  每个条目各铸一份（original = 各自的条目描述）。
+ *  ΠΑΝ-7：note 非字符串（模型输出的任意 JSON 真值）防御式字符串化 ——
+ *  旧实现 note.slice 对非字符串抛 TypeError，grant_approval 把 args.note
+ *  原样透传 ⇒ 违反「运行层绝不抛」宪。绝不抛。 */
 export function castAmendmentFor(originalDescription: string, note: string, now: number): ApprovalAmendment {
-  const clamped = note.slice(0, AMENDMENT_NOTE_MAX);
+  const src = typeof note === 'string' ? note : String(note ?? '');
+  const clamped = src.slice(0, AMENDMENT_NOTE_MAX);
   return {
     note: clamped,
     targetDescriptionDelta: { original: originalDescription, corrected: clamped },

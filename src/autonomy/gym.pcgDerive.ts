@@ -7,7 +7,9 @@
 // EvidenceLedger 的 pcg.truth.* 键域）与防弹兜底 pcgFallbackDerivation。行为零
 // 变化（纯搬运，逐字节不改）；推导律随件走（fnv1a 域分离派生 mulberry32 单流
 // 固定序消费 —— gym.ts 立法在源）。绝不抛异常：内部异常 ⇒ 最小兜底推导。
-import { fnv1a, mulberry32 } from './gym';
+// ΠΑΝ-127（D-F5 清偿）：rng 立法改自零出边叶 gym.rng.ts 导入（原自桶 gym.ts
+// 回借构成桶-卫星 value 二环；桶面同名符号仍经再导出可用）。
+import { fnv1a, mulberry32 } from './gym.rng';
 import { PCG_PRODUCTIONS, pcgEffectiveWeights } from './gym.pcgGrammar';
 import type {
   GymGrammarOptions,

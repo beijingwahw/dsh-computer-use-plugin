@@ -138,6 +138,20 @@ export function marginalProgressScore(
  *     分子/分母全整数 —— floor 与小数部分（同分母的余数）可精确比较，零 FP 噪声；
  *   ③ 最大余数法派发零头：小数部分大者先得，平手按代理序（下标升序）；
  *   ④ 全零出价 ⇒ 均分（floor + 零头按代理序）—— 零证据市场的缺省公平。
+ *
+ * ΠΑΝ-124（平票与先占规则显式立法 · C1-3 L-14 清偿）：本函数的**全部**
+ * 平票/先占裁决点逐条成文，消除「先 spawn 者确定性占优」这类隐式规则：
+ *   P1【池不足先占律】T < n 时按下标升序保底前 T 个 —— 先入名册（先 spawn）
+ *       者先占。这是**有意立法**：池不足以全员保底时，任何分配都是偏爱，
+ *       出生序是唯一无 RNG、无时钟、可重放的偏爱源；后 spawn 者在下一轮
+ *       池宽裕时自动补齐（每轮重拍卖，非终身劣势）。
+ *   P2【余数平票律】最大余数法的小数部分平手 ⇒ 下标升序先得（③ 已立法）。
+ *   P3【全零均分平票律】零证据市场的均分零头 ⇒ 下标升序先得（④ 已立法）。
+ *   P4【零出价保底律】自报完成（bid=0）者仍得保底 1 步 —— 有意立法：保底
+ *       是「确认退场/收尾」的机会成本（完成者用它提交最终报告），不是浪费；
+ *       且轮内配额执法对 0 配额者会跳过（不产生额外物理动作）。
+ *   P5【确定性总律】以上裁决点全序确定（无 sort 稳定性依赖、无 Map 迭代序
+ *       依赖）—— 同输入恒同输出；执法测试以重放全等 + 平票手算例锁定。
  */
 export function allocateQuotas(bids: number[], total: number): number[] {
   const n = bids.length;
@@ -146,16 +160,18 @@ export function allocateQuotas(bids: number[], total: number): number[] {
   const out = new Array<number>(n).fill(0);
   if (T === 0) return out;
   if (T < n) {
-    for (let i = 0; i < T; i++) out[i] = 1; // 池不足以全员保底：按代理序保底前 T 个
+    // ΠΑΝ-124 P1（池不足先占律）：下标升序保底前 T 个 —— 出生序偏爱成文立法
+    for (let i = 0; i < T; i++) out[i] = 1;
     return out;
   }
+  // ΠΑΝ-124 P4（零出价保底律）：bid=0 的完成者同样得保底（见函数头注立法）
   for (let i = 0; i < n; i++) out[i] = 1; // 饿死防护：每代理每轮至少 1 步
   const rem = T - n;
   if (rem === 0) return out;
   const mBids = bids.map(b => Math.max(0, Math.round((typeof b === 'number' && Number.isFinite(b) ? b : 0) * 1000)));
   const B = mBids.reduce((s, m) => s + m, 0);
   if (B <= 0) {
-    // 全零出价 ⇒ 均分（floor + 零头按代理序 —— 平手按代理序的缺省体现）
+    // 全零出价 ⇒ 均分（floor + 零头按代理序）—— ΠΑΝ-124 P3：平票裁决点成文
     const base = Math.floor(rem / n), extra = rem % n;
     for (let i = 0; i < n; i++) out[i] += base + (i < extra ? 1 : 0);
     return out;
@@ -173,7 +189,7 @@ export function allocateQuotas(bids: number[], total: number): number[] {
   let leftover = rem - allocated;
   const order = fracNums
     .map((f, i) => ({ f, i }))
-    .sort((a, b) => b.f - a.f || a.i - b.i); // 小数大者先得；平手按代理序
+    .sort((a, b) => b.f - a.f || a.i - b.i); // 小数大者先得；平手按代理序（ΠΑΝ-124 P2 立法点）
   for (let k = 0; k < order.length && leftover > 0; k++, leftover--) out[order[k].i] += 1;
   return out;
 }

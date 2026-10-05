@@ -2,6 +2,8 @@ import { kernelRegistry } from '../kernel/registry.js';
 import { scoreOptions, actionSignature } from './counterfactual.js';
 import { CJK_RE, tokenizeText } from '../dialects/tokenizer.js';
 import { extractQuotedSpans } from '../intentGrammar.js';
+// ΤΕΛ-5 D-G22：弹窗栖息地中央带单源方言（popupDetector 几何/语义通道同假设）
+import { popupHabitatNorm } from '../popupDetector.js';
 // ─── 常量 ───
 /** 元素匹配置信门槛：最佳候选得分低于此值 ⇒ uncertain（请云脑或如实标注） */
 export const MATCH_CONFIDENT = 0.55;
@@ -14,8 +16,50 @@ export const BUDGET_STEPS_LOW = 2;
 export const BUDGET_MS_LOW = 15_000;
 /** 弹窗确认类元素判据（中文子串 + 英文整词，大小写/空白已折叠）。
  *  纪元 Δ 扫描面修正：补「确定/是/同意/yes」——只认 确认/ok/allow 时，四类
- *  高频确认按钮会反落 Esc 分支（Esc 对模态确认框常等于「取消」，语义相反）。 */
-export const POPUP_CONFIRM_RE = /确认|确定|同意|允许|继续|是|\bok\b|\ballow\b|\byes\b/;
+ *  高频确认按钮会反落 Esc 分支（Esc 对模态确认框常等于「取消」，语义相反）。
+ *  ΤΕΛ-5 D-G22（「是」收窄）：单字「是」加汉字邻接守卫 —— 前后均非汉字才命中
+ * （独立按钮「是」「是(Y)」照常；「是否/但是/是否删除」类句子文案不再误中）。
+ *  多字中文词（确认/确定/同意/允许/继续）保持子串律（按钮文案如「确认保存」）。 */
+export const POPUP_CONFIRM_RE = /确认|确定|同意|允许|继续|(?<![\p{Script=Han}])是(?![\p{Script=Han}])|\bok\b|\ballow\b|\byes\b/u;
+/**
+ * ΤΕΛ-5 D-G22：元素中心是否落弹窗栖息地（中央 40% 带，归一域 × 屏宽高）。
+ * 弹窗注记是字符串无真 bounds —— 此为 popupDetector 几何/语义通道同一「弹窗
+ * 居于屏中央」假设的诚实代位（popupHabitatNorm 单源方言）。
+ * fail-closed 律：屏宽高缺席/非正、元素无可用心落点（center 缺席且 bbox 不可
+ * 用）⇒ false —— 弹窗在场时的确认点击不给免检通行（宁可退 Esc 也不点弹窗外
+ * 未知目标）。纯函数、任何脏输入 ⇒ false，绝不抛。
+ */
+export function centerInPopupHabitat(el, width, height) {
+    try {
+        const w = typeof width === 'number' && Number.isFinite(width) && width > 0 ? width : 0;
+        const h = typeof height === 'number' && Number.isFinite(height) && height > 0 ? height : 0;
+        if (w <= 0 || h <= 0 || !el)
+            return false;
+        let x = null;
+        let y = null;
+        const c = el.center;
+        if (c && typeof c.x === 'number' && Number.isFinite(c.x) && typeof c.y === 'number' && Number.isFinite(c.y)) {
+            x = c.x;
+            y = c.y;
+        }
+        else {
+            const b = el.bbox;
+            if (b && typeof b === 'object' &&
+                [b.x0, b.y0, b.x1, b.y1].every(v => typeof v === 'number' && Number.isFinite(v))) {
+                x = (b.x0 + b.x1) / 2;
+                y = (b.y0 + b.y1) / 2;
+            }
+        }
+        if (x === null || y === null)
+            return false;
+        const r = popupHabitatNorm();
+        const x0 = r.x * w, x1 = (r.x + r.width) * w, y0 = r.y * h, y1 = (r.y + r.height) * h;
+        return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+    }
+    catch {
+        return false; // 防御律：几何判定的任何故障按「不在栖息地」处置（fail-closed）
+    }
+}
 /** 破坏性词表（点击目标的词法预分类；英文按整词、中文按子串） */
 const DESTRUCTIVE_ZH = ['删除', '卸载', '清空', '格式化', '重置', '抹掉'];
 const DESTRUCTIVE_EN = ['delete', 'remove', 'uninstall', 'format', 'erase', 'destroy'];
@@ -173,7 +217,7 @@ export function buildCandidates(elements, unmet) {
  * 逐字节零变化（良性/常规置信候选的选优结果不因本函数在场而漂移）。
  * 防御律：任何异常 ⇒ 原序直通（绝不抛）；带内不足 2 人 ⇒ 原样返回。
  */
-export function breakTieBand(candidates, spec, snapshot, history) {
+export function breakTieBand(candidates, spec, snapshot, history, pilotId) {
     try {
         if (!Array.isArray(candidates) || candidates.length < 2)
             return candidates;
@@ -208,6 +252,8 @@ export function breakTieBand(candidates, spec, snapshot, history) {
             noEffectActionKeys: (Array.isArray(history) ? history : [])
                 .filter(h => h?.outcome === 'no_effect')
                 .map(h => actionSignature(h?.action)),
+            // ΠΑΝ-60：评分上下文携带 pilot 域键（世界模型回落按域取接线；缺席 ⇒ 旧律）
+            ...(typeof pilotId === 'string' && pilotId !== '' ? { pilotId } : {}),
         });
         if (!plan)
             return candidates;
