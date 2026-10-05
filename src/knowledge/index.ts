@@ -11,7 +11,7 @@
 // 零侵入红线：不修改任何既有文件 —— 与 D-5（sandbox）/ D-6（orchestration）并存为第七器官。
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { InMemoryKnowledgeBase, CONTENT_MAX_CHARS } from './knowledgeBase';
+import { InMemoryKnowledgeBase, CONTENT_MAX_CHARS, initializeKnowledgeBase } from './knowledgeBase';
 import { KnowledgePipelineOrchestrator } from './pipeline';
 import { StubVisionStation, ReflexiveDecisionStation, StubExecutionStation } from './stations';
 import { DoctorVerdictBridge, toD7Intent } from './adapters';
@@ -73,7 +73,13 @@ const DEFAULT_CONFIG: PipelineConfig & { consumePlanReady: boolean } = {
 export async function apply(ctx: Context, config?: Partial<PipelineConfig> & { consumePlanReady?: boolean }): Promise<void> {
   console.log('[Knowledge] Initializing Tacit-Knowledge Enhanced Hub (D-7)...');
 
-  const knowledge = new InMemoryKnowledgeBase();
+  // ΠΑΝ-43（双脑合一）：知识器官经 initializeKnowledgeBase() 的单一路径铸造/取得
+  // —— 与睡眠免疫幕消费的模块单例（knowledgeBase.ts 导出）**同一实例**。
+  // 旧实现 `new InMemoryKnowledgeBase()` 自建第二颗脑：流水线全部学习落在
+  // apply 实例，睡眠 consolidate 作用在模块单例 —— 白天所学永远不被夜间整合
+  //（C1-8 H2 split-brain）。测试注入端口不变：wire({ knowledge }) 仍是缝，
+  // 隔离实例照旧可注入；本行只改生产缺省供给。
+  const knowledge = initializeKnowledgeBase();
   const orchestrator = new KnowledgePipelineOrchestrator();
 
   // 配置深合并（嵌套组 partial 覆盖）—— 加载门在 apply 收口：configure Result !ok ⇒ throw

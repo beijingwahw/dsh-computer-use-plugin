@@ -3,7 +3,7 @@
 > 本文件由 `scripts/gen_config_docs.mjs` 从 `src/config.ts` 的 Config Schema 自动生成，请勿手改（重跑即重铸）。
 > 生成命令：`node --import ./test/register.mjs scripts/gen_config_docs.mjs`
 
-共 154 个配置字段。
+共 155 个配置字段。
 
 | 键 | 类型 | 缺省 | 描述 |
 | --- | --- | --- | --- |
@@ -103,7 +103,7 @@
 | kernelStatePath | string | "" | Kernel evolution-state JSON path (atomic tmp+rename write): params/evidence/generations carried across sessions (restored on load, saved on unload and after evolution ticks); empty = memory only |
 | kernelEvolutionEnabled | boolean | false | Master switch for production kernel evolution: throttled calibrator ticks on user-message hooks; false (default) = bookkeeping only, zero behavior change |
 | ioTimeoutMs | number | 15000 | ioMutex per-IO queue/execution timeout (ms): a hung physical call no longer blocks the global queue forever; 0 = wait forever (legacy behavior) |
-| hotkeyBlacklist | string | "alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete" | Comma-separated system-hotkey blacklist (lowercase key names): press_hotkey matches are rejected outright (window-close / OS-shell escape moves) |
+| hotkeyBlacklist | string | "alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete,ctrl+shift+esc,alt+space" | Comma-separated system-hotkey blacklist (lowercase key names): press_hotkey matches are rejected outright (window-close / OS-shell escape moves: alt+f4, meta/win, ctrl+alt+delete, ctrl+shift+esc task manager, alt+space window menu) |
 | enableNotarizationLock | boolean | true | Two-key semantic notarization for irreversible actions: OCR-read label + whitebox control name + model self-description — ANY channel seeing danger blocks (fail-heavy); channels absent degrade honestly to legacy single-channel behavior |
 | notarySemanticHandshake | boolean | true | Semantic handshake: the OCR-read label at the click point must agree with the model description, otherwise reject and demand re-description (defeats injection lying about the target) |
 | foveatedEncoding | boolean | false | Foveated encoding: center region at native resolution, periphery downsampled — maximize information gain per VLM token; false (default) = uniform encoding (legacy) |
@@ -118,7 +118,7 @@
 | notaryTracePath | string | "" | Append-only JSONL path for anchor records (tolerant of torn last lines); empty = memory only (anchor chain lost across processes) |
 | notaryAutoAnchor | boolean | false | Automatically mint one anchor (chain tip + MMR root + timestamp) for the journal on unload; false (default) = notarize only manually via the quality_checkup notarize action |
 | federationEndpoint | string | "" | Federation aggregation endpoint; empty = zero network (local mint/merge/apply still fully functional for multi-process and test use) |
-| federationEpsilon | number | 1 | Differential-privacy epsilon for federated evidence digests (Laplace count noise; same default of 1 as the swarm experience crystals) |
+| federationEpsilon | number | 1 | Differential-privacy epsilon for federated evidence digests (Laplace count noise; same default of 1 as the swarm experience crystals). Valid domain (0, total privacy budget] is single-sourced from federation (validFederationEpsilon / PRIVACY_BUDGET_EPSILON_TOTAL): out-of-domain values are rejected at config load (fail-loud) and again fail-closed at the federation mint/sync entry (PAN-70); lower bound 0.001 approximates the open interval (schemastery has closed domains only) |
 | federationMaxRemoteShare | number | 0.5 | Cap (0~1) on remote-evidence share per key relative to the local ledger: prevents remote flooding from dominating local calibration; 0.5 = at most half-and-half blending |
 | enableSelfModel | boolean | true | Self-model: decayed Beta competence posteriors per (action-kind x scene-bucket), passive bookkeeping consumed by the epistemic gate and introspection |
 | selfModelMinEvidence | number | 8 | Minimum evidence n before the self-model may inform the epistemic gate (honest cold start, no fabricated experience) |
@@ -161,3 +161,4 @@
 | enableReversibilityLanes | boolean | false | W4-3 S5: dispatch lanes by reversibility level — click/type/drag tools classify the intent (reversibilityRegistry.classify) BEFORE dispatch: reversible = fast lane, compensable = escrow lane (mint a reversal plan BEFORE approval.beginAttempt on dangerous+token paths; non-enforcement paths annotate only), irreversible = hand control back to the HUMAN (no automated dispatch). Unknown-semantics actions are left to the existing danger-word gate (classification-knowledge absence is not a lane verdict). false (default) = byte-identical legacy path |
 | enableStepAuction | boolean | false | W4-7 G5: step-auction market for sub-agents — per-agent maxSteps becomes a shared pool re-auctioned every K charged steps (convergence evidence aggregated from experience crystals by birth-scene fingerprint); false (default) = per-agent maxSteps budgets, byte-identical |
 | stepAuctionBudget | number | 0 | W4-7 G5: explicit total step-pool budget for the auction market; 0 (default) = derived from the roster (sum of maxSteps — total budget equivalent to the status quo) |
+| enableSandboxStack | boolean | — | Sandbox stack (rehearse -> consolidate -> replay dojo: 4 tools + 3 event wirings + sandboxLog ledger persistence) root-assembly switch. Tri-state by design (no schema default — unset stays undefined): unset = follow the legacy autonomyEnabled gate (byte-identical compatibility; F2-3 interim gate retired per D-G16-1); explicit true = light up independently of the autonomous loop; explicit false = off regardless of autonomyEnabled (explicit setting wins). Default deployment stays OFF (zero regression) |

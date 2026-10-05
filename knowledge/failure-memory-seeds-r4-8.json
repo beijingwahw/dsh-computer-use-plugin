@@ -1,0 +1,43 @@
+{
+  "_comment": "R4-8 failureMemory 反技能种子（canonical，仓内档）。部署拷贝 = 本对象嵌入 checkpoint v4 档的 failureMemory 段（~/.dsh/plugin-memory/computer-use-checkpoint.json，由本档生成保证逐字节一致）。来源：R1-8 九连败取证（C:\\2\\.survey\\practice\\R1-8.md、R3-6.md §1 三大缺陷画像）。rootCause 仅在鉴别探针可归因处标注（1/3 = blind-spot-text），其余诚实留空（= unknown 桶）。",
+  "records": [
+    {
+      "id": 1,
+      "query": "记事本经文件菜单另存为到指定路径（notepad file menu save-as menu item）",
+      "approach": "click_mouse 点击菜单项，但未先截图确认下拉菜单已展开（菜单未开即点；坐标取自旧帧或屏顶估计，未按当帧重读）",
+      "symptom": "菜单未展开，点击落在壁纸或收起态菜单栏；diff_view 像素零变化、effect.detected=false，文件未保存",
+      "rootCause": "blind-spot-text",
+      "at": 1791172800000
+    },
+    {
+      "id": 2,
+      "query": "GUI 点击无效果后重试同一目标（repeat click same coordinate no effect）",
+      "approach": "click_mouse 同一坐标 (x,y) 第三次及以上重复点击，其间 diff 零像素变化仍不改坐标；预校验 target-changed 拒点后截图了却仍用原坐标",
+      "symptom": "同坐标连点全部无效：diff changed_fraction_pct=0，回执明令勿用陈旧坐标仍被违反；坐标惯性 —— 流程重试、几何原地踏步",
+      "at": 1791172800000
+    },
+    {
+      "id": 3,
+      "query": "向另存为/保存对话框输入文件路径并回车（type path into save dialog input box）",
+      "approach": "type_text + enter：对话框未截图确认在场即盲打（I-beam 探针在文档正文与输入框间歧义仍乐观采信，clearFirst 直接覆盖文档内容）",
+      "symptom": "type_text 回执 SUCCESS 但路径打进文档正文；Test-Path 三次 False，文件从未落盘",
+      "rootCause": "blind-spot-text",
+      "at": 1791172800000
+    },
+    {
+      "id": 4,
+      "query": "GUI 自动化受挫后改用脚本模拟键鼠（script bypass pwsh SendKeys UIA Win32 OCR）",
+      "approach": "pwsh SendKeys/UIA 全树走查/Win32 EnumWindows/自建 OCR 脚本旁路连续加码，全程零 take_screenshot；把不可见桥接窗矩形当可见菜单边界去点",
+      "symptom": "脚本零报错但 GUI 无任何存盘效果；49 调用中 38 次旁路吞掉 78% 步骤预算后任务必败",
+      "at": 1791172800000
+    },
+    {
+      "id": 5,
+      "query": "小目标精确定位后落点（zoom_inspect 放大后点击 small target）",
+      "approach": "zoom_inspect 放大观察目标后，点击仍复用 zoom 之前的旧坐标，不按随图映射公式把放大图读数换算回全屏坐标",
+      "symptom": "zoom 买来的信息被丢弃（等于没有 zoom）；原坐标继续脱靶，同点再败",
+      "at": 1791172800000
+    }
+  ],
+  "nextId": 6
+}

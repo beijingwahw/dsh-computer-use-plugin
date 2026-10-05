@@ -1,66 +1,24 @@
-import { tokenize } from '../uiMemory.js';
+// ΠΑΝ-46（分词单源收口）：词法面（反射弧/运动弧/前额叶仿真）从 ../uiMemory 的
+// 第二套口径换到 dialects.tokenizeText 单源（停用词剥离 + 分段 bigram）。
+// 注意：intentGrammar.residueTokens（运动弧残差）仍是 uiMemory 口径 —— 非
+// knowledge 链文件，跨口径比较的重合度影响已在测试覆盖下（英文词与 CJK
+// bigram 双口径基本重合；纯数字 residue 会失去元素侧对应 token，可接受损失）。
+import { tokenizeText } from '../dialects/tokenizer.js';
 import { embed, cosine } from '../semanticHash.js';
 import { trustOf } from './knowledgeBase.js';
 import { P } from './params.js';
 import { SANDBOX_ACTION_KINDS } from '../sandbox/types.js';
 import { classifyWordShape } from '../wordShape.js';
 import { classifyMotor, extractQuotedSpans, residueTokens, extractScroll, extractHotkey, } from '../intentGrammar.js';
-// ─── 网格分区铸造（'g{col}x{row}' —— D-6 坐标同一性方案复刻，跨轮稳定）───
-// exempt(ΝΩ-41 BC-5)：与 orchestration/pipeline.helpers.ts 同体有意双份（knowledge 与 orchestration 互不 import 的器官边界律，行为由 D-6 同一性测试锁定）—— 知情申报
-function gridRegions(grid) {
-    const regions = [];
-    for (let col = 0; col < grid.cols; col++) {
-        for (let row = 0; row < grid.rows; row++) {
-            regions.push({
-                id: `g${col}x${row}`,
-                x: col / grid.cols, y: row / grid.rows,
-                width: 1 / grid.cols, height: 1 / grid.rows,
-            });
-        }
-    }
-    return regions;
-}
-/** 故障补丁铸造：扫描失败 ≠ 真空（两种空，两种决策 —— 对齐 D-6 ScenePatch.fault 契约）。
- *  导出：D-5 微服务感知端口（d7HostPort）同方言复用 —— 感知失败的形状全机体统一。 */
-export function faultPatches(grid, detail) {
-    const capturedAt = Date.now();
-    return gridRegions(grid).map(region => ({
-        region,
-        elements: [],
-        funnelDepth: 'empty',
-        fault: { source: 'L1', detail },
-        capturedAt,
-    }));
-}
-/** 感知分派公用件：归一化元素（中心落区即入区）→ 网格分区补丁。
- *  capability 源（本机 a11y/OCR）与 D-5 微服务源（远端 UI 树）共用同一分派律 ——
- *  'g{col}x{row}' 坐标同一性方言跨源稳定。
- *  分派语义：半开区间 [x0, x1) —— 中心恰落在格线上归属右侧分区（最右/最下
- *  边缘夹回末区）。双闭区间会把居中元素（中心恰为 0.5）重复派进两个分区，
- *  破坏 reflexArc 的最优/次优区分与 deliberate 的亚军比较。 */
-export function dispatchElementsToGrid(els, grid, depth, sourceLabel) {
-    const capturedAt = Date.now();
-    const byRegion = new Map();
-    for (const e of els) {
-        const col = Math.max(0, Math.min(grid.cols - 1, Math.floor((e.rect.x + e.rect.width / 2) * grid.cols)));
-        const row = Math.max(0, Math.min(grid.rows - 1, Math.floor((e.rect.y + e.rect.height / 2) * grid.rows)));
-        const id = `g${col}x${row}`;
-        const bucket = byRegion.get(id);
-        if (bucket)
-            bucket.push(e);
-        else
-            byRegion.set(id, [e]);
-    }
-    return gridRegions(grid).map(region => {
-        const inRegion = byRegion.get(region.id) ?? [];
-        return {
-            region,
-            elements: inRegion.map(e => ({ source: sourceLabel, ...e })),
-            funnelDepth: inRegion.length > 0 ? depth : 'empty',
-            capturedAt,
-        };
-    });
-}
+// ΠΑΝ-127（D-F5 清偿）：网格分区三件（gridRegions/faultPatches/
+// dispatchElementsToGrid）已下沉零环基座 knowledge/gridDispatch.ts ——
+// physicalExecution/d7HostPort.ts 曾回借本件 faultPatches/dispatchElementsToGrid
+// 构成 knowledge↔physicalExecution 跨模块 value 环的一臂；此处再导出保导入面
+// 零破坏（epochX/harness 测试面照旧），本件内部消费改 import 叶。
+// 行为零变化 —— 纯结构搬家。
+export { faultPatches, dispatchElementsToGrid } from './gridDispatch.js';
+// 件内消费（工位桩/能力源同方言复用分派三件）：ΠΑΝ-127 下沉叶后经导入回流。
+import { faultPatches, dispatchElementsToGrid } from './gridDispatch.js';
 /**
  * L2 OCR 词元 → 点击候选元素（Z-2 正文剔除，纯函数 —— 测试面）。
  * content-like（宽行/多行段落形态：聊天消息、文档正文）不参选 —— 反射弧
@@ -283,8 +241,8 @@ export function embedCached(text) {
 // （满库且无 auto-learn 可驱逐 —— 全 manual/import 主权库）时该闭环断裂，
 // 工位实例闩锁只护 run 内 —— 每个 run 都重付探针学费。修法：学习侧容量
 // 拒绝上报时（escalateProbeLatch，接线缝 = pipeline learnSettled 的
-// r.error.field === 'capacity' 分支），该 intent 的闩锁升进程级 —— 跨工位
-// 实例存活；1h 衰减懒过期自动解除（容量拒绝可被上游清库解除，永久闩锁
+// r.error.field === 'capacity' 分支 —— ΠΑΝ-48 已接线，不再是无调用的死声明），
+// 该 intent 的闩锁升进程级 —— 跨工位实例存活；1h 衰减懒过期自动解除（容量拒绝可被上游清库解除，永久闩锁
 // 会把「世界会变」的复活通道焊死 —— 探针本是传闻的解药，不是刑具）。
 const PROCESS_LATCH_DECAY_MS = 60 * 60 * 1000;
 const processProbeLatch = new Map(); // intentId → 升级时刻
@@ -536,8 +494,10 @@ export class ReflexiveDecisionStation {
     /**
      * DS-4 学习闭环断裂上报（接线缝：pipeline 侧 learnSettled 检出容量拒绝
      * `r.error.field === 'capacity'` 时对本工位调用 —— 工位在 pipeline deps 内
-     * 可直达）：该 intent 的探针闩锁升进程级（跨工位实例存活），1h 衰减自动
-     * 解除（容量拒绝可被上游清库解除 —— 探针是传闻的解药不是刑具）。
+     * 可直达。ΠΑΝ-48 已接线：此前该缝在 pipeline.ts 无对应分支，本方法是
+     * 零调用方的死声明 —— 注释承诺的保护不存在）：该 intent 的探针闩锁升
+     * 进程级（跨工位实例存活），1h 衰减自动解除（容量拒绝可被上游清库解除
+     * —— 探针是传闻的解药不是刑具）。
      * 运行层永不抛错：非法输入静默拒绝（守卫不炸流水线）。
      * now 可注入（时间旅行测试缝 —— 与 trustOf 同方言）；缺省墙钟。
      */
@@ -662,7 +622,7 @@ export class ReflexiveDecisionStation {
         for (const patch of scene) {
             for (const el of patch.elements) {
                 total += 1;
-                const score = tokenize(el.name).filter(t => intentTokens.has(t)).length;
+                const score = tokenizeText(el.name).filter(t => intentTokens.has(t)).length;
                 if (!best || score > best.score) {
                     second = best ? best.score : 0;
                     best = { name: el.name, cx: el.rect.x + el.rect.width / 2, cy: el.rect.y + el.rect.height / 2, score };
@@ -680,7 +640,7 @@ export class ReflexiveDecisionStation {
     }
     /** 脊髓反射弧（Tier 1）：动作 / 接地 + 前额叶可否接手（压制路径外独立计算） */
     reflexArc(ctx) {
-        const intentTokens = new Set(tokenize(ctx.intent.description));
+        const intentTokens = new Set(tokenizeText(ctx.intent.description));
         if (intentTokens.size === 0) {
             return {
                 grounding: { reason: 'intent has no recognizable tokens — no reflex arc', focus: 'full-scene' },
@@ -736,7 +696,7 @@ export class ReflexiveDecisionStation {
         // 载荷词不参加落点选举（与运动弧同律）；语义通道仍用完整意图（证据
         // 经济学不因词法纪律而失明）。
         const motorClass = classifyMotor(ctx.intent.description);
-        const intentTokens = new Set(motorClass ? residueTokens(ctx.intent.description) : tokenize(ctx.intent.description));
+        const intentTokens = new Set(motorClass ? residueTokens(ctx.intent.description) : tokenizeText(ctx.intent.description));
         // DS-3（ΝΩ-16 顺修）：三处嵌入全走进程级 LRU 缓存 —— run 内 intent/
         // fragment/元素名高度复现（重试轮尤甚），重复哈希是纯浪费；embed 纯函数
         // ⇒ 缓存命中零语义漂移。
@@ -753,7 +713,7 @@ export class ReflexiveDecisionStation {
                 const evidence = [];
                 let utility = 0;
                 let veto = false;
-                const matched = new Set(tokenize(el.name).filter(t => intentTokens.has(t))).size;
+                const matched = new Set(tokenizeText(el.name).filter(t => intentTokens.has(t))).size;
                 if (matched > 0)
                     utility += matched;
                 const intentSim = cosine(intentVec, elVec);
@@ -813,7 +773,13 @@ export class StubExecutionStation {
     constructor(opts) {
         this.opts = opts;
     }
-    async execute(env) {
+    /**
+     * 可选止损 signal（ΠΑΝ-43~48 修复潮对接点）：透传到宿主端口的实际派发
+     * （host.execute(action, signal)）—— 流水线执行步超时的止损经此抵达真机
+     * 躯体（D-5 微服务断流）。端口不消费 signal 时由其内层超时兜底（浪费窗口
+     * 有界），工位零强求。
+     */
+    async execute(env, signal) {
         const action = env.payload;
         const startedAt = Date.now();
         if (!this.opts.host) {
@@ -825,7 +791,7 @@ export class StubExecutionStation {
             };
         }
         try {
-            const r = await this.opts.host.execute(action);
+            const r = await this.opts.host.execute(action, signal);
             // 外部注入执行端口（dsh.host-executor）的返回是外部数据：status 词表外或
             // 缺失 ⇒ 按契约违约处理（host-error），不得把垃圾值伪装成 degraded 完成
             if (!r || (r.status !== 'success' && r.status !== 'failure' && r.status !== 'degraded')) {

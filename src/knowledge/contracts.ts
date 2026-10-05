@@ -8,7 +8,7 @@
 // 《异常诚实分层契约》D-7 修正案：apply = 加载门（throw）；configure = 运行层可重配方法
 //   （Result，严禁 throw）；一切运行方法 Result 优雅降级。
 import type {
-  ScenePatch, AtomicAction, PipelineVerdict, Result, ConfigError,
+  ScenePatch, AtomicAction, PipelineVerdict, Result, ConfigError, ExecutionFailureKind,
 } from '../orchestration/contracts';
 
 export type { ScenePatch, AtomicAction, PipelineVerdict, Result, ConfigError }; // 透传再导出（单一事实源分发）
@@ -158,12 +158,23 @@ export type D7DoctorVerdict =
   | { status: 'needs_review'; flags: string[] };
 
 // ─── 8. 执行结果（D-7 方言：action 内联回显）───
+// ΤΕΛ-4（D-G20 清偿）：failure.kind 词表扩容 —— 旧 6 值方言与 D-6
+// orchestration/contracts 的 ExecutionFailureKind（ΝΩ-27 十四细分 + timeout-aborted）
+// 静默漂移，d7HostPort.translateFailureKind 被迫三类折叠保义落位（ΠΑΝ-65）。
+// 现直接 import D-6 单源（本文件既有「非冲突类型一律 import D-6」立法同律；
+// D-6 不反向依赖 D-7 ⇒ 无环）：两份契约的漂移面就此根除，翻译表退化为
+// 恒等直通。'timed-out' 是 D-7 自有值（D-6 无此值）—— 保留为方言增量。
+// 行为面：knowledge 流水线的 kind 判据只有 cancelled/timed-out 直达 aborted
+//（pipeline 失败路由），细分值语义与折叠后同域（其余一律入重试循环）——
+// 扩容是可观测面细化，非路由行为变更。
+export type D7FailureKind = ExecutionFailureKind | 'timed-out';
+
 export interface ExecutionResult {
   action: AtomicAction;
   status: 'success' | 'failure' | 'degraded';
   durationMs: number;
   failure?: {
-    kind: 'gate-rejected' | 'host-error' | 'timeout' | 'sandbox-degraded' | 'cancelled' | 'timed-out';
+    kind: D7FailureKind;
     detail: string;
   };
 }
@@ -202,7 +213,12 @@ export interface DecisionStation {
 }
 
 export interface ExecutionStation {
-  execute(env: AttentionEnvelope<'execution', AtomicAction>): Promise<ExecutionResult>;
+  /**
+   * 可选止损 signal（ΠΑΝ-43~48 修复潮对接点）：流水线执行步超时 abort ——
+   * 工位尽力向宿主端口透传（真机派发断流）；不消费的实现忽略之，由其内层
+   * 超时兜底。可选参数 = 既有实现/测试桩零回归。
+   */
+  execute(env: AttentionEnvelope<'execution', AtomicAction>, signal?: AbortSignal): Promise<ExecutionResult>;
 }
 
 /** 决策重规划语境（D-7 最小形态） */

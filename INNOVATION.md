@@ -424,7 +424,13 @@ DirectShow 可读环境必 TypeError → internal_error；作者环境测不到�
 | W7 终局验证 | 创世审计器 genesis_audit 立宪（账实一致机器执法）+ doctor 官方豁免治理 + 全器官 E2E + 全开压力 + 确定性模糊 + 性能回归门 + 接线收尾 | w7audit / w7doctor / w7e2e / w7fullon / w7fuzz / w7gate / w7wire（七册） | 96/0 实测全绿 | ✅ 完工（--check 在册执法，W9-5 补录后复跑通过） |
 | W8 世界创新修复 | 世界创新债清偿：三大巨文件拆分（gym/approval/runtime）/ 判据证伪器官 / 包级断环 / 记忆升级 / 预言细化 / 重放公证 / federation-server 单源化 / SoM·梦·增量三线接线收口 | w8.arch / w8.criteria / w8.escrow / w8.finalwiring / w8.incremental / w8.memory / w8.organwiring / w8.prophecy / w8.providerPort / w8.replaynotary / w8gymsplit（十一册） | 96/0 实测全绿（另全量 2472/2467/0 fail 系 W8-C2 收稿口径） | ✅ 完工（DEBTS 43→47：翻案闭 11 + 新增 4） |
 | W9 终账 | 已知取舍 12 条终谳（设计决策定谳面）+ GENESIS 纪元补录 + 审计校账 | —（占位） | 占位——集成者收官填终数 | ⏳ 收口中 |
+| ΠΑΝ 修复潮 | 批判报告（C1/C2 系列）工单化清偿：仲裁阈值经验定标 / visualDiff 滚动配准 / 施密特参数成文 / 振荡环键域有界化 / 拍卖平票立法 / 器官册漂移检测 / 对外文档承诺校正（README/INNOVATION）等分批落地 | pan 前缀分册（随工单推进逐册入 test/） | **待全量验证**——批次审判数字以 F4 波全量实跑为准，本表不预填任何数字 | 🔧 进行中（逐工单零回归门） |
+| ΤΕΛΟΣ 完满纪元 | 完满收官四役：census 在册器官全员通电（unwired-organ 6→0，mergeSimilarTypes 改判 internal-surface）· dead-code 34 条清删（10 删/24 改判，ΤΕΛ-11 册终局收割 dead-code 类别清零）· D-PAN 系列 D-G16..G32 全数清偿（18 闭 1 谳，留案拆条 D-G33..G40）· 8 条需真机债一键探针化（D-A1/D-A4 当场收割，其余 absent 诚实缺席） | tel1.wiring / tel3.fix / t1-4.gdebts / tel5.fixes / t1-6.fixes / w0unload / realverify 等分册 | Τ1-12 两窗自跑：首窗 3384/3370/5 败（3 败经 T2-3/T2-4 期望更新修复、D-E3 在册、册收割前）→ 二窗 **3387/3376/2 败**（D-E3 在册 + epochChi＝ΤΕΛ-13 sandbox 在途）· census exit 0（609/609 在册）；采样 2026-10-05，T2-6/7/10 与 ΤΕΛ-13 报告仍在途 | ✅ 主体完工（DEBTS 77→85：未闭 18/定谳 18/闭环 49；探针化真机债硬件到场即收割） |
 
 三浪潮按 GENESIS 既有浪潮章节格式登记（不带「纪元 Wn」标题——w7audit 执法册
 deepEqual 锁定审计宇宙恰为 W1-W5 五纪元，审计器头注亦立「w7+ 不属本审计宇宙」律；
 扩宇宙须先修执法册，属后续窗口决策）。
+
+ΠΑΝ 行注记（2026-10-04）：ΠΑΝ 修复潮的审判数字**以 F4 波全量验证后的实跑
+口径为准**——本表只登记工单状态与执法册名，不预填通过/失败计数（防止「先
+写数后跑数」的账面话术；各工单的局部测试绿在其修复报告留痕）。

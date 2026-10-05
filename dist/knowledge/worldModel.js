@@ -10,6 +10,24 @@ const TYPE_MATCH_SIMILARITY = 0.62;
  *  只有「本就该是一型、却因渐变被分铸」的碎片才收拢；0.62~0.85 之间是
  *  合理的方言内变体，各自成型。值即碎片治理的口径，非调参旋钮。 */
 const TYPE_MERGE_SIMILARITY = 0.85;
+/**
+ * ΠΑΝ-47（有界化）：碎片收拢幕的触发阈值 —— 共享模型的类型数到达该值即扫
+ *（mergeSimilarTypes 收拢 + 容量执法，见 maintainCapacity）。导出供 pipeline
+ * 的 run-end 维护接线检查触发条件。64 = 「远超真实部署的屏幕类型学规模、
+ * 又足以让碎片在驱逐前先获得收拢机会」的保守带（对拍 knowledgeBase 的
+ * MAX_ENTRIES=1000 容量纪律 —— 双器官自此对等）。
+ */
+export const WORLD_MODEL_MERGE_SWEEP_TYPES = 64;
+/**
+ * ΠΑΝ-47（有界化）：类型容量上界 —— 收拢后仍溢出 ⇒ 驱逐最弱类型（members
+ * 最少 = 证据最少；无逐型时间戳，拒绝伪造 LRU —— members 是「最近被使用」的
+ * 诚实代理：在线质心下持续命中的类型 members 单调增长）。256 对屏幕类型学
+ * 是宽裕上界；溢出计数（evictedTypes）诚实标注在 stats()/快照 —— 驱逐不是
+ * 无声的。
+ */
+export const WORLD_MODEL_MAX_TYPES = 256;
+/** ΠΑΝ-47：typeOf 签名缓存容量（LRU —— run 内场景高度复现，重复扫描是纯浪费） */
+const TYPE_CACHE_CAPACITY = 128;
 /** Laplace 平滑系数 —— Jeffreys 二项不变先验 α=1/2（唯一有不变性推导的
  *  无信息先验，数值由推导固定）。校准：包络内不敏感（novel 直通通道主导）。 */
 const SURPRISE_ALPHA = 0.5;
@@ -149,6 +167,19 @@ export class InMemoryWorldModel {
      * 外部持有者（挂账转移、预言缓存）对合并无感。
      */
     aliases = new Map();
+    /**
+     * ΠΑΝ-47：typeOf 签名的 embed 备忘缓存（LRU，键 = 签名 tokens join，
+     *  值 = 签名向量）。run 内场景高度复现（重试轮尤甚）—— 全签名重复 embed
+     *  是纯浪费（C1-8 H6）。**只缓存 embed，不缓存扫描判决**：argmax 扫描
+     *  逐次照跑 —— 在线质心语义下多类型并存时最近邻可能翻转（ΝΩ-15 渐变剧本
+     *  正依赖 argmax 吸收驱动双质心相向漂移），缓存判决会钉死首winner、
+     *  改变聚类动力学（严格等价论证：embed 是确定性纯函数 ⇒ 备忘零语义漂移；
+     *  扫描成本由容量上界 WORLD_MODEL_MAX_TYPES 钳死 —— 有界化本身就是扫描的
+     *  缓存）。无需失效：值只依赖输入签名，与 types/aliases 状态无关。
+     */
+    sigEmbedCache = new Map();
+    /** ΠΑΝ-47：容量驱逐累计数（诚实标注面 —— stats()/快照可观测，驱逐绝不无声） */
+    evictedTypes = 0;
     // ── O 纪元（#20）：run 级快照 —— 并发 run 隔离 ──
     /** fork 出的实例才记账（根实例 journaling=false —— 根永不 merge 自己） */
     journaling = false;
@@ -174,6 +205,7 @@ export class InMemoryWorldModel {
         for (const [from, into] of this.aliases)
             child.aliases.set(from, into);
         child.typeCounter = this.typeCounter;
+        child.evictedTypes = this.evictedTypes; // ΠΑΝ-47：历史计数随快照继承（fork 不维护，只记账）
         child.journaling = true;
         return child;
     }
@@ -264,7 +296,23 @@ export class InMemoryWorldModel {
         const tokens = sceneTokens(scene);
         if (tokens.length === 0)
             return null; // 看不见 ≠ 真空屏（fault 补丁零元素同律）
-        const vec = embed(tokens.join(' '));
+        // ΠΑΝ-47：embed 备忘缓存（确定性纯函数 ⇒ 命中零语义漂移；LRU 新鲜度刷新）
+        const sig = tokens.join(' ');
+        let vec = this.sigEmbedCache.get(sig);
+        if (vec !== undefined) {
+            this.sigEmbedCache.delete(sig);
+            this.sigEmbedCache.set(sig, vec);
+        }
+        else {
+            vec = embed(sig);
+            this.sigEmbedCache.set(sig, vec);
+            if (this.sigEmbedCache.size > TYPE_CACHE_CAPACITY) {
+                const oldest = this.sigEmbedCache.keys().next().value;
+                if (oldest !== undefined)
+                    this.sigEmbedCache.delete(oldest);
+            }
+        }
+        // argmax 扫描逐次照跑（见 sigEmbedCache 字段注记的严格等价论证）
         let bestId = null;
         let bestSim = 0;
         for (const [id, t] of this.types) {
@@ -293,11 +341,18 @@ export class InMemoryWorldModel {
         this.types.set(id, { tokens, vec, members: 1 });
         if (this.journaling)
             this.ops.push({ k: 'mint', id, tokens });
+        // ΠΑΝ-47（根实例的内联容量执法）：非 journaling 的直接消费者（pipeline
+        // 走 fork+run-end 维护，不至此路径；测试/工具直调 typeOf 的用户在此执法）。
+        // fork 内不驱逐 —— 驱逐不进 journal，重放等价性优先（run-end 维护兜底）。
+        if (!this.journaling && this.types.size > WORLD_MODEL_MAX_TYPES)
+            this.maintainCapacity();
         return id;
     }
     /**
      * ΝΩ-15：近邻合并（cosine ≥ TYPE_MERGE_SIMILARITY）—— 碎片化治理的收拢
-     * 器官（供 sleep 幕/维护钩子显式调用；接线由后续工单）。
+     * 器官。ΠΑΝ-47 起接线：维护入口 = maintainCapacity（pipeline run-end 在
+     * 类型数 ≥ WORLD_MODEL_MERGE_SWEEP_TYPES 时调用；typeOf 铸造路径的根实例
+     * 内联容量执法亦经它）—— 不再是零调用的孤儿器官。
      * 确定性贪心（单轮）：类型按 members 降序、id 字典升序遍历 —— 每型要么
      * 成为幸存者，要么并入已幸存集合中与其最相似且 ≥ 阈值者（证据多者为
      * 身份之锚）。并入动作：
@@ -365,6 +420,99 @@ export class InMemoryWorldModel {
         }
         this.transitions = reborn;
         return { merged: [...localAlias.entries()].map(([from, into]) => ({ from, into })) };
+    }
+    /**
+     * ΠΑΝ-47（有界化维护幕）：碎片收拢（mergeSimilarTypes）→ 容量执法（收拢后
+     * 仍 > WORLD_MODEL_MAX_TYPES ⇒ 逐出最弱类型直到合规）。接线点：
+     *   · pipeline run-end（fork 重放回共享模型后、落盘前，类型数 ≥
+     *     WORLD_MODEL_MERGE_SWEEP_TYPES 触发）—— 生产主路径；
+     *   · typeOf 铸造路径的根实例内联执法（直调用户）。
+     * journaling fork 上拒绝执行（收拢/驱逐不进 ops 日志 —— 重放等价性优先；
+     * fork 的膨胀由 run-end 维护兜底，上界 = MAX_ROUNDS 的铸造数）。永不 throw。
+     * 返回收拢与驱逐清单（诚实标注面 —— 调用方入链/入账）。
+     */
+    maintainCapacity() {
+        if (this.journaling)
+            return { merged: [], evicted: [] };
+        const merged = this.mergeSimilarTypes().merged;
+        const evicted = [];
+        while (this.types.size > WORLD_MODEL_MAX_TYPES) {
+            const gone = this.evictWeakestType();
+            if (gone === null)
+                break; // 空模型防御（不可达 —— size > 上界 ⇒ 非空）
+            evicted.push(gone);
+        }
+        return { merged, evicted };
+    }
+    /**
+     * ΠΑΝ-47：驱逐最弱类型（members 最少 = 证据最少；并列取 id 字典序最小 ——
+     * 确定性）。无逐型时间戳，拒绝伪造 LRU —— members 在线质心语义下是「被
+     * 使用程度」的诚实代理（持续命中的类型 members 单调增长）。连带修复：
+     *   · 别名链清理：指向被逐类型的别名（含经它中转的死链）整体解除 ——
+     *     resolveTypeId 绝不把调用方引向幽灵；
+     *   · 转移表重铸：from 悬空的行随型死亡；next 中的幽灵计数移除且
+     *     total 随降（sum(next)==total 记账不变量保序）；success 取
+     *     min(success, 新 total) —— 目的地证据消失时分母收缩，分子不许虚构
+     *     超越幸存分母（快照域执法 success ≤ total 的必要修复，诚实截断）。
+     * 驱逐计数 evictedTypes +1（stats()/快照可观测 —— 溢出从不无声）。
+     */
+    evictWeakestType() {
+        if (this.types.size === 0)
+            return null;
+        let weakest = null;
+        let weakestMembers = Number.POSITIVE_INFINITY;
+        for (const [id, t] of this.types) {
+            if (t.members < weakestMembers ||
+                (t.members === weakestMembers && weakest !== null && id < weakest)) {
+                weakest = id;
+                weakestMembers = t.members;
+            }
+        }
+        if (weakest === null)
+            return null;
+        this.types.delete(weakest);
+        // 别名链清理（两遍：直接指向者 → 经死链中转者）
+        for (const [from, into] of [...this.aliases]) {
+            if (into === weakest)
+                this.aliases.delete(from);
+        }
+        for (const from of [...this.aliases.keys()]) {
+            if (!this.types.has(this.resolveTypeId(from)))
+                this.aliases.delete(from);
+        }
+        // 转移表重铸（悬空引用 + 记账不变量修复）
+        const reborn = new Map();
+        for (const [key, tr] of this.transitions) {
+            const bar = key.indexOf('|');
+            const from = this.resolveTypeId(bar === -1 ? key : key.slice(0, bar));
+            if (!this.types.has(from))
+                continue; // 该型的动力学证据随型死亡
+            const action = bar === -1 ? '' : key.slice(bar + 1);
+            const nk = `${from}|${action}`;
+            let st = reborn.get(nk);
+            if (!st) {
+                st = { total: 0, success: 0, next: new Map() };
+                reborn.set(nk, st);
+            }
+            for (const [to, n] of tr.next) {
+                const cto = this.resolveTypeId(to);
+                if (!this.types.has(cto))
+                    continue; // 目的地被逐 —— 计数随证据消失
+                st.next.set(cto, (st.next.get(cto) ?? 0) + n);
+                st.total += n;
+            }
+            st.success += Math.min(tr.success, tr.total); // 逐入参行内截断（分母未定时先按原分母）
+        }
+        for (const [nk, st] of reborn) {
+            if (st.next.size === 0) {
+                reborn.delete(nk);
+                continue;
+            } // 无目的地证据 ⇒ 行死亡
+            st.success = Math.min(st.success, st.total); // 诚实截断：分子 ≤ 幸存分母
+        }
+        this.transitions = reborn;
+        this.evictedTypes += 1;
+        return weakest;
     }
     observe(fromTypeId, actionKey, toTypeId, success) {
         if (!nonEmptyStr(fromTypeId) || !nonEmptyStr(actionKey) || !nonEmptyStr(toTypeId)) {
@@ -448,12 +596,12 @@ export class InMemoryWorldModel {
             },
         };
     }
-    /** 库存快照（可观测面：类型学规模 + 动力学覆盖） */
+    /** 库存快照（可观测面：类型学规模 + 动力学覆盖 + ΠΑΝ-47 溢出驱逐累计） */
     stats() {
         let observations = 0;
         for (const t of this.transitions.values())
             observations += t.total;
-        return { types: this.types.size, transitions: this.transitions.size, observations };
+        return { types: this.types.size, transitions: this.transitions.size, observations, evictedTypes: this.evictedTypes };
     }
     /**
      * 持久化快照：完整签名 tokens（铸造谱系）+ 转移统计 + 计数器。
@@ -473,6 +621,7 @@ export class InMemoryWorldModel {
             }),
             typeCounter: this.typeCounter,
             aliases: [...this.aliases.entries()],
+            evictedTypes: this.evictedTypes,
         };
     }
     /** 快照水合（异常诚实）：先验后写，任一非法 ⇒ 整体拒绝绝不半水合 */
@@ -626,6 +775,11 @@ export class InMemoryWorldModel {
         // 携带偏小 typeCounter 时，下次铸造会同号覆写既有类型（members/tokens 静默丢失）
         this.typeCounter = typeof s.typeCounter === 'number' && Number.isFinite(s.typeCounter)
             ? Math.max(0, Math.floor(s.typeCounter), maxSeq) : Math.max(this.types.size, maxSeq);
+        // ΠΑΝ-47：溢出驱逐累计随档水合（旧档无此字段 / 域外 ⇒ 0 —— 缺席即语义）
+        this.evictedTypes = typeof s.evictedTypes === 'number' &&
+            Number.isFinite(s.evictedTypes) &&
+            s.evictedTypes >= 0
+            ? Math.floor(s.evictedTypes) : 0;
         return { ok: true, value: undefined };
     }
 }

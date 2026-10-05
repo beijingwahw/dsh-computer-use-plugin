@@ -22,8 +22,9 @@ import type {
 } from './contracts';
 import { DoctorVerdictBridge } from './adapters';
 import { distillInjection } from './knowledgeBase';
-import { InMemoryWorldModel, transitionActionKey } from './worldModel';
+import { InMemoryWorldModel, transitionActionKey, WORLD_MODEL_MERGE_SWEEP_TYPES } from './worldModel';
 import { InMemoryKnowledgeBase } from './knowledgeBase';
+import { ReflexiveDecisionStation } from './stations';
 import { KnowledgePersistence } from './persistence';
 import { MetricsLedger, type RunMetricRecord } from './metrics';
 // ΝΩ-28 任务1（M5 奖励接线）：run-end 收割逐类别记忆操作成败 → insert 臂记账
@@ -112,6 +113,17 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
   private persistence: KnowledgePersistence | null = null;
   private metrics: MetricsLedger | null = null;
   private reportCounter = 0; // 报告文件名防碰撞序号（同 intent 同毫秒不互相覆盖）
+  /**
+   * ΠΑΝ-44（收割水位线）：上次 run-end 奖励收割的墙钟。同一证据只计一次 ——
+   * 条目 updatedAt 冻结（query 只递增 usageCount 不动 updatedAt）导致 7 天窗口
+   * 内每个 run-end 都把同一批条目重新收割、向 insert 臂重复记伯努利试验
+   * （C1-8 H3：Beta 后验 n 被系统性膨胀，MEMORY_OP_FEEDBACK_GATE=8 形同虚设）。
+   * 修正：只收割 updatedAt > 水位线的新证据；收割即推进水位线。复证
+   * （reinforceEntry 刷新 updatedAt）视为新证据状态可再计一次 —— 文档在案。
+   * 水位线是进程内状态（不随 stateDir 持久化）：进程重启后窗口内条目会再计
+   * 一次 —— 账本（EvidenceLedger）同为进程内状态，两侧口径一致。
+   */
+  private lastHarvestAt = 0;
 
   /**
    * 运行层可重配方法（D-7 修正案 / 验收修复项 #2）：Result 降级，严禁 throw。
@@ -333,8 +345,12 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
           payload: action,
           tokenBudget: cfg.stationTokenBudgets!.execution,
         };
+        // ΠΑΝ-43~48 修复潮对接点：执行步超时的止损 abort —— signal 经工位透传到
+        // 宿主端口的实际派发（超时的动作不再于后台飞行；D-5 微服务断流）。
+        // 工位/端口不消费 signal 时由其内层超时兜底（浪费窗口有界，零回归）。
+        const execCtrl = new AbortController();
         const result = await this.withTimeout(
-          deps.execution.execute(execEnv),
+          deps.execution.execute(execEnv, execCtrl.signal),
           cfg.timeout.perStep,
           {
             action,
@@ -342,6 +358,7 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
             durationMs: cfg.timeout.perStep,
             failure: { kind: 'timeout', detail: `execution step timeout after ${cfg.timeout.perStep}ms` },
           } satisfies ExecutionResult,
+          execCtrl,
         );
 
         // ── 闭环进化（数据流三段论 #4 + P0-4 验收门）：打包 outcome → 结算 → 学习 ──
@@ -421,6 +438,26 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
           worldModel instanceof InMemoryWorldModel && sharedModel instanceof InMemoryWorldModel) {
         sharedModel.merge(worldModel);
         forkMerged = true;
+      }
+      // ΠΑΝ-47（世界模型有界化 · 接线）：fork 重放回共享模型后、落盘前，类型数
+      // 过碎片收拢阈值 ⇒ 维护幕（mergeSimilarTypes 收拢 + 容量上界驱逐最弱类型，
+      // 见 InMemoryWorldModel.maintainCapacity）。触发条件在**共享模型**上检查
+      //（fork 内不维护 —— merge/evict 不进 journal，重放等价性优先）；落盘在
+      // 维护之后 ⇒ world-model.json 快照有界。旁路义务：维护异常只记链不击穿报告。
+      if (sharedModel instanceof InMemoryWorldModel &&
+          sharedModel.stats().types >= WORLD_MODEL_MERGE_SWEEP_TYPES) {
+        try {
+          const maintained = sharedModel.maintainCapacity();
+          if (maintained.merged.length > 0 || maintained.evicted.length > 0) {
+            logKnowledge('world-transition', {
+              intentId: intent.id, maintenance: 'world-model-bounded',
+              merged: maintained.merged.length, evicted: maintained.evicted.length,
+              types: sharedModel.stats().types,
+            });
+          }
+        } catch {
+          // 维护是旁路义务：失败绝不击穿 run 报告（下一 run-end 的触发条件会再试）
+        }
       }
       this.checkpointState(intent.id, verdict, { roundsTotal, l3Rounds, knowledgeRounds, executions: outcomes.length }, consolidation, startedAt); // 反遗忘 + 仪表盘
       return this.finalReport(intent, verdict, terminalReason, outcomes, knowledgeUsed, startedAt);
@@ -551,13 +588,18 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
       // M5 奖励闭环：metrics.readAll 含本轮刚落账的行（appendFileSync 同步 flush），
       // 收割窗口（7 天缺省）内逐条目判成败 —— 键在此时首次入册（台账律），
       // sleep 第④幕 convergeMemoryOps 消费同一账本收敛阈值。
+      // ΠΑΝ-44（同证据单次计数）：只收割 updatedAt > lastHarvestAt 的**新证据**
+      //（水位线见字段注记），收割后推进水位线 —— Beta 后验 n 恢复真实样本量
+      //（旧实现：窗口内每个 run-end 对同一批 updatedAt 冻结的条目重复记账）。
       if (this.metrics && !this.cfg?.ablation?.disableKnowledge &&
           this.deps?.knowledge instanceof InMemoryKnowledgeBase) {
-        const trials = harvestMemoryOpRewards(
-          this.deps.knowledge.snapshot(),
-          this.metrics.readAll().records,
-        );
-        applyHarvestedRewards(trials, 'insert');
+        const freshEvidence = this.deps.knowledge.snapshot()
+          .filter(e => e.updatedAt > this.lastHarvestAt);
+        if (freshEvidence.length > 0) {
+          const trials = harvestMemoryOpRewards(freshEvidence, this.metrics.readAll().records);
+          applyHarvestedRewards(trials, 'insert');
+        }
+        this.lastHarvestAt = Date.now();
       }
     } catch {
       // 检查点整体旁路：仪表盘/落盘/奖励收割的缺席不该让认知失能
@@ -644,6 +686,24 @@ export class KnowledgePipelineOrchestrator implements PipelineOrchestrator {
       const r = this.deps?.knowledge.learnFromOutcome(settlement.outcome);
       if (r && !r.ok) {
         console.warn(`[KnowledgePipeline] learnFromOutcome degraded: ${r.error.field}: ${r.error.reason}`);
+        // ΠΑΝ-48（DS-4 接线缝兑现）：容量拒绝 = 学习闭环断裂（满库且全
+        // manual/import 主权条目无 auto-learn 可驱逐）——「探针失败 ⇒ auto-learn
+        // 亲证压制诞生 ⇒ 不再探针」的知识闭环在此断线，跨 run 的探针续护必须
+        // 由进程级闩锁接管（此前 stations.ts 的 escalateProbeLatch 声明了本接线
+        // 缝但无人调用 —— 注释承诺的保护是死代码，C1-8 H5）。只对真实
+        // ReflexiveDecisionStation 工位上报（instanceof 收窄 —— 注入的测试桩
+        // 无此升级面，测试端口不变）；上报永不抛（工位守卫 + 本层 try 兜底）。
+        if (r.error?.field === 'capacity') {
+          const decision = this.deps?.decision;
+          if (decision instanceof ReflexiveDecisionStation) {
+            decision.escalateProbeLatch(settlement.outcome.intent.id);
+            logKnowledge('knowledge-internal-fault', {
+              intentId: settlement.outcome.intent.id,
+              phase: 'probe-latch-escalated',
+              reason: 'learnFromOutcome capacity rejection — process-level probe latch armed (1h decay)',
+            });
+          }
+        }
         return;
       }
       logKnowledge('knowledge-learned', {

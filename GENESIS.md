@@ -1,6 +1,6 @@
 # 创世总账（GENESIS LEDGER）
 
-七击全景：O 清账 → P 灭虫 → Q/R/S/T/U 六击铸器官（30 件 + 5 认证）→ V 审判日 → W 隔离与真机审判 → X 笔迹纪元 → Ω 云脑皮层（GLM-5.3-Flash 十器官）→ Φ 自主智能环（识别·判断·执行·进化四环）→ Ψ 万脑归一（13 平台统一视觉皮层）→ Δ 全库跃迁（审计驱动 52 项）→ Σ 全军升维（七件能力跃迁）→ Θ 内核进化（约 50 内核普查、18 键接线）→ Ξ 内核进化全域潮（55 键、生产闭环、10 代收敛 0.1%）→ Λ 开箱即亮（本地接管/向导弹页/热切换）→ 世界性创新纪元潮（P1 地基速修 + Ρ 双钥公证 · Γ 注视经济 · Υ 认知睡眠 · Η 认识论闭环 · Κ 惊异课程 · Π 行为公证 · Μ 万脑联邦 · 三潮续笔：Ι 自我模型 · Τ 干预即教育 · Χ 重放证词 · Γ2 注视经济 inset · P2a/P2b 加固 · 四潮续笔：Ε 预言引擎 · Β 反驳法院 · Ν 探索经济学 · Μ2 拜占庭聚合 · Ζ 持久化标定 · PyS 真值跨线）→ W1 执行与感知韧性（九器官 + W2-0 集成接线：执行层四连改 · 带外确认码 · 免看门控 · 噪声诊所 · EXP4 · 根因归因 · 稀疏 SoM · Zoom 复核 · 视觉经济）→ W2 离线韧性与成本自律（九器官 + W3-0 集成接线：离线批准队列 · fail-closed 审计+新鲜度探针 · bench 可信度 · 租约黑板+实证仲裁 · 恢复疗效 · 记忆操作老虎机 · 金丝雀试演 · 成本级联路由）→ W3 活意图与自纠偏（九器官 + W4-0 集成接线：逆转托管 · 参数化技能 · 增量编码 · DAG 流水线 · 活意图漂移 · 岔路卡 · 探索前沿 · 过程评分）→ W4 第四批器官潮（九器官 + W5-0 集成接线收官：集成接线 · 宏重放 · 策略联邦 · 可逆性体系 · PCG 训练营 · 移动 Surface · 零 API 设备面 · 步数拍卖 · 声学通道）→ W5 第五批收官潮（七器官：集成接线收官 · Python 注册落盘 · 梦回放 · 跨机编排 · SoM 调用面 · steer 闭环 · 效能基准七过秤）→ W6 债清偿浪潮（W6-R 修复批：安全 fail-closed · 协议补齐 · 审计扩容 · 大文件治理，另含深化/缝隙/持久化三包）→ W7 终局验证浪潮（创世审计器立宪 · 七册终验）→ W8 世界创新修复潮（2 批 18 修复代理 + 2 收尾复核：世界创新债清偿 · 巨文件拆分 · 接线收口）→ W9 终账纪元（终数已收口：取舍终谳 · 部署落锤 · 真机九条实证 · 2503/0 收官）→ ΑΩ 隐患清账战役（46 项隐患 · 5 批次 · 44 编号工单 R1-R46：全库隐患总清账，测试 2503→2613 / 0 失败零回归收官）→ ΝΩ 前沿升级战役（体检驱动 · 54 项工单 ΝΩ-1..54 · 6 批次：安全正确性/决策感知/信任隐私/知识沙箱/质量架构/前沿升级，测试 2613→2963、python 96→152，cycle_lint 立宪 5 value 环在案待拆）。
+七击全景：O 清账 → P 灭虫 → Q/R/S/T/U 六击铸器官（30 件 + 5 认证）→ V 审判日 → W 隔离与真机审判 → X 笔迹纪元 → Ω 云脑皮层（GLM-5.3-Flash 十器官）→ Φ 自主智能环（识别·判断·执行·进化四环）→ Ψ 万脑归一（13 平台统一视觉皮层）→ Δ 全库跃迁（审计驱动 52 项）→ Σ 全军升维（七件能力跃迁）→ Θ 内核进化（约 50 内核普查、18 键接线）→ Ξ 内核进化全域潮（55 键、生产闭环、10 代收敛 0.1%）→ Λ 开箱即亮（本地接管/向导弹页/热切换）→ 世界性创新纪元潮（P1 地基速修 + Ρ 双钥公证 · Γ 注视经济 · Υ 认知睡眠 · Η 认识论闭环 · Κ 惊异课程 · Π 行为公证 · Μ 万脑联邦 · 三潮续笔：Ι 自我模型 · Τ 干预即教育 · Χ 重放证词 · Γ2 注视经济 inset · P2a/P2b 加固 · 四潮续笔：Ε 预言引擎 · Β 反驳法院 · Ν 探索经济学 · Μ2 拜占庭聚合 · Ζ 持久化标定 · PyS 真值跨线）→ W1 执行与感知韧性（九器官 + W2-0 集成接线：执行层四连改 · 带外确认码 · 免看门控 · 噪声诊所 · EXP4 · 根因归因 · 稀疏 SoM · Zoom 复核 · 视觉经济）→ W2 离线韧性与成本自律（九器官 + W3-0 集成接线：离线批准队列 · fail-closed 审计+新鲜度探针 · bench 可信度 · 租约黑板+实证仲裁 · 恢复疗效 · 记忆操作老虎机 · 金丝雀试演 · 成本级联路由）→ W3 活意图与自纠偏（九器官 + W4-0 集成接线：逆转托管 · 参数化技能 · 增量编码 · DAG 流水线 · 活意图漂移 · 岔路卡 · 探索前沿 · 过程评分）→ W4 第四批器官潮（九器官 + W5-0 集成接线收官：集成接线 · 宏重放 · 策略联邦 · 可逆性体系 · PCG 训练营 · 移动 Surface · 零 API 设备面 · 步数拍卖 · 声学通道）→ W5 第五批收官潮（七器官：集成接线收官 · Python 注册落盘 · 梦回放 · 跨机编排 · SoM 调用面 · steer 闭环 · 效能基准七过秤）→ W6 债清偿浪潮（W6-R 修复批：安全 fail-closed · 协议补齐 · 审计扩容 · 大文件治理，另含深化/缝隙/持久化三包）→ W7 终局验证浪潮（创世审计器立宪 · 七册终验）→ W8 世界创新修复潮（2 批 18 修复代理 + 2 收尾复核：世界创新债清偿 · 巨文件拆分 · 接线收口）→ W9 终账纪元（终数已收口：取舍终谳 · 部署落锤 · 真机九条实证 · 2503/0 收官）→ ΑΩ 隐患清账战役（46 项隐患 · 5 批次 · 44 编号工单 R1-R46：全库隐患总清账，测试 2503→2613 / 0 失败零回归收官）→ ΝΩ 前沿升级战役（体检驱动 · 54 项工单 ΝΩ-1..54 · 6 批次：安全正确性/决策感知/信任隐私/知识沙箱/质量架构/前沿升级，测试 2613→2963、python 96→152，cycle_lint 立宪 5 value 环在案待拆）→ ΠΑΝ 修复潮（全谱批判审计 260+ 发现 · 工单 ΠΑΝ-1..89：两波 9 工位 + python/治理脚本收口 · 四件账面器官通电 · 装配完备性执法器立宪）→ ΤΕΛΟΣ 完满纪元（工单 ΤΕΛ-1..13：census 在册器官全员通电（unwired-organ 6→0）· dead-code 34 条清删（10 删/24 改判）· D-PAN 系列 D-G16..G32 逐条清偿 · 8 条需真机债一键探针化——D-A1/D-A4 当场收割）→ ἈΓΩΝ 实战纪元（真实任务实弹：四波准备 34 工位 + 五问题攻坚 + 批1 3/3 + 批2 首轮 4/9→R5 重评 7/9 门槛过（T8 五层根因修复第 8 次尝试 PASS）+ 批3 未跑在案登记 + 基建六面 + 纯净度分离 purePass 10/0.769 + 成本封顶 143 调用 ¥0.2983 三阈值零告警 + 反技能种子注入 · 审判数字收官回填）。
 每件一行：器官 / 数学根基 / 执法册 / 审判数字（V-W-X 实测）。
 
 ## 证明与审计
@@ -727,9 +727,272 @@ scripts/bench/.github 五域 45+8 项全部落地（批 6 于本册收稿窗口�
   实跑）；cycle_lint 287 文件/1438 相对边/14 非平凡 SCC（5 value 环 exit 1
   立法执法——D-F5 在案）；内核注册表 58 键；词表 375 对；配置文档 154 键。
 - genesis_audit --check 收官复跑退出码 0（虚报 0）。本段按 W6-ΑΩ 同律以浪潮
-  章节格式登记、不入审计器纪元宇宙（审计器头注「w7+ 不属本审计宇宙」律 +
+  章节格式登记、不入 genesis_audit 纪元宇宙（审计器头注「w7+ 不属本审计宇宙」律 +
   w7audit 执法册 deepEqual 锁定 W1-W5——扩宇宙须先修执法册）。DEBTS 台账
   49→55：新立有意决策四条（D-D14 riskGate 词边界双轨制 / D-D15 沙箱五门与
   位宽域 / D-D16 journal 组提交崩溃窗口 / D-D17 optionalDependencies 迁移
   搁置——sec.runtime-deps 否决在案）+ D-F5（5 value 依赖环新债，cycle_lint
   执法在案待拆）+ D-E3（w9real node v24 环境暴露）。
+
+## ΠΑΝ 修复潮（全谱批判审计驱动 · 260+ 发现 · 工单 ΠΑΝ-1..89 · 两波 9 工位 + python/治理脚本 + 治理收口）
+
+ΝΩ 之后对全库的最后一轮全谱批判审计（C1-1..C1-9 src 各模块 + C2-1..C2-9 外围横切，
+两波 18 册批判报告 + 总册，260+ 项带文件:行号证据的发现：审批队列人证缺失与令牌双花 /
+不记名令牌 / 键盘·拖拽·宏·重放四侧门 / riskGate 不可见字符绕过 / 联邦 DP 种子可重构 /
+沙箱装配死线 / 知识中枢六断裂 / 编排 L3 覆写烧钱 / DPI 三域混用 / 治理脚本可绕过等）
+由修复潮按工位清偿：F1 波 9 工位（ΠΑΝ-1..33 审批·闸门·工具·vlm·python·组合根·src 根）、
+F2 波 9 工位（ΠΑΝ-34..80 组合根通电·沙箱·知识·内核·自主环·编排·联邦·守卫）、F3 波
+（ΠΑΝ-81..89 python 物理域与治理脚本；F3-2 报告缺席，81-83 由 F3-1、84-89 由 F3-3 覆盖，
+号段无缺口）。本段为 F3-8 治理登记工单收口：功绩入本册、批判未覆盖残余与各工位移交项
+入 DEBTS D-PAN 系列、config 文档再生核验、genesis_audit 自校。
+
+| 工位（工单段） | 战果（工单号 → 器官/文件 · 修复一句话） | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| F1-1（ΠΑΝ-1..4 审批队列） | ΠΑΝ-1 adjudicate 人证补全（approval.queue.ts：stageAction 锚定 confirmCodeHash + grant 臂携码四态执法 + 错码封顶焚毁——队列路径的模型自批链结构性封死）｜ΠΑΝ-2 takeGranted 复查 TTL（当前时钟倒序清理，陈年同意不可兑换全新执行令牌）｜ΠΑΝ-3 持久化 HMAC-SHA256 信封（approval.queueContracts.ts v2 + 密钥档 filePerms 收紧 + 读侧三态：trusted 恢复 / 降级剥离 granted / 篡改整档归零；哈希仅内存驻留防离线爆破）｜ΠΑΝ-4 双通道双花封堵·队列侧（recordTokenDecision 传播改 absorbed 终态，交互令牌本尊是唯一执行载体） | w2queue | 12/0 |
+| F1-2（ΠΑΝ-5..8 审批令牌） | ΠΑΝ-5 令牌目标绑定（approval.security/ledger：macaroon 式 targetDigest + validate/consume 强制比对，拒绝先于一切簿记变异；既有无绑定路径逐位不变）｜ΠΑΝ-6 双花封堵·ledger 侧（grantDetailed 对已队列授予条目返 queue-granted-already，结构性拒绝不烧预算）｜ΠΑΝ-7 非字符串 token 宪法违例（normalizeToken 收口全公开面，9 类垃圾 token 结构化拒绝绝不抛）｜ΠΑΝ-8 bypass 面复审（escrowBlockedByGate requirePlan 死闸门复活 + 示范载荷只读深拷贝） | w1approval | 26/0 |
+| F1-3（ΠΑΝ-9..11 风险闸门） | ΠΑΝ-9 归一化补全（riskGate.ts：剥除集扩 Cf/Mn/VS 全类 + NFKC 单码点前置——pass­word/p⁠in/toḱen 等不可见注入全命中，既有 LEET/同形/边界律零回归）｜ΠΑΝ-10 热键黑名单重复键绕过（system.hotkeyPolicy.ts：chordSignatureOf 别名折叠后去重 + 缺省表补 ctrl+shift+esc/alt+space 只增不减幂等）｜ΠΑΝ-11 词表再生路径防护（gen_confusables.mjs 不可见键过滤，再生成逐字节一致） | riskGate / p1-fixes | 18/0 · 25/0 |
+| F1-4（ΠΑΝ-12..14 键盘/拖拽侧门） | ΠΑΝ-12 ActionKind 闭集扩员（actionGate.ts：click/type 两员扩为五物理写通道 + hotkey 臂三层执法：黑名单和弦（alt+alt+f4 折叠）/敏感焦点 ctrl+v 粘贴面/危险上下文）｜ΠΑΝ-13 drag_mouse 补防（dragMouse.ts：assertActionAllowed 门禁 + 落点双钥公证（notary-mismatch 拦「拖进回收站」谎报）+ beginAttempt 原子预留/步终按验证判决结算 + 终点敏感焦点登记）｜ΠΑΝ-14 装配执法（ACTION_KIND_UNIVERSE + 分派表映射类型缺键即编译红） | pan1213.gate | 18/0 |
+| F1-5（ΠΑΝ-15..19 重放/技能/截图/输入） | ΠΑΝ-15 重放崩溃窗口封堵（replayActions.ts：在途预留随手登记 + 兜底结算恒可达（ΝΩ-5 缺陷在崩溃窗口内复活面根除）+ forensic-failure 第四路归因）｜ΠΑΝ-16 open_url 重放契约（安全重发过 urlSense 安检阶梯 + skillTools SKIPPED/failed 分账——含跳转步技能不再结构性失败）｜ΠΑΝ-17 模板指纹铸造（skillTools.ts：首次全步成功铸 exitFingerprint 基准，模板账本 0→1 打通）｜ΠΑΝ-18 多屏坐标单位（takeScreenshot.ts：像素域归一修正 + NaN/负值卫兵）｜ΠΑΝ-19 脱敏旁路封堵（typeText.ts：region_text_snippet 同律脱敏 + 截断标注兜底——明文密码第二回显路径封死） | pan15-19.fixes | 9/0 |
+| F1-6（ΠΑΝ-20..24 vlm 子系统） | ΠΑΝ-20 向导本机进程认证（onboarding/autoAdopt：会话 nonce fragment + 四端点 timingSafeEqual 过闸 + 监听进程归属取证拒绝他用户收养）｜ΠΑΝ-21 反注入铁律全量覆盖（internalUtils.ts 单源常量 10 落点 7 文件——verdict/OCR/refute/diagnosis/ensemble 六族提示词设防）｜ΠΑΝ-22 refute 单次不重试 + baseUrl 同源剔除双因子激活｜ΠΑΝ-23 计量旁路收编（ensemble meter 通道 + 限流闸 tryAcquire + 会话限流器单实例同池）｜ΠΑΝ-24 cascade novelty 真 dhash 场景指纹（注入端口 + 汉明 0 精确命中 + 分诊纯读去副作用） | pan20-24.vlm.fixes | 24/0 |
+| F1-7（ΠΑΝ-25..27 python 管理面） | ΠΑΝ-25 管理面入 capability 位图 + fail-closed（auth.py：admin/observe 位 + /v1/shutdown 等四映射 + 未知端点 403 默认拒绝）｜ΠΑΝ-26 /docs 认证 + 401/503 审计留痕（server.py：免认证面收敛为显式配置 + 中间件层级重排使认证失败全落日志）｜ΠΑΝ-27 Windows 认证强化（密钥 DACL 纯 ctypes 收紧 + **密钥落盘字节漂移存量雷修复**（约 1 成概率 33B+ 落盘 ⇒ 首启 invalid signature，缓冲写+回读复核）+ PID attestation win 三态含僵尸/复用检测） | python_service/tests（test_auth 等） | 300 通过/2 skip（pytest 全套） |
+| F1-8（ΠΑΝ-28..29 组合根生命周期） | ΠΑΝ-28 卸载链完备性（index.ts：approval.reset 等 12 面归零补齐 + UNLOAD_CHECKLIST 48 键登记制立法（执行登记≡清单，新增单例忘注册即红）+ 登记簿统一吞异常）｜ΠΑΝ-29 睡眠/dispose 竞速（SleepConfig.disposeSignal 同步 abort + 幂等水位线不前滚——离线整合被永久标记已消化的无声丢失封堵） | w0unload | 7/0 |
+| F1-9（ΠΑΝ-30..33 src 根杂项） | ΠΑΝ-30 intentGrammar 多引号段错位（residueTokens 自右向左切除——载荷泄漏进残差获得落点投票权的缺陷根除）｜ΠΑΝ-31 钉扎引擎数值修复（contextManager.records.ts composeSalience 单源 + 锚点语义通道 + 新近度引用钟——钉扎 0.8/解钉 0.5 滞回带真正可达）｜ΠΑΝ-32 settleAndVerify 终帧同帧原子采用律（actionVerifier.ts：跨帧错配对封堵）｜ΠΑΝ-33 ioMutex 超时语义（队列尾只认真实终局——超时上报≠放行队列，物理串行公理在超时路径成立 + 可选取消传播端口） | epochX / pan31.pinEngine / pan32.framePair / p1-fixes | 17/0 · 8/0 · 4/0 · 25/0 |
+| F2-1（ΠΑΝ-34..37 escrow 通电） | ΠΑΝ-34 escrow 生产接线（index.ts:913 armReversalEscrow 四命脉通电：dispatchGate/settlement 钩子/TTL sweep/WAL 持久化 + mintPlan 在途上界 64 收割腾位；C2-8 账面器官#1 闭）｜ΠΑΝ-35 WAL 完整性 + 焦点校验（reversalEscrow.ts v3 哈希链逐行校验损坏行弃置不连坐 + 补偿前焦点比对 fail-closed——TTL 到期对已切窗用户盲发 Ctrl+Z 的第二次事故封堵 + verifyThreshold 夹取 [0.5,1]）｜ΠΑΝ-36 审批对接收尾（adjudicate 工具 confirm_code 透传（string/per-id map）+ clickMouse 坐标级 targetHint + 续跑令牌继承原绑定）｜ΠΑΝ-37 残余双花窗口闭合（takeGranted 焚毁原令牌 + veto 双面撤销已批条目） | pan3437.fix | 10/0 |
+| F2-2（ΠΑΝ-38 装配完备性执法器） | wiring_census 立宪（scripts/wiring_census.mjs：静态普查 1523 值导出 + 14 动词方法级面 + 豁免册 594 条六类登记制 + 幽灵即红 + 词法域四态感知（cycle_lint 正则盲区收口）；package.json 挂 wiring:census）——「测试绿 ≠ 接线完」从叙事升格为机械闸，C2-9 主题 1（24.8% 导出零引用）的执法面 | w0wiring.census | 11 测 1 fail（现状红：ΠΑΝ-38 之后工席新增 hmacKeyFile.HMAC_KEY_FILE_BYTES / cast.castProvider 两孤儿未登记——D-PAN 系列在册，见审判口径） |
+| F2-3（ΠΑΝ-39..42 沙箱闭环） | ΠΑΝ-39 死接线修复（sandbox/apply.ts applySandboxStack 单一装配函数：4 工具注册 + 3 事件接线 + sandboxLog 落盘——487 行装配层与 D-6/D-7 双断点生产可达；组合根以 autonomyEnabled 门控）｜ΠΑΝ-40 闭环五断裂（planner mintChainPlanReady 发射方 + manual 收场景 virtual_scene + 嗅探键名对齐生产者 + 入口指纹铸造 + 门 4B 指纹缺席按可逆性分道）｜ΠΑΝ-41 双账本合一（引擎与宏门禁共享 MuscleMemoryStore + save 真实落盘 + fpSimilarity 位宽鲁棒单源）｜ΠΑΝ-42 重放门禁（步级扫描闭集 ACTION_KIND_UNIVERSE 前置（危险步在链中段也绝不部分执行）+ 可靠度从派发完成升级为效果验证（verifyChainEffect 端口）） | pan39-42.sandbox | 17/0 |
+| F2-4（ΠΑΝ-43..48 知识中枢） | ΠΑΝ-43 双脑合一（initializeKnowledgeBase 单一路径铸造——白天所学夜间可整合）｜ΠΑΝ-44 老虎机奖励重复计数（lastHarvestAt 收割水位线——Beta 后验 n 恢复真实样本量）｜ΠΑΝ-45 置信度时间衰减（query 出口浅拷贝有效置信度——两年陈年 error-pattern 不再以全值 0.9 压制本能弧）｜ΠΑΝ-46 免疫抗原归一化（语义指纹 + cosine≥0.8 语义营救 + knowledge 链/semanticHash 分词单源收口）｜ΠΑΝ-47 worldModel 有界化（maintainCapacity 接线 + WORLD_MODEL_MAX_TYPES=256 + 驱逐不无声 + 别名/转移表连带治理；C2-9 census unwired-organ 闭）｜ΠΑΝ-48 escalateProbeLatch 接线（pipeline learnSettled 容量拒绝分支真实落地；C2-8 账面器官#3 闭）+ 对接点 7 AbortSignal 透传（超时动作不再后台飞行） | pan43-48.knowledgeClosures | 11/0 |
+| F2-5（ΠΑΝ-49..55 内核/公证/预言/journal WAL） | ΠΑΝ-49 canonical 单源收编（dialects/canonical.ts：journal 病态载荷守卫语义为唯一出处，六消费点改 import——章③永久误红根除）｜ΠΑΝ-50 promoteFrom 护栏 + CLI 通道（registry.ts：步长夹取 maxStepPct/Beta 回归守卫/血统快照/证据计数不覆写 + kernel/index.ts:103 promoteFromCli 显式通道；C2-8 账面器官#2 闭）｜ΠΑΝ-51 章②驱逐边界双错判（判据源锚定 ledger.base()——空洞绿与永久误红双封）｜ΠΑΝ-52 校准证据语义（margin 外生化原始距离（对合振荡根除）+ matchConfident 去删失（阈学习两侧有数据））｜ΠΑΝ-53 TSA/pin 分级执法（签名败/未钉 ⇒ degraded 黄章 + clockRollback 顶层披露）｜ΠΑΝ-54 prophecy 严格配对（prophecyId 按号结算 + no-match 可观测 + 无效观察不回灌）｜ΠΑΝ-55 journal WAL 深修（inspectJournalWal 回读逐行哈希校验损坏行隔离 + 2MB 轮转两代 + 创世 HMAC 封签——同机整档重写可检测） | pan49-55.fixes | 19/0 |
+| F2-6（ΠΑΝ-56..61 自主环） | ΠΑΝ-56 宏执行入宪（执行层末道闸 gateMacroStepFor 双证据判定 + 环级宪法 macroRiskScan 预扫描（危险宏 ⇒ approval-required 零执行）+ 免看门控 macro-impact 档——含删除步骤的历史宏不再以 benign 自主跑完全程）｜ΠΑΝ-57 生产 popup 供方（makeDefaultPopupNotes 几何+词表双通道 + Schmitt 私有实例——策略①弹窗优先律生产可达）｜ΠΑΝ-58 OCR 接线（config.ocrLang/服务端 RapidOCR L2 优先随栈入感知——中文判据链恢复）｜ΠΑΝ-59 clearBlockers 接线（goalState.ts:321 clearConstructionBlockers + driveLoop ①′ 构造降级阻塞清账放行——降级 spec 断点续跑 0 步死循环根除；C2-8 账面器官#4 闭）｜ΠΑΝ-60 多 pilot 隔离（steer 会话/世界模型接线/探索账本 per-pilot 域 Map + pilotStore 追加原子化与他进程并档）｜ΠΑΝ-61 否定判据三盲区（当帧重采封瞬态逃逸 + 截断留痕 + 否定面容差收紧三闸）+ 探索证据申报（危险 label ⇒ destructive、未知元素 backgroundRisk 留痕） | pan56-61.autonomy | 18/0 |
+| F2-7（ΠΑΝ-62..68 编排/物理执行） | ΠΑΝ-62 L3 结果覆写修复（pipeline 位阶提升：funnelDepth 感知合并语义 + L3 证据 10s 时效窗——花钱的语义答案在窗内不被 L1/L2 覆盖）｜ΠΑΝ-63 烧钱循环修复（forcedByBudget 无 regionId 拒绝新批准直达 escalated——预算耗尽不再触发全网格 L3 重扫 ×3）｜ΠΑΝ-64 止损链三断修复（编排器→工位→宿主 signal 全链贯通——ΝΩ-8「消灭超时后幽灵动作」真兑现）｜ΠΑΝ-65 错误细分折叠修复（d7HostPort translateFailureKind 按可重试/终局/认证三类保真落位）｜ΠΑΝ-66 mmap-file 路径校验（resolveMmapFilePath 白名单根 + .. 遍历拒绝 fail-closed——被攻破服务牵引读本机任意文件封堵）｜ΠΑΝ-67 连接韧性（keyPromise 拒绝永久缓存清零 + Python SIGKILL 后 respawn 三次指数退避 + dirtyRegions 用后清除）｜ΠΑΝ-68 getUiTree 花钱权（缺省 funnel_ceiling L3→L2 对齐 D-6 立法） | pan62-63.orchestration / pan64-68.physicalExecution | 6/0 · 8/0 |
+| F2-8（ΠΑΝ-69..75 联邦数据面） | ΠΑΝ-69 值域分离 typed channels（skillFederation：哈希通道 uint32 原生域不裁剪——32 位哈希撞 ±4096 裁剪域全坍缩成常量、DP 对常量加噪的空转根除）｜ΠΑΝ-70 DP 种子密钥派生（HMAC-SHA256(K_fed, digest_id)——种子不可从公开面 mintedAt 重构（「拿到摘要就拿回真值」的预算假账根除）+ ε 非法 fail-closed + rng 失效拒绝（绝不零噪声真值出境））｜ΠΑΝ-71 预算主体记账（s:subject\|k:key 组合 + 原子决算 + 4096 账户上界——滑窗指纹换账洞闭合）｜ΠΑΝ-72 检疫账对齐（签名路径配额信任按指纹账最弱链 min——检疫牙齿重新咬合配额闸）｜ΠΑΝ-73 回声环与稀释（铸造侧 origin 过滤 + 掺入上限按本地证据计数）｜ΠΑΝ-74 新鲜度与撤销（TTL 1h + 未来锚同拒 + 本地撤销表原子落盘 + 名册饱和封顶 68）｜ΠΑΝ-75 swarm 隐私（sceneHash HMAC 私有标签——上行 driftEvents 不再裸出境） | pan6975.fedprivacy | 8/0 |
+| F2-9（ΠΑΝ-76..80 守卫/checkpoint） | ΠΑΝ-76 会话 LRU 洪泛防护（sessionLru.ts：分保护区 + 全局上界 + 新会话速率限制——批量建会话静默逐出熔断冷静期/探针预算/死循环记忆的攻击面封堵）｜ΠΑΝ-77 金丝雀证据强化（readRegionText OCR 实读交叉：danger-cross 并联拦截 + 幂等准入否决权——被审计对象自述不再唯一证词）｜ΠΑΝ-78 防死循环路径不变量（isRegionMicroLoop 同键形≥6 + 包围盒≤0.15 + 途经熵>1bit + 折返判据——0.05 尺度外的路径轮换逃逸封堵且双目标乒乓豁免数学保持）｜ΠΑΝ-79 守卫总兜底（hooks.ts fault wall：守卫异常放行+记账、下游异常原样上抛、next 单次闸防双跑）｜ΠΑΝ-80 checkpoint approval 段完整性（HMAC 信封三态同律（trusted/剥离 granted/整段拒绝）+ 死缓存移除 + 裁决面金丝雀锚 canaryGuard.ts:427/:464——盘面预授权凭据第二块裸奔面封堵） | f2-9.guards | 18/0 |
+| F3-1（ΠΑΝ-81..83 python 物理域） | ΠΑΝ-81 进程级 DPI 域统一（新模块 dsh_physical/dpi.py：PER_MONITOR_AWARE_V2 幂等申请 + 探测链 + pixel_domain_report 诊断面；125% 屏三通道读数 DOMAINS UNIFIED 实测）｜ΠΑΝ-82 uiautomation/pyautogui 导入副作用（先锁后导——坐标域不随「哪个端点先被调用」漂移，pyautogui 自身翻转源一并治理）｜ΠΑΝ-83 audio 结构体修复（WAVEFORMATEX 字段序 + EXTENSIBLE SubFormat 偏移 + parse_wave_format 双引擎单源 + 字节级夹具；raw-vtable 真声卡采到真音频（peak=1.0 非假静默）） | python_service/tests（test_audio/test_screen/test_ui_tree 等） | 300 通过/2 skip（pytest 全套） |
+| F3-3（ΠΑΝ-84..89 治理脚本） | ΠΑΝ-84 genesis_audit 删行洗白封堵（执法面=发现面：未入账红面/合计算术不自洽/DEBTS 枚举违例一律 exit 1，豁免须 env 显式登记）｜ΠΑΝ-85 bug_class_lint 三类实证规避封堵（类型注解剥除/词法级参数切分/文件级 PS 上下文 + 豁免登记可见化）｜ΠΑΝ-86 cycle_lint 契约修复（type 再导出判 TYPE/动态 import 三态盲区申报/字符串伪边封堵）｜ΠΑΝ-87 mutation_lint 等价变异豁免面 + 自检默认化（一次性沙箱探针——真实源码零接触，环境变量门槛废除）｜ΠΑΝ-88 federation-server 认证强化（v2 nonce+±30s+重放拒绝 + 组提交去抖 + 落盘 contentSig 回读验签——形状合法内容被换的档拒之门外）｜ΠΑΝ-89 _patch_* 三守卫（main 守卫 + dry-run 缺省 + 沙箱根覆写——误导入即执行全量改写的隐患根除） | pan85.bcrLint / pan86.cycleLint / pan89.patchGuards / w7audit / w9deploy | 4/0 · 5/0 · 3/0 ·（w7audit --selftest 43/43、w9deploy 13/0 为收稿口径） |
+
+审判口径（F3-8 收官实跑取数，node v24.19.0 / Windows，2026-10-04，TAP 计数——不抄
+收稿报告；与各工位报告申报数的差异如实并记）：上表 24 册执法面合计 306 用例——23 册
+295/0 全绿；epochX 实跑 17/0（F1-9 申报 19）、pan43-48 实跑 11/0（F2-4 申报 12），差值
+为并行施工窗口的册面演化，按实测口径入账。python pytest 300 通过 / 2 skip（dxgi 真机
+探针 + uiautomation 未装环境守卫，与 F3-1 收稿同数）。
+现状红如实登记：w0wiring.census「现状g」1 fail = ΠΑΝ-38 立法后的册失修（后续工席新增
+src/hmacKeyFile.ts 的 HMAC_KEY_FILE_BYTES 与 src/vlm/providers/cast.ts 的 castProvider
+两孤儿未接线未登记豁免册——执法器按设计红面，DEBTS D-G27 在册）；w2queue 批跑窗曾现
+1 fail 单跑复验 12/0（同册 HMAC 密钥档窗口竞态）；bug_class_lint --strict 全库零命中
+（F3-3 收稿时点的两处 BC-5 克隆已由 hmacKeyFile.ts 共享件等收口）；w2audit 25/0
+（F3-3 记录的 join 缺失已由并行工位补齐）。
+本段不入 genesis_audit 纪元宇宙（W6-ΝΩ 同律——审计器头注「w7+ 不属本审计宇宙」律 +
+w7audit 执法册 deepEqual 锁定 W1-W5；ΠΑΝ-84 的未入账盘存面只覆盖 w1-w6 文件，pan*/
+f2-9 新册不在其射程）。DEBTS 台账 55→77：四件账面器官补登即闭（D-G12..D-G15——
+C2-8 点名「不在台账」的接线缺位，ΠΑΝ-34/50/48/59 已接线）+ 移交项新债 D-PAN 系列
+17 条（本纪元ΠΑΝ处理）+ 需真机 1 条（D-A8 comtypes py<3.14 真机冒烟）；修复潮未新增
+config 键（docs/config-schema.md 再生实跑「内容未变 154 字段」——全部修复走既有开关/
+端口/模块常量，多份工位报告明示 config.ts 非其领地，新开关类移交项在 D-PAN 系列）。
+genesis_audit --check 收官复跑退出码 0（--parse 与抽样实跑两模式均过：虚报 0 /
+实跑异常 0 / 枚举违例 0 / 分节条数偏差 0 / 未入账红面 0——本册登记引发的红面为零，
+明细见 F3-8 报告）。
+
+### ΠΑΝ 终验收口（F4 波 · 全谱修复潮收官）
+
+F4 波 9 工位收口（ΠΑΝ-127..132：五 value 依赖环全数拆解（常量下沉叶/端口注入，cycle_lint
+实跑 value 环 0 绿退出，D-F5 已闭环）· TS↔Python 能力位闭集程序化对账（pan128 册 9/0）·
+豁免册 624/624 收口 · 全量终跑 · 五闸链接电 · dist 重建对账 · 台账终数 · P0 敌意抽查
+（8/8 落地，1 处向导 nonce 回显新泄漏当场修复））。终树实测（2026-10-04/05，全部施工停止后）：
+全量 TS 测试 3310 用例 / 3300 过 / 1 败（w9real W9-4①＝D-E3 在册 node v24 libuv 退出竞态，
+诚实红保持） / 9 诚实 skip；tsc 0 错；npm run verify 五闸链退出码 0（fatal_fixes 23/23 ·
+bug_class_lint --strict 零命中 · cycle_lint value 环 0（299 文件/1510 边/13 type-only 豁免）·
+wiring:census 624/624 无孤儿无幽灵 · genesis_audit --check 严格模式过）；doctor --strict
+退出码 0（score 71 · critical 0 · major 0）；Python pytest 341 过 / 2 诚实 skip + 八模块
+selftest 8/8 + 回环冒烟通过；dist 重建 292↔292 严格对账 + manifest/smoke/pack 通过。
+F4 批次报告见 C:/2/.survey/fix/F4-1..F4-7.md 与 F4-9 总册 REPORT.md（F4-8 台账工位超时，
+其终数对账由本段与 DEBTS 证据列就地收口）。
+
+## ΤΕΛΟΣ 完满纪元（工单 ΤΕΛ-1..13 · 器官全通电 · 死代码清删 · D-PAN 清偿 · 真机债探针化）
+
+ΠΑΝ 收官后四役完满纪元：① census 在册 unwired-organ 六条全员处置——五条真实通电转
+wired、一条经论证改判 internal-surface（ΤΕΛ-1），类别清零；② dead-code 34 条删除决策
+落地——10 条真死码清删（净减约 60 行）+ 24 条独立复核改判保留（census 词法域误判逐条
+取证，ΤΕΛ-2；豁免册收割由 ΤΕΛ-11 终局完成，dead-code 类别清零）；③ D-PAN 系列
+D-G16..D-G32 全数清偿（ΤΕΛ-4/5/6/8 主刀 + ΠΑΝ 姊妹波 ΠΑΝ-114/116/119/128/129 合围
+取证 + ΤΕΛ-10 组合根收口——18 条闭账、1 条定谳，留案拆条 D-G33..D-G40 八条入
+DEBTS）；④ 8 条需真机债升格「需真机 + 一键验证」（ΤΕΛ-9 九探针 + 一键编排 + 引导
+文档——D-A1 采集卡现场标定残余与 D-A4 真声学整环在本机当场收割 pass 2 / absent 7 /
+fail 0）。本段为 ΤΕΛ-12 台账立宪工位收口：功绩入本册、终局改判与统计重数入 DEBTS、
+留案拆条、审计自校与全量自跑取数。
+
+| 工位（工单段） | 战果（工单号 → 器官/文件 · 修复一句话） | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| ΤΕΛ-1（器官通电） | setAccessibilityProvider 通电（uiExtractor createUiaTreeProvider——L1 无障碍树通道 + role 方言归一 + 防御几何，enableElementIdMode 既有开关门控）｜armSkillFederationPersistence 通电（checkpoint 同目录派生 + 8 突变原子落盘 + 卸载 flush/disarm 冲账）｜enforceMinedProperties 通电（self_diagnose 会话内基线立法制——挖掘性质升格在线规约，新迹段执法 + 全迹重立法）｜configureFailureMemory 通电（DSH_FAILURE_MEMORY_CAPACITY env→纯解析器→库容）｜clearBlockers 通电（steer_answer A 应答＝人工确认放行，终止可逆）｜mergeSimilarTypes 改判 internal-surface（ΠΑΝ-47 维护幕单源论证 + 源级锚） | tel1.wiring + 11 册回归 | 11/0（回归 280 项 0 败） |
+| ΤΕΛ-2（死码清删） | dead-code 34 条双保险复核（census + 独立 grep）：删 10（_resetSharpCache_forTest / _resetTesseractCache_forTest / verifyEffect / remintScore / FEDERATION_AUTH_SKEW_MS / incrementalDeliveryEnabled / unwrap / _reset_forTests / getPopupSprt / mmrDeterministic）｜改判保留 24（生产消费 7 wired / 文件内活消费 9 internal-surface / 测试宇宙 3 / 插件壳生命周期契约 5）｜豁免册收割清单移交 T2 波（D-G39 在册） | actionVerifier 等 10 册定向 | 138/138（smoke_imports 298 模块净；全量 3313/3287/17 败——逐项归属核实均并行在途，非本工位删除） |
+| ΤΕΛ-3（令牌绑定生产面） | request_approval 生产铸造携 target（macaroon 式 targetDigest 透传 + boundTargetOf 账本核验 + 垃圾形状 bound=false 成因申报绝不静默降级）｜消费点全景补齐（dragMouse/clickElement beginAttempt+consume 描述级同形；replayActions/skillTools 预留-结算同形透传 + replayTargetHintOf 同标准铸造）｜兼容律（无 target 键集逐字节锁定，hint 可选旧签名照常） | tel3.fix | 7/7（回归 280+ 零败） |
+| ΤΕΛ-4（D-G16..G20 清偿） | D-G16③ orchestrator planReady 生产发射接线（供源闭包现取 + 沙箱栈三态门控 + 词表外步毒证整链拒绝）｜D-G17① sec.approval-fail-closed 单面锚扩三面锚（grantDetailed + 队列四结局字面量 + 金丝雀双要素——真实源码树零命中执法）｜D-G18 BC-5 全库零命中验证 + 孤儿登记取证｜D-G19 ΠΑΝ-128 镜像对账取证复跑｜D-G20 knowledge failure 词表 D-6 单源扩容 + translateFailureKind 恒等直通（编译期漂移即红）；M3/M7/M8 拆条 D-G33..35 | t1-4.gdebts | 14/14（回归 424 用例 0 败；bug_class_lint --strict exit 0） |
+| ΤΕΛ-5（D-G21..G26 清偿） | D-G21 prophecyId 宿主严格配对接线（号序断言 + 真见证清号消费律）+ gym margin 口径与生产同域（对合振荡根除）｜D-G22「是」词面汉字邻接守卫 + 决策层栖息地过滤（与 ΠΑΝ-119 派发层双闸同源）｜D-G23 ioMutex 取消端口生产接线（门面六行 signal 透传 + system.ts 五点 AbortController 断流恢复通路）｜D-G24 ΠΑΝ-114 闸门双 hint 取证｜D-G25③ F7 检疫离散臂换 2×MAD（k=3 毒值吞没域闭合）｜D-G26 releaseShm 服务端 realpath 守卫（逃逸拒删 + 账面不扣） | tel5.fixes + python test_shm | 11/11（pytest test_shm 10 过 1 平台 skip；回归约 370 全绿） |
+| ΤΕΛ-6（D-G27..G32 清偿） | D-G28② /health pixel_domain 30s TTL 接线（诚实 absent 绝不抛）｜D-G29 federationAuthHeaders v2 客户端半边（nonce 三头 + canonical 同构 + authNonce 开关，v1 逐字节兼容）+ README v2｜D-G30 T1-8c 落地验收锁定｜D-G32 notary M2 双向覆盖判据（撒单词穿透形收紧，CJK 零回归）+ M3 证据新鲜度 10s 时效闸（notaryEvidenceStale + fail-closed 拒派不焚毁）；D-G27 验收（unwired-organ 6→0）/ D-G31 移交成品方案（index.ts 产权） | t1-6.fixes + test_dpi_health | 11/0 · 4/0（python 全量 345 过 2 skip；回归七面全绿） |
+| ΤΕΛ-7（治理工具盲区） | cycle_lint 正则字面量盲区收口（stripForEdges 八态词法域感知重写——som 两动态边入图 +15 真实边 0 误边，value 环 0 保持）｜mmap-file symlink 逃逸收口（resolveMmapFilePath realpath 再验 + 白名单根对账 + ENOENT 唯一例外，fail-closed）｜发布面包瘦身（files 否定式排除 pyc：406→339 files 恰 −67，包 3.1→2.2 MB） | pan86.cycleLint + shmReader | 7/7 · 8 过 1 平台 skip（pack dry-run 0 pyc） |
+| ΤΕΛ-8（配置面治理） | enableSandboxStack 三态门控立法（schema 无缺省 = undefined 穿透，未设回退旧门控逐字节兼容 + 39c 金丝雀随迁）｜federationEpsilon 上界单源对接（PRIVACY_BUDGET_EPSILON_TOTAL import，两处立法漂移根除）｜hotkeyBlacklist 缺省串补齐（装载期补全幂等收敛 no-op）｜配置蔓延清点（155 字段零未文档 + 幽灵示例清除 + gen_config_docs 方法函数泄漏修正） | configDocs + pan105-113 等 | 5/5（合并复跑 87/87） |
+| ΤΕΛ-9（真机债探针化） | scripts/realverify 九探针（D-A1..A4/A6..A8/B1/G4 逐债一件，退出码立法 0/1/2/3=pass/fail/absent/degraded，缺席不红）+ run-all 一键编排（汇总表 + 报告落盘）+ docs/realverify.md 引导（硬件清单/接线/台账回填模板）——本机当场收割 2：D-A1 UVC 12 帧稳定 + 黑边剖面 + rectify 闭环（证据帧落盘）、D-A4 合成叮声→WASAPI 回环→分类 notification_ding conf 0.7333（真声学整环） | realverify.test | 12/12（run-all exit 0：在场 2/9｜pass 2｜absent 7｜fail 0） |
+| ΤΕΛ-10（组合根收口 · T2-1） | D-G31 三单例归零缝原子落地（T1-6 移交方案 (a)(b)(c) 逐支兑现：resetProphecyWorldModel 重铸面 / resetAutonomousRunEvolution 动态具名导入 / releaseAllExplorationLedgers 两域分治 + UNLOAD_CHECKLIST 52 键三 disposer + w0unload 金名单同步三新例——清单≡执行律两向绿）+ index.ts 在途残留清理（tsc 基线自愈核验）与 Τ1 五工位协同复核（器官接线无覆盖亲读） | w0unload + index 相关批 | 10/10（合计 232 用例 0 败；census exit 0：三新导出全 wired 943=940+3；value 环 0） |
+| ΤΕΛ-11（census 豁免册终局收割 · T2-2） | 幽灵删条 11（T1-2 删除清单 + Τ1-8b 接线条——并行波次 04:15 落地、本工位逐条对账零残留）+ dead-code 类别清零（24 条按 T1-2 §二复核改判重铸：16 internal-surface / 3 test-only / 5 unwired-organ（cordis 壳契约））+ MUSCLE_* 四常量应急登记（ΤΕΛ-13 M7 在途新增）+ **countRefs spread/三元词法盲区发现**（生产在用符号被误判 orphan——留案 D-G40） | w0wiring.census | 11/11 绿（census 终态 exit 0：未登记 0/幽灵 0/非法 0，609/609 在册，册 605→609） |
+| ΤΕΛ-12（纪元台账立宪 · 本工位） | GENESIS 本章 + DEBTS 终局改判（D-G16..G32 对齐工位报告：18 闭 1 谳；D-A1 终态/D-A4 真机收割闭账；留案拆条 D-G33..G40 新立八条；统计 77→85）+ INNOVATION 行 + genesis_audit 自校 + 全量自跑取数 | genesis_audit --check + npm test | 见审判口径（两窗自跑采样） |
+| ΤΕΛ-13（sandbox 立法施工 · 收稿时点未交付） | M3 否决钉面（engine.ts:59/:136/:207/:220——rejected 判决钉入钉面，主缓存驱逐不再等于否决失忆 + veto-pin-evicted 审计链段）/ M7 肌肉记忆遗忘淘汰（memory.ts:99/:138——容量常量 + 逐出台账有界审计面）/ M8 排练三态保全（macroRehearsal.ts:167——acceptsText/scrollable 缺席保持弃权语义）——T2-4 在途注记亲证施工 + Τ1-12 源级亲验标记在场、tsc exit 0；**工位报告与执法测试册收稿时点未交付，终数不预填**；同波终验排已交付：T2-3（第一排回归修复：w4wire 锚更新可溯 T1-4，负责域 61 册 846 测 845 过 1 败=D-E3）、T2-4（第二排：kernel.generations 夹具迁移可溯 T1-5 D-G21② 6/6，终验全量 3387/3376/2）、T2-5（Python 终验五项全过）+ 并行终验审计工位（敌意抽查六项全过 + 豁免册收割/D-G19 转义/探针竞态三小修——其在 DEBTS 的记录块在案） | —（报告未交付） | 不预填（施工在场） |
+
+审判口径（ΤΕΛ-12 收官自跑取数，node v24.19.0 / Windows，2026-10-05——T2 波部分工位
+仍在途（T2-6/T2-7/T2-10 报告收稿时点缺席、ΤΕΛ-13 sandbox 施工未收稿；T2-1/T2-2/
+T2-3/T2-4/T2-5 已交付），数字为时点快照、如实注明）：
+- `npm test` 全量（本工位两窗实跑）：首窗 **3384 测 / 3370 过 / 5 败 / 9 skip**——5 败
+  归因：w9real D-A5＝**D-E3 在册**（node v24 libuv 退出竞态——RESULT ok:true 后
+  0xC0000409，诚实红保持）；w0wiring.census「现状g」＝豁免册幽灵 11（收割前在途态）；
+  w4wire W4-G＝Τ1-4 planReady 注入改排版（测试钉旧单行字面量）与 kernel.generations
+  Ξ-1/Ξ-2＝Τ1-5 D-G21② margin 口径语义变更（夹具钉旧收敛轨迹）——后三者经 T2-3
+  （w4wire 锚更新 10/10）/T2-4（kernel.generations 夹具迁移 6/6，期望更新全部可溯
+  工单报告）修复；二窗（收割与期望更新落地后）**3387 测 / 3376 过 / 2 败 / 9 skip**
+  ——败 1＝w9real D-E3 在册、败 2＝epochChi Χ-2（sandbox 域 ΤΕΛ-13 在途编辑面，与
+  终验审计工位同判）；复跑 w0wiring.census + kernel.generations + w4wire 三册
+  **27/27 全绿**。本工位产权仅三册 .md（不进 tsc 编译目标），上述红面零本批背书
+  （「并行批次在途文件瞬时红不由本批背书」先例同律）。
+- `npm run wiring:census`（本工位两窗实跑）：首窗 未登记 0 / 幽灵 11 / 非法 0（1552 值
+  导出——收割前在途态）→ 二窗（收割落地后）**exit 0：未登记 0 / 幽灵 0 / 非法 0**，
+  1559 值导出、609/609 在册、dead-code 类别清零（ΤΕΛ-11 终态；unwired-organ 5 为
+  cordis 壳契约改判条目）。unwired-organ 器官类别的原始六条全数处置＝D-G27① 终验。
+- `genesis_audit --check`（本工位实跑，--parse 与抽样两模式）：**exit 0**——虚报 0 /
+  实跑异常 0 / 枚举违例 0 / 编号重复 0 / 分节条数偏差 0 / 合计不自洽 0 / 未入账红面 0
+  （抽样 16 条账目：一致 4 / 滞后 11——W1-W5 史行对后续浪潮扩册的既有软呈报，不执法；
+  未入账盘存 w6 五文件 0 fail）。注：w0 前缀不匹配 W1-W6 盘存正则——w0wiring.census
+  状态由全量自跑与 D-G39/D-G40 账面如实登记，非审计盲写；行内 `|` 转义致枚举错位的
+  隐患一处（D-G19）由并行终验审计工位改全角｜修复。
+- DEBTS 台账 77→85：新立八（D-G33..D-G40 留案拆条——其中 D-G39 经 ΤΕΛ-11 当场收割
+  闭账留档）+ 翻案闭十八（D-G16..G30/G32 十七条 + D-A4）+ 定谳一（D-G25）+ D-A1
+  终态收口；未闭 18（需真机 7 全部探针就位 / 需人工 3 / 部分闭环 1 / 后续窗口 7）/
+  已定谳 18 / 已闭环 49。
+本段不入 genesis_audit 纪元宇宙（W6-ΠΑΝ 同律——审计器头注「w7+ 不属本审计宇宙」律 +
+w7audit 执法册 deepEqual 锁定 W1-W5）。批次报告见 C:/2/.survey/fix/T1-1..T1-9.md、
+T2-1..T2-5.md（T2-6/T2-7/T2-10 收稿时点缺席）。
+
+### ΤΕΛΟΣ 终验收口（集成者 2026-10-05 · 全部施工停止后）
+
+T2-6/T2-7/T2-10 补交付（五闸+doctor 多轮采样终轮双 exit 0；dist 终轮 299↔299 对账、
+pack 347 files 零 pyc；D-G16 M3/M7/M8 三立法落地 tel…t2-10 册 16/16）。集成者终验
+（全线施工停止后实跑）：**全量 3403 测 / 3393 过 / 1 败 / 9 skip**——唯一败＝w9real
+D-A5 即 D-E3 在册 node v24 libuv 退出竞态（诚实红，三窗确定性复现形态与台账逐字一致）；
+epochChi Χ-2 已随 ΤΕΛ-13 收工自愈（台账二窗快照的在途注记如实保留）。终验中捕获并
+修复一处测试隔离缺陷（**ΤΕΛ-14**：w5pyreg W5-1①a 的 py_compile 在全量并发跑时与其它
+python 子进程竞争写同一 __pycache__/*.pyc，Windows rename 共享冲突 ⇒ 瞬态 WinError 5
+——改用独立 PYTHONPYCACHEPREFIX 临时前缀隔离写入面，语法判定语义零变化，单册 8/8）。
+终态五面：tsc exit 0 ｜ npm run verify 五闸链 exit 0（BC 零命中 · value 环 0 · census
+609/609 无幽灵无非法 · genesis_audit 严格模式过）｜ doctor --strict exit 0（critical/
+major 0/0，score 65.5）｜ npm test 3403/3393/1/9 ｜ python pytest 348 过 + 八模块
+selftest 8/8 + realverify 探针 pass 2/absent 7。批次报告补齐：T2-6/T2-7/T2-10 与
+两纪元总册 C:/2/.survey/fix/TELOS-REPORT.md。
+
+## ἈΓΩΝ 实战纪元（AGŌN · 真实任务实弹 · 开卷 2026-10-05 · 审判数字收官回填）
+
+训练营时代（gym/PCG/沙箱/合成世界）的终局考试：把全器官带上真实 Windows 桌面、真金白银计费、真实任务电池竞技。四波实战准备——R1 侦察九工位（宿主接入考古、电池本机化与 26 任务设计、驱动硬化与桌面协议、双 VLM 通道实弹选型、安全护栏与急停、分析回路、九跑冒烟）；R2 攻坚九工位（换脑、热键收口、焦点保卫、精度攻坚、直启通道、编排器、复位器、成本护栏、就绪度立宪）；R3 收尾八工位（冒烟正果+批1、备脑注入口、限流/预算/轮数三闸、反作弊检测器+纯净度分离、宿主运维自动化、glm-5.3 行为缺陷画像+话术补丁、批2 预检、内存基线）；R4 批2 执行波八工位（批2 执行、批1 深析+画像 v2、b 类回执话术、批3 预检、回归护栏、成本守卫、在役观测、失败模式免疫注入）；R5 收官波七工位交付+一缺席（R5-1 批2 残局修复+受控重启+retry 重评 7/9——T8 五层根因逐层剥洋葱、工具面 35→43；R5-2 D5 type_text 吞换行修复+选族回执增强；R5-3 SEED_MANIFEST 松绑+话术清剿；R5-4 视觉外包调用画像+降本三实施；R5-6 E2 verify 谓词独立性审计 8 处强化；R5-7 watchdog daemon 保活+成本复盘修正；R5-8 回归护栏 v2 四闸全绿；R5-5 报告缺席在案登记）；R6 写回波（R6-1/R6-2 报告缺席在案登记；R6-3=台账写回工位，本段）。
+
+五问题攻坚在案（现象→根因→修复→数字全链）：弹窗误判（geoHigh 1.15→2.0，暗壁纸亮窗误拦根除）、跨会话污染（SchmittPopupFilter 按会话分键）、热键白名单收口（全字母表+导航键，黑名单零弱化）、宿主抢焦三层防线（驱动压制+type_text 前置闸+打字防串窗污染扫描，役累计 133 拍零污染零误报）、菜单精度两段式纪律+qwen 反算层（273px→4.0px，任务门 7.5×）。**Day 1 转折**：R1-8 时代九连败（GUI 存盘 0/9）→ G3 冒烟正果（E2 5/5，134s）→ 批1 3/3（保存链首次完整达成，¥0.0469/24 调用）。**Day 2 转折**：批2 首轮 4/9 门槛未过（≥6/9）——T8 系统性双败三因定谳（开环精度×闸门误撞×审批死端——fail-closed 对金丝雀 T19 是证据、对 T8 是误伤，同一机制两面并列在案），4 任务播种链级联 blocked，编排器 exit 8 停止待人工；修复矩阵落地（b 类回执话术六面+反技能种子五条+R5 波五层根因），**重评终局 7/9 门槛过**（T8 第 8 次尝试 PASS——read_text×10/find_text/diff_view 全参、E2 五谓词全过、磁盘第 3 行精确整行替换；T11 同签名三败如实保留——agent 不保留 explorer 窗的行为面缺口；T12 blocked），批3 未跑在案登记（orchestrator state=pending，R6-1/R6-2 缺席）。
+
+基建六面（驱动/编排/复位/分析/护栏/运维）+ 纯净度分离（`purePassRate` 诚实口径：全役终判 13 判桶——11 任务判桶全 pure（pure-pass=10·0.769、pure-fail=1）+2 目录伪影 unknown，tainted=0、cheated=0——失败亦诚实失败）+ 成本封顶开卷（全役终数 143 调用 ¥0.2983=阈值 ¥2 的 14.9%（批1 24/¥0.0469+批2 首轮净额 55/¥0.1081+R5 重评波增量 64/¥0.1433），三阈值零告警，宿主订阅制按轮记账）+ 失败模式免疫闭环（R1-8 五类失败模式离线固化为反技能种子，检索命中居首；R5-1 重启后 Checkpoint failureMemory OK 实证生效）。立法三律：双证终判 / 成本入账 / 不虚报。宪法五律+附则三则全役执法：串行律（pid 锁）、圈禁律（anti-cheat 全维度 0）、成本封顶律、急停优先律、纯净度分离律。
+
+### 工位表（每行：工单段 → 战果 · 执法册 · 审判数字）
+
+#### R1 波 · 侦察（九工位）
+
+| 工位（工单段） | 战果（工单号 → 器官/文件 · 修复一句话） | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| R1-1（宿主接入考古） | Electron 0.2.0-rc.2 三钉：RPC `127.0.0.1:19387/api/<ns>/<method>` 信封（非 3080/非点号）、启动日志 token 每轮转+`GET /?token=` 303→HttpOnly cookie、会话 zstd JSONL 可读；挂载两步律（package.json deps 且 dsh.profile.bundles）；硬链接拷贝+tsc 原子替换须 pnpm install+重启律；python 物理后端懒拉起 8421..8428+遗留精杀律 | runbook（§5 全绿） | 35 工具恒载（R2/R3 波六轮重启反复验证） |
+| R1-2（电池本机化） | `C:\dsh3\test-runs` 底座；7/7 套件字面量深替换（D: 残留 0——旧套件面；R3-7 复验 suite-full 430 串 D: 残留 0/39 串携 C:） | 离线自检 | 238/238 |
+| R1-3（电池设计） | suite-full 26 任务全工具族×核心能力面（E2 核证 9/侧证 10/absent 7，MDER 0.39）+圈禁立法（产物全落 playground、五件套应用、example.com 唯一网络读） | 设计律（R2-7 状态矩阵对偶） | 26 任务三梯次 3/9/14 |
+| R1-4（驱动硬化） | drive-hardened 决策核心纯函数：瞬态/致命二分退避（4 次 800ms→15s 封顶）、超时钳制 [5,10]min+总量熔断、断点续跑（resume-state 原子写+所有权纪律）、串行 pid 锁（exit 5）、stopfile（在场拒跑 exit 6）、prompt 三证重发律、双重屏幕卫生 | driveCore（R1-8 桌面协议适配复用：projections→asOfSeq→page 游标律） | 九跑冒烟管线零 harnessError |
+| R1-5（智谱选型） | glm-4.5v/4v/4v-plus 全 429 code 1113（余额不足）定性；glm-4v-flash 免费档可用（ask 1587ms、max_tokens 1024 硬顶实测）——grounding 弃用位 | 实弹探针 | grounding 102.6px/IoU 0（对照系存档） |
+| R1-6（安全护栏） | 三层急停执行序（L1 RPC cancel → L2 python drain → L3 --hard/--host）+现场恢复四步（Esc×3/剪贴板覆写/MinimizeAll/残留探测）+审批闸判定：带外码死端 ⇒ 危险动作 100% fail-closed 不落地 | emergency-stop.mjs / recover-scene.ps1 | — |
+| R1-7（分析回路） | enrich 四件（vlm-meter 计量切片/retry-chain 配对/kernel 快照机会主义/首末帧归档——原件零触碰、token 不可重建不伪造）+失败五归类（驱动>时序>闸门>定位>理解，基建错优先）+r17 工单规则+基线自动固化 | 49/49 | 批1/批2 工单 R17 系 7 条产出 |
+| R1-8（驱动桌面协议+九跑冒烟） | 桌面 19387 协议适配+401 自动重换 cookie；九跑 GUI 存盘 0/9 暴露五问题阶梯；当场修 P1（popup.geoHigh 1.15→2.0 配置侧 kernel-state 存档）+P2（SchmittPopupFilter 按会话分键 LRU32+10min 惰性过期——模块级单例跨会话传染根除） | r18.popupSessionIsolation（5 断言） | 九跑零 harnessError；全套件 3432/3422（1 败=w9real 预存在册） |
+| R1-9（qwen 选型） | DashScope qwen3-vl-plus/flash 有配额可用；原生 0-1000 归一化坐标且文本谎称「图片像素」的家族坑发现+反算修正探针（三门判据思想源头） | 实弹探针 | 裸探针反算后 1.9px/IoU 0.94；图像仅 242 token |
+
+#### R2 波 · 攻坚（九工位）
+
+| 工位（工单段） | 战果 | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| R2-1（换脑+反算层） | 主脑切 qwen3-vl-plus + `wrapQwenCoordDomain` 三门反算（家族门/宽高门 PNG IHDR·JPEG SOF/签名门 4 坐标全 [0,1000] 整数——文本声明不可信，签名与家族门才是判据；任一门缺席原样透传不猜）；~160 行纯函数零依赖；不覆盖面登记（failover 池/庭直铸备脑） | r21.qwenCoordDomain 13/13 + 回归 118（80/80+38/38） | 插件路径 4.0px/IoU 0.897（任务门 <30px 达成 7.5×；金样 273px→1.87px）；宿主 vlm_platforms qwen minted+池双 closed |
+| R2-2（热键收口） | `HOTKEY_WHITELIST_KEYS` 扩全字母表 a-z+导航键（协议 schema 层根因：字母仅 a/c/v/v 无 s，python 物理层早已全字母表——TS 两侧镜像滞后）；system.ts fallbackMap+python Key Literal 双向镜像；win/meta/printscreen 刻意不入列；黑名单执法零弱化（cmd+q 等四层一致回归钉死） | 新册 6/6+局部 56/56 | 批1 T3 ctrl+end/z/s 三和弦全放行实战复核；suite-full 热键任务零改动可跑 |
+| R2-3（焦点保卫） | 双层防线：驱动等待环每 9s 探测前台命中宿主标记⇒只压宿主窗（~0.9s/拍）+type_text 前置焦点校验（python `/active_window` 新端点+记账复焦一次+复测仍中⇒FAILED 诚实失败绝不派发；backend 缺席 unchecked 放行降级） | 20+7（真机 3 拍不误压） | 役累计焦点保卫 133 拍：压回 3、污染 0、误报 0（冒烟 27/批1 33/批2 73） |
+| R2-4（精度攻坚） | 菜单两段式确定性路径（不依赖换脑）：menuExpandBetrayedHint（背叛⇒MENU DID NOT OPEN 专项话术）/menuNotOpenGateHint（I-beam 拦截本身即「下拉没开」确定性证据）/menuItemSemantics 中英词形探测/提示词增小目标定位+两段式纪律 | r24.menuTwoStage 7/7（attempt9 seq54 复现入测） | 真值标定双源互证（标签条 y 0-0.041/菜单栏 0.041-0.074/另存为 0.184，与 R1-8 手记一致） |
+| R2-5（直启通道） | `launch_app` 白名单直启（notepad/calc/mspaint 闭集）：detached+shell:false 裸 CreateProcess 逃双机制死局（libuv kill-on-close 作业连坐 × 受限 token Shell 激活代理断裂——四联探针定性）；600ms 存活观察窗；undo=taskkill /PID 只杀自己拉的 pid（退出码 128 幂等）；注入面比 -EncodedCommand 更前移一层（根本不经 shell） | r25.launchApp 20 断言 | 真机启动器退出后 5s 存活 PASS；批1 T2 第一步即用 |
+| R2-6（编排器） | batch-orchestrator+orchestrCore：3/9/14 三梯次（门槛 ≥2/3、≥6/9、终批只出报告）、播种清单硬软二分、checkpoint 状态机逐任务落盘、批前健康巡检（RPC/python/磁盘≥5GB 异常 STOP exit 9）、批收口固定流 enrich→analyze | 16/16+mock 整链 | 批1 exit 0 放行 / 批2 exit 8 停止待人工——两形态均按律执法；R5 重评 exit 0 |
+| R2-7（复位器） | playground-reset：26 任务状态矩阵（standalone 9/chain 17；假 PASS 防线 14 任务：absent/absentDirs/purity/在场播种）+三面复位（文件清空重建幂等/进程白名单+标题特征双门槛精确 kill/可选 MinimizeAll）+安全律 S1-S3（在场内校验/永不删本体/白名单制） | 69 断言+实机脏场注入 | 冷复位 280-463ms；真实桌面样本误伤 0 |
+| R2-8（成本护栏） | vlm-batch-report 成本看板：批级 VLM 调用/token 估算/降级分桶/429 率+三阈值告警闸（>¥2 / 429>5% / 降级>20% ⇒ STOP exit 1 ⇒ 驱动 3s 停批）；成本模型低中高失控五档（全轮 ¥0.16-2.61） | 模型对照（R4-6 修正：调用锚上移高档 8/任务；R5-7 再修正 10-11/执行任务） | 批1 ¥0.0469/批2 ¥0.155 实测斜率低于预估下界；全役终数三阈值零告警 |
+| R2-9（就绪度立宪） | 就绪度十项矩阵（Day 0 终态九绿一半绿）+G1-G8 开跑门槛+CONSTITUTION-AGON 五律起草（串行/圈禁/成本封顶/急停优先/纯净度分离+附则三则） | 宪法（全役逐批对账） | 七门达线开卷（唯 G3 待 R3-1） |
+
+#### R3 波 · 收尾（八工位）
+
+| 工位（工单段） | 战果 | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| R3-1（冒烟正果+批1） | G3 达成：E2 5/5、134s、15 工具调用（真实尝试 3 轮+2 次并行 401 中断——第 1 轮自身污染扫描误报⇒HOST_INJECTED_USER_PREFIXES 白名单；第 2 轮三重根因⇒话术修复 10 处/6 任务+操作员清残留+QQMail 预关）；批1 AGON-B01=3/3（保存链首次完整达成）；第三层打字防串窗污染扫描（typed-into-host/self-injected-message ⇒ cancel 止损+FAIL+receipt 记账） | r31.typingPollution 7/7（R5-1 补登后 13/13） | 批1 ¥0.0469/24 调用/13·15·37 步/0 越界 0 急停 |
+| R3-2（备脑注入口） | `vlmFallbackProviders` CSV 扩 `id=model` 方言（池+合议庭同解析——修复庭会把 glm 整颗静默挤出席的伴生缺口）+max_tokens 模型键控硬顶（glm-4v-flash ≤1024）落 types/cast/glmClient 三面单一执法（R1-5 钳制核实从未落 src） | r32.failoverFallback 9/9+回归 286/286 | 宿主重启后池 [qwen,glm] 双 configured 双 closed（probe=false 零网络） |
+| R3-3（三闸） | GAP-1：vlm.maxPerMinute/maxPerHour 幂等注册（[0,600]/[0,36000] 越界夹取）+`rewireVlmRateGate()` 单一铸造点+restores 腿重焊（kernel-state 开机即生效）；GAP-2：codec.maxImagesPerTask/maxBytesPerTask 入册+resolveVlmBudget（缺省逐字节不变）；GAP-4：`--max-turns-per-session 60`+waitDoneDesktop 每 tick 拉轮号+stoppedBy:'turn-cap' 分口径 | r33.gaps（GAP-1a/1b：set 1 ⇒ 第二次 chatJson `rate limited` 前置拒绝零 fetch）+maxturns 3/3+attempt8 型 51 轮事件流端到端 | 批1 三任务 receipt.turnCap={limit:60} 全在役；全役终读 11 任务 exceeded 全 false 零触发 |
+| R3-4（反作弊） | bench/anti-cheat.mjs：工具面七分类/意图六类/任务路径触碰=实锤 cheat/三态 pure-pass·tainted-pass·fail/`purePassRate` 聚合分离+26 prompt 纪律前缀（幂等，套前缀自动切严格档） | 94/94 自检 | R1-8 九跑回溯 4/8 pure、实锤 0；全役终判 pure-pass=10（0.769）/tainted=0/cheated=0 |
+| R3-5（运维自动化） | ops 三件：restart-host.mjs 七阶段（安全门 RPC 实核 idle→树杀→健康验证→token 存档）/watchdog.mjs（rpc/py/disk/hostRSS 巡检）/sessions-hygiene.mjs（会话归档搬移不直删，results 证据铁律豁免） | 批2 受控重启实战 | exit 0/7.8s；watchdog 批2 期 23+ tick 全绿零 CRIT |
+| R3-6（行为画像+话术） | glm-5.3 三缺陷画像（D1 坐标惯性——同点 3-8 连击+zoom 信息丢弃/D2 盲链赌博——click→盲type→enter 无中间证据/D3 旁路螺旋+方言字面服从——a8 38 次 pwsh 零截图）+a1-a5 提示词补丁（zoom 换算消费/同坐标三击禁/type 前置确认/旁路回视觉/菜单段被动观测） | dist 5 处+R2-4⑦ 入册断言 | 批1 行为验证（R4-2）：a1 3/3 zoom 消费（R1-8 为 0/3）、a2 零三击、a3 12/12、a4/a5 未触发 |
+| R3-7（批2 预检） | 6 坑消解（open_url file:// 偏航自愈路径/黑名单回退/alt+f4 反成护栏/OCR 合成 17/17 命中/路径替换 D: 残留 0/首启向导已消费）+时长修正现实 27-35min+首回合人工检查清单 5-0..5-6 | 预检册 | 批2 前置 5-0 全过（msedge 清零/explorer 图标核验） |
+| R3-8（内存基线） | 宿主空载 685MB 基线+漂移包络 1.2MB/min+R-H 三线（RSS 2.0GB/renderer 1.2GB/Δ+800MB 每批）+R-P 线（python 400MB 黄线）+懒拉起旋涡 R-P3 判据立法 | 采样协议（<2s 只读） | 批2 峰 801.8MB=R-H1 40%、批后回落 701.8MB——线有效 |
+
+#### R4 波 · 批2 执行+批3 预备（八工位）
+
+| 工位（工单段） | 战果 | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| R4-1（批2 执行） | 受控重启（互斥广播首次实战执法）+链态恢复（--task 确定性重建+记事本会话恢复脏标签逐窗清除）+批2 首轮 4/9 门槛未过（T8 系统性双败+4 任务播种链级联 blocked；retry-failed 同判 exit 8 停止待人工）+T8 三因定谳（开环精度×闸门误撞×审批死端）+修复建议 A（suite 话术）/B（compensable 分级）/C（审批止损窗） | 证据包四件套×5+anticheat+analyze | 79 调用（screen 64/ground 15）¥0.155（阈值 7.8%）；8 判桶全 pure、purePass=7；工单 P0×1 P1×1 P2×2 |
+| R4-2（批1 深析） | a1-a5 补丁逐条 hist 验证（3 生效 2 未触发非证伪）+VLM 调用模式（验证类 42% 第一大用途——a3 纪律的直接成本与 3/3 的直接原因）+时延分解（VLM 占墙钟 16-35%，主时延=模型思考+宿主回合 ~3.3-4.6s/步）+根因发现：glm-5.3 会话纯文本（4 次自述看不见图，ask_screen 是唯一眼睛）+画像 v2（D1/D2 消、D3 休眠、D4 纯文本视觉外包/D5 type_text 换行丢失新立）+批3 高危预测五任务监控点 | 只读深析（零 GUI） | 行为稳定可复现（冒烟 vs 批1 同任务同形态） |
+| R4-3（b 类回执话术） | R3-6 立项落地六面（b1 probe 记忆召回升格警示/b2 control 判读「不指名哪个控件」限定/b3 TACTICAL_PAUSE 逃逸条款——无弹窗时合法出口不再幻觉坐标/b4 type SUCCESS=按键已发出≠落对地方+noop 头部判停/b5 click page-level-only 环境噪声嫌疑注记/b6 降级建议命令式可执行化+重试熔断）；全部加法式+`// R4-3:` 证据注释 | r43.dialectHardening 10/10 + 钉形状批次全绿 | build 212 文件 dist 刷新、新话术 7 处命中；下批重启生效（R5-1 实证 Checkpoint OK） |
+| R4-4（批3 预检） | 双配置王炸（autonomyEnabled/enableElementIdMode 缺省 false——不修 T22 必 FAIL+T16 元素路径灭）+prereq 级联黑洞（T19 FAIL⇒T20→T26 整条尾链 blocked）+T19 双模式推演（模式 A=现状零改动：fail-closed 死锁即金丝雀证据）+T23 Actor 双通道死证（SDK AgentRegistry 无 run 方法+技能相关度门槛）+UIA 离线实弹 | 预检册（config.ts:462/556 等七处代码实读锚） | UIA 306 元素/452ms/named 231；修复后预测 8-10/14 |
+| R4-5（回归护栏） | 实战期改动面全量回归+verify 五闸+dist 就绪判定+修 R3-2 引入的 r32:276 tsc 错（运行时零变化） | r45 全量+五闸日志 | 3537/3527 过/1 败（w9real D-E3 预存在册）/9 skip；census 621/621；收官终数由 R5-8/R5-1 承接 |
+| R4-6（成本守卫） | 批2 放行前状态核实+实时曲线+R2-8 模型对照修正（调用/任务锚定高档 8、单价吻合 -2.5%）+DashScope 配额探测（GET×3 全 200、延迟 163-186ms 平稳、无限流头）+批3 预算裁决 GO | 采样+探测（零 token 消耗） | 批3 均值外推 ¥0.218（封顶 4.4%）/失控锚 ¥1.34（< 告警 ¥2）；全役投影 ≈¥0.41-0.57 |
+| R4-7（在役观测） | 三路只读采样全程在跑：宿主水位曲线（锯齿非台阶：批前 715±12→峰 801.8→批后 5min 回落 701.8；每任务瞬态 +15-17MB 几乎全落 renderer、残留 ≈0）+会话堆积（127 事件/任务稳定）+python 懒拉起（1 次/批、旋涡 <60s 自愈逐拍首录）+RPC 29 探测无漂移+焦点保卫实效（批2 73 拍 0 污染）+批3 轮转建议 | r47-samples.csv/r47-py-watch.log/r47-rpc-latency.log | 红线全绿（峰=40% R-H1；renderer 27% R-H3） |
+| R4-8（失败模式免疫） | R1-8 五类失败模式（菜单未开即点/同坐标惯性/对话框盲打/脚本旁路螺旋/zoom 不消费）离线固化反技能种子：checkpoint v4 部署档+knowledge 档双面、match_skill 前科清单直达、reversibilityRegistry 负证据；必要性论证：autoRemember/failureMemory 自动路径对「回执 SUCCESS 但意图未达」型结构性失明 | r48.failureModeSeeds 5/5+既有 100/100 | 五情境检索各自命中居首（score 0.77-1.02）；部署档与 canonical 逐字节一致；R5-1 重启生效实证 |
+
+#### R5 波 · 收官（七工位交付 + R5-5 缺席在案）
+
+| 工位（工单段） | 战果 | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| R5-1（批2 残局修复→重评 7/9） | 批2 终局 7/9 门槛过（≥6/9 余量 1，ORCH-EXIT 0）：T8 五层根因逐层剥洋葱（L1 审批闸误拦恢复键→isRecoveryChord 豁免；L2 记事本 TabState 延迟恢复脏缓冲→预置协议 v2；L3 选区覆盖开环+恢复螺旋→话术 v4；L4 read_text 判据不可达→enableOcr 王炸③；L5 宿主重复调用纠偏提示误判→HOST_INJECTED_USER_PREFIXES 补登）——T8 第 8 次尝试 PASS；T9/T10 首跑 PASS；T11 fail×3 同签名；T12 blocked。两次受控重启（41→43 tools）；审批止损窗 --approval-timeout-ms | r51.recoveryChord 6 用例；r31.typingPollution 13/13 复绿；质量门四闸 | gate proceed=true 7/9；143 调用 ¥0.2983 三阈值零告警；pure-pass=10（0.769） |
+| R5-2（D5 修复+T8 插件侧深因） | type_text 吞换行根因定位于 python `_type_unicode`（KEYEVENTF_UNICODE 0x0A ⇒ 编辑控件只认 0xD 静默丢弃）→`_newline_plan` 归一真 VK_RETURN 键事件+代理对拆分；TS 回执 newline_count/newline_semantics；T8 插件侧四层成因+回执增强三面（选族 SELECTION UNVERIFIED/noop CAVEAT/换行披露）；dHash 选区可见性离线实验 | python test_input_newline 11 项+全套件 366 过/3 skip；r52.typeTextNewline 7/7（dist 全链字节比对） | 单行路径锚点逐字节不变；多行一次成型 |
+| R5-3（套件松绑+话术清剿） | SEED_MANIFEST 两处松绑（T20/T26 prereq→[]——T19 计划内 FAIL 金丝雀不再绑架尾链；物料面 files 谓词独立保留）；黑名单键教学残留清零 3 处（保留 14 反教学注记+1 安全禁令）；T19 planned-fail-canary+T23 known-limitation 双结局元数据 | verify.selftest 258/258；w2orchestr 16/16；plan 双跑确定性 | 批3 前置三坑就绪 |
+| R5-4（视觉外包画像+降本） | 调用画像 v3（59 次 ask_screen 逐条三分：survey 17%/ground 31%/verify 53%；确定性验证通道全批 0 调用——唯一眼睛被当成唯一验证通道；~51% 可确定性替代）；三实施（视觉摘要缓存恒开/同屏同问语义回放缺省关/验证经济提示词两段）+双键入册（grounding.semanticCache+ask.semanticCache，册容 60→62） | r54.vlmEconomy 7/7；受影响既有 120/120 | 提示词根性失修修正（VISION_GROUNDING 对纯文本会话虚构「看」） |
+| R5-5 | 报告缺席在案登记（不虚填） | — | — |
+| R5-6（E2 verify 谓词独立性审计） | 26 任务谓词攻击面矩阵；9 处弱谓词→8 处强化落盘（T2 minBytes 55/T4+T7 windowExists/T8 邻行完整性/T9 not 锚前缀/T10 minBytes 150/T15 Microsoft Edge/T23 记事本域窗口锚）；回放重判 7 PASS 零翻红；F1 旁发现：轨迹臂提示词回声洞（expect 正则匹配轨迹 JSON 子串——T4 工具从未被调用） | verify.selftest 258/258+playground-reset.selftest 69/69+r56-replay 可复跑 | 判定独立性双翼合围：过程纯净（R3-4）+谓词独立（本工位） |
+| R5-7（运维面修正） | watchdog 无心跳根因定谳（nohup 在 win32 不脱离 console——关终端硬杀；stop 墓碑三铁证）→v2 daemon（detached+pidfile+--ensure 保活+计划任务每 5min+boot-env 0600）；findToken 顺序修正（env→最新启动日志→state 存档）；批2 成本复盘修正（79=累计、净额 55/¥0.1081）；批3 预算终裁 GO | 部署验证（daemon 心跳 61s 恒定/幂等/schtasks 就绪） | 全役运维 SOP v2 一段式命令清单 |
+| R5-8（回归护栏 v2） | R5 波实战期全量回归+四闸（收笔信号 29 分 45 秒稳定确认）：tsc 仅 3 条 R2-5 预存；npm test 3552 测/3542 过/1 败/9 skip（唯一败=w9real W9-4① 在案环境红）；verify 五闸 EXIT 0；dist 终建 300/300+smoke 299 模块+manifest sha 一致——批3 可重启加载 READY | r58 四闸日志在盘 | census 1581 值导出/953 wired/621 orphan 100% 在册 |
+
+#### R6 波 · 台账写回（本册——收官工位）
+
+| 工位（工单段） | 战果 | 执法册 | 审判 |
+| --- | --- | --- | --- |
+| R6-1/R6-2 | 报告缺席在案登记（批3 终局数字以盘上证据为准：orchestrator 批 3 state=pending、无 T13-T26 任务目录 ⇒ 批3 未跑，不虚填） | — | — |
+| R6-3（项目史官·台账写回） | 三件套草案占位回填清零；GENESIS 本章写回（卷首全景行+工位表 R1-R6+审判数字）；DEBTS D-G41..D-G82 四十二条入账+状态枚举补「实战在册」+统计段 85→127 | genesis_audit --check | 详见 R6-3.md |
+
+### 批次表
+
+| 批 | 战果 | 证据 | 审判 |
+| --- | --- | --- | --- |
+| AGON-B01 | 3/3 PASS（门槛 ≥2/3 余量 1，编排器 exit 0；13/15/37 步 mean 21.7；VLM 24 调用 ¥0.0469；工单 P1×1 P2×2；焦点保卫 0/33；零越界零急停；保存链=R1-8 九连败首次完整达成；三和弦全放行） | `results\suite-full\analysis\` | 已核证 |
+| AGON-B02 | 首轮 4/9 门槛未过（T8 双败+4 blocked，exit 8 停止待人工）→ R5-1 重评终局 **7/9 门槛过**（余量 1，ORCH-EXIT 0；T8 第 8 次尝试 PASS、T9/T10 首跑 PASS、T11 fail×3 同签名、T12 blocked；HEALTH STOP 1 次自愈；零越界零急停） | 同上+`r41-anticheat.json`+`r51-anticheat.md`+`batch2_r51_retry{,2..8}.log` | 已核证（orchestrator gate proceed=true） |
+| AGON-B03 | 未跑在案登记：orchestrator 批 3 state=pending、无 T13-T26 任务目录、R6-1/R6-2 缺席——R5-1「有条件 GO」后未执行（前置已就绪：profile 三王炸+43 tools/松绑/清剿/hygiene --keep 20/watchdog daemon；未竟：通知中心清理+T11/T12 残局） | orchestrator-state.json 批 3 块 | 待执行（在案登记，非占位） |
+
+审判数字（收官终数 · R6-3 实测，全部锚定盘上证据）：任务通过率——26 任务分母：已执行 11=10 过 1 败（执行口径 10/11=90.9%）、blocked 1、未执行 14（批3 未跑）；分列 E2 核证 8（批1 3+T3/T4/T8/T9/T10）/侧证 absent 2（T5/T6 显性盲区律）/E2 FAIL 1（T11）/blocked 1。**purePassRate**：pure-pass=10（0.769）/tainted=0/cheated=0/pure-fail=1（失败亦诚实失败）/unknown=2（目录伪影）。**总成本**：143 调用（screen 81/ground 22/ocr 40）¥0.2983=阈值 ¥2 的 14.9%，429 0%/降级 0%/三阈值零告警；宿主 glm-5.3 订阅边际 ¥0 按轮记账。步效：终判轮 11 任务 min=3 p50=34 max=50 mean=26.182。失败分布：T11=闸门拦截 1 条。工单：终局分析 4 条（P0×1/P1×1/P2×2）。轮数护栏：11 任务 turnCap={limit:60} 全在役零触发、T8 终判轮 stoppedBy=timeout（481s=10min 任务钳制）。五闸状态：R5-8 四闸全绿（verify 五闸 EXIT 0/dist 300/300 READY）+R5-1 末批重建质量门（tsc 3 预存错、npm test 3553 过唯二红 w9real+census 已修、build exit 0、部署档 sha 301/301）；全量无一窗 0 败——w9real W9-4① 为 D-E3 同款在案环境红，非实战期引入。
+
+本段不入 genesis_audit 纪元宇宙（W6-ΤΕΛΟΣ 同律——审计器头注「w7+ 不属本审计宇宙」；标题不带「纪元 Wn」、工位编号 R1-R6 不在 w1-w6 盘存射程）。债务面联动：ἈΓΩΝ 纪元新债 42 条入 DEBTS G 分区 D-G41..D-G82（ASCII 转写枚举兼容；草案号 D-ΑΓ-N 见来源列），状态枚举补「实战在册」。报告索引：C:/2/.survey/practice/{CONSTITUTION-AGON,LEDGER-AGON-v3-draft,REPORT-day0,REPORT-day1,REPORT-day2-draft,GENESIS-AGON-chapter-draft,DEBTS-DAG-entries-draft}.md 与 R1-1..R5-8 各册（R5-5 缺席）、R6-3.md（写回工位报告）。
+
+
+### ἈΓΩΝ 实战终局补记（集成者 2026-10-05 · R6-1 工位超时后驱动进程自主完成批3）
+
+R6-3 台账写回时批3 state=pending 为当时快照；其后编排器/驱动以独立 OS 进程自主跑完
+批3（任务时间戳 11:49-13:30 本地）。orchestrator-state.json 终局实读：**26 任务 =
+23 pass / 2 fail / 1 blocked**。三非过面逐一定性：
+- **full-approval-delete-file（T19）= 设计内金丝雀通过**：3 跑全部 trajectoryPass=true
+  而 E2 拒绝删除落地——正是模式 A 的 fail-closed 执法验证（审批闸拦住不可逆动作、
+  轨迹全合规），按 R5-3 双判读注记计「金丝雀 PASS」；
+- **full-orchestration-file（T23）= known-limitation blocked**（Actor 双通道死在案 0 跑）；
+- **full-autonomous-goal（T22）= 唯一真实能力失败**（3 跑每跑仅 1-2 工具调用即
+  ~7min 停摆——autonomous_run 内核预算账目为负即 abort 的缺陷，入工单池 W-10 系）。
+能力面口径：23+金丝雀=24/26 达标；失败仅 T22；T23 属基建欠账。批2 经 R5-1 六轮
+修复会话最终 9/9（edge-open-form 第 6 跑、edit-precision 第 8 跑过线）。战役 VLM
+计量可见 ~320 调用（enrich 覆盖缺口在案）· 估算总成本 ≤¥0.9 · 三阈值全程零告警 ·
+纯净度收官抽验 15/15 pure（tainted/cheated 双 0）。R6-6 收官回归四绿一在案 + 本补记
+后 tsc exit 0（r25 三错已修 20/20）。

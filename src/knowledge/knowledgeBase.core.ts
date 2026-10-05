@@ -4,6 +4,8 @@
 // （遗忘曲线/信任度/注入蒸馏/鸡尾酒轮转/主题键）整体搬迁。零 IO 依赖，行为零变化；
 // knowledgeBase.ts 以再导出保持导入面不变。
 import type { KnowledgeCategory, KnowledgeEntry, KnowledgeInjection, KnowledgeResult } from './contracts';
+// ΠΑΝ-46（分词单源收口）：抗原指纹与 knowledge 链词法面统一消费 dialects 单源分词
+import { tokenizeText } from '../dialects/tokenizer';
 
 
 /** 分类学全集（insert 铸造点的域执法依据） */
@@ -56,11 +58,18 @@ export const STABILITY_GROWTH = 1.6;
  *  间隔效应不能把旧知识变成永恒（封顶是诚实性约束，不是性能参数）。 */
 export const HALF_LIFE_CAP_MS = 365 * 24 * 60 * 60 * 1000;
 
-/** 分词（J 纪元统一）：复用 `../uiMemory` 的 tokenize（拉丁词 + CJK 单字 + 二元组）。
- *  旧实现私有一份「CJK 连续串整体」的分词 —— 与决策工位（reflexArc/deliberate
- *  经 uiMemory.tokenize）不同构：同一个中文词在两通道被切成不同粒度，KB 的
- *  keyword 通道（长串 includes 精确匹配）在中文场景几乎必然哑火，只剩语义通道兜底。 */
-import { tokenize } from '../uiMemory';
+/** 分词（J 纪元统一 → ΠΑΝ-46 方言单源收口）：knowledge 链的词法面全部消费
+ *  `../dialects` 的 tokenizeText（停用词剥离 + 分段 bigram）。旧实现复用
+ *  `../uiMemory` 的另一套口径（无停用词 + 跨词边界 bigram）—— 同一中文词在
+ *  两通道被切成不同粒度，BM25 语料统计被 'the'/'的' 类功能词污染（C1-8 M4）。
+ *  分词单源律（ΝΩ-41）自此对最重的方言（分词）也成立：knowledge 链与
+ *  semanticHash.embed 统一消费 dialects 版本（embed 用 keepDigits 签名系方言）。 */
+
+/** ΠΑΝ-46：免疫抗原的语义指纹匹配阈值 —— 指纹索引未命中时的语义营救扫描
+ *  （cosine ≥ 0.8 才算同抗原）。与 SEMANTIC_DEDUP_COSINE 同保守口径但不同义：
+ *  去重锚防皮层增殖（宁漏合并不错合并），抗原门防免疫误应答（宁漏强化不错杀
+ *  —— 误判同抗原会把 A 主题的反证记到 B 主题头上，错误传播比错误平反更贵）。 */
+export const ANTIGEN_SEMANTIC_COSINE = 0.8;
 
 /** 遗忘曲线（纯函数）：c × 0.5^(age/半衰期)。age=0 ⇒ 原值；越老越冷。
  *  E-1 间隔重复：半衰期逐条目化 —— 条目自带 halfLifeMs（复证增长），
@@ -149,8 +158,20 @@ export function cocktailRotate(entries: KnowledgeEntry[]): KnowledgeEntry[] {
   return out;
 }
 
-/** 学习蒸馏的主题键（免疫应答的抗原匹配键：同场景 = 同抗原） */
+/**
+ * 学习蒸馏的主题键（免疫应答的抗原匹配键：同场景 = 同抗原）。
+ * ΠΑΝ-46（归一化抗原）：旧实现 = 意图全文 trim+lowercase 精确串 —— LLM 生成的
+ * plan 措辞每次都不同 ⇒ 复证/反证通道在生产中近乎永不触发（C1-8 H1：错误知识
+ * 不会被措辞变化的成功反证，逐字重复的失败却自激强化）。新实现 = 语义指纹：
+ *   NFKC 归一（全角/兼容形折叠）→ dialects 单源分词（停用词剥离 + 分段 bigram）
+ *   → 去重 + 字典序排序（词序不参与身份）。大小写 / 标点 / 空白 / 语序 /
+ *   功能词（the/的/please）差异不再铸出新抗原；同义改写与增删实词仍属不同指纹
+ *   —— 那一层由 learnFromOutcome 的语义营救扫描（ANTIGEN_SEMANTIC_COSINE）
+ *   兜底。非字符串宽收 ⇒ 空指纹（与全扫描「无同抗原条目」同语义）。
+ */
 export function learnTopicKey(scenario: string): string {
-  return scenario.trim().toLowerCase();
+  if (typeof scenario !== 'string') return '';
+  const norm = scenario.normalize('NFKC');
+  return [...new Set(tokenizeText(norm))].sort().join(' ');
 }
 

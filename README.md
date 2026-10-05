@@ -658,7 +658,7 @@ W8 之后对全库遗留隐患的总清账（46 项隐患 · 5 个批次 · 44 �
 
 - **安全与信任**：沙箱宿主重放执行器接入宿主安全链五门+审计存证+指纹位宽域 [32,256]；AbortSignal 贯穿执行链；联邦 Ed25519 逐源签名（聚合端原样中继、各端逐源验签剔除）；RDP 预算会计（Σε≤10）+ 掺入抖动；riskGate 升级 Aho-Corasick 词边界匹配（拉丁硬边界 + 免边界族双轨制）。
 - **感知与决策**：世界模型在线聚类/合并/软量化并接进反事实（转移置信折扣）；决策站级联仲裁（反射先行 LLM 断后）；grounding maxTokens 自适应+NMS containment+同屏缓存；反驳法院合议庭点亮（quorum 多数票 + census 透明 + 置信带）；中英 375 对词表桥（跨语系 cosine 0 死角恢复）。
-- **工程与质量**：CI 双 OS 矩阵五闸（typecheck/verify/compile/全量+bench/genesis_audit+smoke，Linux 臂物理服务 E2E）；AST 变异器量化测试执法力（自检 91.3% vs 0%）；Tarjan cycle_lint 依赖环执法（5 value 环登记为债待拆）；dist SBOM 清单（287 模块 sha256）；三厂结构化输出约束解码（json_schema / tool_use / responseSchema，opt-in）；journal 组提交 + rotation（WAL 同步不变）。
+- **工程与质量**：CI 双 OS 矩阵五闸（typecheck/verify/compile/全量+bench/genesis_audit+smoke，Linux 臂物理服务 E2E）——**配置就绪、尚未执行过**（收官 commit 待推送，首次真机验证以 push 后的 CI 首跑为准，DEBTS D-A7）；AST 变异器量化测试执法力（自检 91.3% vs 0%，手动件——需 `MUTATION_LINT_SELFCHECK=1` 显式启用）；Tarjan cycle_lint 依赖环执法（5 value 环登记为债待拆；手动件，未接 CI）；dist SBOM 清单（287 模块 sha256）；三厂结构化输出约束解码（json_schema / tool_use / responseSchema，opt-in）；journal 组提交 + rotation（WAL 同步不变）。
 - **物理层**：DXGI 可选捕获后端（`backend: "dxgi"` opt-in，缺省 gdi 零变化）；scrcpy 控制通道复用（活跃流 tap/drag/scroll/key <10ms）；RawInput 事件驱动光标镜像（`DSH_PHYSICAL_RAW_INPUT=1` 显式开启）；UIA/AT-SPI 深度遍历同律单源。
 - **收官口径**：全量测试 2613 → **2963 用例**（node v24.19.0 收官窗实跑——除 1 例 node v24/Windows libuv 退出竞态环境暴露[w9real，DEBTS D-E3 在册，纯净树复现非回归]外 0 失败）；python 96 → 152；genesis_audit --check 通过。总账见 [GENESIS.md](GENESIS.md) 与 [DEBTS.md](DEBTS.md)。
 
@@ -707,7 +707,11 @@ W8 之后对全库遗留隐患的总清账（46 项隐患 · 5 个批次 · 44 �
 
 ### 1. 环境准备
 
-Node.js >= 18（推荐 22）与 pnpm。原生依赖（`sharp` / `@nut-tree/nut-js` / `screenshot-desktop` / `tesseract.js`）随插件自动安装。
+Node.js >= 20（推荐 22；暂避 24 —— Windows 上 node v24 存在 libuv 退出竞态，见 DEBTS D-E3，与 `package.json` engines 口径一致）与 pnpm。
+
+原生依赖现状（如实）：`sharp` / `tesseract.js` 在 dependencies 里随插件自动安装；`@nut-tree/nut-js` 与 `screenshot-desktop` **不在依赖里** —— 它们只属于 legacy 回退路径（`DSH_FORCE_LEGACY_SYSTEM=1`，见 `src/_legacyDeps.ts`），需要走该路径时须自行安装（`npm i @nut-tree/nut-js screenshot-desktop` 并设 `DSH_FORCE_LEGACY_DEPS=1`）。
+
+Python 物理服务依赖（默认物理执行路径需要）：键鼠/截屏/UI 树由 `python_service/` 的 dsh_physical 微服务执行 —— Python >= 3.10 后在仓库根执行 `pip install -e python_service`（依赖清单见 [`python_service/pyproject.toml`](python_service/pyproject.toml)：fastapi / uvicorn / pydantic / pyautogui / pillow / numpy / rapidocr-onnxruntime / httpx，及平台件 pyserial / opencv-python / comtypes(Windows) / python-xlib(Linux)）。未安装时服务孵化会诚实报错降级，不会静默失败；配置字段总表见 [`docs/config-schema.md`](docs/config-schema.md)。
 
 ### 2. 安装插件
 
@@ -809,7 +813,7 @@ MIT
 [中文（顶部）](#中文) | **English**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-green.svg)](package.json)
+[![Node](https://img.shields.io/badge/node-%3E%3D20%20%3C24-green.svg)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-orange.svg)](https://github.com/topics/dsh-plugin)
 
 A Computer Use plugin for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness). It completely abandons the underlying UI-tree dependency and adopts a **Vision-Only Grounding architecture**, letting the AI understand and operate a computer by "looking" at screenshots — just like a human.
@@ -1041,7 +1045,7 @@ After W8, a final sweep of every remaining latent hazard (46 hazards · 5 batche
 
 ## ΝΩ: The Frontier-Upgrade Campaign
 
-After ΑΩ, an audit-driven upgrade wave (54 tickets ΝΩ-1..54 · 6 batches, each behind a zero-regression gate). Security & trust: the sandbox replay executor joins the host security chain (five gates + per-step audit attestation + fingerprint bit-width domain [32,256]); AbortSignal threads through the execution chain; federation digests gain per-source Ed25519 signatures (the aggregator relays verbatim — every client verifies each source and drops failures); RDP budget accounting (Σε≤10) with injection jitter; riskGate upgrades to Aho-Corasick with word-boundary awareness (hard boundaries for Latin, boundary-free families for CJK). Perception & decisions: the world model gains online clustering/merging/soft quantization and feeds counterfactual scoring (transition-confidence discount); cascade arbitration per decision station (reflex first, LLM last); grounding gains adaptive maxTokens, NMS containment, and same-screen result caching; the refute court lights up the ensemble quorum (majority vote + per-juror census + confidence band); a 375-pair bilingual bridge fixes the cross-script cosine-0 blind spot. Engineering: a dual-OS CI matrix with five gates (incl. the Linux physical-service E2E), an AST mutation linter quantifying test enforcement power (self-check 91.3% vs 0%), a Tarjan cycle_lint (5 runtime value cycles registered as debt), a dist SBOM (287 modules, sha256), opt-in structured-output constrained decoding across three vendors (json_schema / tool_use / responseSchema), and journal group commit + rotation (WAL sync semantics unchanged). Physical layer: an optional DXGI capture backend (`backend:"dxgi"`, gdi default unchanged), scrcpy control-channel reuse for taps/drags (<10 ms), and a RawInput event-driven cursor mirror (`DSH_PHYSICAL_RAW_INPUT=1`, off by default). Closing numbers: the full suite grew 2613 → **2963 tests** (final window measured under node v24.19.0 — all green except one environment-exposed node v24/Windows libuv exit race on a pre-existing test, reproduced identically on a pristine HEAD tree and registered as DEBTS D-E3); python 96 → 152; genesis_audit --check passes. Full ledger in [GENESIS.md](GENESIS.md) and [DEBTS.md](DEBTS.md).
+After ΑΩ, an audit-driven upgrade wave (54 tickets ΝΩ-1..54 · 6 batches, each behind a zero-regression gate). Security & trust: the sandbox replay executor joins the host security chain (five gates + per-step audit attestation + fingerprint bit-width domain [32,256]); AbortSignal threads through the execution chain; federation digests gain per-source Ed25519 signatures (the aggregator relays verbatim — every client verifies each source and drops failures); RDP budget accounting (Σε≤10) with injection jitter; riskGate upgrades to Aho-Corasick with word-boundary awareness (hard boundaries for Latin, boundary-free families for CJK). Perception & decisions: the world model gains online clustering/merging/soft quantization and feeds counterfactual scoring (transition-confidence discount); cascade arbitration per decision station (reflex first, LLM last); grounding gains adaptive maxTokens, NMS containment, and same-screen result caching; the refute court lights up the ensemble quorum (majority vote + per-juror census + confidence band); a 375-pair bilingual bridge fixes the cross-script cosine-0 blind spot. Engineering: a dual-OS CI matrix with five gates (incl. the Linux physical-service E2E) — **configured but never executed yet** (the closing commit awaits its first push; first real-machine validation is defined as the first CI run after that push, DEBTS D-A7), an AST mutation linter quantifying test enforcement power (self-check 91.3% vs 0%; a manual gate — requires `MUTATION_LINT_SELFCHECK=1`), a Tarjan cycle_lint (5 runtime value cycles registered as debt; manual, not wired into CI), a dist SBOM (287 modules, sha256), opt-in structured-output constrained decoding across three vendors (json_schema / tool_use / responseSchema), and journal group commit + rotation (WAL sync semantics unchanged). Physical layer: an optional DXGI capture backend (`backend:"dxgi"`, gdi default unchanged), scrcpy control-channel reuse for taps/drags (<10 ms), and a RawInput event-driven cursor mirror (`DSH_PHYSICAL_RAW_INPUT=1`, off by default). Closing numbers: the full suite grew 2613 → **2963 tests** (final window measured under node v24.19.0 — all green except one environment-exposed node v24/Windows libuv exit race on a pre-existing test, reproduced identically on a pristine HEAD tree and registered as DEBTS D-E3); python 96 → 152; genesis_audit --check passes. Full ledger in [GENESIS.md](GENESIS.md) and [DEBTS.md](DEBTS.md).
 
 ## Epoch Φ (Phi): The Autonomy Loop
 
@@ -1310,7 +1314,11 @@ Every remaining item from the post-campaign ledger, delivered in recommended ord
 
 ### 1. Prerequisites
 
-Node.js >= 18 (22 recommended) and pnpm. Native dependencies (`sharp` / `@nut-tree/nut-js` / `screenshot-desktop` / `tesseract.js`) install automatically with the plugin.
+Node.js >= 20 (22 recommended; avoid 24 for now — a node v24 libuv exit race on Windows is on record as DEBTS D-E3, matching the `package.json` engines field) and pnpm.
+
+Native dependencies, honestly stated: `sharp` / `tesseract.js` are regular dependencies and install automatically; `@nut-tree/nut-js` and `screenshot-desktop` are **not** dependencies — they only serve the legacy fallback path (`DSH_FORCE_LEGACY_SYSTEM=1`, see `src/_legacyDeps.ts`) and must be installed manually if you take that path (`npm i @nut-tree/nut-js screenshot-desktop` plus `DSH_FORCE_LEGACY_DEPS=1`).
+
+Python physical-service dependencies (the default physical execution path): keyboard/mouse/screenshot/UI-tree actions run through the dsh_physical microservice in `python_service/` — with Python >= 3.10, run `pip install -e python_service` from the repo root (full dependency list in [`python_service/pyproject.toml`](python_service/pyproject.toml): fastapi / uvicorn / pydantic / pyautogui / pillow / numpy / rapidocr-onnxruntime / httpx, plus platform extras pyserial / opencv-python / comtypes (Windows) / python-xlib (Linux)). Without it, service spawn fails with an honest error rather than silently degrading; see [`docs/config-schema.md`](docs/config-schema.md) for the full config reference.
 
 ### 2. Install the plugin
 

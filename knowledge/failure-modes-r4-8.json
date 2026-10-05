@@ -1,0 +1,69 @@
+{
+  "_comment": "R4-8 预置知识档：R1-8 九连败实战失败模式 → D-7 knowledgeBase 快照（exportSnapshot v1 形状，restoreSnapshot 可直接水合）。数据文件（零代码）：不改知识库核心逻辑。条目语言与插件一致（中文）。source='manual' = 造物主主权（不可被容量驱逐）；verifiedAt = R1-8 hist.jsonl 取证日期（直接观察亲证）；halfLifeMs = 90 天（模型行为型失败模式比环境怪癖稳定，比 30 天基线更抗遗忘，封顶 365 天内）。生效路径见 C:\\2\\.survey\\practice\\R4-8.md。",
+  "version": 1,
+  "entries": [
+    {
+      "id": "kb-r48-001-menu-not-open",
+      "category": "error-pattern",
+      "content": "触发情境：点击菜单栏（如记事本\"文件\"）后未截图确认下拉已展开，就按记忆或屏顶估计坐标点击菜单项（如\"另存为\"）。菜单栏坐标随窗口状态漂移（a6：窗口态菜单栏实际在屏 y≈0.24，模型按屏顶 y=0.035 全点在壁纸）；菜单项仅在下拉展开期间存在。click 回执报 SUCCESS（像素变过/键按下）但意图未达成。正确行为：菜单两段式——第一段点菜单栏后必须用被动观测（take_screenshot/diff_view，它们不收菜单）确认下拉展开、从当帧读菜单项坐标，再点第二段；菜单未展开绝不进入第二段；点错菜单按 Esc 收起重来。证据：C:\\2\\.survey\\practice\\R1-8.md §3（a6/a7/a9 主败因）、R3-6.md §1-D2、R2-4.md（菜单两段式）。",
+      "scenario": "桌面 GUI 任务点击菜单项：点完菜单栏后未确认下拉展开就点菜单项（文件/另存为/保存菜单 menu item dropdown notepad save-as）",
+      "confidence": 0.9,
+      "source": "manual",
+      "updatedAt": 1791172800000,
+      "usageCount": 0,
+      "verifiedAt": 1791172800000,
+      "halfLifeMs": 7776000000
+    },
+    {
+      "id": "kb-r48-002-coordinate-inertia",
+      "category": "error-pattern",
+      "content": "触发情境：同坐标第二击仍无可见效果（diff 像素零变化 / 菜单未展开 / effect.detected=false）后，第三击复用完全相同的 (x,y)（R1-8 a9：(0.031,0.037)×5、(0.057,0.183)×4，diff 两报 changed_fraction_pct=0 后仍原坐标再点；预校验 target-changed 拒点并回执明令 Do NOT click stale coordinates 仍违反两次）。这是坐标惯性：流程上重试了，几何上原地踏步。正确行为：同坐标第二击无效果 ⇒ 第三击严禁复用该坐标——必须先 zoom_inspect 重读目标坐标，或更换策略/路径并停止报错；被预校验拒点后按回执要求截了图，就必须用新帧坐标。证据：C:\\2\\.survey\\practice\\R3-6.md §1-D1、R1-8.md（a5/a6/a7/a9）。",
+      "scenario": "GUI 点击无效果后的重试：同一坐标 (x,y) 反复点击不换坐标（repeat click same coordinate no effect retry）",
+      "confidence": 0.9,
+      "source": "manual",
+      "updatedAt": 1791172800000,
+      "usageCount": 0,
+      "verifiedAt": 1791172800000,
+      "halfLifeMs": 7776000000
+    },
+    {
+      "id": "kb-r48-003-blind-type-enter",
+      "category": "error-pattern",
+      "content": "触发情境：点开对话框的动作（可能脱靶）之后中间无任何截图，直接 type_text 输入路径并回车（R1-8 a7 seq58-59、a9 seq88-99、a6 两轮盲打：路径全部打进文档正文，Test-Path 三次 False；clearFirst 还把文档标记行覆盖掉）。I-beam 探针判读在「文档正文」与「输入框」间天然歧义，模型选乐观分支。type_text 的 SUCCESS 只代表按键已发出，不代表焦点正确、更不代表目标界面已打开。正确行为：向对话框/输入框落键前，必须先截图确认该界面真的在场、输入框可见，再输入；enter 后用文件系统谓词（Test-Path）或 read_text 验证真落盘，失败即回截图找原因而非再盲打。证据：C:\\2\\.survey\\practice\\R3-6.md §1-D2、R1-8.md §3。",
+      "scenario": "向另存为/保存对话框输入路径并回车：未截图确认对话框在场就盲打（type_text enter dialog input box focus）",
+      "confidence": 0.9,
+      "source": "manual",
+      "updatedAt": 1791172800000,
+      "usageCount": 0,
+      "verifiedAt": 1791172800000,
+      "halfLifeMs": 7776000000
+    },
+    {
+      "id": "kb-r48-004-script-bypass-spiral",
+      "category": "error-pattern",
+      "content": "触发情境：GUI 视觉路径连续失败后转向宿主脚本模拟键鼠并不断加码（R1-8 a8：49 调用中 38 次 pwsh——SendKeys('%f')/UIA 全树/Win32 EnumWindows/PostMessage/自建 WinRT OCR，0 次 take_screenshot；a3 同型 18/28）。脚本\"已发送\"回执无法证明 GUI 状态变化；Win32/UIA 几何与可见 UI 错位（不可见的 XAML 桥接窗全矩形被当成可见菜单边界去点）；步骤预算被吞 78% 后任务必败。正确行为：键鼠模拟脚本不是视觉回路的替代——连续 2 次脚本旁路无任务进展，立即回到 take_screenshot 视觉回路并考虑换策略或 ask_user_question；pwsh 仅限只读状态查询（Test-Path/进程枚举）。证据：C:\\2\\.survey\\practice\\R3-4.md §1.2、R3-6.md §1-D3、R1-8.md §3（a8）。",
+      "scenario": "GUI 自动化受挫后改用脚本旁路：pwsh SendKeys/UIA/Win32/自建 OCR 模拟键鼠连续加码零截图（script bypass pwsh SendKeys UIA OCR spiral）",
+      "confidence": 0.9,
+      "source": "manual",
+      "updatedAt": 1791172800000,
+      "usageCount": 0,
+      "verifiedAt": 1791172800000,
+      "halfLifeMs": 7776000000
+    },
+    {
+      "id": "kb-r48-005-zoom-not-consumed",
+      "category": "error-pattern",
+      "content": "触发情境：对小目标做了 zoom_inspect 放大观察（正确动作），随后点击仍复用 zoom 之前的旧坐标（R1-8 a9：seq180 对 (0.05,0.05) zoom 后 seq185/191 依旧旧坐标——zoom 买来的信息被丢弃；九次尝试 zoom 仅 3 次且信息多未消费）。等于没有 zoom。正确行为：zoom 的价值在换算出的新坐标——从放大图估出目标 (fx,fy) 后，必须用随图附带的映射公式换算回全屏坐标再落点；换算结果与旧估计一致时，也要复核一遍公式代入是否正确，而不是径直复用旧值。证据：C:\\2\\.survey\\practice\\R3-6.md §1-D1 与 §3-a1、R1-8.md（a9）。",
+      "scenario": "小目标精确定位：zoom_inspect 放大读图后仍用旧坐标点击、不按映射公式换算（zoom_inspect small target coordinate mapping）",
+      "confidence": 0.9,
+      "source": "manual",
+      "updatedAt": 1791172800000,
+      "usageCount": 0,
+      "verifiedAt": 1791172800000,
+      "halfLifeMs": 7776000000
+    }
+  ],
+  "corticalizedIds": [],
+  "semanticMemoryIds": [],
+  "idCounter": 0
+}

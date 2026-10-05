@@ -19,15 +19,17 @@ import { P } from './params';
 // knowledgeBase.core.ts（行为零变化）；导入面不变 —— 再分发。
 import {
   CATEGORIES, decay, cocktailRotate, learnTopicKey, CONTENT_MAX_CHARS, INJECTION_MAX_CHARS,
-  SEMANTIC_WEIGHT, SEMANTIC_FLOOR, MAX_ENTRIES, HALF_LIFE_CAP_MS, CONFIDENCE_HALF_LIFE_MS, STABILITY_GROWTH, AUTO_LEARN_FAILURE_CONFIDENCE, MIN_CLUSTER_SIZE, CLUSTER_SIMILARITY, CONSENSUS_BONUS, CORTICALIZE_DECAY, SEMANTIC_DEDUP_COSINE,
+  SEMANTIC_WEIGHT, SEMANTIC_FLOOR, MAX_ENTRIES, HALF_LIFE_CAP_MS, CONFIDENCE_HALF_LIFE_MS, STABILITY_GROWTH, AUTO_LEARN_FAILURE_CONFIDENCE, MIN_CLUSTER_SIZE, CLUSTER_SIMILARITY, CONSENSUS_BONUS, CORTICALIZE_DECAY, SEMANTIC_DEDUP_COSINE, ANTIGEN_SEMANTIC_COSINE,
 } from './knowledgeBase.core';
-import { tokenize } from '../uiMemory';
+// ΠΑΝ-46（分词单源收口）：BM25 语料/查询词法面从 ../uiMemory 换到 dialects 单源
+// （停用词剥离 + 分段 bigram —— IDF 区分度不再被功能词稀释）
+import { tokenizeText } from '../dialects/tokenizer';
 // ΝΩ-28 任务2（M5 决策接线）：强化步长 / 铸造置信消费 kernelRegistry 的
 // memory.op.<category>.<op> 键（memoryOps.ts 铸键）。getOrDefault 缺省 = 各消费点
 // 现行字面量 —— 未入册 / 未收敛 ⇒ 零漂移安全带；sleep 第④幕收敛后逐类可调。
 import { kernelRegistry } from '../kernel/registry';
 import { memoryOpKey } from './memoryOps';
-export { trustOf, distillInjection, CONTENT_MAX_CHARS, INJECTION_MAX_CHARS } from './knowledgeBase.core';
+export { trustOf, distillInjection, learnTopicKey, CONTENT_MAX_CHARS, INJECTION_MAX_CHARS } from './knowledgeBase.core';
 
 
 /**
@@ -38,6 +40,14 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
   private entries = new Map<string, KnowledgeEntry>();
   /** 语义向量缓存（insert 铸造 / 驱逐同步清 —— 与条目同生命周期，绝不悬空） */
   private vectors = new Map<string, SparseVector>();
+  /**
+   * ΠΑΝ-46：抗原语义向量缓存（scenario 独立向量 —— 与 vectors 的
+   * `scenario+content` 联合向量不同基）。免疫应答的语义营救扫描
+   *（指纹未命中时按 cosine ≥ ANTIGEN_SEMANTIC_COSINE 找同抗原）需要
+   * 「场景对场景」的比较基 —— 用联合向量对照会把 content 长度差异灌进夹角。
+   * insert / 驱逐 / 水合同步维护（embed 确定性，快照不序列化 —— 水合重铸）。
+   */
+  private scenarioVecs = new Map<string, SparseVector>();
   /** 已皮层化的情景条目（已折叠进某条语义记忆 —— 重复 consolidate 不再参与聚类） */
   private corticalizedIds = new Set<string>();
   /** 语义记忆产物 ID（consolidate 铸造 —— 它们是皮层内容物，不是情景） */
@@ -86,7 +96,7 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     const startedAt = Date.now();
     const text = `${query.sceneDescription} ${query.intentDescription}`;
     // J 纪元 query 侧去重口径（Map/Set 迭代天然去重）→ 逐条目查表
-    const queryTokens = [...new Set(tokenize(text))];
+    const queryTokens = [...new Set(tokenizeText(text))];
     const queryVec = embed(text);
     // ΑΩ-R21-2：BM25 上下文从增量缓存一次成型（查询词为空 / 空库 ⇒ null ⇒
     // 词法通道 0 分，与 Δ-1 的 corpus null / N=0 守卫同语义）。缓存写入
@@ -106,9 +116,23 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     // 命中清单）→ 遍历彻底结束后**一次性 touch 提交**。对外行为不变：
     // 连续两次 query 后 usageCount 照常 +1（检索即使用的簿记语义保持）。
     for (const { entry } of ranked) entry.usageCount += 1;
+    // ΠΑΝ-45（置信度时间衰减·检索出口执法）：query 的对外出口携带**有效置信度**
+    //（decay(e.confidence, e.updatedAt, startedAt, e.halfLifeMs) —— 复用既有遗忘
+    // 曲线常数方言），不再外泄存储置信度。旧实现：遗忘曲线只影响过滤/排序，
+    // 决策层（Tier0 免疫压制 assessSuppression / Tier2 deliberate veto）看到的
+    // fragments.confidence 永不衰减 —— 两年前的 error-pattern（有效置信已衰到
+    // 0.05）只要仍被检索到，就以全值 0.9 压制本能弧、否决候选（C1-8 H4：
+    // 陈年错误模式三重保护下的永久把持）。修正：出口发**浅拷贝**（confidence =
+    // 有效值；其余字段原样透传）—— 绝不改写库内本体（存储置信度是免疫应答
+    // 强化/反证算术的基线，检索排序与决策面消费衰减视图，两律并行不悖）。
+    // snapshot()/exportSnapshot() 仍发存储值（持久化语义），消费面分工在案。
     return {
       ok: true,
-      value: { entries: ranked.map(r => r.entry), latencyMs: Date.now() - startedAt, strategy: 'hybrid' },
+      value: {
+        entries: ranked.map(r => ({ ...r.entry, confidence: r.eff })),
+        latencyMs: Date.now() - startedAt,
+        strategy: 'hybrid',
+      },
     };
   }
 
@@ -160,7 +184,7 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
 
   /** ΑΩ-R21-2：单条目统计入账（insert 铸造点 / 重建路径共用 —— 恰好 tokenize 一次） */
   private corpusAdd(id: string, text: string): void {
-    const tokens = tokenize(text);
+    const tokens = tokenizeText(text);
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     this.corpusStats.docTf.set(id, tf);
@@ -278,6 +302,7 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
       if (victimEntry) this.topicRemove(victimEntry);
       this.entries.delete(victim);
       this.vectors.delete(victim);
+      this.scenarioVecs.delete(victim); // ΠΑΝ-46：抗原语义向量随本体销账
       this.corticalizedIds.delete(victim);
       this.semanticMemoryIds.delete(victim);
     }
@@ -313,6 +338,8 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     });
     // 语义向量铸造（hybrid 通道的检索索引 —— insert 时一次成型，query 零重算）
     this.vectors.set(id, embed(`${entry.scenario} ${entry.content}`));
+    // ΠΑΝ-46：抗原语义向量（scenario 独立基 —— 免疫应答语义营救扫描的消费面）
+    this.scenarioVecs.set(id, embed(String(entry.scenario ?? '')));
     // ΑΩ-R21-2：BM25 语料统计入账（缓存文本口径与 Δ-1 重算口径逐字一致：
     // `${scenario} ${content}`.toLowerCase() 后 tokenize —— content 已是截断后
     // 的入账本体，scenario 是入账原样）
@@ -345,8 +372,16 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     // learnTopicKey(scenario) === topic）；强化/反证的算术逐行保持原样。
     // learnFromOutcome 的强化路径只动 confidence/updatedAt/verifiedAt/
     // halfLifeMs —— 不动 content/scenario ⇒ 语料统计与主题索引皆无需更新
-    // （ΑΩ-R21-2 缓存对 boost 天然免疫，这是内容不变式，不是遗漏）。
-    for (const e of this.topicCandidates(topic)) {
+    //（ΑΩ-R21-2 缓存对 boost 天然免疫，这是内容不变式，不是遗漏）。
+    // ΠΑΝ-46（归一化抗原）：主题键 = NFKC+分词+停用词剥离的语义指纹 —— 措辞的
+    // 大小写/标点/语序/功能词差异不再铸出新抗原。指纹未命中 ⇒ 语义营救扫描
+    //（cosine ≥ ANTIGEN_SEMANTIC_COSINE 的同抗原条目 —— 同义改写仍能复证/反证，
+    // 只付首现的 O(N) 扫描；同指纹复现走索引，摊销有界）。
+    const indexedCandidates = this.topicCandidates(topic);
+    const candidates = indexedCandidates.length > 0
+      ? indexedCandidates
+      : this.semanticAntigenCandidates(outcome.intent.description);
+    for (const e of candidates) {
       if (e.category === category) {
         // ΝΩ-28 任务2（M5 决策接线）：强化步长消费 kernelRegistry 键
         // memory.op.<category>.boost（缺省 = P.REINFORCE_STEP 现行字面量 —— 零漂移）。
@@ -464,9 +499,33 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     }
   }
 
+  /**
+   * ΠΑΝ-46：语义抗原营救扫描（指纹索引未命中时的第二段应答）。
+   * 对全部 auto-learn 条目（= topicIndex 的扫描域）按「场景对场景」cosine 找
+   * 同抗原（≥ ANTIGEN_SEMANTIC_COSINE —— 与语义去重锚同保守口径：宁可漏判
+   * 不错判，误判同抗原会把 A 主题的反证记到 B 主题头上）。只在指纹未命中时
+   * 调用（同措辞复现走索引 O(1) —— 摊销成本有界）。防御：索引死 ID 直接跳过
+   * （不触发重建 —— 重建由 topicCandidates 的域复核负责，本方法只读）。
+   */
+  private semanticAntigenCandidates(scenario: string): KnowledgeEntry[] {
+    const incoming = embed(scenario);
+    if (incoming.dims.length === 0) return [];
+    const out: KnowledgeEntry[] = [];
+    for (const ids of this.topicIndex.values()) {
+      for (const id of ids) {
+        const e = this.entries.get(id);
+        if (!e || e.source !== 'auto-learn') continue; // 死 ID / 域外：跳过（只读路径）
+        const vec = this.scenarioVecs.get(id);
+        if (vec && cosine(incoming, vec) >= ANTIGEN_SEMANTIC_COSINE) out.push(e);
+      }
+    }
+    return out;
+  }
+
   dispose(): Result<void, Error> {
     this.entries.clear();
     this.vectors.clear();
+    this.scenarioVecs.clear(); // ΠΑΝ-46：抗原语义向量随本体归零
     this.corticalizedIds.clear();
     this.semanticMemoryIds.clear();
     // ΑΩ-R21-2/3：派生缓存随本体归零（corpusStats 换新容器三表清空）
@@ -728,12 +787,15 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
     // 换脑：清空旧内容后整批入账
     this.entries.clear();
     this.vectors.clear();
+    this.scenarioVecs.clear();
     this.corticalizedIds.clear();
     this.semanticMemoryIds.clear();
     for (const e of s.entries) {
       const entry = e as KnowledgeEntry;
       this.entries.set(entry.id, entry);
       this.vectors.set(entry.id, embed(`${entry.scenario} ${entry.content}`));
+      // ΠΑΝ-46：抗原语义向量重铸（快照不序列化 —— embed 确定性，水合即真相）
+      this.scenarioVecs.set(entry.id, embed(entry.scenario));
     }
     for (const id of Array.isArray(s.corticalizedIds) ? s.corticalizedIds : []) {
       if (typeof id === 'string' && this.entries.has(id)) this.corticalizedIds.add(id);
@@ -768,15 +830,30 @@ export class InMemoryKnowledgeBase implements KnowledgeBase {
   }
 }
 
-// ─── W9-3（D-D9 单例供给）：睡眠免疫幕的生产消费单例 ───
+// ─── W9-3（D-D9 单例供给）+ ΠΑΝ-43（双脑合一）：知识中枢的生产单例 ───
 //
-// 债项背景（DEBTS D-D9）：纪元 Υ 睡眠第③幕（免疫幕 —— consolidate 海马体→
-// 皮层整合）此前在生产无单例可注入（唯一实例铸造在 D-7 知识插件 apply 内部，
-// 主插件组合根不可及）⇒ 晨报恒标 skipped。本行把供给面就位：模块级单例随
-// 加载铸造（构造零副作用、零 IO），组合根（src/index.ts）经 SleepDeps.
-// knowledgeBase 投喂 —— 供给后免疫幕从 skipped 转 runnable（真实 consolidate、
-// 真实计数，绝不伪造）。缺省行为零漂移：enableSleepCycle 缺省 false ⇒ 单例
-// 无人消费，与供给前逐字节等价；卸载路径由组合根 dispose（W-1 单例隔离律）。
-// D-7 插件 apply 内的自建实例不受影响（独立 apply 面、独立生命周期 —— 共享
-// 与否是后续窗口的接线决策，本轮零碰）。
-export const knowledgeBase = new InMemoryKnowledgeBase();
+// 债项背景（DEBTS D-D9 / C1-8 H2）：睡眠免疫幕需要单例；D-7 插件 apply 曾**自建**
+// `new InMemoryKnowledgeBase()` —— 流水线全部 learnFromOutcome 落在 apply 实例，
+// 睡眠 consolidate 作用在模块单例：两个脑，一个学到的东西另一个永远整合不到
+//（晨报数字真实但整合的是空脑/分叉脑）。ΠΑΝ-43 修正：**单一路径铸造与消费** ——
+//   · `initializeKnowledgeBase()` 是单例的唯一铸造路径（幂等：首次铸造，此后
+//     原样返回同一实例）；apply（knowledge/index.ts）经它取得流水线学习所消费
+//     的器官，不再自建；
+//   · `knowledgeBase` 导出（睡眠免疫幕的生产消费面，组合根 SleepDeps 注入）
+//     经同一函数铸造 —— apply 与 sleep 消费**同一实例**，白天所学夜间可整合；
+//   · 构造零副作用、零 IO（模块加载铸造安全）；dispose 归零的是**记忆内容**
+//     不是身份（apply 卸载 dispose 后单例身份续存，下次 initialize 复用同一
+//     空脑 —— 与 ΑΩ-R21-5 idCounter 不回卷律同哲学）；
+//   · 可注入测试端口不变：pipeline.wire({ knowledge }) 仍是注入缝，测试传
+//     `new InMemoryKnowledgeBase()` 隔离实例照旧（本单例只是生产缺省供给）。
+let theKnowledgeBase: InMemoryKnowledgeBase | null = null;
+
+/** ΠΑΝ-43：模块单例的唯一铸造/使用路径（apply 与一切共享消费方的入口；幂等） */
+export function initializeKnowledgeBase(): InMemoryKnowledgeBase {
+  if (theKnowledgeBase === null) theKnowledgeBase = new InMemoryKnowledgeBase();
+  return theKnowledgeBase;
+}
+
+/** 睡眠免疫幕的生产消费单例（W9-3 供给面）—— 经 initializeKnowledgeBase 铸造，
+ *  与 apply 消费的实例同一（ΠΑΝ-43 双脑合一的对接锚）。 */
+export const knowledgeBase: InMemoryKnowledgeBase = initializeKnowledgeBase();
