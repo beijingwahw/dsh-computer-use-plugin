@@ -1,5 +1,5 @@
 /**
- * 生产内核入册单：Θ-4 + Ξ-D 接线的全部读点键（55 键 / 21 读点文件）。
+ * 生产内核入册单：Θ-4 + Ξ-D 接线的全部读点键（R3-3 后 60 键 / 21 读点文件）。
  * min/max 按 census 区间；defaultValue = 各读点现行字面量（零行为变化的锚）；
  * organ 为消费器官名（与 gym LAB_KERNEL_SPECS 同一词表 + 新器官扩展）。
  *
@@ -454,6 +454,28 @@ export const PRODUCTION_KERNEL_SPECS = [
         max: 600000,
         note: 'VlmApiBreaker 冷却期 ms：期满自动回 closed（缺省 60000；半开语义惰性判定）',
     },
+    // ── R5-4（视觉外包经济面）：两枚 0/1 语义缓存开关入册 ──
+    // 病灶（R3-3 GAP-1 同款）：消费点一直在（vlm/grounding.ts 读
+    // grounding.semanticCache、tools/askScreen.ts 读 ask.semanticCache），但键
+    // 从未入册 ⇒ kernelRegistry.set 返回 {ok:false,reason:'unregistered'} 静默
+    // 拒收 —— 宿主在 kernel-state.json 根本开不了。入册缺省 0=关（零回归铁律，
+    // W5-4⑧「同输入双调必须两次真实进 VLM」契约不受扰），开关权交宿主。
+    {
+        key: 'grounding.semanticCache',
+        organ: 'grounding',
+        defaultValue: 0,
+        min: 0,
+        max: 1,
+        note: 'ΝΩ-48 同屏 grounding 语义缓存开关（0/1，缺省 0=关）：同 dhash+同问+同脑 30s 窗内回放缓存（零编码零拨号，命中注记 grounding-cache-hit）；开 = 显式放弃同输入双调的确定性幂等语义',
+    },
+    {
+        key: 'ask.semanticCache',
+        organ: 'vlm',
+        defaultValue: 0,
+        min: 0,
+        max: 1,
+        note: 'R5-4 ask_screen 同屏同问语义回放开关（0/1，缺省 0=关）：同屏指纹+同问 30s 窗内直接回放答案（零 VLM 拨号，回执 answer_source=semantic-cache-hit）—— 验证类重复问的去重闸',
+    },
     {
         key: 'quantum.iou',
         organ: 'quantum',
@@ -477,6 +499,26 @@ export const PRODUCTION_KERNEL_SPECS = [
         min: 50,
         max: 95,
         note: 'encodeForVlm 缺省 JPEG 质量 1-100（缺省 80 —— UI 文字边缘清晰且体积可控）',
+    },
+    // ── R3-3（GAP-2 VlmBudget 可调）：任务级视觉配额双键 —— 读点在
+    // autonomy/runtime 的 createExecute 构造期（resolveVlmBudget），缺省 =
+    // codec.ts DEFAULT_MAX_IMAGES/DEFAULT_MAX_BYTES 字面量锚 ⇒ 入册前后读数
+    // 同值（零行为变化律）；set 后新任务生效（每任务铸新闸）。
+    {
+        key: 'codec.maxImagesPerTask',
+        organ: 'codec',
+        defaultValue: 200,
+        min: 1,
+        max: 2000,
+        note: 'R3-3（GAP-2）：VlmBudget 每任务图数配额（缺省 200 = codec.DEFAULT_MAX_IMAGES 字面量锚；下限 1 —— 本键是经济闸不是视觉开关，关视觉另有通道）',
+    },
+    {
+        key: 'codec.maxBytesPerTask',
+        organ: 'codec',
+        defaultValue: 536870912,
+        min: 16777216,
+        max: 2147483648,
+        note: 'R3-3（GAP-2）：VlmBudget 每任务字节配额（缺省 512MB = codec.DEFAULT_MAX_BYTES 字面量锚；区间 16MB-2GB）',
     },
     // ── 宪法器官（Ξ-C 已在 gym 实验室入册接线；生产册此补 specs，读点不动） ──
     {

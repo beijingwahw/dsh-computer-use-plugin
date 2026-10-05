@@ -21,13 +21,13 @@
 
 import { arbitrateElements, normalizedLevenshtein } from '../arbitration';
 import type { GroundedElement } from '../grounding';
-import { createAnthropicProvider } from './anthropic';
-import { createGeminiProvider } from './gemini';
-import { createOpenAiProvider } from './openai';
-import { resolveProviderConfig } from './failover';
+import { castProvider } from './cast';
+import { parseFallbackSpec, resolveProviderConfig } from './failover';
 import { isLocalBaseUrl, sanitizeError } from './types';
-import type { VisionChatRequest, VisionImage, VisionProvider } from './types';
+import type { ProviderMeterRecord, VisionChatRequest, VisionImage, VisionProvider } from './types';
 import type { PlatformPreset } from './registry';
+// ΠΑΝ-21：反注入铁律单一来源（internalUtils 零依赖叶子 —— 合议庭缺省系统词同律设防）
+import { VLM_ANTI_INJECTION_RULE } from '../internalUtils';
 
 // W6-2（doctor smell.over-engineering 清偿）：协议类型 → ensemble.types.ts、元素方言归一
 // → ensemble.elements.ts（行为零变化）；导入面不变 —— 再分发。
@@ -41,16 +41,21 @@ import { normalizeElements, fusePair, confOr } from './ensemble.elements';
 /** 同簇判据线：两两 normalizedLevenshtein 相似度 ≥ 0.7 判同一簇（拼写级分歧容忍） */
 const CLUSTER_THRESHOLD = 0.7;
 
-/** 裁决系统词缺省 —— 强制 {verdict, confidence} 严格 JSON 方言 */
+/** 裁决系统词缺省 —— 强制 {verdict, confidence} 严格 JSON 方言
+ *  ΠΑΝ-21：反注入铁律随行 —— 合议庭票面（confirmed/refuted）直接回流反驳法院
+ *  与动作裁决链，屏幕文字的指令不得策反陪审脑 */
 const VERDICT_SYSTEM =
   '你是严谨的事实裁决官。只输出严格 JSON：{"verdict":"confirmed"|"refuted","confidence":0到1的小数}。' +
-  '依据截图与问题判定陈述真假，不要输出 JSON 以外的任何内容。';
+  '依据截图与问题判定陈述真假，不要输出 JSON 以外的任何内容。' +
+  VLM_ANTI_INJECTION_RULE;
 
-/** 接地系统词缺省 —— 强制 {elements:[...]} 严格 JSON 方言（bbox 数组/对象双形态） */
+/** 接地系统词缺省 —— 强制 {elements:[...]} 严格 JSON 方言（bbox 数组/对象双形态）
+ *  ΠΑΝ-21：同律设防（元素 label 是屏幕原文 —— 数据不是指令） */
 const ELEMENTS_SYSTEM =
   '你是桌面截图的视觉接地专家。只输出严格 JSON：{"elements":[{"label":"元素可见文字",' +
   '"role":"button|textbox|link|icon|text","bbox":[x0,y0,x1,y1] 或 {"x0":..,"y0":..,"x1":..,"y1":..},' +
-  '"confidence":0到1的小数}]}。bbox 为像素坐标且 x1>x0、y1>y0。不要输出 JSON 以外的任何内容。';
+  '"confidence":0到1的小数}]}。bbox 为像素坐标且 x1>x0、y1>y0。不要输出 JSON 以外的任何内容。' +
+  VLM_ANTI_INJECTION_RULE;
 
 // ─── 内部：文本相似度测度与聚类 ───
 
@@ -135,6 +140,26 @@ export interface EnsembleCourtOptions {
   maxSessionCalls?: number;
   /** ΝΩ-47：askElements 折叠置信模式 —— 'classic'（缺省旧行为）| 'loglinear'（有界累积） */
   fuseMode?: 'classic' | 'loglinear';
+  /**
+   * ΠΑΝ-23（旁路计量收编）：限流闸 —— 结构注入面（metering.VlmRateLimiter /
+   * glmClient.GlmRateLimitGate 天然结构满足）。在场时每次成员拨号前 tryAcquire：
+   * 被拒 ⇒ 该成员零拨号、普查记 rate-limited 条目（诚实透传 retryAfterMs），
+   * 与 glmClient 主路径同标准（被拒不占配额、不占成本闸预算）；成员终败含
+   * 429 时经 recordServer429 回填（在场且可调时）。缺省缺席 = 全量并问
+   * （既往行为逐字节不变）。
+   */
+  rateGate?: EnsembleRateGate;
+}
+
+/**
+ * ΠΑΝ-23：合议庭限流闸的最小结构契约（与 glmClient.GlmRateLimitGate 同形 ——
+ * 结构满足即可注入，杜绝模块耦合；metering.VlmRateLimiter 天然满足）。
+ */
+export interface EnsembleRateGate {
+  /** 拨号前配额申请：被拒给出到最近可获批边界的毫秒数 */
+  tryAcquire(now?: number): { allowed: boolean; retryAfterMs: number };
+  /** 服务端 429 回填面（可选 —— 缺席时回填跳过，主路径语义不变） */
+  recordServer429?(now?: number): number;
 }
 
 /** 预算闸数值整形：非有限/非正/非整数 ⇒ undefined（缺席 = 不设限） */
@@ -159,11 +184,13 @@ export class EnsembleCourt {
   private sessionCalls = 0;
   /** ΝΩ-47：askElements 折叠置信模式（脏值安静归 'classic'） */
   private readonly fuseMode: 'classic' | 'loglinear';
+  /** ΠΑΝ-23：限流闸（缺省缺席 = 全量并问，既往行为不变） */
+  private readonly rateGate: EnsembleRateGate | undefined;
 
   /**
    * @param providers 庭员名单（index 0 = 座长席；垃圾与重复条目安静剔除）
    * @param options ΑΩ-R35 成本闸（maxParallel / maxSessionCalls）+ ΝΩ-47 fuseMode
-   *   （脏值均安静忽略）
+   *   + ΠΑΝ-23 限流闸（rateGate；脏值均安静忽略）
    */
   constructor(providers: VisionProvider[], options?: EnsembleCourtOptions) {
     const roster: VisionProvider[] = [];
@@ -183,6 +210,12 @@ export class EnsembleCourt {
     this.maxSessionCalls = sanitizeLimit(options?.maxSessionCalls);
     // ΝΩ-47：融合模式整形（仅 'loglinear' 字面量生效，其余安静归缺省）
     this.fuseMode = options?.fuseMode === 'loglinear' ? 'loglinear' : 'classic';
+    // ΠΑΝ-23：限流闸整形（须有 tryAcquire 函数；脏值安静缺席，绝不抛）
+    this.rateGate =
+      options?.rateGate && typeof options.rateGate === 'object'
+        && typeof options.rateGate.tryAcquire === 'function'
+        ? options.rateGate
+        : undefined;
   }
 
   /** 庭员数（垃圾/重复条目已剔除后） */
@@ -228,6 +261,10 @@ export class EnsembleCourt {
       temperature: req?.temperature,
       jsonMode: useJson || req?.jsonMode === true,
       timeoutMs: req?.timeoutMs,
+      // ΠΑΝ-22：maxRetries 透传各成员适配器 —— 反驳法院 quorum 通道以 0 传入，
+      // 「每颗脑单次不重试」的法院铁律自此在合议庭路径可表达（此前该字段缺席，
+      // 陪审脑一律走适配器缺省 2 次重试）。
+      maxRetries: req?.maxRetries,
     };
     let dialedThisQuestion = 0; // ΑΩ-R35：单问并行席计数（座次序占席）
     const jobs = this.roster.map(async p => {
@@ -235,6 +272,28 @@ export class EnsembleCourt {
       try {
         if (p.configured !== true) {
           return { result: { id: p.id, ok: false, text: '', latencyMs: 0, error: `${p.id} not configured` } };
+        }
+        // ΠΑΝ-23（旁路计量收编）：限流闸前置 —— 与 glmClient 主路径同标准。被拒 ⇒
+        // 该成员零拨号、普查诚实记 rate-limited（retryAfterMs 随行）；被拒不占
+        // 配额（tryAcquire 自身语义）、不占成本闸席/预算（下方计数不执行）。
+        // 闸故障 ⇒ 视为获批（fail-open —— 与 glmClient rateGateDenyMs 同向：
+        // 计量/限流件故障不得杀死法院旁路）。
+        if (this.rateGate !== undefined) {
+          let gate: { allowed: boolean; retryAfterMs: number } | null = null;
+          try {
+            gate = this.rateGate.tryAcquire();
+          } catch {
+            gate = null;
+          }
+          if (gate !== null && gate.allowed !== true) {
+            const waitMs = Number.isFinite(gate.retryAfterMs) ? Math.max(0, Math.round(gate.retryAfterMs)) : 0;
+            return {
+              result: {
+                id: p.id, ok: false, text: '', latencyMs: Date.now() - t0,
+                error: sanitizeError(`${p.id} rate-limited (retry after ${waitMs}ms)`, p.id),
+              },
+            };
+          }
         }
         // ΑΩ-R35：成本闸 —— 未配置席不占预算；超席/预算尽 ⇒ 零拨号诚实记账
         if (
@@ -256,6 +315,7 @@ export class EnsembleCourt {
             return { result: { id: p.id, ok: true, text: raw, latencyMs }, value: r.value };
           }
           const err = r && typeof r.error === 'string' && r.error !== '' ? r.error : `${p.id} json call failed`;
+          this.backfill429(err);
           return { result: { id: p.id, ok: false, text: raw, latencyMs, error: err } };
         }
         const r = await p.chat(chatReq);
@@ -271,6 +331,7 @@ export class EnsembleCourt {
           fail && typeof fail.error === 'string' && fail.error !== ''
             ? fail.error
             : sanitizeError('provider returned no result', p.id);
+        this.backfill429(error);
         return { result: { id: p.id, ok: false, text: '', latencyMs, error } };
       } catch (e) {
         return { result: { id: p.id, ok: false, text: '', latencyMs: Date.now() - t0, error: sanitizeError(e, p.id) } };
@@ -289,6 +350,22 @@ export class EnsembleCourt {
       }
     }
     return outcomes;
+  }
+
+  /**
+   * ΠΑΝ-23：服务端 429 回填 —— 成员终败错误面含 429（fetchWithRetry 的
+   * `http 429 after N attempt(s)` 形）时经限流闸 recordServer429 记作本地已用
+   * 配额（与 glmClient 主路径同标准：服务端已用事实证明超速，本地桶据此收紧，
+   * 下一次 tryAcquire 给出诚实等待期而非再烧一次真实 429 往返）。闸缺席 /
+   * 无回填面 / 错误面无 429 / 一切故障 ⇒ 安静跳过，绝不抛。
+   */
+  private backfill429(errorText: string): void {
+    if (this.rateGate === undefined) return;
+    try {
+      if (typeof errorText !== 'string' || !/\b429\b/.test(errorText)) return;
+      if (typeof this.rateGate.recordServer429 !== 'function') return;
+      this.rateGate.recordServer429();
+    } catch { /* 回填故障不得影响主路径 */ }
   }
 
   /**
@@ -453,31 +530,9 @@ export class EnsembleCourt {
 
 // ─── 铸造厂：createEnsembleCourt ───
 
-/** 按预设协议选厂铸造 —— openai/anthropic/gemini 三兄弟适配器的分派点 */
-function castProvider(
-  preset: PlatformPreset,
-  apiKey: string,
-  baseUrl: string,
-  model: string,
-  fetchImpl: typeof fetch | undefined,
-): VisionProvider {
-  const config = {
-    id: preset.id,
-    apiKey,
-    baseUrl,
-    model,
-    ...(fetchImpl ? { fetchImpl } : {}),
-  };
-  switch (preset.protocol) {
-    case 'anthropic':
-      return createAnthropicProvider(config);
-    case 'gemini':
-      return createGeminiProvider(config);
-    case 'openai':
-    default:
-      return createOpenAiProvider(config);
-  }
-}
+// 适配器分派点已收编为共享件（修复潮 F3-7 / BC-5：此处与 failover.ts 的
+// 池铸造厂曾是逐字克隆 ×2）：castProvider 见 ./cast.ts（ΠΑΝ-23 meter 透传
+// 语义头注一并迁入 —— 庭内每一次成员拨号经适配器恰好一条台账，防双计）。
 
 /**
  * 铸造云脑合议庭（铸造律）：
@@ -496,7 +551,10 @@ function castProvider(
 export function createEnsembleCourt(opts?: {
   /** 主力平台 id（registry 十三平台之一）；未给/查无 ⇒ 主力席位空缺 */
   provider?: string;
-  /** 备选平台 id 清单（各自的 env/key 自解析，按序排在主力之后） */
+  /**
+   * R3-2: 备选平台链 —— 与 failover 池同方言：裸平台 id 或 'id=model'
+   * per-brain 模型覆写（'glm=glm-4v-flash'）；各自 env/key 自解析，按序入席。
+   */
   extraProviders?: string[];
   /** fetch 实现 —— 透传给庭内每个适配器（测试注入假实现，绝不真实联网） */
   fetchImpl?: typeof fetch;
@@ -516,6 +574,19 @@ export function createEnsembleCourt(opts?: {
    * 'loglinear' = 有界累积（加成按 1/√家数 衰减，连折不饱和）。
    */
   fuseMode?: 'classic' | 'loglinear';
+  /**
+   * ΠΑΝ-23（旁路计量收编）：用量/延迟遥测回调 —— 透传各成员适配器（每次成员
+   * 拨号恰好一条 ProviderMeterRecord，与 createProviderPool 的 meter 通道
+   * 同标准）；缺省缺席 = 不挂（既往行为不变）。最贵的旁路（不可逆动作前的
+   * 多脑核验）自此在 vlmMeter 台账可见。
+   */
+  meter?: (rec: ProviderMeterRecord) => void;
+  /**
+   * ΠΑΝ-23：限流闸 —— 透传 EnsembleCourtOptions.rateGate（缺省缺席 = 既往
+   * 行为不变）；vlm/index 的 configureVlm 铸庭时与单例共享同一 VlmRateLimiter
+   * 实例（配额同池同标准）。
+   */
+  rateGate?: EnsembleRateGate;
 }): EnsembleCourt {
   try {
     const o = opts ?? {};
@@ -526,27 +597,36 @@ export function createEnsembleCourt(opts?: {
     const primary = resolveProviderConfig({ provider: o.provider });
     if (primary !== null) {
       seen.add(primary.preset.id);
-      providers.push(castProvider(primary.preset, primary.apiKey, primary.baseUrl, primary.model, o.fetchImpl));
+      providers.push(castProvider(primary.preset, primary.apiKey, primary.baseUrl, primary.model, o.fetchImpl, o.meter));
     }
 
     // 备选：getPreset + env 自解析；无 key 且非本机免钥跳过；同 id 去重
+    // R3-2：段先过 parseFallbackSpec —— 与 failover 池同方言（裸 id 或
+    // 'id=model' per-brain 覆写）：configureVlm 把同一 fallback 链灌进池与庭，
+    // 庭不解析 '=' 段会把 glm 备脑整颗静默挤出席（异构作证对凑不齐）。
     const extras = Array.isArray(o.extraProviders) ? o.extraProviders : [];
     for (const raw of extras) {
-      const platform = typeof raw === 'string' ? raw : String(raw ?? '');
-      const r = resolveProviderConfig({ provider: platform });
+      const spec = parseFallbackSpec(raw); // R3-2: 空段/脏段安静跳过（与池同律）
+      if (spec === null) continue;
+      const r = resolveProviderConfig({
+        provider: spec.platform,
+        ...(spec.model !== '' ? { model: spec.model } : {}),
+      });
       if (r === null) continue; // 查无预设
       if (seen.has(r.preset.id)) continue; // 主力或先到的同 id 去重
       seen.add(r.preset.id);
       const localFree = r.preset.localAuthOptional === true && isLocalBaseUrl(r.baseUrl);
       if (r.apiKey === '' && !localFree) continue; // 无钥且非本机免钥 —— 不占席
-      providers.push(castProvider(r.preset, r.apiKey, r.baseUrl, r.model, o.fetchImpl));
+      providers.push(castProvider(r.preset, r.apiKey, r.baseUrl, r.model, o.fetchImpl, o.meter));
     }
     // ΑΩ-R35：成本闸透传（脏值由庭构造期整形为缺席 —— 不抛铁律）；
-    // ΝΩ-47：融合模式透传（脏值安静归 'classic'）。
+    // ΝΩ-47：融合模式透传（脏值安静归 'classic'）；
+    // ΠΑΝ-23：限流闸透传（结构整形在庭构造期，脏值安静缺席）。
     return new EnsembleCourt(providers, {
       ...(o.maxParallel !== undefined ? { maxParallel: o.maxParallel } : {}),
       ...(o.maxSessionCalls !== undefined ? { maxSessionCalls: o.maxSessionCalls } : {}),
       ...(o.fuseMode !== undefined ? { fuseMode: o.fuseMode } : {}),
+      ...(o.rateGate !== undefined ? { rateGate: o.rateGate } : {}),
     });
   } catch {
     // 铸造面意外故障 —— 空庭兜底（绝不抛）

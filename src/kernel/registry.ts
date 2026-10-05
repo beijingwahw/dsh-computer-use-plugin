@@ -7,7 +7,54 @@
 //   · 单例 + reset 照 src/vlm/metering.ts —— 模块级单例贯穿插件生命周期，
 //     resetKernelRuntime 供测试隔离（生产代码无理由清空生产注册表）；
 //   · 垃圾输入静默降级、绝不抛异常 —— 与 metering 同律（诚实回声 / 静默忽略）。
-// 纯离线零依赖：无 import、无 IO；updatedAt 走 Date.now（不注入墙钟 —— 值语义可测）。
+// 纯离线零依赖：无 IO；updatedAt 走 Date.now（不注入墙钟 —— 值语义可测）。
+// ΠΑΝ-50 例外申报：本件自此刻起持两处有向 import —— ① calibrator 的
+// regressionPosteriorMass（Beta 后验数学件单源 —— 晋升回归守卫与校准器 ΝΩ-6
+// 判决共用同一数学，绝不双份；calibrator 对本件仅类型引用，运行时无环）；
+// ② lineage 的 KernelLineage 类型（纯类型，擦除后零耦合）。旧行注释的
+// 「无 import」承诺就位时本件是纯数据面；ΠΑΝ-50 立法把晋升护栏放进本件
+//（一切写径的执法点），护栏所需的数学与血统类型随立法进场。
+
+// ΠΑΝ-50：晋升护栏缺省（与校准器 DEFAULT_GUARDRAILS 同律 —— 单步 10% 区间、
+// 回归后验质量门 0.9；minLabEvidence 缺省 0 = 证据门默认关：gym 侧证据在
+// ledger 滑窗不在 registry 计数，无 ledger 注入时无从执法，交给显式通道
+// promoteFromCli 全副武装）。
+import { regressionPosteriorMass } from './calibrator';
+import type { KernelLineage } from './lineage';
+
+/** ΠΑΝ-50：promoteFrom 的护栏与审计注入面（全部可选 —— 缺省 = 步长护栏 + 证据只升不降） */
+export interface PromoteOptions {
+  /** 显式 key 域（非字符串项剔除；缺省 = 双方在册交集 —— 既有语义） */
+  keys?: string[];
+  /** 步长上限：|to − 现值| ≤ maxStepPct × (max − min)（缺省 0.1；1 = 全程单跳） */
+  maxStepPct?: number;
+  /** 回归守卫的实验室证据门（labLedger 在场才执法；缺省 0 = 关） */
+  minLabEvidence?: number;
+  /** 回归守卫后验质量门（缺省 0.9 —— 与 ΝΩ-6 rollbackPosteriorMass 同律） */
+  rollbackPosteriorMass?: number;
+  /** 实验室台账（在场 ⇒ 回归守卫按滑窗 n/successRate 执法 —— gym 侧证据所在） */
+  labLedger?: EvidenceLedger;
+  /** 生产台账（在场 ⇒ 血统 fitness 取生产窗成功率；回归守卫的生产侧对照） */
+  ledger?: EvidenceLedger;
+  /** 血统（在场 ⇒ 晋升按血统法登记现代快照 + 新一代 —— 两套代数计数器自此同律） */
+  lineage?: KernelLineage;
+  /** 时钟注入（血统登记与 updatedAt 的确定性测试缝；缺省 Date.now） */
+  now?: () => number;
+}
+
+/** ΠΑΝ-50：晋升清单行（key/from/to 面向与旧契约逐字节兼容 —— 老断言不动） */
+export interface PromoteChange {
+  key: string;
+  from: number;
+  to: number;
+  /** 晋升形态：'promoted' 直落 | 'step-capped' 步长截断 | 'at-target' 值未变（仅代际/证据更新） */
+  reason?: 'promoted' | 'step-capped' | 'at-target';
+}
+
+/** ΠΑΝ-50：promoteFrom 步长上限缺省（0.1 —— 与 DEFAULT_GUARDRAILS.maxStepPct 同值） */
+const PROMOTE_DEFAULT_MAX_STEP_PCT = 0.1;
+/** ΠΑΝ-50：promoteFrom 回归后验质量门缺省（0.9 —— 与 rollbackPosteriorMass 同值） */
+const PROMOTE_DEFAULT_ROLLBACK_MASS = 0.9;
 
 /** 内核参数规格：入册声明 —— key + 所属器官 + 缺省值 + 可行区间（+ 出处注记） */
 export interface KernelParamSpec {
@@ -260,35 +307,148 @@ export class KernelRegistry {
    *   - key 域：显式 opts.keys（非字符串项剔除）∩ 双方在册；缺省 = 全部已注册交集；
    *     任一侧未注册的 key 跳过（lab 未注册不报错，生产未注册不动）；
    *   - 拷贝语义：to = lab 值**重夹生产 bounds**（实验室可以探得更宽的区间），
-   *     evidence := lab 的（取，不是加 —— 证据跟着值走），generation + 1（世系 +1 代），
-   *     updatedAt 仅数值变化时刷新；
+   *     generation + 1（世系 +1 代），updatedAt 仅数值变化时刷新；
    *   - 返回晋升清单：[{ key, from, to }]，值未变（from === to）也入清单 ——
-   *     证据与代际已更新，这是一次真实的晋升事件；
+   *     代际已更新，这是一次真实的晋升事件；
    *   - lab 非法（非 KernelRegistry）⇒ 空清单；晋升是拷贝不是移动 —— lab 不受影响。
+   *
+   * ΠΑΝ-50（晋升护栏 + 合法通道）：C1-9 M2 判定旧 promoteFrom 是全库约束最弱
+   * 的写径（safetyCritical 键的「唯一合法通道」反而零护栏）：一次晋升可跳
+   * [min,max] 任意点（绕过校准器 maxStepPct=10% 与回归守卫）、lineage 完全不被
+   * 触碰（注册表代与血统代两套计数器自此漂移）、evidence 取不是加（生产累计
+   * 证据被实验室小样本覆写）、无晋升审计。本方法自此执法四护栏（全部可注入
+   * 覆盖，opts.guard 见 PromoteOptions）：
+   *   ① 步长夹取：|to − 现值| ≤ maxStepPct × (max − min)（缺省 0.1，与校准器
+   *      DEFAULT_GUARDRAILS.maxStepPct 同律）—— 沿方向截断，远距值经多次晋升
+   *      逐步走近（每次都过证据门，不是一次跳到位）；maxStepPct=1 = 全程单跳
+   *      （显式解除，测试/运维迁移用）；
+   *   ② 过回归守卫（Beta-Bernoulli，与校准器 ΝΩ-6 同一数学件 regressionPosteriorMass）：
+   *      labLedger 在场且该键实验室证据 n ≥ minLabEvidence(缺省 0=关) 时，若实验室
+   *      窗成功率相对生产窗成功率的后验 P(rate_lab < rate_prod) ≥ rollbackPosteriorMass
+   *      （缺省 0.9）⇒ 该键本批跳过（证据说实验室值更差 —— 晋升不许退化）；
+   *      证据不足 ⇒ 不判（保守放行 —— 与校准器「证据不足维持现行为」同律）；
+   *   ③ 血统记录：lineage 在场 ⇒ 晋升前对现代拍快照（fitness = 生产窗成功率，
+   *      ledger 在场时取 stats().successRate，缺席按 0 —— 诚实下限且失败安全：
+   *      fitness=0 使后续回归守卫永不误回滚）、晋升后 promote 新一代 —— 注册表
+   *      代与血统代自此同律推进，校准器的回归守卫对被晋升的值有了执法面；
+   *   ④ 证据计数不覆写：evidence := max(生产, lab)（只升不降 —— 生产累计证据
+   *      不被实验室小样本覆写；旧「取 lab 的」语义废弃）。
+   * 晋升审计：变更行延展 { key, from, to, reason }（reason = 'promoted' |
+   * 'step-capped' | 'at-target'），跳过项入 skipped（结构化审计面 —— 老调用方
+   * 只读 key/from/to 面向兼容）。绝不抛（垃圾注入静默回落缺省护栏）。
    */
-  promoteFrom(lab: KernelRegistry, opts?: { keys?: string[] }): Array<{ key: string; from: number; to: number }> {
+  promoteFrom(lab: KernelRegistry, opts?: PromoteOptions): Array<PromoteChange> {
     if (!(lab instanceof KernelRegistry)) return [];
+    this.lastPromoteSkips = []; // ΠΑΝ-50：跳过审计随每次晋升重立（不跨次累积）
+    // ΠΑΝ-50：护栏消毒（绝不抛 —— 非法项回落缺省，与 set/ register 的垃圾静默同律）
+    const maxStepPct =
+      typeof opts?.maxStepPct === 'number' && Number.isFinite(opts.maxStepPct) && opts.maxStepPct >= 0 && opts.maxStepPct <= 1
+        ? opts.maxStepPct
+        : PROMOTE_DEFAULT_MAX_STEP_PCT;
+    const minLabEvidence =
+      typeof opts?.minLabEvidence === 'number' && Number.isFinite(opts.minLabEvidence) && opts.minLabEvidence >= 0
+        ? opts.minLabEvidence
+        : 0;
+    const rollbackMass =
+      typeof opts?.rollbackPosteriorMass === 'number' && Number.isFinite(opts.rollbackPosteriorMass) &&
+      opts.rollbackPosteriorMass >= 0 && opts.rollbackPosteriorMass <= 1
+        ? opts.rollbackPosteriorMass
+        : PROMOTE_DEFAULT_ROLLBACK_MASS;
+    const lineage = opts?.lineage ?? null;
+    const labLedger = opts?.labLedger ?? null;
+    const prodLedger = opts?.ledger ?? null;
+    const nowFn = typeof opts?.now === 'function' ? opts.now : Date.now;
+
     const wanted = opts?.keys;
     const keys = Array.isArray(wanted)
       ? wanted.filter((k): k is string => typeof k === 'string')
       : [...this.params.keys()].filter(k => lab.params.has(k));
-    const changes: Array<{ key: string; from: number; to: number }> = [];
+    const changes: Array<PromoteChange> = [];
     for (const key of keys) {
       const prod = this.params.get(key);
       const labP = lab.params.get(key);
       if (!prod || !labP) continue;
-      const to = clamp(labP.value, prod.min, prod.max);
+
+      // ΠΑΝ-50 ②：回归守卫（Beta 后验 —— lab 值显著更差 ⇒ 跳过该键）
+      if (labLedger !== null && minLabEvidence > 0) {
+        try {
+          const labStats = labLedger.stats(key);
+          const prodStats = prodLedger !== null ? prodLedger.stats(key) : null;
+          if (labStats.n >= minLabEvidence && prodStats !== null && prodStats.n >= minLabEvidence) {
+            const k = Math.min(labStats.n, Math.max(0, Math.round(labStats.successRate * labStats.n)));
+            const mass = regressionPosteriorMass(k, labStats.n, prodStats.successRate);
+            if (mass >= rollbackMass) {
+              this.lastPromoteSkips.push({
+                key,
+                reason: `regression-guard: posterior P(rate_lab<rate_prod)=${Math.round(mass * 1000) / 1000} >= ${rollbackMass} @labN=${labStats.n} prodN=${prodStats.n} — lab value is evidence-wise worse, promotion refused`,
+              });
+              continue;
+            }
+          }
+        } catch { /* 守卫故障 ⇒ 放行该键（旁路义务，绝不炸晋升） */ }
+      }
+
+      // ΠΑΝ-50 ①：步长夹取（沿方向截到上限；maxStepPct=1 时区间全程即单跳）
+      const raw = clamp(labP.value, prod.min, prod.max);
+      const limit = Math.max(0, maxStepPct * (prod.max - prod.min));
+      let to = raw;
+      let reason: PromoteChange['reason'] = raw === prod.value ? 'at-target' : 'promoted';
+      if (Math.abs(raw - prod.value) > limit) {
+        to = prod.value + (raw > prod.value ? limit : -limit);
+        to = clamp(to, prod.min, prod.max);
+        reason = 'step-capped';
+      }
+
+      // ΠΑΝ-50 ③：血统记录（现代快照 → 落值 → 新一代；fitness 诚实取生产窗成功率）
+      if (lineage !== null) {
+        try {
+          let fitness = 0;
+          if (prodLedger !== null) {
+            const st = prodLedger.stats(key);
+            fitness = Number.isFinite(st.successRate) ? st.successRate : 0;
+          }
+          lineage.record({
+            key,
+            generation: prod.generation,
+            value: prod.value,
+            fitness,
+            createdAt: nowFn(),
+          });
+        } catch { /* 血统快照故障不阻断晋升（旁路义务） */ }
+      }
       this.params.set(key, {
         ...prod,
         value: to,
-        evidence: labP.evidence,
+        // ΠΑΝ-50 ④：证据只升不降（max —— 生产累计不被实验室小样本覆写）
+        evidence: Math.max(prod.evidence, labP.evidence),
         generation: prod.generation + 1,
-        updatedAt: to !== prod.value ? Date.now() : prod.updatedAt,
+        updatedAt: to !== prod.value ? nowFn() : prod.updatedAt,
       });
-      changes.push({ key, from: prod.value, to });
+      if (lineage !== null) {
+        try {
+          let fitness = 0;
+          if (prodLedger !== null) {
+            const st = prodLedger.stats(key);
+            fitness = Number.isFinite(st.successRate) ? st.successRate : 0;
+          }
+          lineage.promote(key, to, fitness, nowFn());
+        } catch { /* 血统推进故障不回滚值（血统是审计事实，尽力入账） */ }
+      }
+      changes.push({ key, from: prod.value, to, ...(reason !== 'promoted' ? { reason } : {}) });
     }
     return changes;
   }
+
+  /**
+   * ΠΑΝ-50：本注册表最近一次 promoteFrom 的跳过审计（结构化 — regression-guard
+   * 拒绝的键与理由；每次 promoteFrom 开头清账）。只读消费面（CLI 报告/测试）。
+   */
+  get promoteSkips(): ReadonlyArray<{ key: string; reason: string }> {
+    return this.lastPromoteSkips.slice();
+  }
+
+  /** ΠΑΝ-50：promoteFrom 跳过审计账（每次调用清账重立） */
+  private lastPromoteSkips: Array<{ key: string; reason: string }> = [];
 
   /** 清空全部条目（测试隔离 / 会话切换用 —— 生产代码无理由调用） */
   reset(): void {

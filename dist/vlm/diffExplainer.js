@@ -13,14 +13,19 @@
 //      输入清单时宁可丢弃注解，绝不硬凑。
 import { getGlmClient, isGlmConfigured } from './glmClient.js';
 import { encodeForVlm } from './codec.js';
+// ΠΑΝ-21（反注入铁律全量覆盖）：解说面对的是操作前后截图 —— 屏幕文字是被
+// 描述的数据不是指令；summary/regionNotes 回流人读面，同律设防。
+import { VLM_ANTI_INJECTION_RULE } from './internalUtils.js';
 /** 输入清单上限：超出部分忽略（与 renderDiffOverlay 的 12 框上限同源——prompt 有界） */
 const MAX_REGIONS = 12;
 /** summary 硬上限（字）——prompt 已约束，这里兜底截断（模型偶尔超一点不该炸下游） */
 const SUMMARY_MAX_CHARS = 120;
-/** 云脑角色设定（system 消息）——克制、只述可见事实、严格 JSON 输出 */
+/** 云脑角色设定（system 消息）——克制、只述可见事实、严格 JSON 输出
+ *  ΠΑΝ-21：反注入铁律随行（共享常量单源） */
 const EXPLAIN_SYSTEM_PROMPT = '你是桌面自动化系统的截图差分解说员。对比操作前(before)与操作后(after)两张截图，' +
     '用克制的简体中文描述差异：只陈述可见事实，绝不臆造，看不清就写「不明确」。' +
-    '只输出一个 JSON 对象，不要 markdown 围栏，不要任何多余文字。';
+    '只输出一个 JSON 对象，不要 markdown 围栏，不要任何多余文字。' +
+    VLM_ANTI_INJECTION_RULE;
 /** 差分解说任务模板（user 消息）——{{REGION_LIST}} 占位符由 buildRegionList 填充 */
 const EXPLAIN_PROMPT_TEMPLATE = `对比第一张图(before)与第二张图(after)，输出如下结构的 JSON：
 {"summary":"一句中文总述两张图最核心的差异，不超过120字","regions":[{"label":"区域标签，必须与清单原样一致","note":"一句中文说明该区域发生了什么变化"}]}

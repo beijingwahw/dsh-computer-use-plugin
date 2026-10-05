@@ -33,8 +33,10 @@
 import { createAnthropicProvider } from './providers/anthropic.js';
 import { createGeminiProvider } from './providers/gemini.js';
 import { createOpenAiProvider } from './providers/openai.js';
+// R3-2：铸造点共享件 —— 模型硬顶包装（glm-4v-flash 家族 max_tokens ≤1024）
+import { wrapModelTokenCap } from './providers/cast.js';
 import { detectPresetFromBaseUrl, detectPresetFromEnv, getPreset } from './providers/registry.js';
-import { fetchWithRetry, sanitizeError } from './providers/types.js';
+import { clampMaxTokensForModel, fetchWithRetry, sanitizeError } from './providers/types.js';
 // W6R-A4（工具去重）：传输小件 / JSON 剥壳律 / 可重试状态常量收拢 internalUtils
 // 单一实现 —— 本模块不再自持拷贝。ΑΩ-R15（重试律单一立法）：传输重试循环
 // 整体退役 —— 原生 GLM 路径全权委托 providers/types.fetchWithRetry（与三厂
@@ -114,6 +116,165 @@ function platformEnvApiKey(keys) {
     }
     return '';
 }
+// ─── R2-1：qwen3-vl 系 0-1000 归一化坐标域反算层 ───
+//
+// 实战背景（R1-9 实弹）：Qwen3-VL 系（含 qwen2/2.5-vl 家族）**原生输出 0-1000
+// 归一化整数坐标，且会在文本里谎称「图片像素」**——插件 grounding/OCR 器按
+// 提示词声明的像素系原样消费（vlm:as-is），640×400 合成按钮上实测中心偏差
+// 273px/IoU=0（比 glm 免费档 102.6px 还差）。修正法（R1-9 裸探针验证）：
+// 按请求图实际宽高把 bbox ×(W/1000, H/1000) 反算回像素系 —— 同一张样张
+// 反算后中心误差 1.9px/IoU 0.94（生产级）。本层在 qwen 委托脑的 chatJson
+// 出口执行该反算；glm 原生路径与其余平台不经本包装（真像素，零影响）。
+//
+// 灰度安全律：模型家族（qwen[23]-vl 文档化 0-1000 域）、请求图宽高（PNG
+// IHDR/JPEG SOF 解析）、节点签名（4 坐标全为 [0,1000] 整数）三者齐备才反算；
+// 任一缺席且回执确含 bbox 节点 ⇒ note 'coord-domain-ambiguous' 原样透传
+// （诚实标注，绝不猜域）。反算生效 ⇒ note 'qwen-coord-rescaled'（可观测）。
+/** R2-1: qwen[23]-vl 系模型名判定 —— 文档化 0-1000 归一化坐标输出家族 */
+const R21_QWEN_VL_MODEL = /qwen[23](?:\.\d+)?-vl/i;
+/** R2-1 遍历深度上限（elements→[{bbox:[…]}] 仅 3 层；防深巢/环兜底） */
+const R21_MAX_DEPTH = 8;
+/** R2-1: 请求首图像素宽高解析（PNG IHDR / JPEG SOF 段扫描）—— 失败 null，绝不抛 */
+function r21ImageDims(imgs) {
+    try {
+        const b64 = imgs?.[0]?.base64;
+        if (typeof b64 !== 'string' || b64.length < 32)
+            return null;
+        // 只解码头部（base64 前 88000 字符 = 二进制 66000 字节，4 对齐）：PNG IHDR
+        // 固定在偏移 16；JPEG SOF 位于量化/哈夫曼表之后，屏幕截图量级恒在前 64KB
+        const b = Buffer.from(b64.slice(0, 88_000), 'base64');
+        if (b.length >= 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+            const w = b.readUInt32BE(16);
+            const h = b.readUInt32BE(20);
+            return w >= 1 && h >= 1 ? { width: w, height: h } : null;
+        }
+        if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+            let i = 2;
+            while (i + 9 < b.length) {
+                if (b[i] !== 0xff) {
+                    i++;
+                    continue;
+                }
+                const m = b[i + 1];
+                if (m === 0x01 || m === 0xd8 || (m >= 0xd0 && m <= 0xd9)) {
+                    i += 2;
+                    continue;
+                }
+                const seg = b.readUInt16BE(i + 2);
+                // SOF0..SOF15 除 JPG 系（C4/C8/CC）外皆载宽高（baseline/progressive 全覆盖）
+                if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+                    const h = b.readUInt16BE(i + 5);
+                    const w = b.readUInt16BE(i + 7);
+                    return w >= 1 && h >= 1 ? { width: w, height: h } : null;
+                }
+                if (seg < 2)
+                    return null; // 段长非法 —— 头部脏，诚实放弃
+                i += 2 + seg;
+            }
+        }
+        return null;
+    }
+    catch {
+        return null;
+    }
+}
+/** R2-1: bbox 四元组提取 —— [x0,y0,x1,y1] 数组或 {x0,y0,x1,y1} 对象（器官双方言） */
+function r21Quad(v) {
+    if (Array.isArray(v)) {
+        if (v.length !== 4 || !v.every(n => typeof n === 'number' && Number.isFinite(n)))
+            return null;
+        return [v[0], v[1], v[2], v[3]];
+    }
+    if (v !== null && typeof v === 'object') {
+        const o = v;
+        const ns = [o.x0, o.y0, o.x1, o.y1];
+        if (!ns.every(n => typeof n === 'number' && Number.isFinite(n)))
+            return null;
+        return ns;
+    }
+    return null;
+}
+/** R2-1: 0-1000 整数域签名 —— qwen3-vl 系回执坐标的判别特征（R1-9 实测形态） */
+function r21ThousandDomain(q) {
+    return q.every(n => Number.isInteger(n) && n >= 0 && n <= 1000);
+}
+/** R2-1: 就地反算写回（数组/对象双形态）；dry=true 只探测不改（灰度安全） */
+function r21Apply(target, q, sx, sy, dry) {
+    if (dry)
+        return;
+    const v = [q[0] * sx, q[1] * sy, q[2] * sx, q[3] * sy];
+    if (Array.isArray(target)) {
+        for (let i = 0; i < 4; i++)
+            target[i] = v[i];
+    }
+    else {
+        const o = target;
+        o.x0 = v[0];
+        o.y0 = v[1];
+        o.x1 = v[2];
+        o.y1 = v[3];
+    }
+}
+/**
+ * R2-1: 深度受限遍历 —— 对每个 bbox 节点（'bbox' 键下的四元组，或直接携带
+ * x0/y0/x1/y1 的对象，与 grounding/OCR 提示词方言对齐）做域判定与反算。
+ * acc：touched=发现过 bbox 节点；rescaled=反算节点数；offDomain=签名不过数。
+ */
+function r21Walk(node, sx, sy, dry, depth, acc) {
+    if (depth > R21_MAX_DEPTH || node === null || typeof node !== 'object')
+        return;
+    if (Array.isArray(node)) {
+        for (const child of node)
+            r21Walk(child, sx, sy, dry, depth + 1, acc);
+        return;
+    }
+    const o = node;
+    const holder = o.bbox !== undefined ? o.bbox : (o.x0 !== undefined ? o : undefined);
+    const q = holder !== undefined ? r21Quad(holder) : null;
+    if (q !== null) {
+        acc.touched = true;
+        if (r21ThousandDomain(q)) {
+            r21Apply(holder, q, sx, sy, dry);
+            if (!dry)
+                acc.rescaled++;
+        }
+        else {
+            acc.offDomain++;
+        }
+    }
+    for (const child of Object.values(o))
+        r21Walk(child, sx, sy, dry, depth + 1, acc);
+}
+/**
+ * R2-1: qwen 委托脑坐标域包装 —— 只包 chatJson（chat 纯文本路径无坐标可修）。
+ * 三门齐开（家族 + 宽高 + 逐节点 0-1000 签名）⇒ 反算为请求图像素系；任一
+ * 缺席且回执含 bbox ⇒ 'coord-domain-ambiguous' 原样透传（不猜）。绝不抛、
+ * 绝不改 ok/error/raw；ok:false 回执零接触。
+ */
+function wrapQwenCoordDomain(inner) {
+    return {
+        ...inner,
+        async chatJson(req) {
+            const res = await inner.chatJson(req);
+            if (!res.ok || res.value === null || typeof res.value !== 'object')
+                return res;
+            try {
+                const dims = r21ImageDims(req.images);
+                const dry = !(dims !== null && R21_QWEN_VL_MODEL.test(inner.model));
+                const acc = { touched: false, rescaled: 0, offDomain: 0 };
+                r21Walk(res.value, dims ? dims.width / 1000 : 0, dims ? dims.height / 1000 : 0, dry, 0, acc);
+                if (acc.rescaled > 0)
+                    return { ...res, note: 'qwen-coord-rescaled' };
+                if (acc.touched)
+                    return { ...res, note: 'coord-domain-ambiguous' };
+                return res;
+            }
+            catch {
+                return res; // 反算面自身故障 ⇒ 原样透传（不抛铁律；宁可不修，不可修错）
+            }
+        },
+    };
+}
 /**
  * 铸造委托适配器 —— 按平台预设的线协议分派三厂之一（providers 单一来源）：
  *  - apiKey：options 显式 > 平台预设 envKeys 序列（GLM 环境变量不外溢到他平台）；
@@ -159,12 +320,20 @@ function castDelegate(platform, options) {
     };
     switch (preset?.protocol) {
         case 'anthropic':
-            return createAnthropicProvider(config);
+            // R3-2：主脑委托路径同过模型硬顶包装（glm-4v-flash 直配主脑不再 400）
+            return wrapModelTokenCap(createAnthropicProvider(config));
         case 'gemini':
-            return createGeminiProvider(config);
+            return wrapModelTokenCap(createGeminiProvider(config));
         case 'openai':
-        default:
-            return createOpenAiProvider(config);
+        default: {
+            const provider = createOpenAiProvider(config);
+            // R2-1: qwen 预设（DashScope）挂 0-1000 归一化坐标域反算层 —— qwen3-vl
+            // 系回执 bbox 按请求图实际宽高反算为像素系（grounding 实战精度的破局
+            // 点，见本文件 R2-1 节注释）；其余 openai 方言平台与 glm 原生路径零影响
+            // R3-2：包装序 —— 硬顶钳制（请求前置）在外，坐标反算（回执后置）在内，
+            // 两面互不接触（一个改 maxTokens，一个改 bbox）
+            return wrapModelTokenCap(preset?.id === 'qwen' ? wrapQwenCoordDomain(provider) : provider);
+        }
     }
 }
 /**
@@ -464,7 +633,10 @@ export class GlmClient {
             return (await consultFailoverPool(req)) ?? res;
         }
         const startedAt = Date.now();
-        const maxTokens = req.maxTokens ?? 2048;
+        // R3-2：glm-4v-flash 家族硬顶钳制（缺省 2048 → 1024；其余模型恒等）——
+        // R1-5 实测免费档 max_tokens >1024 即 HTTP 400 code 1210 拒单，原生路径
+        // （platform 缺省 glm + GLM_VLM_MODEL=glm-4v-flash 直配主脑）自此有防线。
+        const maxTokens = clampMaxTokensForModel(this.model, req.maxTokens ?? 2048);
         const temperature = req.temperature ?? 0.1;
         const timeoutMs = req.timeoutMs ?? 30_000;
         const maxRetries = req.maxRetries ?? 2;

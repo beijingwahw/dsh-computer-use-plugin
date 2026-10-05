@@ -15,9 +15,7 @@
 // 三分（explicit / env / preset，registry 的 via 标的是平台发现路，语义不同）。
 
 import { VlmApiBreaker } from '../metering';
-import { createAnthropicProvider } from './anthropic';
-import { createGeminiProvider } from './gemini';
-import { createOpenAiProvider } from './openai';
+import { castProvider } from './cast';
 import { getPreset as registryGetPreset } from './registry';
 import { resolveProviderConfig as registryResolveProviderConfig } from './registry';
 import { extractProviderJson, isLocalBaseUrl, sanitizeError } from './types';
@@ -76,6 +74,41 @@ export function getPreset(id: unknown): { platform: string; preset: PlatformPres
   if (platform === '') return null;
   const preset = registryGetPreset(platform);
   return preset !== null ? { platform, preset } : null;
+}
+
+// ─── R3-2（per-brain 模型注入口）：fallback 段的 id=model 方言 ───
+
+/**
+ * R3-2: fallback 段解析产物 —— platform 为归一后的平台 id；model 为 per-brain
+ * 模型覆写（'' = 未覆写，走 registry 缺省 —— 既有裸 id 形态逐字节不变）。
+ */
+export interface FallbackSpec {
+  /** 归一平台 id（trim + 小写） */
+  platform: string;
+  /** per-brain 模型覆写名（原样大小写、已 trim；'' = 缺席） */
+  model: string;
+}
+
+/**
+ * R3-2: 解析 fallback 链单段 —— 两种方言：
+ *   - 裸 id：'glm' / ' GLM ' ⇒ { platform:'glm', model:'' }（既有形态，零变化）；
+ *   - per-brain 覆写：'glm=glm-4v-flash' ⇒ { platform:'glm', model:'glm-4v-flash' }
+ *    （与 vlmProviderTiers 的 "id=tier" CSV 方言同族 —— 宿主配置面零新概念）。
+ * '=' 后空白 ⇒ 视同缺席（'glm=' ≡ 'glm'，宽容解析）；空段/脏值/无 id ⇒ null。
+ * 只切首个 '='（平台 id 不含 '='，模型名右侧原文保留）。绝不抛。
+ */
+export function parseFallbackSpec(raw: unknown): FallbackSpec | null {
+  try {
+    const seg = typeof raw === 'string' ? raw.trim() : '';
+    if (seg === '') return null;
+    const eq = seg.indexOf('=');
+    const platform = normalizePlatformId(eq >= 0 ? seg.slice(0, eq) : seg);
+    if (platform === '') return null; // 空段 / '=model' 无 id 形态 ⇒ null
+    const model = eq >= 0 ? seg.slice(eq + 1).trim() : '';
+    return { platform, model };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -489,7 +522,11 @@ export interface PoolBuildOptions {
   baseUrl?: string;
   /** 主力模型名（缺省用平台预设；仅作用于主力） */
   model?: string;
-  /** 备选平台 id 清单（各自的 env/key 自解析，按序排在主力之后） */
+  /**
+   * R3-2: 备选平台链（各自的 env/key 自解析，按序排在主力之后）—— 每段两种
+   * 方言：裸平台 id（'glm'，registry 缺省模型）或 'id=model' per-brain 模型
+   * 覆写（'glm=glm-4v-flash' —— 显式模型压过预设缺省，env 密钥解析不变）。
+   */
   fallbacks?: string[];
   /** fetch 实现 —— 透传给池内每个适配器（测试注入假实现，绝不真实联网） */
   fetchImpl?: typeof fetch;
@@ -503,45 +540,24 @@ export interface PoolBuildOptions {
   tiers?: Readonly<Record<string, ProviderTier>>;
 }
 
-/** 按预设协议选厂铸造 —— openai/anthropic/gemini 三兄弟适配器的分派点 */
-function castProvider(
-  preset: PlatformPreset,
-  apiKey: string,
-  baseUrl: string,
-  model: string,
-  fetchImpl: typeof fetch | undefined,
-  meter: ((rec: ProviderMeterRecord) => void) | undefined,
-): VisionProvider {
-  const config = {
-    id: preset.id,
-    apiKey,
-    baseUrl,
-    model,
-    ...(fetchImpl ? { fetchImpl } : {}),
-    ...(meter ? { meter } : {}),
-  };
-  switch (preset.protocol) {
-    case 'anthropic':
-      return createAnthropicProvider(config);
-    case 'gemini':
-      return createGeminiProvider(config);
-    case 'openai':
-    default:
-      return createOpenAiProvider(config);
-  }
-}
+// 适配器分派点已收编为共享件（修复潮 F3-7 / BC-5：此处与 ensemble.ts 的
+// 合议庭铸造厂曾是逐字克隆 ×2）：castProvider 见 ./cast.ts（ΠΑΝ-23 meter
+// 透传语义头注一并迁入）。
 
 /**
  * 铸造多脑故障切换池（铸造律）：
  *  1. resolveProviderConfig 解析主力 —— null（平台未给/查无预设）⇒ 空池
  *     （size 0，chat 回合成 degraded）；主力即便没解析到密钥也照常进池
  *     （configured:false，chat 会跳过它 —— 诚实降级而非静默丢脑）；
- *  2. 每个 fallback id 经 getPreset + registry env 自解析为 provider；查无预设
+ *  2. 每个 fallback 段经 parseFallbackSpec 解析（R3-2：裸 id 或 'id=model'
+ *     per-brain 覆写）→ getPreset + registry env 自解析为 provider；查无预设
  *     跳过，与主力同 id 跳过（去重）；
  *  3. 解析不出 key 且预设非 localAuthOptional（本机免钥脑）的 fallback
  *     跳过 —— 不进池（半配置的备脑顶上去只会白烧一次降级调用）；
  *  4. 按预设 protocol 分派 createOpenAiProvider / createAnthropicProvider /
- *     createGeminiProvider（import 自兄弟文件），fetchImpl/meter 全员透传。
+ *     createGeminiProvider（import 自兄弟文件），fetchImpl/meter 全员透传；
+ *     R3-2：铸出的适配器经 castProvider 统一过模型硬顶包装（glm-4v-flash
+ *     家族 max_tokens ≤1024 —— 免费档 400 拒单防线，见 cast.ts）。
  * 任何铸造面故障都收敛为「尽力而为的池」乃至空池 —— 绝不抛异常。
  */
 export function createProviderPool(opts?: PoolBuildOptions): ProviderPool {
@@ -564,14 +580,22 @@ export function createProviderPool(opts?: PoolBuildOptions): ProviderPool {
     );
 
     // 备选：各自 env/key 自解析（registry 仲裁），解析不出 key 且非本机免钥 ⇒ 跳过
+    // R3-2：段先过 parseFallbackSpec —— 'glm=glm-4v-flash' 的 per-brain 模型
+    // 覆写注入 registryResolveProviderConfig（显式 model 压过预设缺省）；裸 id
+    // 段 model='' 缺席注入 ⇒ 解析路径与既往逐字节一致（缺省零变化律）。
     const seen = new Set<string>([primary.preset.id]);
     const fallbacks = Array.isArray(o.fallbacks) ? o.fallbacks : [];
     for (const raw of fallbacks) {
-      const found = getPreset(raw);
+      const spec = parseFallbackSpec(raw);
+      if (spec === null) continue; // 空段/脏段安静跳过
+      const found = getPreset(spec.platform);
       if (found === null) continue; // 查无预设
       if (seen.has(found.platform)) continue; // 主力或先到的同 id 去重
       seen.add(found.platform);
-      const r = registryResolveProviderConfig({ provider: found.platform });
+      const r = registryResolveProviderConfig({
+        provider: found.platform,
+        ...(spec.model !== '' ? { model: spec.model } : {}),
+      });
       if (r === null) continue; // 理论不可达（found 已查有预设）
       const localFree =
         found.preset.localAuthOptional === true && isLocalBaseUrl(found.preset.baseUrl);

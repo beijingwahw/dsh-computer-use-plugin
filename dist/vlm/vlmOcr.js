@@ -16,8 +16,12 @@
 // blur（几何不变）/ inset（分段反算）两模式，词坐标恒回源图系。
 import { getGlmClient, isGlmConfigured, } from './glmClient.js';
 import { encodeForVlmMeta, mapEncodedToOriginal, mapInsetToOriginal } from './codec.js';
-import { clampBbox } from './grounding.js';
-import { buildOcrPrompt } from './som.js';
+// ΠΑΝ-127（D-F5 清偿）：clampBbox 改自零出边叶导入（原借 grounding 构成感知
+// 主环 value 二环；桶面同名符号仍经再导出可用）。
+import { clampBbox } from './bbox.js';
+// ΠΑΝ-127（D-F5 清偿）：buildOcrPrompt 改自零出边叶导入（原借 som 构成感知
+// 主环 value 环的一臂；som 面同名符号仍经再导出可用）。
+import { buildOcrPrompt } from './internalUtils.js';
 /** 大小写/空白不敏感归一 —— 与 textReader.ts 的 normalize 同律（toLowerCase + 空白折叠） */
 const normalize = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
 /**

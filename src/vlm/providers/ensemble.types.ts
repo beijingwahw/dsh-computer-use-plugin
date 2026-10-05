@@ -6,7 +6,7 @@ import type { VisionImage } from './types';
 
 // ─── 协议类型 ───
 
-/** 合议庭问询：一次并席发问的请求（各字段语义同 VisionChatRequest，无 maxRetries） */
+/** 合议庭问询：一次并席发问的请求（各字段语义同 VisionChatRequest） */
 export interface EnsembleQuery {
   /** 截图序列（至少一帧才有视觉语义） */
   images: VisionImage[];
@@ -22,6 +22,13 @@ export interface EnsembleQuery {
   jsonMode?: boolean;
   /** 单次 fetch 尝试超时毫秒（透传各成员适配器缺省） */
   timeoutMs?: number;
+  /**
+   * ΠΑΝ-22（反驳法院 quorum 单次不重试）：拨号重试上限 —— 透传各成员适配器。
+   * 缺席 = 各适配器缺省（openai 家族 2）；反驳法院的 quorum 通道以 0 传入，
+   * 使「每颗脑单次不重试」的法院铁律在合议庭路径同样成立（此前 EnsembleQuery
+   * 无此字段，askAll 无法表达 —— 注释宣称与实现漂移的修法）。
+   */
+  maxRetries?: number;
 }
 
 /** 庭员普查条目：每颗脑在本次问询中的成败、原文与延迟（census 透明律的最小单元） */

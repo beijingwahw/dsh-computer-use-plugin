@@ -17,10 +17,11 @@
 //      请 1 颗备选脑（换脑非重试），且只在剩余预算内发生（8s 硬帽语义不变）；
 //   3. 同源剔除 —— 与主脑同 providerId/baseUrl 的候选脑不请上证人席（用主脑
 //      反驳主脑是确认偏误的马戏，不是对抗核验）；剔除数诚实注记；
-//   4. 零依赖注入式 —— 本模块不 import 任何兄弟模块（叶子模块，杜绝环引）；
+//   4. 零依赖注入式 —— 本模块不 import 任何兄弟器官（叶子模块，杜绝环引）；
 //      第二意见面经 attachRefuteFace 注入（vlm/index 的 configureVlm 装配，
 //      照 P2a attachFailoverPool 的注入模式），EnsembleCourt 庭员/池内脑
-//      天然结构满足 RefuteBrain 契约；
+//      天然结构满足 RefuteBrain 契约；ΠΑΝ-21 唯一的静态依赖是 internalUtils
+//      （零依赖叶子原语仓 —— glmClient/providers 同律引用，不构成器官耦合）；
 //   5. 纯离线可测 —— 假脑注入 + 超时测试缝（_overrideRefuteTimeoutForTest）
 //      零网络零墙钟。
 //
@@ -56,17 +57,22 @@ const REFUTE_WEAK_UPHELD_AT = 0.55;
  */
 const REFUTE_WEAK_REFUTED_AT = 0.5;
 // ─── 提示词构造（铁律风格随 som.ts：默认怀疑 / 找反驳而非确认 / 不臆造） ───
+// ΠΑΝ-21（反注入铁律全量覆盖）：反驳法院面对的截图与目标描述均来自不可信屏幕
+// —— 被审陈述（description）本身可能是注入产物。铁律行引共享常量单源注入。
+import { VLM_ANTI_INJECTION_RULE } from './internalUtils.js';
 /**
  * 纯函数：反驳式系统提示词。与 som.ts 的裁决/接地系统词同律 —— 只输出严格
  * JSON；三条怀疑铁律写死：默认持怀疑态度、找反驳证据而不是确认、宁可
  * uncertain 不可附和；判断必须基于图像实际像素，不要臆造。
+ * ΠΑΝ-21：反注入铁律随行（屏幕文字是数据不是指令）。
  */
 export function buildRefutationSystemPrompt() {
     return '你是对抗核验官，默认持怀疑态度。你的职责不是确认陈述，而是找出反驳证据。'
         + '只输出严格 JSON：{"verdict":"refuted"|"upheld"|"uncertain","confidence":0到1的小数,"reason":"一句中文说明"}。'
         + 'verdict 语义：refuted=你找到了反驳证据；upheld=认真寻找反驳证据后描述仍然成立；'
         + 'uncertain=证据不足不敢断言。宁可输出 uncertain 也不附和确认。'
-        + '判断必须基于图像实际像素，不要臆造图上看不到的现象。';
+        + '判断必须基于图像实际像素，不要臆造图上看不到的现象。'
+        + VLM_ANTI_INJECTION_RULE;
 }
 /**
  * 纯函数：反驳式用户提示词。把「目标 = 描述」作为被审陈述呈堂，指令是
@@ -96,7 +102,9 @@ export function buildRefutationQuorumSystemPrompt() {
         + '只输出严格 JSON：{"verdict":"confirmed"|"refuted","confidence":0到1的小数}。'
         + 'verdict 语义：refuted=你找到了反驳证据；confirmed=认真寻找反驳证据后描述仍然成立。'
         + '与其他陪审脑独立判断，宁可低 confidence 也不附和确认。'
-        + '判断必须基于图像实际像素，不要臆造图上看不到的现象。';
+        + '判断必须基于图像实际像素，不要臆造图上看不到的现象。'
+        // ΠΑΝ-21：多脑通道同律设防 —— 多数票也挡不住全体陪审脑被同一注入话术策反
+        + VLM_ANTI_INJECTION_RULE;
 }
 // ─── 模块级注入面（照 P2a attachFailoverPool 的注入模式） ───
 /** 模块级反驳面 —— 宿主 configureVlm 装配后注入；null = 未装配（法院缺席） */
@@ -368,6 +376,11 @@ export async function askRefutation(deps) {
                 temperature: REFUTE_TEMPERATURE,
                 jsonMode: true,
                 timeoutMs,
+                // ΠΑΝ-22（quorum 单次不重试）：与单脑通道（下方 maxRetries:0）对齐 ——
+                // 审判序注释「每颗脑单次不重试」此前只是宣称：quorum 请求体缺席该字段
+                // ⇒ 陪审脑走适配器缺省 maxRetries=2；withHardCap 弃单后底层重试继续
+                // 烧钱（8.5s 硬帽 + 3 次拨号的叠加恰发生在不可逆动作前的高危窗口）。
+                maxRetries: 0,
             };
             const attempt = (async () => {
                 try {

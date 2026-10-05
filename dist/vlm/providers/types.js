@@ -160,6 +160,56 @@ export function maskBaseUrl(raw) {
         return '(unknown endpoint)';
     }
 }
+// ─── R3-2（max_tokens 钳制泛化）：模型名键控的生成硬顶知识 ───
+//
+// 病灶（R1-5 实测 / R2-1 §6 登记）：glm-4v-flash 免费档对 max_tokens 有 1024
+// 硬顶（超出 ⇒ HTTP 400 code 1210 直接拒单），而全链缺省生成预算是 2048
+//（openai/anthropic/gemini 三适配器与 glmClient 原生路径同调）——grounding
+// adaptiveMaxTokens 只抬不降（小图恒 2048）、OCR/verdict 走缺省。R1-5 时代的
+// 钳制是冒烟脚本的运行时注入（StructuredVisionPort 的 client 包装），从未
+// 落进 src —— failover 备脑一经点亮（R3-2 per-brain 注入 glm-4v-flash）就会
+// 立刻踩中 400：failover 在线但拨号必败，等于单脑裸奔。本表把「模型家族 →
+// 生成硬顶」落为单一来源，供池/合议庭铸造点（cast.ts）与 glmClient 双路
+//（castDelegate 委托 + 原生路径）统一消费；非命中家族恒 null（零钳制，
+// 行为逐字节不变 —— qwen3-vl-plus 实测 4096 无碍，R2-1 §4 D）。
+/** R3-2: glm-4v-flash 家族（前缀命中 —— 容忍日期后缀变体如 glm-4v-flash-250414） */
+const R32_GLM_FLASH_MODEL = /^glm-4v-flash/i;
+/** R3-2: glm-4v-flash 免费档的 max_tokens 硬顶（R1-5 实测 400 code 1210 的界）
+ *  （模块内常量 —— tokenCapForModel 单点消费，不外泄导出面） */
+const R32_GLM_FLASH_TOKEN_CAP = 1024;
+/**
+ * R3-2: 模型名 → max_tokens 硬顶（null = 无已知硬顶，调用方零钳制）。
+ * 纯查表零 I/O、绝不抛；脏模型名（非字符串/空串）⇒ null（无证据不钳制）。
+ */
+export function tokenCapForModel(model) {
+    try {
+        return typeof model === 'string' && R32_GLM_FLASH_MODEL.test(model.trim())
+            ? R32_GLM_FLASH_TOKEN_CAP
+            : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * R3-2: 按模型硬顶钳制 max_tokens —— 无硬顶/已在界内/脏值 ⇒ 原值直传
+ *（恒等，零行为变化）；超顶 ⇒ 取硬顶。绝不抛。消费点约定在「缺省已解析
+ * 之后」调用（req.maxTokens ?? 2048 先行落定），保证 undefined 请求也被
+ * 拉进界内（2048 > 1024 ⇒ 钳为 1024 —— 免费档免费的前提）。
+ */
+export function clampMaxTokensForModel(model, maxTokens) {
+    try {
+        const cap = tokenCapForModel(model);
+        if (cap === null)
+            return maxTokens;
+        return typeof maxTokens === 'number' && Number.isFinite(maxTokens) && maxTokens > cap
+            ? cap
+            : maxTokens;
+    }
+    catch {
+        return maxTokens;
+    }
+}
 /** 本机回环主机集合（小写、去 IPv6 方括号后比对） */
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 /**

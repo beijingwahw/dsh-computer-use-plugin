@@ -36,13 +36,36 @@
 //      d) /api/connect 保存非预设 host 的 baseUrl 前强制探测通过
 //         （endpoint-probe-failed 拒存）—— 防「被诱导存攻击者端点致截图
 //         持续外发」。
+//   7. ΠΑΝ-20（向导本机进程认证）—— 上述 ΝΩ-4 四重防护全部针对「浏览器发起的
+//      跨站请求」；任何本地进程可直连 127.0.0.1 自设 Host 头即过第一闸（裸
+//      客户端无 Sec-Fetch 头，第二闸天然失效），随后 POST /api/connect 把视觉
+//      流静默重路由到自己的回环钓鱼端点（探测由攻击者服务自答通过）。修法：
+//      会话启动时生成高熵一次性 nonce（crypto.randomBytes 32 字节），仅以两
+//      种形态出域：① 向导页 URL 的 **fragment**（`#<nonce>` —— fragment 永不
+//      发往服务端，浏览器同源策略保住它不进任何跨站读取面；页面 JS 从
+//      location.hash 取出并随 API 请求头回传）；② 仅当前用户可读的临时文件
+//      （filePerms 分平台收紧，供宿主/程序化消费面取证）。/api/test、
+//      /api/models、/api/connect、/api/disconnect 四个探测/写端点全部要求
+//      `x-wizard-nonce` 头命中（timingSafeEqual 常时比对）；**fail-closed：
+//      nonce 缺席即 403 wizard-nonce-required**（GET / 与 /api/state 只读面
+//      免验 —— 页面加载与状态轮询不破坏）。残余风险（诚实边界）：与当前用户
+//      同权限的本地进程可读 nonce 文件 —— 该权限下攻击者本可直接读
+//      ~/.dsh/vlm-connection.json 明文密钥；本闸消灭的是「异用户进程与零凭据
+//      的静默劫持面」。
 import { createServer } from 'node:http';
+import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createAnthropicProvider } from './providers/anthropic.js';
 import { createGeminiProvider } from './providers/gemini.js';
 import { createOpenAiProvider } from './providers/openai.js';
 import { discoverModels, probeProvider } from './providers/probe.js';
 import { detectPresetFromBaseUrl, getPreset, listPlatforms } from './providers/registry.js';
 import { ConnectionStore, maskKey } from './connection.js';
+// ΠΑΝ-20：nonce 文件的分平台权限收紧（与 connection 存档同律 —— chmod 0600 /
+// icacls 断继承；失败尽力降级不阻断向导启动）
+import { tightenFilePerms } from '../filePerms.js';
 // ─── 常量与小工具 ───
 /** 缺省端口（被占则 +1 逐试至 +8，即 18432..18440） */
 const DEFAULT_PORT = 18432;
@@ -54,6 +77,64 @@ const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_BODY_BYTES = 32 * 1024;
 /** 环回主机白名单（host 入参仅此三者，其余强制 127.0.0.1 —— 环回铁律） */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+// ─── ΠΑΝ-20（向导本机进程认证）：一次性会话 nonce ───
+/** 探测/写端点的 nonce 门槛覆盖面（GET / 与 /api/state 只读面免验） */
+const NONCE_PROTECTED_ROUTES = new Set([
+    '/api/test', '/api/models', '/api/connect', '/api/disconnect',
+]);
+/** nonce 回传头名（自定义头 ⇒ 跨站请求必先过 CORS 预检 —— 向导无 CORS 面，天然封死） */
+const WIZARD_NONCE_HEADER = 'x-wizard-nonce';
+/** nonce 熵源字节数（32 字节 = 256 位 —— 高熵一次性凭据） */
+const NONCE_BYTES = 32;
+/** nonce 十六进制长度（供响应面长度校验与常时比对的形状约束） */
+const NONCE_HEX_LEN = NONCE_BYTES * 2;
+/** 生成会话 nonce（randomBytes 高熵 —— 唯一允许的熵源；绝不回退时间戳/计数器） */
+function generateWizardNonce() {
+    return randomBytes(NONCE_BYTES).toString('hex');
+}
+/**
+ * ΠΑΝ-20：nonce 常时校验（永不抛）—— 双向 sha256 摘要后 timingSafeEqual
+ *（摘要归一长度，长度差不泄漏为时序差）；脏头/缺席/长度异常 ⇒ false。
+ * fail-closed：会话 nonce 未生成（理论不可达 —— 启动即铸）同样拒。
+ */
+function wizardNonceValid(req, sessionNonce) {
+    try {
+        if (typeof sessionNonce !== 'string' || sessionNonce.length !== NONCE_HEX_LEN)
+            return false;
+        const raw = req.headers[WIZARD_NONCE_HEADER];
+        if (typeof raw !== 'string' || raw.length !== NONCE_HEX_LEN)
+            return false;
+        const a = createHash('sha256').update(raw).digest();
+        const b = createHash('sha256').update(sessionNonce).digest();
+        return timingSafeEqual(a, b);
+    }
+    catch {
+        return false;
+    }
+}
+/** nonce 临时档路径（tmpdir 下带端口的具名档 —— 宿主/程序化消费面可取证） */
+function wizardNonceFilePath(port) {
+    return join(tmpdir(), `dsh-vlm-wizard-${port}.nonce`);
+}
+/**
+ * ΠΑΝ-20：nonce 落档（尽力面，绝不抛）—— 写入仅当前用户可读的临时文件
+ *（filePerms 分平台收紧；失败不阻断向导启动 —— 页面 fragment 通道仍可用，
+ * 诚实边界：收紧失败时该文件权限可能宽松于 0600，nonce 泄漏面 = 本机全体）。
+ */
+function writeNonceFile(path, nonce) {
+    try {
+        writeFileSync(path, nonce, { mode: 0o600 });
+        tightenFilePerms(path); // win32 icacls 断继承（失败尽力降级）
+    }
+    catch { /* 落档故障 ⇒ 仅剩 fragment 通道（fail-closed 不放水） */ }
+}
+/** nonce 档清理（关停面尽力，绝不抛） */
+function removeNonceFile(path) {
+    try {
+        unlinkSync(path);
+    }
+    catch { /* 已删/权限故障 —— 安静 */ }
+}
 /** 安全 trim 字符串字段：非字符串/脏值 ⇒ '' */
 function strField(v) {
     try {
@@ -297,6 +378,12 @@ const ROUTES = {
  *    Sec-Fetch-Site 在场且非 same-origin/none ⇒ 403 cross-site-blocked；
  *    base_url 仅接受同平台预设端点或显式回环（400 base-url-not-allowed）；
  *    /api/connect 存非预设 host 前强制探测通过（endpoint-probe-failed 拒存）
+ *  - ΠΑΝ-20 本机进程认证 —— 会话启动铸 32 字节高熵 nonce（crypto.randomBytes），
+ *    仅经页面 URL fragment（#<nonce>，SOP 保护不进任何 GET 响应）与仅当前
+ *    用户可读的临时文件（filePerms 收紧）出域；/api/test、/api/models、
+ *    /api/connect、/api/disconnect 必须携 x-wizard-nonce 头命中（常时比对），
+ *    缺席即 403 wizard-nonce-required（fail-closed）；GET / 与 /api/state
+ *    只读面免验。handle.nonce 供程序化消费面取证。
  *
  * @param opts.port       缺省 18432；被占则 +1 逐试至 +8（EADDRINUSE 捕获）；
  *                        传 0 = 内核随机分配（单次尝试）。九口全占 ⇒ Promise
@@ -321,6 +408,10 @@ export async function startOnboarding(opts) {
     let closedFlag = false;
     let idleTimer = null;
     let closePromise = null;
+    // ΠΑΝ-20：会话一次性 nonce（启动即铸、常驻会话期；探测/写端点的法定凭据）
+    const sessionNonce = generateWizardNonce();
+    /** nonce 临时档路径（listen 成功后按实际端口铸名；关停时清理） */
+    let nonceFilePath = null;
     /** 组装向导状态（每次请求即时组装 —— connect/disconnect 后刷新即见） */
     const buildState = () => {
         let conn = null;
@@ -355,6 +446,9 @@ export async function startOnboarding(opts) {
             return closePromise ?? Promise.resolve();
         closedFlag = true;
         clearIdle();
+        // ΠΑΝ-20：nonce 档随灯熄清理（尽力面 —— 残档只余无害凭据，不复用）
+        if (nonceFilePath !== null)
+            removeNonceFile(nonceFilePath);
         closePromise = new Promise(resolve => {
             let settled = false;
             const done = () => {
@@ -433,6 +527,17 @@ export async function startOnboarding(opts) {
                 'cache-control': 'no-store',
             });
             res.end(JSON.stringify({ ok: false, error: `方法不允许：${method}` }));
+            return;
+        }
+        // ── ΠΑΝ-20（向导本机进程认证）：探测/写端点的 nonce 门前闸（fail-closed）──
+        // ΝΩ-4 的 Host/Sec-Fetch 双闸只防浏览器跨站；本地裸 HTTP 进程自设 Host 头
+        // 即可绕过（无 Sec-Fetch 头）。nonce 只经页面 URL fragment（SOP 保护）与
+        // 0600 临时文件出域 —— 异用户进程与零凭据请求一律 403，缺席即拒。
+        if (NONCE_PROTECTED_ROUTES.has(path) && !wizardNonceValid(req, sessionNonce)) {
+            sendJson(res, 403, {
+                ok: false,
+                error: 'wizard-nonce-required：探测/连接端点须携带有效 x-wizard-nonce 头（请从插件启动的向导入口打开本页）',
+            });
             return;
         }
         // ── GET / —— 向导页（状态即时组装，服务端渲染进页面） ──
@@ -632,6 +737,8 @@ export async function startOnboarding(opts) {
         // 监听后意外错误（理论上不可达）：熄灯防僵尸
         closedFlag = true;
         clearIdle();
+        if (nonceFilePath !== null)
+            removeNonceFile(nonceFilePath); // ΠΑΝ-20：残档清理
         try {
             server.close();
         }
@@ -639,10 +746,16 @@ export async function startOnboarding(opts) {
     });
     const port = server.address().port;
     const urlHost = host.includes(':') ? `[${host}]` : host; // IPv6 字面量加方括号
+    // ΠΑΝ-20：nonce 落档（仅当前用户可读 —— 端口已定即可具名）+ 页面地址挂
+    // fragment（fragment 永不进 HTTP 请求 —— 服务端响应面零 nonce 泄漏，页面
+    // JS 从 location.hash 取出随 API 请求头回传）
+    nonceFilePath = wizardNonceFilePath(port);
+    writeNonceFile(nonceFilePath, sessionNonce);
     refreshIdle(); // 启动即起表（无请求 30 分钟后自动熄灯）
     return {
         port,
-        url: `http://${urlHost}:${port}/`,
+        url: `http://${urlHost}:${port}/#${sessionNonce}`,
+        nonce: sessionNonce,
         get closed() {
             return closedFlag;
         },
@@ -800,6 +913,16 @@ ${cards}
 <script>
 var INITIAL_STATE = ${json};
 var STATE = INITIAL_STATE;
+// ΠΑΝ-20（向导本机进程认证）：会话 nonce 从 URL fragment 取出（插件启动向导时
+// 挂在 #<nonce> —— fragment 永不发往服务端，跨站页面读不到它）。探测/写端点
+// 的 fetch 一律随 x-wizard-nonce 头回传；缺席（用户手敲地址/fragment 被剥）⇒
+// 服务端 fail-closed 403，页面如实提示从插件入口重新打开。
+var WIZARD_NONCE = (location.hash || '').replace(/^#/, '').trim();
+function nonceHeaders(extra) {
+  var h = extra || {};
+  if (WIZARD_NONCE) h['x-wizard-nonce'] = WIZARD_NONCE;
+  return h;
+}
 function $(id) { return document.getElementById(id); }
 function selectedId() {
   var el = document.querySelector('input[name=platform]:checked');
@@ -847,7 +970,7 @@ function payload() {
 async function postJson(url, data) {
   var r = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: nonceHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(data || {})
   });
   var body = {};
@@ -885,8 +1008,9 @@ async function loadModels() {
   if (base) qs.set('base_url', base);
   try {
     // ΑΩ-R7 密钥卫生：密钥走 Authorization 头，绝不进 URL query（日志卫生）
+    // ΠΑΝ-20：nonce 随头回传（自定义头跨站必过预检 —— 向导无 CORS 面）
     var r = await fetch('/api/models?' + qs.toString(), {
-      headers: key ? { authorization: 'Bearer ' + key } : {}
+      headers: nonceHeaders(key ? { authorization: 'Bearer ' + key } : {})
     });
     var j = await r.json();
     if (j.ok) {
@@ -944,6 +1068,12 @@ $('btnConnect').addEventListener('click', connect);
 $('btnDisconnect').addEventListener('click', disconnect);
 renderCurrent();
 onPick();
+// ΠΑΝ-20：nonce 缺席（手敲地址/fragment 被剥）⇒ 如实提示（服务端 fail-closed
+// 已拒一切探测/写端点 —— 这里给人读面补一句为什么）
+if (!WIZARD_NONCE) {
+  var sub = document.querySelector('.sub');
+  if (sub) sub.textContent = '警告：本页缺少会话凭据（地址 # 号后的口令缺席）—— 测试 / 保存 / 断开将被拒绝。请从插件启动的向导入口重新打开本页。';
+}
 </script>
 </body>
 </html>`;

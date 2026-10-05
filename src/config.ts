@@ -3,6 +3,50 @@
 // 原项目地层中散落的全部魔法数字（1280/1440、q60/q75、窗口=3、熔断=3、1000 字符）
 // 在此统一收敛为带默认值的配置。
 import Schema from '@deepseek-ai/schemastery';
+// ΤΕΛ-8b（D-G25① 收口）：federationEpsilon 的域上界单源对接 —— 从 federation 侧
+// 导入 PRIVACY_BUDGET_EPSILON_TOTAL（ΠΑΝ-70 的 validFederationEpsilon 判据参数，
+// sync/mint 入口已按它 fail-closed）。config 层前置校验共用同一上界：federation
+// 侧将来收紧总预算而 config 未跟 ⇒ 域外值在装载期即被拒（配置面不撒谎），绝不
+// 出现「config 放行 / federation 拒铸」的两处立法漂移。无环：digest 仅依赖
+// dialects/random，不回指本模块。
+import { PRIVACY_BUDGET_EPSILON_TOTAL } from './federation/digest';
+
+// ─── ΠΑΝ-105（配置域执法）：数值字段的全量区间墙 ───
+//
+// 病灶（C1-1 M6）：120+ 字段全量零域校验 —— maxImageCount=0 会让上下文窗
+// 「即入即逐」churn、pinBudget/probeMemoryCapacity 等被裸用、比率字段可配出
+// 域外值，消费侧只有零星 Math.max 收口。「配置面不许撒谎」方言的执法面就是
+// 这里：**域外值在配置装载期即被拒**（schemastery 原生 min/max —— 宿主解析
+// 配置时抛 ValidationError，插件带明确病灶信息拒绝启动），绝不带着静默钳制
+// 出来的值假装「用户要的就是这个」。
+//
+// 域表原则（逐字段按既有文档语义立法，缺省值全部落在域内）：
+//   · 比率/相似度类 ∈ [0,1]；严格 (0,x) 的开域用最小正数下界近似（0.001/0.0001）
+//     —— schemastery 只有闭域；
+//   · 超时/时长类 > 0（文档明示 0 = 关闭/无限等待的字段除外，如 ioTimeoutMs）；
+//   · 容量类 ≥ 1（文档明示 0 = 禁用该器官的字段除外，如 somSparseBudget/
+//     subconsciousCapacity/autonomyW1ClickRetryMax）；
+//   · 差分隐私 ε ∈ (0,10]（federationEpsilon 用 0.001 下界近似开区间；
+//     ΤΕΛ-8b：上界已单源对接 federation 的 PRIVACY_BUDGET_EPSILON_TOTAL）。
+//
+/** 已知边界（诚实申报，不装不存在的能力）：NaN 穿透 schemastery 的 min/max
+// 比较（NaN 与任何数比较均 false）——类型层面的垃圾在装载期仍会被
+// Schema.number() 的 typeof 检查拦下，但 NaN 是合法 number 类型；消费侧的
+// intOr/numOr/Number.isFinite 防御族（ΠΑΝ-111）是该边界的第二道闸。
+/** ΠΑΝ-105：域约束数值铸造（min/max 进 Schema meta —— 声明序/缺省/描述面全部保持）。
+ *  运行时库的 Schema.prototype 携带 min/max（lib 逐字段校验抛 ValidationError），
+ *  本地类型桩（types/dsh-stubs.d.ts）尚未申报 —— 此处以结构化收窄补齐签名，
+ *  不改共享桩文件；执法性由 pan105-113 测试直接验证（域外值必须抛）。 */
+type NumberSchema = ReturnType<typeof Schema.number>;
+/** 结构化收窄：min/max 链式自返（运行时原型已具备 —— 见 lib 的 prototype 装配） */
+type BoundedNumberSchema = NumberSchema & {
+  min(v: number): BoundedNumberSchema;
+  max(v: number): BoundedNumberSchema;
+};
+const bNum = (min: number, max: number): NumberSchema => {
+  const s = Schema.number() as BoundedNumberSchema;
+  return s.min(min).max(max);
+};
 
 export interface Config {
   /** nut-js 鼠标移动速度(ms)，值越大移动越慢、越像人类（来自「双手纪元」） */
@@ -59,6 +103,11 @@ export interface Config {
   enableOcr: boolean;
   /** OCR 语言，如 'eng'、'chi_sim+eng' */
   ocrLang: string;
+  // ─── R2-3（焦点保卫）：宿主窗口自抬抢焦的 type_text 前置校验 ───
+  /** 打字防串窗开关：type_text 派发前校验前台窗口，命中宿主标记 ⇒ 先复焦、复焦失败诚实失败（绝不把字打进宿主聊天框污染下一回合 prompt）；false = 完全关闭（旧行为） */
+  typeFocusGuard: boolean;
+  /** 宿主窗口标记（CSV，小写子串匹配前台标题）：前台命中即视为宿主抢焦；空 = 用内置缺省表 */
+  hostWindowMarkersCsv: string;
   // ─── Z 纪元（Z-1 世界行动引擎）───
   /** 启用交互性探针：find_text 命中先做悬停物理实验（光标形态 + 悬停重绘），对话文本不再被当成入口 */
   enableInteractivityProbe: boolean;
@@ -216,7 +265,11 @@ export interface Config {
   // ─── 纪元 Ψ（万脑归一：多协议统一层）───
   /** 视觉模型平台 id（openai/anthropic/gemini/qwen/moonshot/doubao/xai/siliconflow/openrouter/ollama/lmstudio/vllm/custom；未知名按 OpenAI 兼容 custom 端点接入）；空 = 自动探测环境变量（GLM envs 优先，其次各平台 envKeys 首命中） */
   vlmProvider: string;
-  /** 备选平台链（CSV，如 'anthropic,gemini'）——铸成故障切换池，主力失败按序补位；空 = 不铸池 */
+  /**
+   * R3-2: 备选平台链（CSV，如 'anthropic,gemini' 或 'glm=glm-4v-flash'）——
+   * 铸成故障切换池，主力失败按序补位；每段可带 '=model' per-brain 模型覆写
+   *（显式模型压过 registry 预设缺省；密钥仍走各平台 env 解析）；空 = 不铸池
+   */
   vlmFallbackProviders: string;
   // ─── 纪元 Λ（开箱即亮）：零配置解析链 ───
   /** 无任何云脑配置（config 与 env 全空）时自动探测收养本地视觉服务（Ollama/LM Studio/vLLM 环回轻叩，单候选 1.5s 止损） */
@@ -248,7 +301,7 @@ export interface Config {
   // ─── 地基速修（P1）：IO 排队超时 + 系统级热键黑名单 ───
   /** ioMutex 单次物理 IO 排队/执行超时（ms）：挂死的物理调用不再永久堵塞全局队列；0 = 无限等待（旧行为） */
   ioTimeoutMs: number;
-  /** 系统级热键黑名单（CSV，键名小写）：press_hotkey 命中即拒绝（Alt+F4 关窗、Meta/Win 唤起系统壳层等逃逸动作） */
+  /** 系统级热键黑名单（CSV，键名小写）：press_hotkey 命中即拒绝（Alt+F4 关窗、Meta/Win 唤起系统壳层、Ctrl+Shift+Esc 任务管理器、Alt+Space 窗口系统菜单等逃逸动作——ΤΕΛ-8c/D-G30：后两键已入缺省串） */
   hotkeyBlacklist: string;
   // ─── 纪元 Ρ（双钥公证锁）：不可逆动作的多通道语义公证 ───
   /** 不可逆动作放行前要求多通道语义公证：OCR 实读文字 + 白盒控件名 + 模型自述，任一通道见危险即拦（fail-heavy） */
@@ -285,7 +338,7 @@ export interface Config {
   // ─── 纪元 Μ（万脑联邦进化）：认知器官参数的隐私保护联邦 ───
   /** 联邦聚合端点；空 = 零网络（本地铸摘要/合并/应用依然全功能，供多进程与测试用） */
   federationEndpoint: string;
-  /** 联邦摘要差分隐私 ε（Laplace 计数噪声；与群体经验结晶同默认 1） */
+  /** 联邦摘要差分隐私 ε（Laplace 计数噪声；与群体经验结晶同默认 1）。ΤΕΛ-8b：合法域 (0, 总预算] 单源对接 federation 的 validFederationEpsilon/PRIVACY_BUDGET_EPSILON_TOTAL——config 层前置拒域外值（装载期 fail-loud），federation 侧（ΠΑΝ-70）照旧 fail-closed，两处同律不漂移 */
   federationEpsilon: number;
   /** 单 key 远端证据占本地账本的比例上限（0~1）：防远端洪泛主导本地校准；0.5 = 至多对半掺入 */
   federationMaxRemoteShare: number;
@@ -379,44 +432,63 @@ export interface Config {
   enableStepAuction: boolean;
   /** W5-0（D 接线）：拍卖外注总预算（步）；0（缺省）= 名册推导（Σ maxSteps，与现状总额等价） */
   stepAuctionBudget: number;
+  // ─── ΤΕΛ-8a（沙箱栈专属开关 · D-G16① 收口）───
+  /**
+   * 沙箱栈（排练→固化→重放演武场：rehearse_chain / recall_muscle / replay_on_host /
+   * verify_sandbox_log 四工具 + 三条事件接线 + sandboxLog 账本落盘）的组合根装配开关。
+   * **三态语义**（本字段刻意不设 schema 缺省值，undefined 穿透供组合根判别）：
+   *   · 未设置（缺省）⇒ 跟随旧门控 autonomyEnabled 回退 —— F2-3 以 autonomyEnabled
+   *     权宜门控 applySandboxStack（当时 config.ts 非其领地，D-G16① 移交本开关）；
+   *     落地后兼容律保持：autonomyEnabled=true 且未设本开关的既有部署，沙箱挂线
+   *     行为逐字节不变；
+   *   · 显式 true ⇒ 独立点亮（无需开自主环 —— 沙箱是自主环 perceive→execute→verify
+   *     的技能演练工位，但演武工具与事件接线可独立于 autonomous_run 使用）；
+   *   · 显式 false ⇒ 独立关闭（autonomyEnabled=true 也不再挂线 —— 显式设置优先）。
+   * 「缺省关零回归」论证：缺省部署（autonomyEnabled=false 缺省 + 本开关未设）门控
+   * 求值 false ⇒ 沙箱零挂线、零事件接线、零磁盘写，与接线前逐字节等价。
+   */
+  enableSandboxStack?: boolean;
 }
 
 export const Config: Schema<Config> = Schema.object({
-  mouseSpeed: Schema.number().default(1500).description('nut-js mouseSpeed(ms), larger = more human-like'),
-  compressWidth: Schema.number().default(1440).description('Screenshot resize width in px'),
-  jpegQuality: Schema.number().default(75).description('JPEG quality 0-100'),
-  gridDivisions: Schema.number().default(10).description('SoM grid divisions per axis, 0 disables'),
-  maxImageCount: Schema.number().default(3).description('Sliding-window: max real images kept in context'),
-  maxConsecutiveFailures: Schema.number().default(3).description('Circuit breaker threshold'),
-  maxTextLength: Schema.number().default(1000).description('Max chars per type_text call'),
+  // ΠΑΝ-105：数值字段全量加域（bNum(min,max) —— 域表与立法注释见文件头）
+  mouseSpeed: bNum(1, 600_000).default(1500).description('nut-js mouseSpeed(ms), larger = more human-like'),
+  compressWidth: bNum(320, 7680).default(1440).description('Screenshot resize width in px'),
+  jpegQuality: bNum(1, 100).default(75).description('JPEG quality 0-100'),
+  gridDivisions: bNum(0, 64).default(10).description('SoM grid divisions per axis, 0 disables'),
+  maxImageCount: bNum(1, 32).default(3).description('Sliding-window: max real images kept in context'),
+  maxConsecutiveFailures: bNum(1, 100).default(3).description('Circuit breaker threshold'),
+  maxTextLength: bNum(1, 100_000).default(1000).description('Max chars per type_text call'),
   enableElementIdMode: Schema.boolean().default(false).description('Enable element-ID addressing (needs accessibility provider)'),
   localVisionApi: Schema.string().default('').description('Local vision model endpoint, empty = disabled'),
   verifyActions: Schema.boolean().default(true).description('dHash before/after effect verification'),
-  actionSettleMs: Schema.number().default(400).description('Wait ms after action before after-hash'),
-  noopSimilarityThreshold: Schema.number().default(0.97).description('Similarity above this = likely no-op'),
+  actionSettleMs: bNum(0, 60_000).default(400).description('Wait ms after action before after-hash'),
+  noopSimilarityThreshold: bNum(0, 1).default(0.97).description('Similarity above this = likely no-op'),
   autoRemember: Schema.boolean().default(true).description('Auto-save verified clicks to UI memory'),
   enableUIMemory: Schema.boolean().default(true).description('Enable remember_ui / recall_ui tools'),
-  uiMemoryCapacity: Schema.number().default(200).description('UI memory capacity'),
+  uiMemoryCapacity: bNum(1, 100_000).default(200).description('UI memory capacity'),
   enableJournal: Schema.boolean().default(true).description('Enable action journal & replay'),
   journalPath: Schema.string().default('').description('JSONL journal path, empty = memory only'),
-  replayMaxSteps: Schema.number().default(100).description('Max steps per replay'),
+  replayMaxSteps: bNum(1, 10_000).default(100).description('Max steps per replay'),
   dryRun: Schema.boolean().default(false).description('Dry-run: log actions without executing'),
-  stableScreenDistance: Schema.number().default(3).description('Change-gate: dHash distance <= this = screen unchanged'),
+  stableScreenDistance: bNum(0, 64).default(3).description('Change-gate: dHash distance <= this = screen unchanged'),
   adaptiveSettle: Schema.boolean().default(true).description('Poll until screen settles before verifying effects'),
-  regionVerifyRadius: Schema.number().default(0.15).description('Region-verify radius as screen fraction; 0 = off'),
-  focusMaxAgeMs: Schema.number().default(30000).description('Focus validity window for region verification'),
+  regionVerifyRadius: bNum(0, 0.5).default(0.15).description('Region-verify radius as screen fraction; 0 = off'),
+  focusMaxAgeMs: bNum(0, 3_600_000).default(30000).description('Focus validity window for region verification'),
   enableOcr: Schema.boolean().default(false).description('Enable local OCR (read_text/find_text + semantic verification)'),
   ocrLang: Schema.string().default('eng').description('OCR language, e.g. eng / chi_sim+eng'),
+  typeFocusGuard: Schema.boolean().default(true).description('R2-3 type_text pre-focus guard: before typing, read the foreground window title; if it matches the host-window markers, auto refocus the last switched target window, and fail honestly (never type) when refocus is impossible — prevents typing into the agent host chat box (next-turn prompt pollution)'),
+  hostWindowMarkersCsv: Schema.string().default('dsh,deepseek harness').description('R2-3 host-window markers (CSV, case-insensitive substring against the foreground title); empty = built-in defaults. Override when the host build renames its window'),
   enableInteractivityProbe: Schema.boolean().default(true).description('Hover-probe OCR hits (cursor shape + hover repaint) so conversation text is never mistaken for a clickable entry'),
-  probeDwellMs: Schema.number().default(350).description('Probe hover dwell in ms'),
-  probeRegionRadius: Schema.number().default(0.06).description('Probe region-hash radius as screen fraction'),
-  probeRepaintThreshold: Schema.number().default(0.985).description('Region similarity below this during hover = repaint detected'),
-  probeMaxTargets: Schema.number().default(4).description('Max find_text hits probed per call'),
+  probeDwellMs: bNum(1, 10_000).default(350).description('Probe hover dwell in ms'),
+  probeRegionRadius: bNum(0.001, 0.5).default(0.06).description('Probe region-hash radius as screen fraction'),
+  probeRepaintThreshold: bNum(0.5, 1).default(0.985).description('Region similarity below this during hover = repaint detected'),
+  probeMaxTargets: bNum(0, 64).default(4).description('Max find_text hits probed per call'),
   enableProbeMemory: Schema.boolean().default(true).description('Memoize probe verdicts per scene fingerprint; repeat scenes reuse verdicts with zero experiments'),
-  probeMemoryTtlMs: Schema.number().default(300000).description('Probe-verdict memory TTL in ms'),
-  probeMemoryCapacity: Schema.number().default(128).description('Probe-verdict memory capacity (LRU)'),
-  probeMemorySceneSimilarity: Schema.number().default(0.9).description('Scene-fingerprint similarity required to recall a verdict'),
-  probeRecallRadius: Schema.number().default(0.015).description('Normalized point-distance radius for verdict recall (OCR bbox jitter tolerance)'),
+  probeMemoryTtlMs: bNum(0, 86_400_000).default(300000).description('Probe-verdict memory TTL in ms'),
+  probeMemoryCapacity: bNum(1, 100_000).default(128).description('Probe-verdict memory capacity (LRU)'),
+  probeMemorySceneSimilarity: bNum(0, 1).default(0.9).description('Scene-fingerprint similarity required to recall a verdict'),
+  probeRecallRadius: bNum(0.0001, 0.5).default(0.015).description('Normalized point-distance radius for verdict recall (OCR bbox jitter tolerance)'),
   enableOpenUrl: Schema.boolean().default(true).description('open_url tool: URL sensing (extract/normalize/scheme allowlist) + jump via the OS default browser'),
   enableSkillLibrary: Schema.boolean().default(true).description('Self-evolving skill library (induce/match/run)'),
   skillLibraryPath: Schema.string().default('').description('Skill library JSON path; empty = memory only. Set a path for cross-session learning'),
@@ -425,42 +497,42 @@ export const Config: Schema<Config> = Schema.object({
   riskPatterns: Schema.string().default('password,passwd,密码,口令,验证码,verification code,2fa,otp,pin,secret,token,api key,私钥').description('Comma-separated risk keywords'),
   enableApprovalGate: Schema.boolean().default(true).description('Approval gate: irreversible actions need a one-shot token from request_approval'),
   dangerPatterns: Schema.string().default('send,发送,delete,删除,remove,移除,pay,支付,付款,buy,购买,checkout,结算,下单,submit order,提交订单,confirm,确认订单,format,格式化,erase,抹掉,uninstall,卸载,reset,重置,清空,withdraw,提现,transfer,转账').description('Comma-separated irreversible-action keywords triggering approval'),
-  approvalTokenTtlMs: Schema.number().default(600000).description('Approval-token TTL (ms). ONE user consent covers the whole task retry window; each failed attempt re-arms it (capped at 3x TTL from mint)'),
-  approvalMaxAttempts: Schema.number().default(5).description('Max physical attempts per approval token: failed (unverified) clicks retry under the same consent without re-asking; beyond this a fresh approval is required'),
+  approvalTokenTtlMs: bNum(1000, 86_400_000).default(600000).description('Approval-token TTL (ms). ONE user consent covers the whole task retry window; each failed attempt re-arms it (capped at 3x TTL from mint)'),
+  approvalMaxAttempts: bNum(1, 100).default(5).description('Max physical attempts per approval token: failed (unverified) clicks retry under the same consent without re-asking; beyond this a fresh approval is required'),
   // ─── W6R（安全收口）：危险令牌路径的验证旁路双重逃生门 ───
   allowUnverifiedDangerous: Schema.boolean().default(false).description('DANGEROUS (risk flag, default false): allow dangerous (approval-token / beginAttempt-consume) actions to dispatch when effect verification is unavailable (verifyActions=false), the grounding freshness probe is absent/failed, or the canary probe is absent/failed on a token-bearing call. false (default) = fail-closed at all three points. true = explicit escape hatch restoring degraded pass-through / legacy unverified-dispatch-consumed dialect (verification bypass additionally requires verifyActions=false — two explicit keys). Irreversible actions may then execute unverified — only for deployments that explicitly accept that risk.'),
   enableTelemetry: Schema.boolean().default(true).description('Telemetry: per-tool success/no-op rates, latency percentiles, memory hit rates'),
   checkpointPath: Schema.string().default('').description('Cognitive-state checkpoint JSON (atomic). Auto-restore on start, auto-save on unload. Empty = disabled'),
   // ─── 创世纪（B-5~B-8） ───
-  visionApiTimeoutMs: Schema.number().default(5000).description('Timeout (ms) for the local vision API. Fail fast instead of hanging the agent'),
+  visionApiTimeoutMs: bNum(100, 600_000).default(5000).description('Timeout (ms) for the local vision API. Fail fast instead of hanging the agent'),
   enableLegacySummary: Schema.boolean().default(true).description('OCR the evicted screenshot into a short text summary so old frames keep semantic content'),
-  legacySummaryMaxChars: Schema.number().default(200).description('Character budget for legacy summaries (prevents OCR text from flooding context)'),
-  maxContextImageKb: Schema.number().default(600).description('Hard budget (KB) for cumulative in-context image bytes; combined with maxImageCount'),
+  legacySummaryMaxChars: bNum(1, 10_000).default(200).description('Character budget for legacy summaries (prevents OCR text from flooding context)'),
+  maxContextImageKb: bNum(1, 100_000).default(600).description('Hard budget (KB) for cumulative in-context image bytes; combined with maxImageCount'),
   popupKeywords: Schema.string().default('cookie,allow,accept,confirm,登录,订阅,update,install,allow notifications,trial,upgrade now,subscribe,accept all,agree').description('Comma-separated keywords: OCR hit in the center region confirms a popup semantically'),
   // ─── 认知升维（C-1~C-5） ───
   intentVerify: Schema.boolean().default(true).description('Intent-aware verification: actions may carry expected_effect; a physics rule engine then seeks evidence (no expectation = zero behavior change)'),
   physicsRules: Schema.string().default('').description('Comma-separated physics-rule kinds to enable (toggle_on,toggle_off,menu_expand,menu_collapse,scroll_content_up,scroll_content_down,input_focus); empty = all'),
   enableRecombination: Schema.boolean().default(true).description('Skill DNA recombination: synthesize new skills from gene segments when match_skill finds nothing'),
   salienceFocus: Schema.boolean().default(true).description('Cognitive-focus engine: salience-driven eviction + task-goal pinning (off = plain FIFO)'),
-  pinBudget: Schema.number().default(1).description('Max pinned screenshots (prevents pin-everything from breaking the dual budget)'),
-  subconsciousCapacity: Schema.number().default(32).description('Subconscious pool capacity (evicted records compressed to (hash,gist) tuples); 0 disables flashback'),
-  subconsciousMatchDistance: Schema.number().default(6).description('Déjà-vu trigger threshold (dHash hamming distance) for subconscious flashback'),
+  pinBudget: bNum(0, 32).default(1).description('Max pinned screenshots (prevents pin-everything from breaking the dual budget)'),
+  subconsciousCapacity: bNum(0, 4096).default(32).description('Subconscious pool capacity (evicted records compressed to (hash,gist) tuples); 0 disables flashback'),
+  subconsciousMatchDistance: bNum(0, 64).default(6).description('Déjà-vu trigger threshold (dHash hamming distance) for subconscious flashback'),
   swarmEndpoint: Schema.string().default('').description('Swarm-intelligence center endpoint; empty = zero network (local experience crystals still work)'),
-  swarmSyncIntervalMs: Schema.number().default(300000).description('Swarm sync interval (ms); upload is async fire-and-forget, never blocks the hot path'),
-  crystalCapacity: Schema.number().default(500).description('Experience-crystal capacity (aggregated from the journal chain)'),
+  swarmSyncIntervalMs: bNum(1000, 86_400_000).default(300000).description('Swarm sync interval (ms); upload is async fire-and-forget, never blocks the hot path'),
+  crystalCapacity: bNum(1, 100_000).default(500).description('Experience-crystal capacity (aggregated from the journal chain)'),
   // ─── 第四维（D-1） ───
   enableSubAgents: Schema.boolean().default(true).description('Multi-agent swarm: spawn role-based sub-agents via swarm_dispatch (one body, many minds)'),
-  maxSubAgents: Schema.number().default(3).description('Hard cap on concurrent sub-agents; excess spawn attempts are rejected'),
-  agentRoundSteps: Schema.number().default(10).description('Per-agent action-step budget reminder line (surface via swarm_dispatch status)'),
+  maxSubAgents: bNum(1, 64).default(3).description('Hard cap on concurrent sub-agents; excess spawn attempts are rejected'),
+  agentRoundSteps: bNum(1, 10_000).default(10).description('Per-agent action-step budget reminder line (surface via swarm_dispatch status)'),
   // ─── 第四维（D-2） ───
   enableEnvironmentShaper: Schema.boolean().default(true).description('Environment shaping: reshape the workspace (raise/maximize/move/zoom) with a LIFO undo log; zero behavior when capability set is empty'),
   shaperAutoRestore: Schema.boolean().default(true).description('Auto restoreAll on unload — the power to change the world comes with the duty to restore it'),
   shaperAllowSystemWide: Schema.boolean().default(false).description('Gate for system-wide changes (set_contrast); disabled by default'),
   // ─── 第四维（D-3） ───
   enableQuantumSense: Schema.boolean().default(true).description('Quantum sensing: after N consecutive verified failures, enter superposition — whitebox annotations are burned into the screenshot, keeping the decision surface purely visual; zero behavior without a whitebox provider'),
-  degradeAfterFailures: Schema.number().default(3).description('Consecutive verified-effect failures before degrading to superposition (hard evidence only)'),
-  quantumRestoreOnSuccess: Schema.number().default(2).description('Consecutive verified successes in superposition before reverting to pure vision'),
-  quantumMaxNodes: Schema.number().default(30).description('Max whitebox annotation nodes per screenshot (token discipline)'),
+  degradeAfterFailures: bNum(1, 1000).default(3).description('Consecutive verified-effect failures before degrading to superposition (hard evidence only)'),
+  quantumRestoreOnSuccess: bNum(1, 1000).default(2).description('Consecutive verified successes in superposition before reverting to pure vision'),
+  quantumMaxNodes: bNum(0, 500).default(30).description('Max whitebox annotation nodes per screenshot (token discipline)'),
   // ─── 第四维（D-4） ───
   enableQualityDoctor: Schema.boolean().default(true).description('Quality Doctor: immune system auditing code genes (iron laws) and causal-chain legality; diagnose is read-only, mechanical fixes need explicit authorization'),
   doctorRules: Schema.string().default('').description('Comma-separated rule-ID whitelist (empty = all rules active)'),
@@ -475,15 +547,15 @@ export const Config: Schema<Config> = Schema.object({
   vlmAssistOcr: Schema.boolean().default(false).description('Allow the VLM cloud cortex to read the screen as a third path when BOTH local OCR paths (server L2 + legacy tesseract) fail (semanticConfirm fallback)'),
   // ─── 纪元 Ψ（万脑归一：多协议统一层） ───
   vlmProvider: Schema.string().default('').description('Vision-model platform id (openai/anthropic/gemini/qwen/moonshot/doubao/xai/siliconflow/openrouter/ollama/lmstudio/vllm/custom; unknown ids are treated as OpenAI-compatible custom endpoints); empty = auto-detect from env (GLM envs first, then each platform envKeys)'),
-  vlmFallbackProviders: Schema.string().default('').description('CSV fallback platform chain (e.g. "anthropic,gemini") minted into a failover pool behind the primary; empty = no pool'),
+  vlmFallbackProviders: Schema.string().default('').description('R3-2: CSV fallback platform chain (e.g. "anthropic,gemini") minted into a failover pool behind the primary; each segment may carry a per-brain model override as "id=model" (e.g. "glm=glm-4v-flash" - explicit model beats the registry preset default; keys still resolve via each platform env); empty = no pool'),
   // ─── 纪元 Λ（开箱即亮） ───
   vlmAutoAdoptLocal: Schema.boolean().default(true).description('When NO vision brain is configured at all (no config, no env), auto-adopt a local zero-key vision service (Ollama/LM Studio/vLLM loopback probe, 1.5s budget each); off = skip straight to the wizard'),
   vlmOnboardingEnabled: Schema.boolean().default(true).description('When NO vision model is resolvable at all (no archive, no local service, no env), pop up the local connection wizard page (loopback HTTP server + default browser); off = stay dark until manual configuration'),
-  vlmOnboardingPort: Schema.number().default(18432).description('Default port for the connection wizard server (falls back +1 up to +8 when occupied)'),
+  vlmOnboardingPort: bNum(1, 65_535).default(18432).description('Default port for the connection wizard server (falls back +1 up to +8 when occupied)'),
   // ─── 纪元 Φ（自主智能环） ───
   autonomyEnabled: Schema.boolean().default(false).description('Enable the autonomous loop meta-tool (autonomous_run): goal -> perceive -> judge -> constitution -> execute -> verify -> evolve. Off = tool not mounted'),
-  autonomyMaxSteps: Schema.number().default(24).description('Autonomous loop per-run step cap (both the loop fuse and the constitution hard stop), default 24'),
-  autonomyTimeBudgetSec: Schema.number().default(300).description('Autonomous loop per-run wall-clock budget in seconds, default 300'),
+  autonomyMaxSteps: bNum(1, 1000).default(24).description('Autonomous loop per-run step cap (both the loop fuse and the constitution hard stop), default 24'),
+  autonomyTimeBudgetSec: bNum(1, 86_400).default(300).description('Autonomous loop per-run wall-clock budget in seconds, default 300'),
   autonomyAllowTiers: Schema.string().default('benign').description('CSV of risk tiers allowed to run autonomously without approval (values: benign, sensitive; destructive is always constitution-gated), default "benign"'),
   autonomyVlmWhenUncertain: Schema.boolean().default(true).description('Consult the GLM cortex when element matching is low-confidence or tied (PolicyEngine uncertainty arbitration), default true'),
   autonomyForbiddenKeywords: Schema.string().default('').description('CSV of extra danger keywords appended to the autonomy constitution scan list (goal/target/payload text scan), empty = none'),
@@ -492,15 +564,19 @@ export const Config: Schema<Config> = Schema.object({
   kernelStatePath: Schema.string().default('').description('Kernel evolution-state JSON path (atomic tmp+rename write): params/evidence/generations carried across sessions (restored on load, saved on unload and after evolution ticks); empty = memory only'),
   kernelEvolutionEnabled: Schema.boolean().default(false).description('Master switch for production kernel evolution: throttled calibrator ticks on user-message hooks; false (default) = bookkeeping only, zero behavior change'),
   // ─── 地基速修（P1） ───
-  ioTimeoutMs: Schema.number().default(15000).description('ioMutex per-IO queue/execution timeout (ms): a hung physical call no longer blocks the global queue forever; 0 = wait forever (legacy behavior)'),
-  hotkeyBlacklist: Schema.string().default('alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete').description('Comma-separated system-hotkey blacklist (lowercase key names): press_hotkey matches are rejected outright (window-close / OS-shell escape moves)'),
+  ioTimeoutMs: bNum(0, 3_600_000).default(15000).description('ioMutex per-IO queue/execution timeout (ms): a hung physical call no longer blocks the global queue forever; 0 = wait forever (legacy behavior)'),
+  // ΤΕΛ-8c（D-G30 收口）：缺省串补齐 ctrl+shift+esc,alt+space 两键 —— 与
+  // system.hotkeyPolicy 的装载期补全 withPan10DefaultAdditions 收敛同一生效缺省
+  //（字面与该模块 canonical 完全一致 ⇒ 补全函数自此对缺省路径自动变 no-op，
+  // 幂等兜底保留防镜像漂移）；显式配置（含显式空串=明示不设防）逐字节生效不被越权。
+  hotkeyBlacklist: Schema.string().default('alt+f4,meta,meta+l,meta+r,meta+d,win,cmd+q,ctrl+alt+delete,ctrl+shift+esc,alt+space').description('Comma-separated system-hotkey blacklist (lowercase key names): press_hotkey matches are rejected outright (window-close / OS-shell escape moves: alt+f4, meta/win, ctrl+alt+delete, ctrl+shift+esc task manager, alt+space window menu)'),
   // ─── 纪元 Ρ（双钥公证锁） ───
   enableNotarizationLock: Schema.boolean().default(true).description('Two-key semantic notarization for irreversible actions: OCR-read label + whitebox control name + model self-description — ANY channel seeing danger blocks (fail-heavy); channels absent degrade honestly to legacy single-channel behavior'),
   notarySemanticHandshake: Schema.boolean().default(true).description('Semantic handshake: the OCR-read label at the click point must agree with the model description, otherwise reject and demand re-description (defeats injection lying about the target)'),
   // ─── 纪元 Γ（注视经济） ───
   foveatedEncoding: Schema.boolean().default(false).description('Foveated encoding: center region at native resolution, periphery downsampled — maximize information gain per VLM token; false (default) = uniform encoding (legacy)'),
-  foveaSize: Schema.number().default(0.5).description('Fovea window edge as a fraction of the encoded image (square), default 0.5'),
-  foveaPeripheryScale: Schema.number().default(2).description('Periphery downsampling factor (>1: periphery shrunk by this factor then scaled back into place), default 2'),
+  foveaSize: bNum(0.01, 1).default(0.5).description('Fovea window edge as a fraction of the encoded image (square), default 0.5'),
+  foveaPeripheryScale: bNum(1, 16).default(2).description('Periphery downsampling factor (>1: periphery shrunk by this factor then scaled back into place), default 2'),
   // ─── 纪元 Υ（认知睡眠周期） ───
   enableSleepCycle: Schema.boolean().default(false).description('Cognitive sleep cycle: on session end run the six-act offline consolidation (replay -> distill -> immune -> calibrate -> audit -> morning report); fully offline, idempotent via watermark'),
   sleepTracePath: Schema.string().default('').description('Sleep watermark + morning-report JSONL path; empty = memory only (cross-process idempotency lost)'),
@@ -508,19 +584,19 @@ export const Config: Schema<Config> = Schema.object({
   enableEpistemicGate: Schema.boolean().default(true).description('Epistemic gate in the autonomy loop: calibrated confidence x error-cost adjudicates proceed/ask_human/abort BEFORE the constitution check (the agent asks for help at mathematically justified moments)'),
   // ─── 纪元 Κ（惊异课程） ───
   curriculumEnabled: Schema.boolean().default(false).description('Surprise-driven curriculum: gym world generation samples proportional to the production worldModel surprise spectrum, P(world) ~ exp(beta*surprise); false (default) = uniform (legacy)'),
-  curriculumBeta: Schema.number().default(1).description('Surprise-curriculum temperature beta: higher = more concentration on high-surprise scenes, default 1.0'),
+  curriculumBeta: bNum(0, 10).default(1).description('Surprise-curriculum temperature beta: higher = more concentration on high-surprise scenes, default 1.0'),
   // ─── 纪元 Π（行为公证账本） ───
   notaryEndpoint: Schema.string().default('').description('RFC 3161 timestamp-authority (TSA) endpoint; empty = local-time anchors only (honestly labeled source:local, zero network)'),
   notaryTracePath: Schema.string().default('').description('Append-only JSONL path for anchor records (tolerant of torn last lines); empty = memory only (anchor chain lost across processes)'),
   notaryAutoAnchor: Schema.boolean().default(false).description('Automatically mint one anchor (chain tip + MMR root + timestamp) for the journal on unload; false (default) = notarize only manually via the quality_checkup notarize action'),
   // ─── 纪元 Μ（万脑联邦进化） ───
   federationEndpoint: Schema.string().default('').description('Federation aggregation endpoint; empty = zero network (local mint/merge/apply still fully functional for multi-process and test use)'),
-  federationEpsilon: Schema.number().default(1).description('Differential-privacy epsilon for federated evidence digests (Laplace count noise; same default of 1 as the swarm experience crystals)'),
-  federationMaxRemoteShare: Schema.number().default(0.5).description('Cap (0~1) on remote-evidence share per key relative to the local ledger: prevents remote flooding from dominating local calibration; 0.5 = at most half-and-half blending'),
+  federationEpsilon: bNum(0.001, PRIVACY_BUDGET_EPSILON_TOTAL).default(1).description('Differential-privacy epsilon for federated evidence digests (Laplace count noise; same default of 1 as the swarm experience crystals). Valid domain (0, total privacy budget] is single-sourced from federation (validFederationEpsilon / PRIVACY_BUDGET_EPSILON_TOTAL): out-of-domain values are rejected at config load (fail-loud) and again fail-closed at the federation mint/sync entry (PAN-70); lower bound 0.001 approximates the open interval (schemastery has closed domains only)'),
+  federationMaxRemoteShare: bNum(0, 1).default(0.5).description('Cap (0~1) on remote-evidence share per key relative to the local ledger: prevents remote flooding from dominating local calibration; 0.5 = at most half-and-half blending'),
   // ─── 纪元 Ι（自我模型） ───
   enableSelfModel: Schema.boolean().default(true).description('Self-model: decayed Beta competence posteriors per (action-kind x scene-bucket), passive bookkeeping consumed by the epistemic gate and introspection'),
-  selfModelMinEvidence: Schema.number().default(8).description('Minimum evidence n before the self-model may inform the epistemic gate (honest cold start, no fabricated experience)'),
-  selfModelHalfLifeH: Schema.number().default(168).description('Self-model memory half-life in hours: old outcomes decay exponentially, default 168 (one week)'),
+  selfModelMinEvidence: bNum(0, 10_000).default(8).description('Minimum evidence n before the self-model may inform the epistemic gate (honest cold start, no fabricated experience)'),
+  selfModelHalfLifeH: bNum(0.1, 100_000).default(168).description('Self-model memory half-life in hours: old outcomes decay exponentially, default 168 (one week)'),
   // ─── 纪元 Τ（干预即教育） ───
   enableDemonstrations: Schema.boolean().default(true).description('Intervention-as-education: acceptance-consumed approvals strengthen skill trust, denied approvals feed failure memory (never records credential content — action shape and screen fingerprint only)'),
   // ─── 纪元 Ε（预言引擎） ───
@@ -531,32 +607,32 @@ export const Config: Schema<Config> = Schema.object({
   enableProbeEconomy: Schema.boolean().default(true).description('Probe economics: interactivity-probe channel ordering by learned bits-per-cost posteriors (driven by memoized-verdict statistics; off = fixed three-channel descending order, legacy)'),
   // ─── 纪元 W1/W2（执行层四连改 · 集成接线） ───
   autonomyW1Exec: Schema.boolean().default(true).description('W1 exec-layer quad upgrade wiring: buildAutonomyStack injects probe (ExecWorldProbe — only lights up when the physical service is already alive, never spawns) + focus source (origin-tagged, no cross-layer shortcuts); off = pre-wire byte-identical legacy path'),
-  autonomyW1RoiRadiusPx: Schema.number().default(128).description('W1-1 A2: action-point ROI radius in px (normalized by capture short edge), default 128'),
-  autonomyW1RoiHammingTolerance: Schema.number().default(2).description('W1-1 A2: ROI region-hash "changed" hamming threshold (distance > this = changed), default 2'),
-  autonomyW1FocusShortcutRadius: Schema.number().default(0.01).description('W1-1 A3: focus shortcut radius (normalized distance <= this skips re-dispatch), default 0.01'),
-  autonomyW1LargeBboxPx: Schema.number().default(96).description('W1-1 A4: large-bbox threshold (long edge >= this => word-centroid landing point), default 96'),
-  autonomyW1SmallBboxPx: Schema.number().default(24).description('W1-1 A4: small-bbox threshold (short edge < this => shrink landing toward center), default 24'),
-  autonomyW1SmallShrinkRatio: Schema.number().default(0.2).description('W1-1 A4: small-bbox shrink ratio (0.2 = pull 20 percent toward center), default 0.2'),
-  autonomyW1WordMaxAreaRatio: Schema.number().default(0.6).description('W1-1 A4: word-element area cap as a fraction of the target bbox (above = treated as the target itself), default 0.6'),
-  autonomyW1ClickRetryMax: Schema.number().default(8).description('W1-1 A4: grid retry cap (3x3 minus center = 8 neighbors; 0 disables grid retry), default 8'),
-  autonomyW1GridStepRatio: Schema.number().default(0.25).description('W1-1 A4: grid step as a fraction of the target short edge, default 0.25'),
-  autonomyW1GridStepMinPx: Schema.number().default(4).description('W1-1 A4: grid step lower bound in px, default 4'),
-  autonomyW1GridStepMaxPx: Schema.number().default(40).description('W1-1 A4: grid step upper bound in px, default 40'),
-  autonomyW1SteadyPollMs: Schema.number().default(150).description('W1-1 A5: steady-gate poll interval in ms, default 150'),
-  autonomyW1SteadyTimeoutMs: Schema.number().default(2000).description('W1-1 A5: steady-gate forced-release timeout in ms (records degraded), default 2000'),
-  autonomyW1SteadyHamming: Schema.number().default(2).description('W1-1 A5: steady-gate hamming threshold (two consecutive frames <= this = settled), default 2'),
-  autonomyW1RowMeansGrid: Schema.number().default(64).description('W1-1 A5: row-means grid for frameRowmeans, default 64'),
-  autonomyW1RowShiftSearchRange: Schema.number().default(16).description('W1-1 A5: row-shift search range for estimateRowShift, default 16'),
+  autonomyW1RoiRadiusPx: bNum(1, 4096).default(128).description('W1-1 A2: action-point ROI radius in px (normalized by capture short edge), default 128'),
+  autonomyW1RoiHammingTolerance: bNum(0, 64).default(2).description('W1-1 A2: ROI region-hash "changed" hamming threshold (distance > this = changed), default 2'),
+  autonomyW1FocusShortcutRadius: bNum(0, 1).default(0.01).description('W1-1 A3: focus shortcut radius (normalized distance <= this skips re-dispatch), default 0.01'),
+  autonomyW1LargeBboxPx: bNum(1, 4096).default(96).description('W1-1 A4: large-bbox threshold (long edge >= this => word-centroid landing point), default 96'),
+  autonomyW1SmallBboxPx: bNum(0, 4096).default(24).description('W1-1 A4: small-bbox threshold (short edge < this => shrink landing toward center), default 24'),
+  autonomyW1SmallShrinkRatio: bNum(0, 1).default(0.2).description('W1-1 A4: small-bbox shrink ratio (0.2 = pull 20 percent toward center), default 0.2'),
+  autonomyW1WordMaxAreaRatio: bNum(0, 1).default(0.6).description('W1-1 A4: word-element area cap as a fraction of the target bbox (above = treated as the target itself), default 0.6'),
+  autonomyW1ClickRetryMax: bNum(0, 64).default(8).description('W1-1 A4: grid retry cap (3x3 minus center = 8 neighbors; 0 disables grid retry), default 8'),
+  autonomyW1GridStepRatio: bNum(0, 1).default(0.25).description('W1-1 A4: grid step as a fraction of the target short edge, default 0.25'),
+  autonomyW1GridStepMinPx: bNum(0, 512).default(4).description('W1-1 A4: grid step lower bound in px, default 4'),
+  autonomyW1GridStepMaxPx: bNum(1, 4096).default(40).description('W1-1 A4: grid step upper bound in px, default 40'),
+  autonomyW1SteadyPollMs: bNum(1, 10_000).default(150).description('W1-1 A5: steady-gate poll interval in ms, default 150'),
+  autonomyW1SteadyTimeoutMs: bNum(1, 600_000).default(2000).description('W1-1 A5: steady-gate forced-release timeout in ms (records degraded), default 2000'),
+  autonomyW1SteadyHamming: bNum(0, 64).default(2).description('W1-1 A5: steady-gate hamming threshold (two consecutive frames <= this = settled), default 2'),
+  autonomyW1RowMeansGrid: bNum(1, 8192).default(64).description('W1-1 A5: row-means grid for frameRowmeans, default 64'),
+  autonomyW1RowShiftSearchRange: bNum(1, 4096).default(16).description('W1-1 A5: row-shift search range for estimateRowShift, default 16'),
   autonomyW1FrameGate: Schema.boolean().default(true).description('W2-0: perception-gate (C1 act-expectation no-look gating) wiring — buildAutonomyStack injects the local frameHash port (capture -> dhash; failure => null => honest degrade to full perception). Five-fold AND gate keeps only the narrowest benign no-impact class skippable'),
-  autonomyW1GateHammingTolerance: Schema.number().default(3).description('W1-3 C1: gate dHash hamming tolerance (same default 3 as worldSnapshot), default 3'),
-  autonomyW1GatePollIntervalMs: Schema.number().default(250).description('W1-3 C1: wait-watch poll interval in ms, default 250'),
-  autonomyW1GatePollMaxMs: Schema.number().default(2000).description('W1-3 C1: wait-watch max duration in ms (then advance with a light observation), default 2000'),
-  autonomyW1GateMaxConsecutiveSkips: Schema.number().default(1).description('W1-3 C1: max consecutive perception skips before a forced full perception (bounded freshness for terminal-criteria OCR), default 1'),
+  autonomyW1GateHammingTolerance: bNum(0, 64).default(3).description('W1-3 C1: gate dHash hamming tolerance (same default 3 as worldSnapshot), default 3'),
+  autonomyW1GatePollIntervalMs: bNum(1, 60_000).default(250).description('W1-3 C1: wait-watch poll interval in ms, default 250'),
+  autonomyW1GatePollMaxMs: bNum(1, 600_000).default(2000).description('W1-3 C1: wait-watch max duration in ms (then advance with a light observation), default 2000'),
+  autonomyW1GateMaxConsecutiveSkips: bNum(0, 100).default(1).description('W1-3 C1: max consecutive perception skips before a forced full perception (bounded freshness for terminal-criteria OCR), default 1'),
   vlmZoomVerify: Schema.boolean().default(true).description('W1-8 P3: zoom re-verify verifyClient wiring (registered into the kernel registry as grounding.verifyZoom): low-confidence / small-target / dense-neighborhood groundings get a selective zoom re-grounding + OCR cross-check; off => trigger events degrade to port-absent and pass through'),
-  somSparseBudget: Schema.number().default(0).description('W1-7 P4: sparse SoM marking budget (Top-K cap); 0 (default) = full marking (OFF — flipping the sparse default changes the existing annotation output surface; keep off until the evidence chain is battle-tested)'),
+  somSparseBudget: bNum(0, 4096).default(0).description('W1-7 P4: sparse SoM marking budget (Top-K cap); 0 (default) = full marking (OFF — flipping the sparse default changes the existing annotation output surface; keep off until the evidence chain is battle-tested)'),
   // ─── 纪元 W2（第二批器官 · W3-0 集成接线） ───
   vlmProviderTiers: Schema.string().default('').description('W2-8 C2: CSV provider-tier map for the failover pool tier roster (e.g. "ollama=cheap,siliconflow=cheap"; tier = cheap|primary; keys are pool provider ids) feeding the cost-cascade cheap arm; empty (default) = no cheap tier, cascade always abstains (zero behavior change)'),
-  vlmCascadeDangerMax: Schema.number().default(0.35).description('W2-8 C2: cost-cascade triage danger ceiling (0~1): danger <= this tries the deterministically-validated cheap arm before the primary; default 0.35 with the wiring-time conservative static factors (medium risk / unfamiliar scene / neutral confidence => danger 0.6) keeps the cascade abstaining (fail-safe: no evidence, no cheapening)'),
+  vlmCascadeDangerMax: bNum(0, 1).default(0.35).description('W2-8 C2: cost-cascade triage danger ceiling (0~1): danger <= this tries the deterministically-validated cheap arm before the primary; default 0.35 with the wiring-time conservative static factors (medium risk / unfamiliar scene / neutral confidence => danger 0.6) keeps the cascade abstaining (fail-safe: no evidence, no cheapening)'),
   recoveryEfficacyPath: Schema.string().default('').description('W2-5: recovery-efficacy ledger JSON path (atomic tmp+rename): Beta posteriors per (syndrome x root-cause x recovery action) restored on load, auto-persisted on episode close, saved on unload; empty (default) = memory only'),
   // ─── 纪元 W3（第三批器官 · W4-0 集成接线） ───
   enableExploration: Schema.boolean().default(false).description('W4-0: exploration frontier (W3-7 R2) — buildAutonomyStack mints an ExplorationLedger into deps.exploration (UCB frontier advice on the recovery escalate branch + per-step observe bookkeeping); false (default) = port absent, byte-identical legacy escalate path'),
@@ -566,5 +642,10 @@ export const Config: Schema<Config> = Schema.object({
   // ─── 纪元 W4（第四批器官 · W5-0 集成接线） ───
   enableReversibilityLanes: Schema.boolean().default(false).description('W4-3 S5: dispatch lanes by reversibility level — click/type/drag tools classify the intent (reversibilityRegistry.classify) BEFORE dispatch: reversible = fast lane, compensable = escrow lane (mint a reversal plan BEFORE approval.beginAttempt on dangerous+token paths; non-enforcement paths annotate only), irreversible = hand control back to the HUMAN (no automated dispatch). Unknown-semantics actions are left to the existing danger-word gate (classification-knowledge absence is not a lane verdict). false (default) = byte-identical legacy path'),
   enableStepAuction: Schema.boolean().default(false).description('W4-7 G5: step-auction market for sub-agents — per-agent maxSteps becomes a shared pool re-auctioned every K charged steps (convergence evidence aggregated from experience crystals by birth-scene fingerprint); false (default) = per-agent maxSteps budgets, byte-identical'),
-  stepAuctionBudget: Schema.number().default(0).description('W4-7 G5: explicit total step-pool budget for the auction market; 0 (default) = derived from the roster (sum of maxSteps — total budget equivalent to the status quo)'),
+  stepAuctionBudget: bNum(0, 100_000).default(0).description('W4-7 G5: explicit total step-pool budget for the auction market; 0 (default) = derived from the roster (sum of maxSteps — total budget equivalent to the status quo)'),
+  // ─── ΤΕΛ-8a（沙箱栈专属开关 · D-G16① 收口）───
+  // 刻意**不设 .default()**（undefined 穿透）：组合根门控为
+  // `config.enableSandboxStack ?? config.autonomyEnabled` —— 未设跟随旧门控回退
+  //（兼容律），显式 true/false 优先。三态语义全述见 interface 注释。
+  enableSandboxStack: Schema.boolean().description('Sandbox stack (rehearse -> consolidate -> replay dojo: 4 tools + 3 event wirings + sandboxLog ledger persistence) root-assembly switch. Tri-state by design (no schema default — unset stays undefined): unset = follow the legacy autonomyEnabled gate (byte-identical compatibility; F2-3 interim gate retired per D-G16-1); explicit true = light up independently of the autonomous loop; explicit false = off regardless of autonomyEnabled (explicit setting wins). Default deployment stays OFF (zero regression)'),
 });

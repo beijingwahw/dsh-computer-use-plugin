@@ -17,7 +17,7 @@ export * from './openai.js';
 export * from './anthropic.js';
 export * from './gemini.js';
 export { probeProvider, discoverModels, probeAllPlatforms, PLATFORM_PRESETS as PROBE_PLATFORM_PRESETS, } from './probe.js';
-export { ProviderPool, createProviderPool, getPreset as getPoolPreset, resolveProviderConfig as resolvePoolProviderConfig, } from './failover.js';
+export { ProviderPool, createProviderPool, getPreset as getPoolPreset, parseFallbackSpec, resolveProviderConfig as resolvePoolProviderConfig, } from './failover.js';
 // 纪元 Σ（Σ-1 全军升维）：云脑合议庭 —— ensemble 全族导出名（Ensemble* 前缀）
 // 与既有导出零重名，star 转发零歧义。
 export * from './ensemble.js';

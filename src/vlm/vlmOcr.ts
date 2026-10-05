@@ -20,8 +20,12 @@ import {
 } from './glmClient';
 import type { StructuredVisionPort } from './providers/types';
 import { encodeForVlmMeta, mapEncodedToOriginal, mapInsetToOriginal, type Bbox } from './codec';
-import { clampBbox } from './grounding';
-import { buildOcrPrompt } from './som';
+// ΠΑΝ-127（D-F5 清偿）：clampBbox 改自零出边叶导入（原借 grounding 构成感知
+// 主环 value 二环；桶面同名符号仍经再导出可用）。
+import { clampBbox } from './bbox';
+// ΠΑΝ-127（D-F5 清偿）：buildOcrPrompt 改自零出边叶导入（原借 som 构成感知
+// 主环 value 环的一臂；som 面同名符号仍经再导出可用）。
+import { buildOcrPrompt } from './internalUtils';
 
 /** 云脑识别词 —— 本地 OcrWord 的像素方言（bbox/center 像素坐标；空间见 VlmOcrResult.coordinateSpace） */
 export interface VlmWord {

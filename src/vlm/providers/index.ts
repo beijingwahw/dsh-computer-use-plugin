@@ -30,10 +30,12 @@ export {
   ProviderPool,
   createProviderPool,
   getPreset as getPoolPreset,
+  parseFallbackSpec,
   resolveProviderConfig as resolvePoolProviderConfig,
   type ProviderPoolOptions,
   type PoolBuildOptions,
   type ProviderConfigVia,
+  type FallbackSpec,
   type ResolvedProviderConfig as PoolResolvedProviderConfig,
 } from './failover';
 // 纪元 Σ（Σ-1 全军升维）：云脑合议庭 —— ensemble 全族导出名（Ensemble* 前缀）

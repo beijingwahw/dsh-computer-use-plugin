@@ -30,8 +30,13 @@ import type { CascadeValidator } from './providers/cascade';
 import type { CascadeRiskTier, CascadeTriageFactors } from './providers/cascade';
 import { matchesDangerPatterns, matchesRiskPatterns } from '../riskGate';
 import type { ProviderTier } from './providers/types';
+// ΠΑΝ-24（dhash 场景指纹）：perceptualHash 纯函数直引 —— 与 grounding 同律
+//（dhash 经 _legacyDeps 懒加载 sharp，无环；级联分诊自此用真实场景指纹，
+// 不再以 prompt-LRU 冒充）。
+import { dhash } from '../perceptualHash';
 // 纪元 Β（反驳法院）：第二意见面的装配物料 + 法院本体再分发
 import { createEnsembleCourt, EnsembleCourt } from './providers/ensemble';
+import type { EnsembleRateGate } from './providers/ensemble';
 import { attachRefuteFace, isSameRefuteSource, type RefuteBrain, type RefuteQuorumFace } from './refute';
 // 纪元 Λ（开箱即亮）：连接存档 / 本地自动接管 / 向导服务 三模块再分发
 export * from './connection';
@@ -270,39 +275,55 @@ export function cascadeSemanticValidators(req: { prompt?: unknown; system?: unkn
 }
 
 /**
- * ΝΩ-18：级联咨询桥的装配体（从 configureVlm 提取为具名函数 —— 同一表达式
- * 供生产接线与测试直用）：perCall 供请求级动态因子（ΑΩ-R2）+ 按请求类型的
- * 语义谓词（追加在实例结构谓词之后 —— cascade 的 [...base, ...extra] 合并律）。
- * 绝不抛。
+ * ΝΩ-18/ΠΑΝ-24：级联咨询桥的装配体（从 configureVlm 提取为具名函数 —— 同一
+ * 表达式供生产接线与测试直用）：请求级动态因子（ΑΩ-R2）+ 按请求类型的语义
+ * 谓词（追加在实例结构谓词之后 —— cascade 的 [...base, ...extra] 合并律）。
+ * ΠΑΝ-24 执法序（因子求值去副作用）：① 先取场景指纹（首帧 dhash 经注入端口，
+ * 指纹不可得 ⇒ null）；② 因子纯读求值（记忆命中判定，不写账）+ 级联裁决；
+ * ③ 裁决**之后**才把指纹记入场景记忆（rememberCascadeScene）—— 本次分诊
+ * 不受本次记账影响。绝不抛。
  */
 export function wireCascadeConsultFace(cascade: VlmCascade): void {
   attachCascadeFace({
-    consultJson: req => {
+    consultJson: async req => {
       const semantic = cascadeSemanticValidators(req);
-      return cascade.runJson(req, {
-        factors: cascadeRequestFactors(req),
+      // ΠΑΝ-24：指纹先算一次（端口故障/无图 ⇒ null ⇒ 新场景保守）
+      const fingerprint = await cascadeSceneFingerprint(req);
+      const out = await cascade.runJson(req, {
+        factors: cascadeRequestFactors(req, { sceneFingerprint: fingerprint }),
         ...(semantic.length > 0 ? { validators: semantic } : {}),
       });
+      // ΠΑΝ-24：观察记账在裁决之后（同屏复现是便宜信号，不得反过来影响本次分诊）
+      rememberCascadeScene(fingerprint);
+      return out;
     },
   });
 }
 
-// ─── ΑΩ-R2（级联因子源点亮）：请求级三因子分诊（接线层注入）───
+// ─── ΑΩ-R2（级联因子源点亮）+ ΠΑΝ-24（dhash 场景指纹）：请求级三因子分诊 ───
 //
 // 病灶（暗功能）：W3-0 原接线把 factors 供成静态保守值（中危/新场景/中性置信 ⇒
 // danger 恒 0.6 > 缺省阈值 0.35）—— 便宜臂在缺省配置下永不触发，配了便宜档的
-// 部署买不到一次省钱。修法：咨询桥携带的请求文本（prompt/system）在此变现为
-// 真实动态因子，经 perCall.factors 压过实例保守源（W2-8g 优先级律）：
+// 部署买不到一次省钱。修法：咨询桥携带的请求物料在此变现为真实动态因子，经
+// perCall.factors 压过实例保守源（W2-8g 优先级律）：
 //   · risk —— riskGate 词法风险分级（混淆归一同律）：危险词/凭据词 ⇒ high
 //     （danger ≥ 0.4 恒主力）；只读观察语义且无危险词 ⇒ low；不可分类 ⇒
 //     medium（保守回落，诚实原则：无证据不便宜）；
-//   · sceneFamiliar —— 便宜信号：近期同 prompt 记忆命中（LRU 上限 32）。dhash
-//     指纹在咨询桥上不可得（解码截图是重操作），同 prompt 复现是场景熟悉度的
-//     廉价代理；首见记新场景（false 保守）；
+//   · sceneFamiliar —— ΠΑΝ-24 修正：**真实 dhash 场景指纹**（perceptualHash.dhash
+//     纯函数，经 CascadeSceneHashPort 结构化端口注入 —— 端口面杜绝
+//     providers/cascade 对 src 根的静态依赖与环引；sharp 缺席/解码失败 ⇒ 指纹
+//     null ⇒ 按新场景保守）。此前实现是「同 prompt 原文 LRU(32)」冒充场景指纹
+//     —— 同一句 prompt 在全新屏幕上复现即记 sceneFamiliar=true ⇒ danger 低估 ⇒
+//     便宜臂在完全陌生的界面上被点亮，与「新场景保守」的分诊初衷相反（桌面
+//     自动化任务语句高度重复、屏幕瞬息万变，错位是常态）。现在：同屏（dhash
+//     汉明 0 精确命中，与 grounding 同屏缓存 ΝΩ-48 同尺）复现才算旧场景。
+//     因子求值**纯读无副作用**（记忆命中判定不写账）；观察记账
+//     （rememberCascadeScene）由咨询桥在裁决**之后**另行执行 —— 「纯函数分诊」
+//     的承诺自此成立（此前因子求值顺手写 LRU，把承诺打穿）；
 //   · confidence —— 调用方上下文在 GlmVisionRequest 上不可得（无置信字段），
 //     诚实保持中性 0.5。
 // 校准一致性（缺省权重 0.4/0.4/0.2 与缺省阈值 0.35 均被 w2cascade/w3wire 既有
-// 断言钉死，本接线只校准因子不动数学）：低危 + 同 prompt 复现 ⇒ danger =
+// 断言钉死，本接线只校准因子不动数学）：低危 + 同屏复现 ⇒ danger =
 // 0.4×(1−0.5) = 0.2 < 0.35 ⇒ 便宜臂真正点亮；危险词 ⇒ risk=high ⇒ danger ≥
 // 0.4×1 = 0.4 > 0.35 ⇒ 恒主力（场景再熟、置信再高也压不进便宜臂）。
 
@@ -315,30 +336,113 @@ const CASCADE_READONLY_MARKERS_ZH: readonly string[] = [
 const CASCADE_READONLY_MARKERS_EN =
   /\b(describe|list|read|detect|recogni[sz]e|compare|locate|identify|observe|transcribe|ocr)\b/i;
 
-/** 近期同 prompt 记忆上限（无界记忆 = 无界账 —— 满后逐出最旧，Map 保序即 LRU） */
-const CASCADE_FAMILIAR_PROMPT_LIMIT = 32;
+/**
+ * ΠΑΝ-24：近期场景指纹记忆上限（LRU —— Map 保序即 LRU；满后逐出最旧）。
+ * 取 64 与 grounding 同屏语义缓存（ΝΩ-48）同尺 —— 场景窗口内有界。
+ */
+const CASCADE_FAMILIAR_SCENE_LIMIT = 64;
 
-/** 模块级同 prompt 记忆 —— 键 = prompt 原文，值恒 true（在场性即全部信息） */
-const cascadeFamiliarPrompts = new Map<string, true>();
+/** ΠΑΝ-24：模块级场景指纹记忆 —— 键 = dhash 位串（汉明 0 精确命中），值恒 true */
+const cascadeSceneMemory = new Map<string, true>();
 
 /**
- * 场景熟悉度代理（记账式读取，绝不抛）：近期同 prompt 命中 ⇒ true 并刷新新近度
- * （LRU 触碰 = 删后重插）；首见 ⇒ 记账后返回 false（新场景保守）。空 prompt
- * 不可熟悉也不记账（无文本无身份）。
+ * ΠΑΝ-24：场景指纹端口 —— 把请求首帧图像（base64）映射为 dhash 位串。
+ * 缺省端口 = perceptualHash.dhash 纯函数经 Buffer 还原（sharp 懒加载，模块图
+ * 与 grounding 同律无环）；测试注入假端口离线复算；null = 端口摘除（指纹
+ * 不可得 ⇒ 恒新场景保守）。attachCascadeSceneHashPort(undefined) 复位缺省。
  */
-function cascadeSceneFamiliar(prompt: string): boolean {
-  if (prompt === '') return false;
-  if (cascadeFamiliarPrompts.has(prompt)) {
-    cascadeFamiliarPrompts.delete(prompt);
-    cascadeFamiliarPrompts.set(prompt, true);
-    return true;
+export type CascadeSceneHashPort = (imageBase64: string) => Promise<string | null>;
+
+/** 缺省场景指纹端口：dhash 纯函数包装（一切故障 ⇒ null，绝不抛） */
+const defaultCascadeSceneHashPort: CascadeSceneHashPort = async imageBase64 => {
+  try {
+    const fp = await dhash(Buffer.from(imageBase64, 'base64'));
+    return typeof fp === 'string' && fp !== '' ? fp : null;
+  } catch {
+    return null;
   }
-  if (cascadeFamiliarPrompts.size >= CASCADE_FAMILIAR_PROMPT_LIMIT) {
-    const oldest = cascadeFamiliarPrompts.keys().next().value;
-    if (oldest !== undefined) cascadeFamiliarPrompts.delete(oldest);
+};
+
+let cascadeSceneHashPort: CascadeSceneHashPort | null = defaultCascadeSceneHashPort;
+
+/**
+ * ΠΑΝ-24：注入/摘除场景指纹端口 —— 传 null 摘除（恒新场景保守）；传 undefined
+ * 复位缺省 dhash 端口（测试恢复缝）。垃圾输入安静归 null（不抛铁律）。
+ */
+export function attachCascadeSceneHashPort(port: CascadeSceneHashPort | null | undefined): void {
+  try {
+    cascadeSceneHashPort = port === undefined ? defaultCascadeSceneHashPort : port;
+  } catch {
+    cascadeSceneHashPort = null;
   }
-  cascadeFamiliarPrompts.set(prompt, true);
-  return false;
+}
+
+/** 请求首帧 base64 提取（脏值防御 —— 图像缺席/形状不对 ⇒ ''） */
+function firstFrameBase64(req: { images?: unknown } | null | undefined): string {
+  try {
+    const arr = req?.images;
+    if (!Array.isArray(arr) || arr.length === 0) return '';
+    const first = arr[0] as { base64?: unknown } | null;
+    return typeof first?.base64 === 'string' ? first.base64 : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * ΠΑΝ-24：请求的场景指纹（永不抛）—— 首帧经注入端口取 dhash；端口缺席 /
+ * 无图像 / 端口故障 / 指纹空 ⇒ null（指纹不可得 = 无场景证据，按新场景保守）。
+ * 请求形状宽纳（images/prompt/system 只读，与咨询桥的 GlmVisionRequest 同构）。
+ * 导出面：测试/可观测消费。
+ */
+export async function cascadeSceneFingerprint(
+  req: { images?: unknown; prompt?: unknown; system?: unknown } | null | undefined,
+): Promise<string | null> {
+  const port = cascadeSceneHashPort;
+  const b64 = firstFrameBase64(req);
+  if (port === null || b64 === '') return null;
+  try {
+    const fp = await port(b64);
+    return typeof fp === 'string' && fp !== '' ? fp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ΠΑΝ-24：场景熟悉度（**纯读，零副作用**）—— 指纹在近期场景记忆中精确命中
+ * （dhash 汉明 0）⇒ true；指纹 null / 未命中 ⇒ false（新场景保守）。
+ * 导出面：测试/可观测消费。
+ */
+export function cascadeSceneFamiliar(fingerprint: string | null | undefined): boolean {
+  try {
+    if (typeof fingerprint !== 'string' || fingerprint === '') return false;
+    return cascadeSceneMemory.has(fingerprint);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ΠΑΝ-24：观察记账 —— 把场景指纹记入 LRU（咨询桥在**因子求值之后**调用：
+ * 本次分诊不受本次记账影响 —— 因子求值去副作用的执法点）。指纹 null 安静
+ * 跳过（无指纹无身份）；命中即刷新新近度（LRU 触碰 = 删后重插）。绝不抛。
+ * 导出面：测试消费。
+ */
+export function rememberCascadeScene(fingerprint: string | null | undefined): void {
+  try {
+    if (typeof fingerprint !== 'string' || fingerprint === '') return;
+    if (cascadeSceneMemory.has(fingerprint)) {
+      cascadeSceneMemory.delete(fingerprint);
+      cascadeSceneMemory.set(fingerprint, true);
+      return;
+    }
+    if (cascadeSceneMemory.size >= CASCADE_FAMILIAR_SCENE_LIMIT) {
+      const oldest = cascadeSceneMemory.keys().next().value;
+      if (oldest !== undefined) cascadeSceneMemory.delete(oldest);
+    }
+    cascadeSceneMemory.set(fingerprint, true);
+  } catch { /* 记账故障不影响分诊（不抛铁律） */ }
 }
 
 /**
@@ -363,26 +467,33 @@ export function classifyCascadeRiskText(text: string): CascadeRiskTier {
 }
 
 /**
- * ΑΩ-R2：请求级三因子 —— 咨询桥的 perCall 因子源（真实动态信号）。
- * 信号不可用（无 prompt 文本/分类失败）时各项回落保守值 medium/false/0.5 ——
- * 与 W3-0 静态保守源逐字节同值（旧行为的诚实降级面）。导出面：测试/可观测消费。
+ * ΑΩ-R2/ΠΑΝ-24：请求级三因子 —— 咨询桥的 perCall 因子源（真实动态信号）。
+ * sceneFingerprint 在场时纯读判定熟悉度（不记账）；缺席时**不**折回
+ * prompt-LRU（ΠΑΝ-24 修正：prompt 原文不是场景证据 —— 同句 prompt 换新屏
+ * 必须按新场景保守），指纹不可得 ⇒ false。信号不可用时各项回落保守值
+ * medium/false/0.5（旧行为的诚实降级面）。导出面：测试/可观测消费。
  */
-export function cascadeRequestFactors(req: {
-  prompt?: unknown;
-  system?: unknown;
-} | null | undefined): CascadeTriageFactors {
+export function cascadeRequestFactors(
+  req: {
+    prompt?: unknown;
+    system?: unknown;
+  } | null
+  | undefined,
+  opts?: { sceneFingerprint?: string | null },
+): CascadeTriageFactors {
   const prompt = typeof req?.prompt === 'string' ? req.prompt : '';
   const system = typeof req?.system === 'string' ? req.system : '';
   return {
     risk: classifyCascadeRiskText(prompt === '' && system === '' ? '' : `${prompt}\n${system}`),
-    sceneFamiliar: cascadeSceneFamiliar(prompt),
+    // ΠΑΝ-24：指纹可注入（调用方已算过则免二次解码）；缺席 ⇒ null ⇒ 新场景保守
+    sceneFamiliar: cascadeSceneFamiliar(opts?.sceneFingerprint),
     confidence: 0.5, // 调用方上下文不可得 ⇒ 中性（不褒不贬，诚实）
   };
 }
 
-/** ΑΩ-R2：同 prompt 记忆归零（测试隔离缝；configureVlm 重铸新纪元时清账） */
+/** ΑΩ-R2/ΠΑΝ-24：场景记忆归零（测试隔离缝；configureVlm 重铸新纪元时清账） */
 export function resetCascadeTriageFamiliarity(): void {
-  cascadeFamiliarPrompts.clear();
+  cascadeSceneMemory.clear();
 }
 
 // ─── ΝΩ-47（合议庭点亮）：反驳法院的多脑裁决面装配 ───
@@ -401,19 +512,57 @@ export function resetCascadeTriageFamiliarity(): void {
 export function buildRefuteQuorumFace(
   court: EnsembleCourt,
   primary: { id: string; baseUrl?: string },
+  benchOptions?: { rateGate?: EnsembleRateGate },
 ): RefuteQuorumFace | null {
   try {
     const jury = court.listRoster().filter(
       p => !isSameRefuteSource({ id: primary.id, baseUrl: primary.baseUrl }, p),
     );
     if (jury.length < 2) return null; // 异构庭员 <2 ⇒ 多数票无从谈起 —— 单脑路径保底
-    const bench = new EnsembleCourt(jury);
+    // ΠΑΝ-23：子庭继承整庭的限流闸（rateGate 是庭实例字段 —— 重铸子庭须显式
+    // 透传，否则多脑裁决面旁路限流；meter 挂在各成员适配器上，随 roster 引用
+    // 天然继承）。无闸时行为与既往逐字节一致。
+    const bench = new EnsembleCourt(jury, {
+      ...(benchOptions?.rateGate !== undefined ? { rateGate: benchOptions.rateGate } : {}),
+    });
     return {
       askVerdict: req => bench.askVerdict(req),
     };
   } catch {
     return null; // 装配故障 = 多脑缺席：单脑路径行为不变（绝不抛）
   }
+}
+
+/**
+ * R3-3（GAP-1）：限流闸铸造/接线的单一权威点（从 configureVlm 的 ΝΩ-18 块原样
+ * 提取，逻辑逐字节保持）—— 按注册表现值解析 vlm.maxPerMinute/maxPerHour：
+ *   · vlm.maxPerMinute > 0 ⇒ 铸 VlmRateLimiter（小时桶 ≤0 ⇒ 回落 分钟×60）并
+ *     attachVlmRateLimiter 注入单例 chat/chatJson 前置位，返回闸实例；
+ *   · ≤0 / 未注册 / 任何故障 ⇒ attachVlmRateLimiter(null) 摘除并返回 null
+ *    （缺省零行为变化律，绝不抛）。
+ * 消费面：configureVlm（铸出的实例另共享给合议庭/反驳法院 —— ΠΑΝ-23 同律）与
+ * 宿主存档复载后的重焊（src/index.ts restores 腿 —— kernel-state.json 回放的
+ * 供参无需等下一次 apply）。导出面 = 生产接线 + 执法测试（set 后本函数即响应）。
+ */
+export function rewireVlmRateGate(): VlmRateLimiter | null {
+  let sessionRateGate: VlmRateLimiter | null = null;
+  try {
+    const mpm = Math.floor(kernelRegistry.getOrDefault('vlm.maxPerMinute', 0));
+    if (Number.isFinite(mpm) && mpm > 0) {
+      const mph = Math.floor(kernelRegistry.getOrDefault('vlm.maxPerHour', mpm * 60));
+      sessionRateGate = new VlmRateLimiter({
+        maxPerMinute: mpm,
+        maxPerHour: Number.isFinite(mph) && mph > 0 ? mph : mpm * 60,
+      });
+      attachVlmRateLimiter(sessionRateGate);
+    } else {
+      attachVlmRateLimiter(null);
+    }
+  } catch {
+    sessionRateGate = null;
+    attachVlmRateLimiter(null); // 供参面故障 ⇒ 摘除（绝不抛）
+  }
+  return sessionRateGate;
 }
 
 /**
@@ -495,6 +644,9 @@ export function configureVlm(
 
     // 池（纪元 Ψ 双轨）：备选链非空 ⇒ 铸池；空 ⇒ 置 null（幂等）。
     // 铸池同样挂 vlmMeter 缺省接线（Δ-6）—— 池内全脑心跳同账本。
+    // R3-2：链段原样透传（'glm=glm-4v-flash' 形态由 createProviderPool 的
+    // parseFallbackSpec 解析 —— per-brain 模型覆写 + 模型硬顶包装都在铸造厂
+    // 单点执法；裸 id 段行为与既往逐字节一致）。
     if (fallbacks !== '') {
       const chain = fallbacks.split(',').map(s => s.trim()).filter(s => s !== '');
       const primary = provider !== '' ? provider : 'glm'; // 缺省主力 = GLM（Ω 纪元缺省脑）
@@ -520,25 +672,45 @@ export function configureVlm(
     // 首个健康脑救回；不配 fallbacks ⇒ null 注入 ⇒ 单例行为与既往逐字段一致。
     attachFailoverPool(poolSingleton);
 
+    // ── R3-3（GAP-1 限流键入册）：vlm.maxPerMinute / vlm.maxPerHour 补注册 ──
+    // 病灶（R2-8 §2.1/§6 GAP-1）：消费点（下方 ΝΩ-18 读键）一直在，但两键从未
+    // 入册 ⇒ kernelRegistry.set 对其返回 'unregistered' 静默拒收 —— 本地限流闸
+    // 在配置层（kernel-state.json 存档通道）根本开不了。修法：configureVlm 的
+    // register 面按 productionSpecs 入册方言（key/organ/defaultValue/min/max/note）
+    // 补两条幂等入册；缺省 0 = 关（零行为变化律 —— 入册前后 getOrDefault 读数同
+    // 为 0，未供参部署逐字节不变）。区间执法由 registry.set 的夹取不变式承担
+    //（越界 set ⇒ 'clamped' 夹回 [min,max]，见 kernel/registry.ts）。
+    try {
+      kernelRegistry.register({
+        key: 'vlm.maxPerMinute',
+        organ: 'metering',
+        defaultValue: 0,
+        min: 0,
+        max: 600,
+        note: 'R3-3（GAP-1）：VlmRateLimiter 分钟桶容量（缺省 0=关；>0 ⇒ configureVlm 铸双桶限流闸挂单例 chat/chatJson 前置；上限 600=10/s —— 远超桌面 agent 常态 5-10/min，只拦失控不塑形）',
+      });
+      kernelRegistry.register({
+        key: 'vlm.maxPerHour',
+        organ: 'metering',
+        defaultValue: 0,
+        min: 0,
+        max: 36000,
+        note: 'R3-3（GAP-1）：VlmRateLimiter 小时桶容量（缺省 0 ⇒ 铸闸时回落 分钟×60 的保守缺省；显式 >0 才收紧日预算）',
+      });
+    } catch { /* 入册失败 = 键不在册，消费面回声 0（关）—— 绝不抛 */ }
+
     // ── ΝΩ-18（限流器接线）：VlmRateLimiter 的 configureVlm 注入面 ──
     // 内核注册表供参（与 metering.VlmApiBreaker 的 Ξ-D 读法同律，不动 config
     // schema）：vlm.maxPerMinute > 0 ⇒ 铸双桶限流闸挂入单例 chat/chatJson 前置
     //（vlm.maxPerHour 可选，缺省 = 分钟 × 60）；未注册/ ≤0 ⇒ 摘除（缺省零行为
     // 变化律 —— 限流器全库原本零消费，未显式供参的部署行为逐字节不变）。
-    try {
-      const mpm = Math.floor(kernelRegistry.getOrDefault('vlm.maxPerMinute', 0));
-      if (Number.isFinite(mpm) && mpm > 0) {
-        const mph = Math.floor(kernelRegistry.getOrDefault('vlm.maxPerHour', mpm * 60));
-        attachVlmRateLimiter(new VlmRateLimiter({
-          maxPerMinute: mpm,
-          maxPerHour: Number.isFinite(mph) && mph > 0 ? mph : mpm * 60,
-        }));
-      } else {
-        attachVlmRateLimiter(null);
-      }
-    } catch {
-      attachVlmRateLimiter(null); // 供参面故障 ⇒ 摘除（绝不抛）
-    }
+    // ΠΑΝ-23：铸出的闸实例另存 sessionRateGate —— 同一实例随后注入合议庭/
+    // 反驳法院（旁路拨号与主路径共享同一配额池与回填面，「同标准」的执法点）。
+    // R3-3：铸闸/接线整体提取为 rewireVlmRateGate（单一铸造点）—— configureVlm
+    // 调用之外，宿主存档复载（kernelStore.applyTo 回放 kernel-state.json）之后
+    // 经同一函数重焊，限流供参才能在当次启动生效（apply 序：configureVlm 先于
+    // restores 腿 ⇒ 不重焊则复载值要等下一次 apply 才被铸闸读到）。
+    const sessionRateGate = rewireVlmRateGate();
 
     // ── 纪元 Β（反驳法院）：第二意见面装配（照 P2a attachFailoverPool 的注入模式）──
     // 备选链在场（≥2 颗脑配置）才有异构可言：铸一座合议庭（主力 + 备选全部入席，
@@ -553,20 +725,34 @@ export function configureVlm(
     //（缺省零行为变化律）。
     try {
       if (fallbacks !== '') {
+        // R3-2：同一链段原样灌庭（'id=model' 由 createEnsembleCourt 的
+        // parseFallbackSpec 同方言解析 —— 池与庭见到同一颗备脑，绝不漂移）
         const chain = fallbacks.split(',').map(s => s.trim()).filter(s => s !== '');
         const primary = provider !== '' ? provider : 'glm';
         const url = eraDefaultStr(baseUrl, GLM_ERA_BASE_URL, primary);
+        // ΠΑΝ-23（旁路计量收编）：铸庭挂 vlmMeterTap（庭内每次成员拨号经适配器
+        // 恰好一条记录落台账 —— 与单例/池同标准）+ 共享限流闸 sessionRateGate
+        //（与主路径同一配额池/回填面；闸缺席 = 全量并问，既往行为不变）。
+        // 此前法院/合议庭的每一次真实云拨号在 vlmMeter 与 vlm.maxPerMinute 上
+        // 完全不可见 —— 恰是最贵的旁路（不可逆动作前的多脑核验）。
         const court = createEnsembleCourt({
           provider: primary,
           ...(apiKey ? { apiKey } : {}),
           ...(url ? { baseUrl: url } : {}),
           extraProviders: chain,
+          meter: vlmMeterTap,
+          ...(sessionRateGate !== null ? { rateGate: sessionRateGate } : {}),
         });
         // ΝΩ-47：多脑裁决面（opt-in —— 内核参未注册时 getOrDefault 回声 0 ⇒ 恒缺席）
         let quorumFace: RefuteQuorumFace | null = null;
         try {
           if (kernelRegistry.getOrDefault('vlm.refuteQuorum', 0) > 0) {
-            quorumFace = buildRefuteQuorumFace(court, { id: primary, ...(url ? { baseUrl: url } : {}) });
+            // ΠΑΝ-23：子庭继承共享限流闸（meter 随成员适配器天然继承）
+            quorumFace = buildRefuteQuorumFace(
+              court,
+              { id: primary, ...(url ? { baseUrl: url } : {}) },
+              sessionRateGate !== null ? { rateGate: sessionRateGate } : undefined,
+            );
           }
         } catch {
           quorumFace = null; // 供参面故障 ⇒ 多脑缺席（绝不抛）
@@ -574,10 +760,15 @@ export function configureVlm(
         attachRefuteFace({
           primaryId: primary,
           ...(url ? { primaryBaseUrl: url } : {}),
-          // 庭员名册 → 第二意见脑（VisionProvider 天然结构满足 RefuteBrain 契约；
-          // baseUrl 适配器不外露 ⇒ 缺席，同源比对退回 providerId 单因子，诚实不虚构）
+          // 庭员名册 → 第二意见脑（VisionProvider 天然结构满足 RefuteBrain 契约）。
+          // ΠΑΝ-22（同源剔除 baseUrl 因子激活）：三厂适配器均回填只读 baseUrl
+          //（W8-A6），此前装配面注释称「适配器不外露 ⇒ 缺席」是过时死代码 ——
+          // isSameRefuteSource 的双因子判定（providerId/baseUrl）在生产路径退化为
+          // 单因子，「不同 id、同 baseUrl」的镜像脑会留下用同源脑反驳同源脑。
+          // 现透传 baseUrl，双因子剔除自此在生产路径成立。
           brains: court.listRoster().map(p => ({
             id: p.id,
+            ...(p.baseUrl !== undefined ? { baseUrl: p.baseUrl } : {}),
             configured: p.configured === true,
             chatJson: (req: Parameters<RefuteBrain['chatJson']>[0]) => p.chatJson(req),
           })),
