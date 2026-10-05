@@ -22,24 +22,25 @@ function normalizeWs(s) {
 }
 /**
  * 轻量分词（中文 2-gram + 英文分词，单源实现）：
- * 中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字切开取词；
- * 滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
- * 入参宽收 unknown（非字符串 ⇒ 空表），string 调用方天然兼容。
+ *   中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字切开取词；
+ *   滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
+ *   入参宽收 unknown（非字符串 ⇒ 空表），string 调用方天然兼容。
  */
-export function tokenizeText(text) {
+export function tokenizeText(text, opts) {
     const norm = normalizeWs(text);
     if (!norm)
         return [];
+    const signature = opts?.signature === true;
     const tokens = [];
     const push = (t) => {
         if (t.length === 0)
             return;
-        if (/^\d+$/.test(t))
-            return; // 纯数字：坐标/序号噪声
-        if (STOPWORDS.has(t))
-            return; // 停用词
-        if (!CJK_RE.test(t) && t.length < 2)
-            return; // 单个英文字母噪声
+        if (!signature && /^\d+$/.test(t))
+            return; // 纯数字：坐标/序号噪声（签名系保留）
+        if (!signature && STOPWORDS.has(t))
+            return; // 停用词：意图系滤除；签名系全保留（协议方言，见 TokenizeOpts 注记）
+        if (!signature && !CJK_RE.test(t) && t.length < 2)
+            return; // 单个英文字母噪声（签名系保留）
         tokens.push(t);
     };
     let cjkRun = '';

@@ -15,7 +15,6 @@
 // 后续补丁小图附件，锚点文本说明替换关系（「这是同一屏幕的增量」），供 VLM
 // 在上下文里重建当前屏幕；模型请求整帧的逃生口（forceFullFrame —— 补丁模式
 // 可显式关闭）。缺省不启用：现有投递路径（saveScreenshotAttachment）零变化。
-import { incrementalEncodingEnabled } from './visualDiff.js';
 import { encodePatchForVlm } from './vlm/codec.js';
 let store = null;
 /** index.ts 启动时注入附件服务（缺席 = 宿主未提供，图像投递诚实降级） */
@@ -209,11 +208,4 @@ export async function deliverIncremental(verdict, currentFrame, opts) {
     catch {
         return null; // 防御式收口：任何意外降级为 null（调用方走整帧旧路径）
     }
-}
-/**
- * W3-3：增量投递模式的模块开关读数（与账本同一注册表键 —— 单一事实源；
- * 缺省 false：增量关闭时投递层与现状逐字节一致，本节函数不被任何现有路径调用）。
- */
-export function incrementalDeliveryEnabled() {
-    return incrementalEncodingEnabled();
 }

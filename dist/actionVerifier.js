@@ -16,7 +16,10 @@ import { dhash, regionDhash, normalizeHash } from './perceptualHash.js';
 import { oscillationTracker } from './oscillationTracker.js';
 import { kernelRegistry } from './kernel/registry.js';
 import { getEnabledPhysicsRules } from './intent.js';
-export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// ΠΑΝ-127（D-F5 清偿）：sleep 下沉至零出边叶 actionVerifier.shared.ts（卫星
+// actionVerifier.stable.ts 回借本桶构成 value 二环；此处再分发保导入面兼容）。
+export { sleep } from './actionVerifier.shared.js';
+import { sleep } from './actionVerifier.shared.js';
 async function sharpAvailable() {
     try {
         const { getSharp } = await import('./_legacyDeps.js');
@@ -58,9 +61,17 @@ export const REMOTE_EVIDENCE_OVERLAP_MIN = 0.25;
 export const REMOTE_PEERS_MAX = 4;
 // W6-2（doctor smell.over-engineering 清偿）：W5-3 判决函数与 W4-8 类型/净化面已
 // 分区提取至 actionVerifier.channels.ts（行为零变化；立法常量按「立法在源」测试
-// 锁定留守本文件）；导入面不变 —— 再分发。
-import { judgeRemoteChange, sanitizeAudioEvent, sanitizeRemoteRegion, sanitizeRemoteChange } from './actionVerifier.channels.js';
-export { judgeRemoteChange } from './actionVerifier.channels.js';
+// 锁定留守本文件）；导入面不变。
+// ΠΑΝ-127（D-F5 清偿）：卫星 channels 曾回借本桶的立法常量
+// REMOTE_EVIDENCE_OVERLAP_MIN 构成 value 二环 —— 现按「纯函数端口注入」方言拆
+// 环：channels 的判决核心改收阈值参数（judgeRemoteChangeCore），本桶以立法
+// 常量铸公开二参包装（签名与语义零变化 —— w5cross 消费面两参照旧）。
+import { judgeRemoteChange as judgeRemoteChangeCore, sanitizeAudioEvent, sanitizeRemoteRegion, sanitizeRemoteChange } from './actionVerifier.channels.js';
+/** W5-3：跨机互证谓词公开面（阈值 = 立法常量 REMOTE_EVIDENCE_OVERLAP_MIN，
+ *  立法在源本文件 —— w5cross ⑩ 源级锁定；纯核心见 actionVerifier.channels） */
+export function judgeRemoteChange(hint, change) {
+    return judgeRemoteChangeCore(hint, change, REMOTE_EVIDENCE_OVERLAP_MIN);
+}
 // ─── W4-8 L4 声学证据通道（有节制的破戒）：非语义物理证据，恒低于视觉 ───
 //
 // 破戒范围（创新提案 L4）：系统音频只作**非语义**物理证据 —— 五类声学纹理
@@ -141,11 +152,24 @@ export async function settleAndVerify(before, opts, expectation) {
                 ? { x: before.focus.x, y: before.focus.y, r: opts.regionRadius } : undefined,
             keepFrame: !!expectation,
         });
-        if (finalCap.dhash)
+        // ΠΑΝ-32（终帧同帧原子采用律）：afterHash 与 afterFrameId 必须来自**同一次
+        // 采集**—— afterFrameId 是下游物理规则/语义锚的服务端帧环引用（frame_stats/
+        // frame_rowmeans 按 id 取行统计），配对错位 = 用另一帧的统计检验这一帧的
+        // 判决。旧实现逐字段独立覆盖：终帧带 dhash 无 frameId 时产出「hash 来自终
+        // 帧、frameId 来自稳定环」的跨帧错配对；终帧带 frameId 无 dhash 时反向错配
+        // （hash 留稳定帧、frameId 跳终帧）；且终帧 dhash 无条件顶替还会作废稳定轮
+        // 询的「已稳定」保证（稳定检测与终帧之间动画可已重启，运动被当效果）。
+        // 修法：终帧哈希只在两种情形下被采纳 —— ① 携带同帧 frameId（原子元组）；
+        // ② 本就无稳定配对可错位（非自适应路径，afterFrameId 起点为 null，采用后
+        // 帧环引用诚实缺席而非错配）。区域指纹/pHash/buffer 无帧环引用面，维持
+        // 逐字段采用（行为兼容）。
+        const finalFrameId = typeof finalCap.frameId === 'number' ? finalCap.frameId : null;
+        if (finalCap.dhash && (finalFrameId !== null || !opts.adaptive)) {
             afterScreen = normalizeHash(finalCap.dhash);
+            afterFrameId = finalFrameId !== null ? finalFrameId : afterFrameId;
+        }
         afterPhash = finalCap.phash;
         afterRegion = finalCap.regionDhash ? normalizeHash(finalCap.regionDhash) : afterRegion;
-        afterFrameId = finalCap.frameId ?? afterFrameId;
         afterBuf = finalCap.buffer ?? Buffer.alloc(0);
     }
     const screen = reportEffect(before.screen, afterScreen, opts.threshold);
@@ -327,9 +351,4 @@ export async function settleAndVerify(before, opts, expectation) {
         // 报告（只读证据 —— 不改写任何视觉判决字段）。
         ...(remote ? { remote } : {}),
     };
-}
-/** 兼容旧签名：立即取全屏对比（不等待） */
-export async function verifyEffect(before, noopThreshold) {
-    const cap = await backend.captureProcessed({ metaOnly: true, wantHashes: true });
-    return reportEffect(before, cap.dhash ? normalizeHash(cap.dhash) : '', noopThreshold);
 }

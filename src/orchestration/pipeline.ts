@@ -15,6 +15,7 @@
 //   严禁 throw）；wire = 加载层（throw 合法，由 apply 收口）；run = 永不抛错。
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import type { ActionChain } from '../sandbox/types';
 import type {
   AtomicAction, ConfigError, DecisionContext, DecisionOutput, ExecutionOrder, ExecutionResult,
   FailureFeedback, IntentPayload, PipelineConfig, PipelineOrchestrator, PipelineReport,
@@ -32,9 +33,61 @@ import {
   EVT_PIPELINE_RUN_END, EVT_PIPELINE_ATTEMPT, EVT_PIPELINE_GROUNDING, MAX_GROUNDING_APPROVALS_PER_RUN,
   gridRegions, withAttemptTimeout, logPipeline,
   SCENE_REUSE_TTL_MS, sceneDhash, readUsageProbe,
+  FUNNEL_RANK, L3_EVIDENCE_TTL_MS,
 } from './pipeline.helpers';
 import type { PipelineStations } from './pipeline.helpers';
 export type { PipelineStations } from './pipeline.helpers';
+
+// ─── ΠΑΝ-118（F2-3 移交项②）：planner chain 臂 → 流水线决策语境 ───
+//
+// 病灶（F2-3 报告第七节 2 + C2-3 H2-1 的消费侧残余）：planner 自 ΠΑΝ-40a 起可
+// 铸 chain 臂（mintChainPlanReady → cognition/plan-ready 事件，D-5 沙箱只认
+// chain 臂排练），但 D-6 流水线侧没有任何接收面 —— plan-ready 的 chain 方言到
+// 达 D-6 的 normalizeIntent 时被折叠成一句 prose goal（「execute N-step action
+// chain (click→type→…)」），决策工位拿到的是规划结论的**摘要**而非规划本身，
+// 只能靠 LLM 从 prose 重新规划，planner 已铸的链（含逐步 expect 校验锚）在
+// 决策语境里不可见。
+//
+// 修法（本文件单点接线）：run() 增可选 planReadyChain（实现层签名扩展 ——
+// 契约接口 PipelineOrchestrator.run 的 opts 形状不变，方法双变兼容），防御
+// 解码后经 DecisionContext 的开放扩展（契约层基形不变、字段纯增量）注入
+// 决策语境。调用方接线（orchestration/index.ts 的事件臂把 normalizeIntent
+// 保留的链传入 run）归 D-6 入口文件领地 —— 本接线先把消费面立起来并钉死
+// 执法测试；缺席 ⇒ 决策语境与接线前逐字节同形（零回归律）。
+
+/** ΠΑΝ-118：DecisionContext 的开放扩展 —— plan-ready chain 臂的决策语境入口。
+ *  契约层 DecisionContext 基形分毫不动（contracts 属主权文件）；本扩展是纯
+ *  增量可选字段，任何只认基形的决策工位照常工作（结构子类型）。 */
+export interface PlanReadyDecisionContext extends DecisionContext {
+  /** D-1 planner 铸就的动作链（cognition/plan-ready 的 CognitionChainPayload.chain
+   *  方言 —— mintChainPlanReady 的产物）。在场 ⇒ 决策工位可直接消费规划器的
+   *  链（逐步派发 + expect 锚），而不是从 prose goal 重新规划。 */
+  planReadyChain?: ActionChain;
+}
+
+/**
+ * ΠΑΝ-118：plan-ready chain 臂的防御解码（纯函数、绝不抛、毒链不入场）。
+ * 形状闸（与 planner.mintChainPlanReady 的毒证拦截同向）：id 非空字符串 +
+ * actions 非空数组 + 每步 kind 为非空字符串（SandboxActionKind 词表执法在
+ * 派发层 actionGate —— 此处只挡「不是链」的垃圾）。垃圾 ⇒ undefined（诚实
+ * 缺席，绝不半截接线）。两路入口同过此闸：opts.planReadyChain（显式）与
+ * intent 运行时随行的 chain 字段（事件载荷直挂方言 —— opts 优先）。
+ */
+export function decodePlanReadyChain(raw: unknown): ActionChain | undefined {
+  try {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const chain = raw as Partial<ActionChain> & { actions?: unknown };
+    if (typeof chain.id !== 'string' || chain.id === '') return undefined;
+    if (!Array.isArray(chain.actions) || chain.actions.length === 0) return undefined;
+    const kindsOk = chain.actions.every(
+      a => !!a && typeof a === 'object' && typeof (a as { kind?: unknown }).kind === 'string' &&
+        (a as { kind: string }).kind !== '',
+    );
+    return kindsOk ? (chain as ActionChain) : undefined;
+  } catch {
+    return undefined; // 陷阱属性等：毒链不入场（防御式，绝不抛）
+  }
+}
 
 
 
@@ -108,8 +161,16 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     this.reconcileReport = opts?.reconcileReport ?? null;
   }
 
-  /** 运行层入口（契约第二条：永不抛错）。try 包裹整环 —— 任何意外 = verdict='failed' 落盘 */
-  async run(intent: IntentPayload, opts?: { snapshotId?: string; signal?: AbortSignal }): Promise<PipelineReport> {
+  /** 运行层入口（契约第二条：永不抛错）。try 包裹整环 —— 任何意外 = verdict='failed' 落盘。
+   *  ΠΑΝ-118（F2-3 移交项②）：opts.planReadyChain = planner 的 chain 臂载荷
+   *  （cognition/plan-ready 的 chain 方言）—— 在场且过 decodePlanReadyChain 形状闸
+   *  ⇒ 注入决策语境（决策工位可直接消费规划器的链）；缺席/毒链 ⇒ 决策语境与
+   *  接线前逐字节同形（零回归）。契约接口的 opts 形状不变（实现层可选扩展，
+   *  方法双变兼容）。 */
+  async run(
+    intent: IntentPayload,
+    opts?: { snapshotId?: string; signal?: AbortSignal; planReadyChain?: ActionChain },
+  ): Promise<PipelineReport> {
     const startedAt = Date.now();
     if (!this.cfg || !this.stations) {
       return this.finalReport(intent, 'failed', 'orchestrator not configured/wired', [], startedAt);
@@ -121,6 +182,19 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
     const stations = this.stations;
     const attempts: AttemptRecord[] = [];
     const tokenUsage = { vision: 0, decision: 0, execution: 0 };
+
+    // ΠΑΝ-118：plan-ready chain 臂解码（run 级一次性）—— opts 显式载荷优先，
+    // intent 运行时随行的 chain 字段（事件载荷直挂方言）次之；两路同过形状闸。
+    // 在场 ⇒ 宿主事件面广播消费留痕（sandboxLog 的 pipeline-* 段是封闭联合且
+    // log.ts 非本工单领地 —— 入账面留待该件扩 kind；事件总线面先立，宿主可
+    // 订阅审计）+ 决策语境携带（下方 DecisionContext 构造处）。
+    const planReadyChain = decodePlanReadyChain(opts?.planReadyChain) ??
+      decodePlanReadyChain((intent as unknown as { chain?: unknown }).chain);
+    if (planReadyChain !== undefined) {
+      stations.emit?.('pipeline/plan-ready-chain', {
+        intentRef: intent.id, chainId: planReadyChain.id, steps: planReadyChain.actions.length,
+      });
+    }
 
     // ── ΝΩ-26（四修之一）：L1 帧缓存的管线侧孪生 —— 脏区跳过账本 ──
     // sceneCache：上轮 fault-free 分区补丁（复用候选；capturedAt 即陈旧度申报）。
@@ -187,9 +261,22 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         // dhash 复用律（诚实方言的核心）：被重扫的分区若内容指纹未变且缓存
         // fault-free ⇒ 交还旧补丁 —— capturedAt 继续申报真实的数据年龄（「这区
         // 自 t0 起未变」是真话）；指纹已变/无缓存/缓存带 fault ⇒ 采纳新补丁入账。
+        // ΠΑΝ-62（L3 结果覆写修复）：dhash 含 funnelDepth ⇒ 批准重扫产出的 L3
+        // 补丁与后续 L1/L2 重扫补丁指纹必不相同，旧实现直接采纳新补丁 ⇒ 花钱
+        // 买的 L3 语义证据在下一轮感知被覆写，决策工位永远看不到它要的答案
+        //（NeedGrounding → 批准 → L3 重扫 → 覆写 → 再次 NeedGrounding → 烧完
+        //  熔断预算）。证据位阶规则：同区缓存位阶**严格高于**新扫补丁且在
+        // L3_EVIDENCE_TTL_MS 时效窗内 ⇒ 缓存胜出（L3 优先于 L1/L2，除非时效
+        // 过期）；窗外世界的新鲜 L1/L2 如实接管 —— capturedAt 全程如实申报
+        // 陈旧度，位阶提升绝不等于谎报新鲜。
         const mergePatch = (fresh: ScenePatch): ScenePatch => {
           const cached = sceneCache.get(fresh.region.id);
           if (cached && !cached.fault && sceneDhash(cached) === sceneDhash(fresh)) return cached;
+          if (cached && !cached.fault &&
+              FUNNEL_RANK[cached.funnelDepth] > FUNNEL_RANK[fresh.funnelDepth] &&
+              Date.now() - cached.capturedAt <= L3_EVIDENCE_TTL_MS) {
+            return cached; // ΠΑΝ-62：位阶更高且未过时效 —— L3 证据存活到决策工位
+          }
           sceneCache.set(fresh.region.id, fresh);
           return fresh;
         };
@@ -226,21 +313,38 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
         // requestRegions 为空 = 全部分区复用 ⇒ 视觉工位本轮零调用、零预算授予
         //（脏区跳过的省钱面；PerceptionRequest.regions=[] 契约上是全屏网格，
         //  绝不能拿空数组当「无事可做」—— 直接跳过整次感知才是诚实形态）。
+        // ΠΑΝ-67：脏区用后清除 —— 疑脏标记在本轮感知已被消费（重扫已发生，
+        // 新鲜度改由 capturedAt 申报）。旧实现全 run 从不清 ⇒ 每个动作落区
+        // 永久疑脏，多步任务很快 4 区全脏 ⇒ 脏区跳过退化为「每轮全量重扫」，
+        // ΝΩ-26 的省钱面在真实任务中静默失效。本轮之后的动作落区/反馈指认
+        // 会重新入集（clear 只清已消费的历史疑脏，不吞并后续因果指认）。
+        dirtyRegions.clear();
 
         // ── 决策（信封铸造权：决策工位只拿 intent + ScenePatch，无截图字节）──
-        const decisionCtx: DecisionContext = { intent, scene };
+        // ΠΑΝ-118：plan-ready chain 臂注入决策语境 —— planner 已铸的链对决策
+        // 工位可见（消费与否是工位策略；语境缺席 ⇒ 与接线前逐字节同形）。
+        const decisionCtx: PlanReadyDecisionContext = {
+          intent, scene,
+          ...(planReadyChain !== undefined ? { planReadyChain } : {}),
+        };
         let output: DecisionOutput;
+        // ΠΑΝ-63（烧钱循环修复）：标记本次 need-grounding 是否为预算耗尽的
+        // **强制降级**（决策工位未被调用、无人消费重扫结果）——与决策工位
+        // 主动申报的信息缺口严格分治（后者有消费方，前者没有）。
+        let forcedByBudget = false;
         // ΝΩ-26（四修之三）：决策余额耗尽 ⇒ 强制降级 —— 不再调用工位（无计量
         // 烧钱是预算制的反面），need-grounding 的 question 即诚实降级注记
         //（沿 NeedGrounding 路由进 L3 授权链 ⇒ 入审计账本；批准预算熔断后
         //  诚实 escalated 终局，绝不谎称任务失败）。
         const decisionRemaining = remainingTokens('decision');
         if (decisionRemaining <= 0) {
+          forcedByBudget = true;
           output = {
             kind: 'need-grounding',
             question: 'decision token budget exhausted — forced degradation (decision station not called)',
           };
         } else {
+          forcedByBudget = false;
           const decisionEnv: AttentionEnvelope<'decision', DecisionContext> = {
             station: 'decision',
             payload: decisionCtx,
@@ -259,11 +363,26 @@ export class PipelineOrchestratorImpl implements PipelineOrchestrator {
 
         // NeedGrounding 路由：L3 花钱权裁决（中枢主权 —— 视觉工位无权自启）
         if ('kind' in output && output.kind === 'need-grounding') {
+          // ΠΑΝ-63（烧钱循环修复）：预算耗尽的强制 need-grounding **不带
+          // regionId 时拒绝新批准**（只消费既有场景证据）—— 此刻决策工位
+          // 已不被调用，批准全网格 L3 重扫是给无人消费的结果烧钱：旧实现
+          // 走 approveGrounding(undefined) = 批准全网格 × 每区一次 VLM，
+          // 循环至 3 次熔断（最多 3 轮 × 4 区 = 12 次 grounding 调用全浪费）。
+          // 正确语义：预算耗尽 + 无 region ⇒ 直接诚实终局 escalated（裁决权
+          // 上交，绝不借重扫伪装推进）。
+          if (forcedByBudget && !output.regionId) {
+            verdict = 'escalated';
+            await logPipeline('pipeline-grounding-denied', {
+              intentRef: intent.id,
+              reason: 'decision token budget exhausted — forced need-grounding carries no regionId and has no consumer; new grounding approval denied (burned-money loop guard)',
+            });
+            break;
+          }
           // 批准预算（风险加固）：恒批准是 L3 失控循环的绿色通道 ——
           // 决策工位反复要 grounding 时按预算熔断。
           // J 纪元升级（'escalated' 兑现语义）：这不是普通失败 —— 决策层持续
           // 索要超出预算的 L3 帮助，流水线自身已无法推进，把裁决权**上交**
-          // （D-4 复核 / 人类介入），而非谎称"任务失败"。七态枚举从此无死态。
+          //（D-4 复核 / 人类介入），而非谎称"任务失败"。七态枚举从此无死态。
           if (groundingApprovals >= MAX_GROUNDING_APPROVALS_PER_RUN) {
             verdict = 'escalated';
             await logPipeline('pipeline-grounding-denied', {

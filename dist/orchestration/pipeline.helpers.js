@@ -79,6 +79,22 @@ export const MAX_GROUNDING_APPROVALS_PER_RUN = 3;
  *  窗口保证陈旧度有上界）。缺省值与 L1/L2 适配器帧缓存 TTL（1500ms）同源：
  *  适配器帧还在 ⇒ 补丁复用零成本；帧过期 ⇒ 重扫恰好拿到新帧。 */
 export const SCENE_REUSE_TTL_MS = 1500;
+// ─── ΠΑΝ-62（L3 结果覆写修复）：证据位阶合并语义的共用面 ───
+/** ΠΑΝ-62：漏斗深度位阶（证据贵贱序）—— L3 是花钱买的语义证据，位阶高于
+ *  本地肌肉层的 L1/L2；empty 无证据位阶最低。mergePatch 的位阶规则据此
+ *  判定「同区缓存补丁是否优先于新扫补丁」。 */
+export const FUNNEL_RANK = {
+    L1: 1,
+    L2: 2,
+    L3: 3,
+    empty: 0,
+};
+/** ΠΑΝ-62：L3 证据时效窗（ms）。批准重扫产出的 L3 补丁在此窗内不被后续
+ *  L1/L2 重扫覆写（决策工位先消费花钱买的答案）；窗外世界的新鲜 L1/L2
+ *  数据如实接管（L3 答案会陈旧 —— capturedAt 全程如实申报数据年龄）。
+ *  取 10s：覆盖一整轮感知延迟（perceptionDeadlineMs 缺省 10s）+ 决策消费，
+ *  保证「批准 → 内联重扫 → 下轮感知 → 决策」链路上 L3 恒可达决策工位。 */
+export const L3_EVIDENCE_TTL_MS = 10_000;
 /** ΝΩ-26：分区内容指纹（dhash 方言）。管线层无像素字节（注意力隔离 ——
  *  像素永不进编排），指纹以 ScenePatch 元素面为源：role/name/state + rect
  *  定点 3 位（≈0.1% 屏宽，坐标微抖不敏感）的确定性摘要。与 perceptualHash

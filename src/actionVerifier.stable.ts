@@ -3,7 +3,9 @@
 // （>500 行拆分信号）—— CombinedEffect 结果类型与稳定帧轮询（waitForStableHash/
 // waitForStableFrame）整体搬迁。行为零变化；actionVerifier.ts 以再导出保持导入面不变。
 import type { EffectReport, RemoteRegion, RemoteJudgement } from './actionVerifier';
-import { sleep } from './actionVerifier';
+// ΠΑΝ-127（D-F5 清偿）：sleep 改自零出边叶导入（原借桶 actionVerifier.ts 构成
+// value 二环；桶面同名符号仍经再分发可用）。
+import { sleep } from './actionVerifier.shared';
 import * as backend from './physicalBackend';
 import { normalizeHash, hammingDistance, dhash } from './perceptualHash';
 import { kernelRegistry } from './kernel/registry';

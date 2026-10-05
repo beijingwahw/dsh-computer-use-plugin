@@ -1,5 +1,8 @@
 import { parseRootCause, recoveryLadderFor } from './diagnosis.js';
-import { BRANCH_REPLAY_BUDGET_STEPS, cloneJson, safeNow, BranchLedgerBook } from './branchCards.js';
+// ΠΑΝ-127（D-F5 清偿）：账本域符号改从零环基座 branchCards.ledger.ts 导入
+// （原自桶 branchCards.ts 回借构成桶-卫星 value 二环；桶面同名符号仍经
+// export * 再分发可用 —— 导入面零破坏，行为零变化）。
+import { BRANCH_REPLAY_BUDGET_STEPS, cloneJson, safeNow, BranchLedgerBook } from './branchCards.ledger.js';
 /** diagnosis 根因报告 → 卡面归因（只读消费 + 防御收敛；报告缺席 ⇒ unknown 兜底） */
 function attributionOf(report) {
     const r = (report && typeof report === 'object' ? report : null);

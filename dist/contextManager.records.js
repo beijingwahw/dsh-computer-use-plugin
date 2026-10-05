@@ -21,6 +21,51 @@ export const SURPRISE_BIT_FLOOR = 24;
 export function approxKb(b64) {
     return b64.length / 1024;
 }
+// ─── ΠΑΝ-31（钉扎引擎数值修复）：显著度合成公式与钉扎/解钉阈值的法定面 ───
+//
+// 背景（批判 C1-1 M2 实证的数值缺陷）：
+//   ① 旧实现 relevance 只在 record.textSummary 在场时计算，而 textSummary 仅在
+//     驱逐时铸造 —— 在窗图片（钉扎候选池的全部成员）relevance 恒 0.5 ⇒ 基线
+//     显著度上限 0.8×0.5×1.0 = 0.4 < 0.8 钉扎线：任务目标**永不可能被钉扎**
+//     （C-4 头注的「核心目标钉扎永生」名存实亡）。修法见 contextManager.
+//     assessSalience 的锚点/任务语义回退通道。
+//   ② 旧实现惊异加成是常数 +0.45（不随时间衰减）⇒ 完全时间衰减后
+//     0.16+0.45 = 0.61 > 0.5 解钉线：惊异帧一旦钉住**永不释放**（钉扎名额
+//     pinBudget=1 被首个惊异帧锁死）。修法：惊异加成乘同一新近度包络 ——
+//     「世界刚剧变」的注意力价值随剧变远去而衰减，钉扎/解钉阈值间的施密特
+//     滞回带对两类候选都真正可达。
+//
+// 本节是公式的唯一事实源（纯函数 + 法定常量）：数值契约由执法测试直接锚定，
+// contextManager.ts 只负责采集输入（typeWeight/relevance/recency/surpriseBits）。
+/** C-4 钉扎线：显著度 ≥ 此值且名额未满 ⇒ 钉扎（高显著度豁免驱逐） */
+export const SALIENCE_PIN_THRESHOLD = 0.8;
+/** C-4 解钉线：已钉扎记录显著度 < 此值 ⇒ 解钉（焦点随任务漂移）；恒 < 钉扎线 —— 施密特滞回 */
+export const SALIENCE_UNPIN_THRESHOLD = 0.5;
+/** E-4 惊异加成幅度：满新近度时恰把基线抬过钉扎线（0.4+0.45=0.85 ≥ 0.8） */
+export const SURPRISE_SALIENCE_BONUS = 0.45;
+/** 新近度半衰期（分钟）：「刚看过」的记忆天然更鲜活 */
+export const SALIENCE_RECENCY_HALF_LIFE_MIN = 5;
+/** ΠΑΝ-31 锚文本语义门：锚文本与当前任务描述的余弦低于此值 ⇒ 视为旧任务遗物，锚点通道让路 */
+export const SALIENCE_ANCHOR_TEXT_GATE = 0.2;
+/**
+ * ΠΑΝ-31 纯函数：显著度合成 —— 类型加权 × 任务相关 × 新近度包络
+ * （0.4 底 + 0.6 衰减项），惊异帧（≥SURPRISE_BIT_FLOOR 位）叠加随同一
+ * 新近度包络衰减的加成（封顶 1）。三位小数确定性输出。
+ * 数值契约（执法测试锚定）：
+ *   · 满新近度 + 满相关 ⇒ 0.8 恰过钉扎线（任务目标可钉 —— 旧实现恒 0.4 不可钉）；
+ *   · 零新近度 + 满相关 ⇒ 0.32 落入解钉线之下（滞回带可穿越）；
+ *   · 满新近度 + 惊异 ⇒ 0.85 过钉扎线；零新近度 + 惊异 ⇒ 0.16 解钉
+ *     （旧实现 0.61 > 0.5 永不解钉）。
+ */
+export function composeSalience(inp) {
+    const round3 = (v) => Math.round(v * 1000) / 1000;
+    const envelope = 0.4 + 0.6 * Math.min(1, Math.max(0, inp.recency));
+    const base = round3(inp.typeWeight * Math.min(1, Math.max(0, inp.relevance)) * envelope);
+    if ((inp.surpriseBits ?? 0) >= SURPRISE_BIT_FLOOR) {
+        return round3(Math.min(1, base + SURPRISE_SALIENCE_BONUS * Math.min(1, Math.max(0, inp.recency))));
+    }
+    return base;
+}
 /** W8-A5：维度体检（≥1 有限数取整；脏值 0 —— 后续判据按不可用处理，不猜） */
 function w8Dim(n) {
     return typeof n === 'number' && Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0;

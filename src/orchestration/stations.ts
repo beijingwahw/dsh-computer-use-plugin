@@ -52,8 +52,12 @@ export interface SemanticSource {
 
 /** 宿主执行通道：ExecutionStation 与宿主管线的适配器接口（四重门禁后的真实执行） */
 export interface HostExecutor {
-  /** 单动作执行 + 效果验证。永不抛错：失败入返回值（effectDetected=false / failure 在场） */
-  execute(action: SandboxAction): Promise<Omit<ExecutionResult, 'seq' | 'rehearsed'>>;
+  /** 单动作执行 + 效果验证。永不抛错：失败入返回值（effectDetected=false / failure 在场）。
+   *  ΠΑΝ-64（止损链断裂修复）：可选止损 signal —— ExecutionOrder.signal 的下游
+   *  传播通道（编排器 attemptTimeoutMs 越限/外部取消即 abort）。兼容式可选参数：
+   *  既有实现（两参签名）经方法双变天然可赋值，零回归；真机躯体（如 D-5 物理
+   *  微服务端口）消费它即可把断流送达 HTTP 层，消灭「超时后幽灵动作落地」。 */
+  execute(action: SandboxAction, signal?: AbortSignal): Promise<Omit<ExecutionResult, 'seq' | 'rehearsed'>>;
 }
 
 /** D-5 沙箱引擎的工位侧最小视图（dsh-stubs 模式：只声明实际使用的表面） */
@@ -302,7 +306,10 @@ export class DefaultExecutionStation implements ExecutionStation {
   }
 
   async execute(env: AttentionEnvelope<'execution', ExecutionOrder>): Promise<ExecutionResult> {
-    const { seq, action, intentRef } = env.payload;
+    // ΠΑΝ-64（止损链断裂修复）：接收 ExecutionOrder.signal 并传播给宿主执行通道 ——
+    // 旧实现解构丢弃 signal、HostExecutor 接口无此形参 ⇒ 编排器铸造的止损信号
+    // 在执行工位断链（只有感知路径真正吃 signal），abort 后在途动作照常执行。
+    const { seq, action, intentRef, signal } = env.payload;
     const startAt = Date.now();
     const base = { seq, latencyMs: 0, rehearsed: false, rehearsalChainId: undefined as string | undefined };
 
@@ -352,7 +359,9 @@ export class DefaultExecutionStation implements ExecutionStation {
       };
     }
     try {
-      const r = await this.opts.host.execute(action);
+      // ΠΑΝ-64：signal 随动作下发（signal 缺席 ⇒ 旧路径逐字节保持）—— 宿主侧
+      // 消费即可断流在途 HTTP（d7HostPort → router → adapter → microFetch）。
+      const r = await this.opts.host.execute(action, signal);
       return { ...base, ...r, latencyMs: Date.now() - startAt, rehearsed: base.rehearsed };
     } catch (e: any) {
       return {

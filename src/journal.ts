@@ -7,9 +7,11 @@
 // 这是金融级审计日志的世界标准：日志不仅要记，还要能证明自己没被改过。
 import {
   appendFileSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync,
-  statSync, renameSync, unlinkSync,
+  statSync, renameSync, unlinkSync, readFileSync, existsSync, writeFileSync,
 } from 'node:fs';
-import { createHash } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
+import { hostname, platform, arch, userInfo } from 'os';
+import { tightenFilePerms } from './filePerms';
 import path from 'path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Config } from './config';
@@ -17,6 +19,8 @@ import { onToolPost } from './guards/hooks';
 import { classifyResult } from './resultContract';
 import { mmrRoot, mmrInclusionProof, type InclusionProof } from './proof';
 import { cohensH } from './knowledge/metrics';
+// ΠΑΝ-49：canonical 单源消费（dialects/canonical.ts —— ΝΩ-24 守卫形态的唯一出处）
+import { canonicalJson } from './dialects';
 
 /** 可重放的动作类工具（take_screenshot 等观察类工具不进日志） */
 export const ACTION_TOOLS = [
@@ -131,9 +135,10 @@ export type PreDispatchAuditResult =
 /** ΝΩ-24：canonical 病态载荷守卫参数 —— 深度上限与降级哨兵。
  *  守卫律与 processScore 的 safeCanonical 同源（降级为常量哨兵串，序列化
  *  稳定、绝不抛）；哨兵在哈希域内确定性一致 —— 同一病态载荷每次铸出同一
- *  指纹，verify 重算同哨兵，链不断。 */
-const CANONICAL_MAX_DEPTH = 64;
-const CANONICAL_SENTINEL = '"#unserializable"';
+ *  指纹，verify 重算同哨兵，链不断。
+ *  ΠΑΝ-49：本实现已收编为 dialects/canonical.ts 单源（canonicalJson，顶部
+ *  import 消费）—— 全库 6 份 canonical 同族实现自此逐字节同律，notary 章③
+ *  前缀重走不再因复刻漂移而误红；深度上限/环哨兵/undefined 键过滤语义不变。 */
 
 // ── ΝΩ-45（journal 组提交 + JSONL rotation）：flusher 与轮转参数 ──
 /** 组提交窗口：50ms 周期或 32 行批阈值，先到者触发一次 open/write/fsync/close */
@@ -150,6 +155,17 @@ const ROTATION_LIMIT_BYTES = 5 * 1024 * 1024;
 /** 轮转保留代数：.1（上一代）与 .2（上上代），更旧出局 */
 const ROTATION_GENERATIONS = 2;
 
+// ── ΠΑΝ-55（WAL 深修）：先行审计通道的轮转上界 + 创世记录参数 ──
+/** WAL 轮转阈值：审计行短小（数百字节），2MB ≈ 万行级 —— 超限先轮转再追加 */
+const WAL_ROTATION_LIMIT_BYTES = 2 * 1024 * 1024;
+/** WAL 轮转保留代数：.wal.1 / .wal.2（与主 JSONL 轮转同律；旧代出局交运维取证） */
+const WAL_ROTATION_GENERATIONS = 2;
+/** WAL 隔离报告的行数上界（inspectJournalWal 的内存有界承诺 —— 更早的损坏行以计数汇总额外申报） */
+const WAL_QUARANTINE_REPORT_CAP = 50;
+/** ΠΑΝ-55：WAL 通道**零缓冲**（appendFileSync 同步写 —— W2-2 先行性立法）：
+ *  「组提交缓冲有界」在此通道的形态 = 缓冲恒 0（上界平凡成立）；轮转保证磁盘
+ *  面有界（当前代 ≤ 2MB + 保留两代）。 */
+
 /** ΝΩ-45（观测/测试面）：主 JSONL 组提交通道的统计快照（reset 归零） */
 export interface JournalDiskStats {
   /** 组提交次数（每批每文件一计 —— open/write/fsync/close 四联的执行次数） */
@@ -164,26 +180,11 @@ export interface JournalDiskStats {
   droppedLines: number;
 }
 
-/** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提）。
- *  ΝΩ-24：递归加 WeakSet 环检测 + 深度上限 64 —— 旧实现无守卫，畸形深嵌套
- *  args 栈溢出、环形 args 无限递归，RangeError 可击穿 append（无 catch）直达
- *  宿主事件层。seen 只记当前递归路径（出口即删）：同一子对象被两键引用是
- *  合法 DAG 载荷（JSON.stringify 同律逐处展开），只有真环才降级哨兵。 */
-function canonical(obj: any, depth = 0, seen = new WeakSet<object>()): string {
-  if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
-  if (depth > CANONICAL_MAX_DEPTH || seen.has(obj)) return CANONICAL_SENTINEL;
-  seen.add(obj);
-  try {
-    if (Array.isArray(obj)) return '[' + obj.map(v => canonical(v, depth + 1, seen)).join(',') + ']';
-    // 值为 undefined 的自有键与缺键同域：JSON.stringify 落盘时丢弃前者
-    // （checkpoint 落盘-恢复往返），若哈希域区分两者，恢复后 verify 重算即误报断链。
-    return '{' + Object.keys(obj).sort()
-      .filter(k => obj[k] !== undefined)
-      .map(k => JSON.stringify(k) + ':' + canonical(obj[k], depth + 1, seen)).join(',') + '}';
-  } finally {
-    seen.delete(obj);
-  }
-}
+/** ΠΑΝ-49：稳定序列化 = dialects 单源（ΝΩ-24 守卫形态：键排序 + undefined 键
+ *  过滤 + WeakSet 环检测 + 深度上限 64 哨兵 —— 见 dialects/canonical.ts）。
+ *  本地别名仅为保住既有调用点字面；任何「复刻一份」的回归都会被
+ *  test/pan49-55.fixes.test.ts 的同源锁定测试打红。 */
+const canonical = canonicalJson;
 
 function sha256(s: string): string {
   return createHash('sha256').update(s).digest('hex');
@@ -193,6 +194,279 @@ function sha256(s: string): string {
 function chainHash(prev: string, entry: JournalEntry): string {
   const { hash: _omit, ...domain } = entry; // 哈希域不含自身
   return sha256(prev + canonical(domain));
+}
+
+// ─── ΠΑΝ-55（WAL 深修）：先行审计通道的回放校验 / 轮转上界 / 创世记录 ───
+//
+// C1-9 对 WAL 的三处深修（工单 ΠΑΝ-55）：
+//   1. 回放校验：load/巡检时逐行哈希验证（wal_hash = sha256(prev_wal + canonical(行域))），
+//      损坏行**隔离报告不连坐** —— 单行损坏只 quarantine 该行（附行号/原因），
+//      前后完好行照常过验（旧形态：无任何读回验证面）。
+//   2. 轮转上界：WAL 文件 size-based 轮转（2MB 阈值 + 两代保留，主 JSONL 同律）；
+//      WAL 通道零缓冲（同步 appendFileSync —— 先行性立法），组提交缓冲上界恒 0。
+//   3. 创世记录：WAL 空文件的首次写入先落一行 genesis（机器指纹 + 启动计数），
+//      经 filePerms 保护的本地密钥 HMAC 封签 —— 同机整档重写可检测：攻击者持
+//      磁盘写权限重造 WAL 史时，若无 .key 文件读权则铸不出合法 genesis_mac
+//      （检验面 inspectJournalWal 报 genesis.mac=false / genesis 缺席）；启动计数
+//      回退（boot 比已知更小）= 截断重写的旁证。不引外部签名密钥 —— 本地对称
+//      密钥的信任边界 = filePerms 收紧的文件权限（W8-A2 同律）。
+
+/** ΠΑΝ-55：机器指纹（进程内缓存 —— hostname|platform|arch|user 的 sha256 前 16 hex；
+ *  稳定的本机标识：跨会话不变、跨机器可区分；不含序列号/MAC 等高敏面） */
+let machineFpCache: string | null = null;
+function machineFingerprint(): string {
+  if (machineFpCache !== null) return machineFpCache;
+  let user = '';
+  try { user = userInfo().username ?? ''; } catch { /* 受限环境兜底 */ }
+  machineFpCache = sha256(`${hostname()}|${platform()}|${arch()}|${user}`).slice(0, 16);
+  return machineFpCache;
+}
+
+/** ΠΑΝ-55：WAL 本地密钥缓存（按 keyPath 记账 —— 多 journal 路径互不串钥匙） */
+const walKeyCache = new Map<string, Buffer | null>();
+
+/**
+ * ΠΑΝ-55：WAL 创世 HMAC 密钥（32 字节）：首次现铸（randomBytes）、落盘
+ * `<walPath>.key` 并经 filePerms 收紧（POSIX 0600 / win32 icacls 断继承）；
+ * 此后读回复用。任何故障 ⇒ null（诚实降级：genesis 无 mac 落盘并如实申报
+ * 'key-unavailable' —— 审计先行性不受密钥通道牵连，fail-closed 语义不破坏）。
+ */
+function walGenesisKey(walPath: string): Buffer | null {
+  const keyPath = walPath + '.key';
+  const cached = walKeyCache.get(keyPath);
+  if (cached !== undefined) return cached;
+  let key: Buffer | null = null;
+  try {
+    if (existsSync(keyPath)) {
+      const raw = readFileSync(keyPath);
+      key = raw.length >= 32 ? raw.subarray(0, 32) : null; // 短档视为损坏 ⇒ 现铸
+    }
+    if (key === null) {
+      key = randomBytes(32);
+      writeFileSync(keyPath, key, { flag: 'wx', mode: 0o600 }); // wx：绝不覆盖既有密钥
+      tightenFilePerms(keyPath); // 尽力收紧；失败 ⇒ 权限面诚实暴露（功能继续）
+    }
+  } catch {
+    key = null; // 读/铸/收紧任一失败 ⇒ 诚实降级（genesis 无 mac —— 检验面如实报）
+  }
+  walKeyCache.set(keyPath, key);
+  return key;
+}
+
+/** ΠΑΝ-55：genesis 行的哈希域（wal_hash 与 genesis_mac 共用 —— 均不含自身） */
+interface WalGenesisDomain {
+  v: 1;
+  kind: 'genesis';
+  seq: 0;
+  ts: number;
+  machine: string;
+  boot: number;
+  prev_wal: string;
+}
+
+/** ΠΑΝ-55：数 WAL 文本里的 genesis 行数（启动计数的取证源；读不得 ⇒ 0） */
+function countGenesisLines(text: string): number {
+  let n = 0;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    try {
+      const row = JSON.parse(line) as { kind?: unknown };
+      if (row && row.kind === 'genesis') n++;
+    } catch { /* 损坏行不计 */ }
+  }
+  return n;
+}
+
+/**
+ * ΠΑΝ-55：铸一行 genesis（同步 appendFileSync 落盘 —— 与审计行同通道同先行性）。
+ * boot = 被接班文本的 genesis 计数 + 1（首次 = 1；轮转 = 退役代的计数 + 1）。
+ * walTip 随行推进（genesis 是链上普通一员 —— seq=0 不占审计序号）。
+ * 密钥缺席 ⇒ genesis_mac 不落（检验面报 'key-unavailable'）。
+ */
+function appendWalGenesis(walPath: string, retiredText: string, prevTip: string, ts: number): string {
+  const domain: WalGenesisDomain = {
+    v: 1, kind: 'genesis', seq: 0, ts, machine: machineFingerprint(),
+    boot: countGenesisLines(retiredText) + 1, prev_wal: prevTip,
+  };
+  const walHash = sha256(prevTip + canonical(domain));
+  const row: WalGenesisDomain & { wal_hash: string; genesis_mac?: string } = { ...domain, wal_hash: walHash };
+  const key = walGenesisKey(walPath);
+  if (key !== null) {
+    try {
+      row.genesis_mac = createHmac('sha256', key).update(canonical(domain)).digest('hex');
+    } catch { /* HMAC 故障 ⇒ 无 mac 落盘（诚实降级） */ }
+  }
+  appendFileSync(walPath, JSON.stringify(row) + '\n', 'utf8');
+  return walHash;
+}
+
+/**
+ * ΠΑΝ-55：WAL 轮转（size-based，主 JSONL rotateIfNeeded 同律）：当前代追加后
+ * 将超 2MB ⇒ 右移两代（.wal.2 出局、.wal.1 递补、当前代退役为 .wal.1）。返回
+ * 退役代文本（genesis 启动计数的接班源）；无需轮转 ⇒ ''。任何失败 ⇒ 返回
+ * ''（照常追加当前代 —— 轮转是旁路义务，绝不阻断先行审计）。
+ */
+function rotateWalIfNeeded(walPath: string, incomingBytes: number): string {
+  try {
+    let size = 0;
+    let retired: string;
+    try {
+      const st = statSync(walPath);
+      size = st.size;
+      if (size + incomingBytes <= WAL_ROTATION_LIMIT_BYTES) return '';
+      retired = readFileSync(walPath, 'utf8');
+    } catch {
+      return ''; // 无当前代文件 ⇒ 首写新档，无需轮转
+    }
+    const oldest = walPath + '.' + WAL_ROTATION_GENERATIONS;
+    const prev = walPath + '.' + (WAL_ROTATION_GENERATIONS - 1);
+    try { unlinkSync(oldest); } catch { /* .2 缺席 = 历史更短，右移照常 */ }
+    try { renameSync(prev, oldest); } catch { /* .1 缺席同上 */ }
+    renameSync(walPath, prev); // 本步失败 ⇒ 外层 catch ⇒ 照常追加当前代
+    return retired;
+  } catch {
+    return ''; // 轮转失败 ⇒ 不轮转照常追加（旁路义务）
+  }
+}
+
+/** ΠΑΝ-55：WAL 巡检回执（inspectJournalWal 的返回面 —— 逐行隔离报告不连坐） */
+export interface WalInspection {
+  /** ok=true = 无隔离行且文件级可读（genesis_mac 缺席/密钥不可读不算行损坏 —— 另立字段申报） */
+  ok: boolean;
+  /** 完整行总数（不含断尾半行） */
+  lines: number;
+  /** 通过逐行哈希验证的行数 */
+  valid: number;
+  /** 被隔离行数（= quarantinedLines.length + 超出报告上界的汇总额） */
+  quarantined: number;
+  /** 隔离报告（≤50 行 —— 行号 0 基 + 原因；超出上界以 quarantined 总数申报） */
+  quarantinedLines: Array<{ line: number; seq: number | null; reason: string }>;
+  /** 最末有效行的链尖（无有效行 ⇒ null —— 续链/对账锚点） */
+  walTip: string | null;
+  /** 最末有效行的审计序号（genesis=0；无有效行 ⇒ null） */
+  lastSeq: number | null;
+  /** ΠΑΝ-55 创世记录读数（首个有效 genesis 行；无 ⇒ null —— 旧档/pre-ΠΑΝ-55 WAL） */
+  genesis: {
+    machine: string;
+    boot: number;
+    ts: number;
+    /** HMAC 判决：true = 与 .key 密钥复算一致；false = 不一致（同机重写证据）；
+     *  null = mac 缺席（铸时密钥不可用）或巡检时密钥不可读（不可判 —— 诚实降级） */
+    mac: boolean | null;
+  } | null;
+  /** 文件级故障（读不得 ⇒ ok:false + error；行级损坏不连坐 —— 各行独立报告） */
+  error?: string;
+}
+
+/**
+ * ΠΑΝ-55：WAL 回放校验（纯读、绝不抛）—— 逐行验证 wal_hash =
+ * sha256(行自身的 prev_wal + canonical(行域))，链连续性与序号单调性对照**前一行
+ * 的完好性**：前一行被隔离 ⇒ 本行跳过链对照（自身哈希已验 ⇒ 不连坐）。损坏行
+ * 进隔离报告（行号/序号/原因），完好行照常计数。genesis 行额外验证 genesis_mac
+ *（.key 在场时）—— mac 不符 = 同机整档重写的可检测证据（顶层 mac:false 披露）。
+ * path 缺省 = 当前配置的 journalPath + '.wal'（未配置/读不得 ⇒ ok:false 诚实回执）。
+ */
+export function inspectJournalWal(walPath?: string): WalInspection {
+  const out: WalInspection = {
+    ok: false, lines: 0, valid: 0, quarantined: 0, quarantinedLines: [], walTip: null, lastSeq: null, genesis: null,
+  };
+  let file = walPath;
+  if (file === undefined) {
+    const main = (journal as unknown as { filePath?: string }).filePath;
+    file = typeof main === 'string' && main !== '' ? main + '.wal' : '';
+  }
+  if (file === '') {
+    out.error = 'no wal path configured';
+    return out;
+  }
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e: unknown) {
+    out.error = `wal unreadable: ${String((e as { message?: string })?.message ?? e)}`;
+    return out;
+  }
+  const key = walGenesisKey(file);
+  let prevValidTip: string | null = null; // 最近**有效**行的链尖（链对照基准）
+  let prevLineHashField: string | null = null; // 上一行（无论有效性）的 wal_hash 字段 —— 连坐豁免的对照源
+  let lastValidSeq: number | null = null;
+  let truncatedReport = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const lineNo = out.lines;
+    out.lines++;
+    const quarantine = (reason: string, seq: number | null): void => {
+      out.quarantined++;
+      if (out.quarantinedLines.length < WAL_QUARANTINE_REPORT_CAP) {
+        out.quarantinedLines.push({ line: lineNo, seq, reason });
+      } else {
+        truncatedReport = true;
+      }
+      prevLineHashField = null; // 损坏行的哈希字段不可信 ⇒ 下一行豁免链对照
+    };
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+      if (!row || typeof row !== 'object' || typeof row.wal_hash !== 'string' || typeof row.prev_wal !== 'string') {
+        quarantine('malformed-row', typeof row?.seq === 'number' ? row.seq : null);
+        continue;
+      }
+    } catch {
+      quarantine('unparseable-json', null);
+      continue;
+    }
+    // 逐行自验：wal_hash = sha256(prev_wal + canonical(域)) —— 与自身字段对照，
+    // 不依赖前后行（单行损坏不连坐的根基）
+    const domain: Record<string, unknown> = { ...row };
+    delete domain.wal_hash;
+    delete domain.genesis_mac;
+    const recomputed = sha256(String(row.prev_wal) + canonical(domain));
+    if (recomputed !== row.wal_hash) {
+      quarantine('hash-mismatch', typeof row.seq === 'number' ? row.seq : null);
+      continue;
+    }
+    // 链连续性：前一行在场（含被隔离行的哈希字段不可信 ⇒ 豁免）才对照
+    if (prevLineHashField !== null && row.prev_wal !== prevLineHashField) {
+      quarantine('chain-discontinuity', typeof row.seq === 'number' ? row.seq : null);
+      continue;
+    }
+    // 序号单调：genesis=0 恒合法；审计行须 > 最近有效序号
+    const seq = typeof row.seq === 'number' && Number.isFinite(row.seq) ? row.seq : null;
+    if (row.kind === 'genesis') {
+      if (seq !== 0) {
+        quarantine('genesis-seq-not-zero', seq);
+        continue;
+      }
+      if (out.genesis === null && typeof row.machine === 'string' && typeof row.boot === 'number' && typeof row.ts === 'number') {
+        let mac: boolean | null = null;
+        if (typeof row.genesis_mac === 'string') {
+          if (key !== null) {
+            try {
+              mac = createHmac('sha256', key).update(canonical(domain)).digest('hex') === row.genesis_mac;
+            } catch { mac = null; }
+          } // key null ⇒ 不可判（诚实 null）
+        } // mac 缺席 ⇒ null（铸时密钥不可用）
+        out.genesis = { machine: row.machine, boot: row.boot, ts: row.ts, mac };
+      }
+    } else if (seq === null || (lastValidSeq !== null && seq <= lastValidSeq)) {
+      quarantine('seq-nonmonotonic', seq);
+      continue;
+    }
+    out.valid++;
+    prevValidTip = row.wal_hash;
+    prevLineHashField = row.wal_hash;
+    if (seq !== null) lastValidSeq = seq;
+  }
+  out.walTip = prevValidTip;
+  out.lastSeq = lastValidSeq;
+  if (truncatedReport) {
+    // 汇总申报超出上界的隔离行（计数为准 —— 报告面有界承诺）
+    out.quarantinedLines.push({ line: -1, seq: null, reason: `report capped at ${WAL_QUARANTINE_REPORT_CAP} rows; total quarantined = ${out.quarantined}` });
+  }
+  out.ok = out.quarantined === 0;
+  return out;
 }
 
 class ActionJournal {
@@ -471,6 +745,11 @@ class ActionJournal {
       const hash = chainHash(this.chainTip, entry); // 病态载荷在此抛出 ⇒ fail-closed
 
       // 步骤 2：WAL 同步落盘（先行性保证：appendFileSync 返回即已交割 OS）
+      // ΠΑΝ-55：落盘前两道深修 —— ① 轮转上界（当前代将超 2MB ⇒ 先右移两代，
+      // 主 JSONL rotateIfNeeded 同律；轮转失败照常追加 —— 旁路义务）；
+      // ② 创世记录（WAL 文件空缺/刚轮转 ⇒ 先落 genesis 行：机器指纹 + 启动计数
+      // + filePerms 保护密钥的 HMAC —— 同机整档重写自此可检测；genesis 铸造
+      // 失败按既有 fail-closed 语义拒派[外层 catch]，绝不静默降级为无创世史）。
       if (this.filePath) {
         const walPath = this.filePath + '.wal';
         if (!this.ensuredWalDirs.has(walPath)) {
@@ -481,10 +760,26 @@ class ActionJournal {
         const record = {
           v: 1, seq: this.walSeq, ts: entry.ts, tool,
           main_tip_before: this.chainTip,
-          prev_wal: this.walTip,
+          prev_wal: this.walTip as string,
           hash, // 主链将采用的哈希（WAL 行与主链行的交叉锚）
           args: entry.args.args ?? null,
         };
+        // ΠΑΝ-55 ①：轮转（retired = 退役代文本 —— genesis 启动计数的接班源；
+        // 尺寸估算含 wal_hash 字段开销 —— 轮转阈值判定偏保守侧）
+        const incomingBytes = Buffer.byteLength(JSON.stringify(record), 'utf8') + 96;
+        const retired = rotateWalIfNeeded(walPath, incomingBytes);
+        // ΠΑΝ-55 ②：创世记录（文件空缺/刚轮转 ⇒ 现铸；非空旧档[含 pre-ΠΑΝ-55
+        // WAL]不追溯补铸 —— 补铸会在非创世位置伪造创世事实；下次轮转自然接续）
+        let walEmpty: boolean;
+        try {
+          walEmpty = statSync(walPath).size === 0;
+        } catch {
+          walEmpty = true; // ENOENT ⇒ 首写新档
+        }
+        if (walEmpty) {
+          this.walTip = appendWalGenesis(walPath, retired, this.walTip, entry.ts);
+          record.prev_wal = this.walTip; // 创世之后审计行接续新链尖
+        }
         const walHash = sha256(this.walTip + canonical(record));
         appendFileSync(walPath, JSON.stringify({ ...record, wal_hash: walHash }) + '\n', 'utf8');
         this.walTip = walHash;

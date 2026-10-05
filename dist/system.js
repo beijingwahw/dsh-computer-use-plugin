@@ -73,10 +73,18 @@ async function _getKey(keyName) {
         ctrl: 'LeftControl', cmd: 'LeftSuper', alt: 'LeftAlt', shift: 'LeftShift',
         enter: 'Enter', tab: 'Tab', space: 'Space', backspace: 'Backspace',
         delete: 'Delete', esc: 'Escape',
+        // R2-2: 导航/编辑键 + 全字母表（原 a/c/v/z 子集收口）—— 与 pressHotkey 的
+        // HOTKEY_WHITELIST_KEYS（no31 漂移防线强制同源）及 python _KEY_MAP 三层收敛。
+        // 根因：白名单缺 s ⇒ ctrl+s 被协议层拒绝（R1-8 冒烟遗留①）；字母/导航和弦
+        // 属应用内安全面，系统级危险和弦仍由 hotkeyBlacklist 独立执法不受本扩员影响。
+        home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown',
+        up: 'Up', down: 'Down', left: 'Left', right: 'Right',
         f1: 'F1', f2: 'F2', f3: 'F3', f4: 'F4', f5: 'F5',
         f6: 'F6', f7: 'F7', f8: 'F8', f9: 'F9', f10: 'F10',
         f11: 'F11', f12: 'F12',
-        a: 'A', c: 'C', v: 'V', z: 'Z',
+        a: 'A', b: 'B', c: 'C', d: 'D', e: 'E', f: 'F', g: 'G', h: 'H', i: 'I',
+        j: 'J', k: 'K', l: 'L', m: 'M', n: 'N', o: 'O', p: 'P', q: 'Q', r: 'R',
+        s: 'S', t: 'T', u: 'U', v: 'V', w: 'W', x: 'X', y: 'Y', z: 'Z',
     };
     const name = keyName.toLowerCase();
     try {
@@ -96,6 +104,9 @@ let windowDelegate = null;
 // system.hotkeyPolicy.ts（行为零变化；nut-js 导入铁律仍只在本文件）；导入面不变 —— 再分发。
 import { hotkeyBlacklistHit, HOTKEY_BLACKLIST_MARKER, getHotkeyBlacklistCsv, setHotkeyBlacklistCsv } from './system.hotkeyPolicy.js';
 export { hotkeyBlacklistHit, isHotkeyBlacklistError, HOTKEY_BLACKLIST_MARKER } from './system.hotkeyPolicy.js';
+// R2-3（焦点保卫）：切窗成功 ⇒ 记账目标窗（type_text 前置校验的复焦依据）。
+// 纯记账旁路 —— recordTargetWindow 永不抛，缺席时焦点保卫按「无复焦依据」降级。
+import { recordTargetWindow } from './windowFocusGuard.js';
 function guardDryRun(action, detail) {
     if (!dryRun)
         return false;
@@ -217,7 +228,11 @@ export const system = {
         const ny = Math.min(1, Math.max(0, y / size.height));
         // D-1 物理躯体公理：动作派发入互斥队列（legacy 路径与 typeText/drag 同律；
         // pressHotkey 例外 —— shaper 的 set_zoom 在 serialize 内复用本管线，嵌套即死锁）
-        await serialize(() => backend.clickMouse(nx, ny, button, dryRun));
+        // ΤΕΛ-5 D-G23：取消端口接线 —— serialize 超时即 abort 底层 D-5 调用
+        //（signal → microFetch 断流），挂死调用的恢复通路不再缺席；abort 后的
+        // 迟来终局由 ioMutex 吞错镜像吸收，队列串行公理不变。
+        const io = new AbortController();
+        await serialize(() => backend.clickMouse(nx, ny, button, dryRun, undefined, io.signal), undefined, () => io.abort());
     },
     /**
      * 移动鼠标（无点击）—— Z-1 交互性探针的悬停动作。
@@ -234,7 +249,9 @@ export const system = {
         const size = await backend.getScreenSize();
         const nx = Math.min(1, Math.max(0, x / size.width));
         const ny = Math.min(1, Math.max(0, y / size.height));
-        await serialize(() => backend.moveMouse(nx, ny, durationMs, dryRun));
+        // ΤΕΛ-5 D-G23：取消端口接线（同 clickMouse 律 —— 超时 abort 底层 D-5 调用）
+        const io = new AbortController();
+        await serialize(() => backend.moveMouse(nx, ny, durationMs, dryRun, io.signal), undefined, () => io.abort());
     },
     async typeText(text, clearFirst = false) {
         if (guardDryRun('typeText', { text: text.substring(0, 30), clearFirst }))
@@ -256,7 +273,9 @@ export const system = {
             });
             return;
         }
-        await serialize(() => backend.typeText(text, clearFirst, dryRun));
+        // ΤΕΛ-5 D-G23：取消端口接线（同 clickMouse 律 —— 超时 abort 底层 D-5 调用）
+        const io = new AbortController();
+        await serialize(() => backend.typeText(text, clearFirst, dryRun, undefined, io.signal), undefined, () => io.abort());
     },
     async dragMouse(start, end) {
         if (guardDryRun('dragMouse', { start, end }))
@@ -274,7 +293,9 @@ export const system = {
         // 像素 → 归一化（D-5 契约域）
         const size = await backend.getScreenSize();
         const clamp01 = (v, max) => Math.min(1, Math.max(0, v / max));
-        await serialize(() => backend.dragMouse({ x: clamp01(start.x, size.width), y: clamp01(start.y, size.height) }, { x: clamp01(end.x, size.width), y: clamp01(end.y, size.height) }, dryRun));
+        // ΤΕΛ-5 D-G23：取消端口接线（同 clickMouse 律 —— 超时 abort 底层 D-5 调用）
+        const io = new AbortController();
+        await serialize(() => backend.dragMouse({ x: clamp01(start.x, size.width), y: clamp01(start.y, size.height) }, { x: clamp01(end.x, size.width), y: clamp01(end.y, size.height) }, dryRun, undefined, io.signal), undefined, () => io.abort());
     },
     async scroll(direction, amount) {
         if (guardDryRun('scroll', { direction, amount }))
@@ -299,7 +320,9 @@ export const system = {
             });
             return;
         }
-        await serialize(() => backend.scrollPage(direction, amount, dryRun));
+        // ΤΕΛ-5 D-G23：取消端口接线（同 clickMouse 律 —— 超时 abort 底层 D-5 调用）
+        const io = new AbortController();
+        await serialize(() => backend.scrollPage(direction, amount, dryRun, undefined, io.signal), undefined, () => io.abort());
     },
     async pressHotkey(keys) {
         // P1-3：dryRun 照旧只记录（不执行 = 无拦截必要；提示词调试要能看到完整热键轨迹）
@@ -339,10 +362,14 @@ export const system = {
         // 窗口清单。原生路径（pygetwindow）三样俱全。委托保留给"无 python 后端"
         // 的环境 —— 那才是 D-2 设计它的场景。
         // ΝΩ-25：缺席判定改 error.kind 优先（backendAbsence），消息正则仅兜底。
+        // R2-3：切换成功且带回执 ⇒ 记账目标窗（宿主自抬抢焦后 type_text 前置
+        // 校验的复焦依据；纯旁路，失败零影响）。
         if (!forceLegacy()) {
             try {
                 const r = await backend.switchWindow(keyword);
                 if (r.method !== 'hotkey_only') {
+                    if (r.matched)
+                        recordTargetWindow({ keyword, matchedTitle: r.matched });
                     return { method: r.method, matched: r.matched ?? null };
                 }
             }
@@ -356,13 +383,33 @@ export const system = {
         if (windowDelegate) {
             const r = await windowDelegate(keyword);
             // 委托方言无标题回执时 matched=null —— 取证降级到工具层 OCR 路径
-            return { method: 'delegate', matched: r?.matched ?? null };
+            const matched = r?.matched ?? null;
+            if (matched)
+                recordTargetWindow({ keyword, matchedTitle: matched });
+            return { method: 'delegate', matched };
         }
         if (forceLegacy()) {
             throw new Error('Window management is not available in this environment. ' +
                 'Install a window-management provider, or switch windows via the press_hotkey tool.');
         }
         throw new Error('native window switch unavailable; use press_hotkey alt+tab');
+    },
+    /**
+     * R2-3（焦点保卫）：前台窗口标题只读探测 —— type_text 前置焦点校验的数据源。
+     * 绝不抛：通道缺席（无 python 后端 / 窗口后端不可用 / legacy 路径无此能力）
+     * ⇒ null（调用方按「不可校验」诚实降级）。空标题（桌面焦点）亦归一为 null。
+     */
+    async getForegroundWindowTitle() {
+        if (forceLegacy())
+            return null; // legacy 栈无窗口读取面 —— 诚实缺席
+        try {
+            const r = await backend.getActiveWindow();
+            const t = typeof r?.title === 'string' ? r.title.trim() : '';
+            return t !== '' ? t : null;
+        }
+        catch {
+            return null;
+        }
     },
     /**
      * 用操作系统默认浏览器打开 URL（AA-1 世界跳转引擎的躯体）。

@@ -4,7 +4,12 @@
 // 面整体搬迁。行为零变化；立法常量（REMOTE_EVIDENCE_OVERLAP_MIN / AUDIO_*）按
 // 「立法在源」测试锁定留守 actionVerifier.ts（w5cross ⑩ / w4audio ⑧a）；
 // actionVerifier.ts 以再导出保持导入面不变。
-import { REMOTE_EVIDENCE_OVERLAP_MIN } from './actionVerifier';
+// ΠΑΝ-127（D-F5 清偿）：本卫星曾自桶 actionVerifier.ts 回借立法常量
+// REMOTE_EVIDENCE_OVERLAP_MIN（value 边）构成桶-卫星二环。常量受 w5cross ⑩
+// 「立法在源」测试源级锁定不可搬家，且复制常量 = 制造漂移（禁）—— 故按
+// 「纯函数端口注入」方言拆环：判决核心改收阈值参数（调用方 = 桶的公开二参
+// 包装，注入立法常量）。类型面（RemoteRegion/RemoteChange/RemoteJudgement）
+// 仍 type-import 自桶（type 边豁免）。行为零变化。
 import type { RemoteRegion, RemoteChange, RemoteJudgement } from './actionVerifier';
 
 // ─── W5-3（L3 跨机互证）：判决函数 ───
@@ -50,13 +55,16 @@ export function sanitizeRemoteChange(c: unknown): RemoteChange | null {
  *     在哪，就无权互证）；
  *   · 无有效变化区域 ⇒ unverified 'no-change-regions'（B 屏没变 —— 诚实
  *     缺席而非反驳：region 证据链断在哪环都不臆造）；
- *   · 判据：max over regions of（区域∩期望）/（期望面积）≥ REMOTE_EVIDENCE_
- *     OVERLAP_MIN ⇒ corroborated；否则 unverified 'overlap-below-min'
+ *   · 判据：max over regions of（区域∩期望）/（期望面积）≥ overlapMin
+ *     ⇒ corroborated；否则 unverified 'overlap-below-min'
  *     （overlap 照报最优值 —— 证据保留）。
+ * ΠΑΝ-127：阈值经参数注入（公开二参面 = 桶 actionVerifier.ts 的包装，注入
+ * 立法常量 REMOTE_EVIDENCE_OVERLAP_MIN —— 立法在源桶，环拆于参数缝）。
  */
 export function judgeRemoteChange(
   hint: RemoteRegion | null,
   change: RemoteChange | null,
+  overlapMin: number,
 ): RemoteJudgement {
   const un = (reason: string): RemoteJudgement =>
     ({ verdict: 'unverified', overlap: 0, reason });
@@ -74,7 +82,7 @@ export function judgeRemoteChange(
       if (iw > 0 && ih > 0) best = Math.max(best, (iw * ih) / hArea);
     }
     const overlap = Math.round(best * 10000) / 10000;
-    return overlap >= REMOTE_EVIDENCE_OVERLAP_MIN
+    return overlap >= overlapMin
       ? { verdict: 'corroborated', overlap }
       : { verdict: 'unverified', overlap, reason: 'overlap-below-min' };
   } catch {

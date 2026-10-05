@@ -47,11 +47,6 @@ export async function getSharp() {
         throw _sharpError;
     }
 }
-/** 重置 sharp 缓存（仅测试用） */
-export function _resetSharpCache_forTest() {
-    _sharp = null;
-    _sharpError = null;
-}
 let _tesseract = null;
 let _tesseractError = null;
 /** 懒加载 tesseract.js —— 使用模式：const worker = await (await getTesseract()).createWorker() */
@@ -74,9 +69,4 @@ export async function getTesseract() {
         _tesseractError.cause = e; // 保留原始错误（如包损坏/网络失败）—— 排障不丢根因
         throw _tesseractError;
     }
-}
-/** 重置 tesseract 缓存（仅测试用） */
-export function _resetTesseractCache_forTest() {
-    _tesseract = null;
-    _tesseractError = null;
 }

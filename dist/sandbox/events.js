@@ -2,6 +2,9 @@ import { DOCTOR_VERDICT_EVENT } from '../doctorEvents.js';
 // P0-3：事件名与载荷联合方言收敛 D-1 单源（cognitionEvents.ts 唯一事实源），
 // 本文件只做消费侧再导出 —— 依赖方向对齐 doctorEvents 先例（D-5 import D-4 契约）。
 import { COGNITION_PLAN_READY_EVENT } from '../cognitionEvents.js';
+// ΠΑΝ-40c：hex dhash 方言归一的单源转换器（ΝΩ-24 域检 —— 恰 16 hex 才展开；
+// perceptualHash 只懒依赖 sharp，无环）。见下方 fingerprintBitsOf。
+import { hexToBits } from '../perceptualHash.js';
 /** D-5 发射事件名注册表（as const 防拼写漂移） */
 export const SANDBOX_EVENTS = {
     rehearsalBegin: 'sandbox/rehearsal-begin',
@@ -39,8 +42,24 @@ export function onDoctorVerdict(ctx, handler) {
 // ─── 宿主观察嗅探（TRUST IS A FINGERPRINT 的镜像源头）───
 // D-5 监听宿主管线 post-execute，尽力嗅探结果 JSON 中的屏指纹字段。
 // 嗅探缺席 ⇒ 快照诚实降级（screenDhash=''）—— 无证据 = 门禁拒绝，保守方向。
+// ΠΑΝ-40c（嗅探键名对齐生产者）：旧四键 ['scene_fingerprint','screen_dhash',
+// 'dhash','scene_hash'] 全库 grep 只有 events.ts 自己 —— 生产工具锚点实际携带
+// 的指纹字段名与之零重合，嗅探恒 null（C2-3 H2-4）。修法：按生产代码**实际
+// 写入**的键名对齐增补（grep 考古，逐键注明生产者）：
+//   · screen / region      —— actionVerifier.BeforeState 方言（clickMouse.ts
+//                             beforeCaptureStage：normalizeHash 后的 64 位位串）
+//   · exitFingerprint      —— skillTools 技能/模板离场指纹（cap.dhash 原样
+//                             hex；snake_case 变体 exit_fingerprint 一并收）
+//   · hash / sceneHash     —— contextManager 帧记录（record.hash，64 位位串；
+//                             flashback/uiMemory 的 sceneHash 驼峰变体同源）
+// 旧四键保留（零成本兼容 —— 形状卫兵恒在，多试几个键不产生假阳性）。
 /** 宿主工具结果中可接受的指纹字段名（按宿主锚点方言增补，收口于此） */
-const FINGERPRINT_KEYS = ['scene_fingerprint', 'screen_dhash', 'dhash', 'scene_hash'];
+const FINGERPRINT_KEYS = [
+    // ΠΑΝ-40c：生产者实键（对齐面）
+    'screen', 'region', 'exitFingerprint', 'exit_fingerprint', 'hash', 'sceneHash',
+    // 旧方言（兼容保留）
+    'scene_fingerprint', 'screen_dhash', 'dhash', 'scene_hash',
+];
 // ΝΩ-1：指纹位宽域常量（摄取侧与 engine.noteHostObservation 同一事实源）。
 // ΑΩ-R19 只修了比对侧（engine.fpSimilarity 不等宽前缀比对 + truncatedTo 注记），
 // 摄取侧仍硬编码 64 位 ⇒ truncatedTo 分支永不可达 —— 修复自相矛盾。位宽放宽为
@@ -57,7 +76,23 @@ const BINARY_FINGERPRINT_RE = new RegExp(`^[01]{${FINGERPRINT_MIN_BITS},${FINGER
 export function isBinaryFingerprint(v) {
     return BINARY_FINGERPRINT_RE.test(v);
 }
-/** 从任意宿主工具结果中嗅探 [01]{32,256} 位指纹串；缺席返回 null（诚实，不伪造） */
+// ΠΑΝ-40c（格式对齐）：生产指纹有两种方言 —— 位串（normalizeHash 后的
+// [01]{32,256}）与 hex（backend cap.dhash / skillTools exitFingerprint 直存
+// 的 16 位 hex = 64 bit）。旧嗅探只认位串 ⇒ hex 方言的生产者（技能离场指纹）
+// 即便键名对上了也被形状卫兵没收。收编转换走顶部单源 import（hexToBits，
+// ΝΩ-24 域检：恰 16 hex 才展开，截断/超长/脏串 null）—— 本文件零复刻。
+/** 指纹方言归一：位串原样透传（[01]{32,256}）；16-hex dhash 展开为 64 位
+ *  位串；其余（含取证摘要等任意长 hex）null —— 诚实缺席，绝不夹取。 */
+function fingerprintBitsOf(v) {
+    if (typeof v !== 'string')
+        return null;
+    if (isBinaryFingerprint(v))
+        return v;
+    const bits = hexToBits(v);
+    return bits !== null && isBinaryFingerprint(bits) ? bits : null;
+}
+/** 从任意宿主工具结果中嗅探指纹（位串/hex 双方言归一为位串）；
+ *  缺席返回 null（诚实，不伪造） */
 export function sniffFingerprint(result) {
     if (typeof result !== 'string')
         return null;
@@ -72,8 +107,11 @@ export function sniffFingerprint(result) {
             : parsed;
         for (const key of FINGERPRINT_KEYS) {
             const v = anchor[key];
-            if (typeof v === 'string' && isBinaryFingerprint(v))
-                return v;
+            if (typeof v === 'string') {
+                const bits = fingerprintBitsOf(v);
+                if (bits !== null)
+                    return bits;
+            }
         }
         return null;
     }

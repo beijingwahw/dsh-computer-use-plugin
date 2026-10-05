@@ -7,8 +7,11 @@
 import { rankTopK, actionSignature, DEFAULT_TOP_K, type ScoringContext } from './autonomy/counterfactual';
 import type { PolicyAction } from './autonomy/policyEngine';
 import { parseRootCause, recoveryLadderFor, type RootCauseReport, type RootCauseId, type RecoveryActionId } from './diagnosis';
-import { branchLedger, BRANCH_REPLAY_BUDGET_STEPS, cloneJson, safeNow, BranchLedgerBook } from './branchCards';
-import type { BranchStepRecord, BranchLedgerSnapshot, BranchCandidateRecord } from './branchCards';
+// ΠΑΝ-127（D-F5 清偿）：账本域符号改从零环基座 branchCards.ledger.ts 导入
+// （原自桶 branchCards.ts 回借构成桶-卫星 value 二环；桶面同名符号仍经
+// export * 再分发可用 —— 导入面零破坏，行为零变化）。
+import { branchLedger, BRANCH_REPLAY_BUDGET_STEPS, cloneJson, safeNow, BranchLedgerBook } from './branchCards.ledger';
+import type { BranchStepRecord, BranchLedgerSnapshot, BranchCandidateRecord } from './branchCards.ledger';
 
 // ─── W3-6：岔路卡（失败相触发的结构化纠偏卡） ───
 

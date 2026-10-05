@@ -54,6 +54,51 @@ export function isSuccess(c: ClassifyResult): boolean {
   return c.status === 'SUCCESS';
 }
 
+// ─── ΠΑΝ-108（前缀协议行首锚定 + 转义规则）───
+//
+// 病灶（C1-2 M11）：旧回退通道用 `raw.includes('[Error]')` —— 任意位置含
+// 该字面即判 FAILED。read_text / OCR 类工具返回的正文（错误对话框截图的
+// 文字、日志摘录）极易含 "[Error]" 字样 ⇒ 误计熔断失败、误进失败记忆 ——
+// 「内容里有」被当成「结果是」。前缀协议的本意是**标记**，不是子串。
+//
+// 执法（三层）：
+//   ① 行首锚定：只有**首个非空行**以 `[Error]` / `[System]` 开头才判
+//      FAILED/SUCCESS —— 全部生产发射点（guards/hooks.ts、各工具的
+//      return `[Error]: ...`）都把标记放在结果串首，正文里再现同字样是
+//      内容巧合，不是协议判决；
+//   ② 转义规则：正文若必须以该字面开头（如 read_text 读到一份以
+//      "[Error]" 开头的日志），发射侧在首行标记前加单个反斜杠转义
+//      （`\[Error]`）—— 判定侧见转义即视为内容（UNKNOWN），绝不折叠为
+//      失败。转义由导出的 escapeContractPrefix 提供，双端同源；
+//   ③ 零漂移：锚定+转义只收紧误判面 —— 首行即标记的旧输入判定结果
+//      与旧 includes 完全一致（既有工具的回执全部首行发射）。
+
+/** ΠΑΝ-108：前缀协议标记（行首锚定判定的字面） */
+const CONTRACT_PREFIX_ERROR = '[Error]';
+const CONTRACT_PREFIX_SYSTEM = '[System]';
+
+/** ΠΑΝ-108：转义规则 —— 首个非空行以协议标记开头的内容串，在标记前加 `\` 转义。
+ *  判定侧见转义即按内容处理（UNKNOWN），发射侧（正文以 [Error]/[System]
+ *  开头的工具）用本函数包一层即安全。空串/无需转义 ⇒ 原样返回（纯函数）。 */
+export function escapeContractPrefix(content: string): string {
+  const s = typeof content === 'string' ? content : String(content ?? '');
+  const wsLen = s.length - s.trimStart().length; // 前导空白长度（转义不吞缩进）
+  const rest = s.slice(wsLen);
+  if (rest.startsWith(CONTRACT_PREFIX_ERROR) || rest.startsWith(CONTRACT_PREFIX_SYSTEM)) {
+    return `${s.slice(0, wsLen)}\\${rest}`;
+  }
+  return s;
+}
+
+/** ΠΑΝ-108：首个非空行的行首锚定判定（trimStart 后 startsWith —— 多行正文
+ *  中部/次行出现的标记字样是内容，不是协议） */
+function firstLineHasPrefix(raw: string, prefix: string): boolean {
+  const body = raw.trimStart();
+  // 转义规则：首行以 `\[Error]` / `\[System]` 开头 ⇒ 内容巧合，已转义申报
+  if (body.startsWith(`\\${prefix}`)) return false;
+  return body.startsWith(prefix);
+}
+
 export function classifyResult(raw: unknown): ClassifyResult {
   if (typeof raw !== 'string') return { status: 'UNKNOWN', noop: false };
 
@@ -74,8 +119,9 @@ export function classifyResult(raw: unknown): ClassifyResult {
   } catch { /* 非 JSON，走前缀协议回退 */ }
 
   // 回退通道：前缀协议（B-4 改造完成前的历史工具格式）
-  if (raw.includes('[Error]')) return { status: 'FAILED', noop: false };
-  if (raw.includes('[System]')) return { status: 'SUCCESS', noop: false };
+  // ΠΑΝ-108：行首锚定 —— OCR/读文本正文里的 "[Error]" 字样不再折叠为错误
+  if (firstLineHasPrefix(raw, CONTRACT_PREFIX_ERROR)) return { status: 'FAILED', noop: false };
+  if (firstLineHasPrefix(raw, CONTRACT_PREFIX_SYSTEM)) return { status: 'SUCCESS', noop: false };
   return { status: 'UNKNOWN', noop: false };
 }
 

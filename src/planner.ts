@@ -3,6 +3,21 @@
 // 保留原版提示词的全部规则（含「单个屏幕内完成」—— 教规划器体谅执行器的极限）。
 // 融合修复：原版签名无 ctx 却想调 ctx.llm -> 改为 ChatFn 依赖注入；
 //           「需增加容错处理」的 TODO -> 实现围栏剥离 + 区间截取的 JSON 容错解析。
+// ── ΠΑΝ-40a（plan-ready chain 臂发射方）──
+// 病灶（C2-3 H2-1）：cognition/plan-ready 的唯一生产发射器是 delegate_to_
+// pipeline，经 mintIntentPlanReady 只铸 intent 臂（D-6/D-7 方言）；全库无任何
+// CognitionChainPayload 铸造点 ⇒ sandbox 侧 `if (!'chain' in payload)` 恒真
+// 返回，engine.receivePlan 是死码，「排练→固化→召回→五门重放」闭环第一环断裂。
+// 修法：计划就绪时铸造 chain 臂载荷 —— 方言零新造：CognitionChainPayload /
+// COGNITION_PLAN_VERSION / emitCognitionPlanReady 全部消费 cognitionEvents
+// 既有单源（D-1 主权），动作校验复用 sandbox/actionSchema（半截链是毒证，
+// 非法链不发射 = 诚实缺席）。发射经注入钩（emitPlanReady）保持 planner 纯函数
+// 零 ctx 依赖；生产一行接线（orchestrator/组合根侧）：
+//   planTasks(prompt, chat, { emitPlanReady: p => emitCognitionPlanReady(ctx, p), chain })
+import type { CognitionChainPayload, CognitionPlanReadyPayload } from './cognitionEvents';
+import { COGNITION_PLAN_VERSION } from './cognitionEvents';
+import { validateActionChainInput } from './sandbox/actionSchema';
+import type { ActionChain, VirtualWidget } from './sandbox/types';
 export const PLANNER_SYSTEM_PROMPT = `
 # Role: 任务规划专家 (Task Planner)
 
@@ -43,9 +58,49 @@ export interface TopoOrder {
   /** 依赖图含环（order 只含无环前缀 —— 调用方必须拒绝执行） */
   cycle: boolean;
   cyclicIds: number[];
+  /** ΠΑΝ-107：源数据撞号留痕 —— 重复 id 清单（去重保序后 byId 取**首现者**；
+   *  旧行为是 Map 后者覆盖前者、前一个子任务无声消失 —— 现在 IMF 留在账面上，
+   *  调用方/日志可据此拒绝或人工复核。缺席 = 无撞号） */
+  duplicateIds?: number[];
+}
+
+// ── ΠΑΝ-107（重复 id 结构化执法）：LLM 重规划语境下常见「两个子任务同号」──
+// 旧病灶（C1-2 M10）：`new Map(tasks.map(t => [t.id, t]))` 后者覆盖前者 ——
+// 前一个子任务从 byId/order 中**无声消失**，依赖它的下游任务照跑，世界状态
+// 与计划脱节。修法（绝不抛 —— planner 的失败方言是诚实空计划/结构化留痕）：
+//   · dedupeSubTasks：首现者占据原 id（与「编号顺序即缺省依赖序」的直觉
+//     一致 —— 先申报的先占号），后续撞号者重编号到首个空闲 id（max+1 起顺延），
+//     一切保序；重复清单留在 duplicateIds 供调用方拒绝/复核；
+//   · topoSortSubTasks 内部同样去重（外部直投路径的防御）；
+//   · planTasks 在 LLM 解析后去重并 console.warn 留痕（自动去重留痕方言：
+//     修得动就不拒绝执行，但绝不静默 —— 病灶与修复都进日志）。
+function dedupeSubTasks(tasks: SubTask[]): { tasks: SubTask[]; duplicateIds: number[] } {
+  const seen = new Set<number>();
+  const duplicateIds = new Set<number>();
+  const used = new Set<number>(tasks.map(t => t.id));
+  const out: SubTask[] = [];
+  let nextId = tasks.reduce((m, t) => Math.max(m, Number.isFinite(t.id) ? t.id : m), 0) + 1;
+  for (const t of tasks) {
+    if (!seen.has(t.id)) {
+      seen.add(t.id);
+      out.push(t);
+      continue;
+    }
+    duplicateIds.add(t.id);
+    // 撞号者重编号到首个空闲 id（deps 不迁移 —— 对旧 id 的依赖语义本就
+    // 因撞号而含混，保持指向首现者；重编号者作为无依赖新节点进入图）
+    while (used.has(nextId)) nextId++;
+    used.add(nextId);
+    out.push({ ...t, id: nextId, deps: [] });
+  }
+  return { tasks: out, duplicateIds: [...duplicateIds].sort((a, b) => a - b) };
 }
 
 export function topoSortSubTasks(tasks: SubTask[]): TopoOrder {
+  // ΠΑΝ-107：源数据撞号先去重（首现者占号，留痕 duplicateIds）—— 旧实现
+  // Map 后者覆盖前者，前一个子任务无声消失
+  const { tasks: deduped, duplicateIds } = dedupeSubTasks(Array.isArray(tasks) ? tasks : []);
+  tasks = deduped;
   const byId = new Map(tasks.map(t => [t.id, t]));
   // 依赖清洗：指向不存在 id 的边剔除（Planner 幻觉防御）
   const depsOf = new Map<number, number[]>();
@@ -79,7 +134,11 @@ export function topoSortSubTasks(tasks: SubTask[]): TopoOrder {
     }
   }
   const cyclicIds = tasks.filter(t => !done.has(t.id)).map(t => t.id);
-  return { order, cycle: cyclicIds.length > 0, cyclicIds };
+  return {
+    order, cycle: cyclicIds.length > 0, cyclicIds,
+    // ΠΑΝ-107：撞号留痕（缺席 = 无撞号 —— 既有消费面零漂移）
+    ...(duplicateIds.length > 0 ? { duplicateIds } : {}),
+  };
 }
 
 /** 对话函数抽象：屏蔽 DSH llm 服务的具体签名，测试时可注入桩函数 */
@@ -299,7 +358,67 @@ export function extractJsonArraySpan(text: string): { start: number; end: number
   return null;
 }
 
-export async function planTasks(userPrompt: string, chat?: ChatFn): Promise<SubTask[]> {
+/** ΠΑΝ-40a：chain 臂铸造的输入面（计划侧供源 —— 调用方持有已解析的动作链）。
+ *  actions 是**未受信**的 unknown（LLM 产出/上游翻译），铸造前过 actionSchema
+ *  双闸；entrySceneFingerprint/virtualScene/budgetMs 全部可选诚实缺席。 */
+export interface PlanReadyChainInput {
+  /** 链 id（缺席 ⇒ plan-<ts36> 铸造 —— 经 IdGenerator 同族方言） */
+  id?: string;
+  /** 动作链（未受信 —— 校验失败整链拒绝，绝不发射半截链） */
+  actions: unknown;
+  /** 计划时刻的屏指纹（[01]{32,256}；缺席 ⇒ D-5 按排练时刻宿主观察铸造） */
+  entrySceneFingerprint?: string;
+  /** 规划期 UI 树提取的控件场景（在场 ⇒ 排练可产 L1/L4 真证据） */
+  virtualScene?: VirtualWidget[];
+  /** 预算（正有限数 —— 域外值诚实缺席，mintIntentPlanReady 同律） */
+  budgetMs?: number;
+}
+
+/**
+ * ΠΑΝ-40a：plan-ready chain 臂铸造（纯函数、永不抛）。方言零新造 —— 载荷
+ * 类型 CognitionChainPayload 与 planVersion 常量全部消费 cognitionEvents 单源
+ * （D-1 主权；依赖倒置：ActionChain 是 sandbox/types 的 D-5 主权类型）。
+ * 诚实分层：actions 非法（校验器拒绝/空链）⇒ 返回 null —— 诚实缺席而非发射
+ * 毒证（半截链排练出的证词会污染肌肉记忆库）；合法 ⇒ 铸 origin='cognition'
+ * 的 ActionChain（sandbox.receivePlan 消费面）。测试可对返回值直接断言。
+ */
+export function mintChainPlanReady(input: PlanReadyChainInput): CognitionChainPayload | null {
+  if (!input || typeof input !== 'object') return null;
+  const verdict = validateActionChainInput(input.actions);
+  if (!verdict.ok) return null; // 毒证拦截：非法链不发射（诚实缺席）
+  const budgetOk = typeof input.budgetMs === 'number'
+    && Number.isFinite(input.budgetMs) && input.budgetMs > 0;
+  return {
+    chain: {
+      id: typeof input.id === 'string' && input.id !== '' ? input.id : `chain-plan-${Date.now().toString(36)}`,
+      actions: verdict.actions,
+      origin: 'cognition',
+      ...(typeof input.entrySceneFingerprint === 'string' && input.entrySceneFingerprint !== ''
+        ? { entrySceneFingerprint: input.entrySceneFingerprint }
+        : {}),
+      ...(Array.isArray(input.virtualScene) && input.virtualScene.length > 0
+        ? { virtualScene: input.virtualScene }
+        : {}),
+      ...(budgetOk ? { budgetMs: input.budgetMs as number } : {}),
+    },
+    planVersion: COGNITION_PLAN_VERSION, // 世界模型溯源单源（cognitionEvents）
+  };
+}
+
+/** planTasks 的计划就绪发射钩（ΠΑΝ-40a）：tasks 非空且 chain 铸造合法 ⇒ 发射。
+ *  发射是旁路义务 —— 钩子抛错绝不毒化计划主流程（try/catch 收敛）。 */
+export interface PlanTasksOptions {
+  /** plan-ready 载荷发射面（生产接线：p => emitCognitionPlanReady(ctx, p)） */
+  emitPlanReady?: (payload: CognitionPlanReadyPayload) => void;
+  /** chain 臂供源（在场且合法 ⇒ 与 tasks 一同发射 —— D-5 排练投喂） */
+  chain?: PlanReadyChainInput;
+}
+
+export async function planTasks(
+  userPrompt: string,
+  chat?: ChatFn,
+  opts?: PlanTasksOptions,
+): Promise<SubTask[]> {
   if (!chat) {
     console.warn('[Planner] LLM 服务不可用，无法拆解任务');
     return [];
@@ -322,7 +441,7 @@ export async function planTasks(userPrompt: string, chat?: ChatFn): Promise<SubT
     if (!Array.isArray(parsed)) return [];
     // J 纪元修正：LLM 漏输出 id 时按序号补齐 —— 旧 filter 不校验 id，
     // orchestrator 会打出 "Task #undefined"（下游 results 格式化失真）。
-    return parsed
+    const parsedTasks: SubTask[] = parsed
       .filter((t: any) => t && typeof t.action === 'string')
       .map((t: any, i: number) => ({
         ...t,
@@ -332,6 +451,32 @@ export async function planTasks(userPrompt: string, chat?: ChatFn): Promise<SubT
           ? t.deps.filter((d: unknown) => typeof d === 'number').map((d: number) => d)
           : undefined,
       }));
+    // ΠΑΝ-107：重复 id 结构化执法 —— LLM 输出两个同号子任务时旧行为是
+    // topoSort 的 Map 后者覆盖前者（前一个无声消失）。自动去重留痕方言：
+    // 首现者占号、撞号者重编号，绝不静默 —— 病灶与修复都进日志（绝不动
+    // 返回形状：SubTask[] 照旧，消费方 orchestrator 零感知）。
+    const { tasks, duplicateIds } = dedupeSubTasks(parsedTasks);
+    if (duplicateIds.length > 0) {
+      console.warn(
+        `[Planner] duplicate subtask ids from LLM: [${duplicateIds.join(', ')}] — ` +
+        `kept first occurrence at its id, renumbered later duplicates to free ids ` +
+        `(deps of renumbered tasks cleared; nothing silently dropped)`,
+      );
+    }
+    // ΠΑΝ-40a：计划就绪 ⇒ 铸造并发射 chain 臂（D-5 排练投喂 —— 闭环第一环）。
+    // 诚实分层：空计划/非法动作链 ⇒ 不发射（诚实缺席）；发射钩抛错 ⇒ 旁路
+    // 收敛（观察者义务：cognition 事件面故障绝不击穿计划主流程）。
+    if (tasks.length > 0 && typeof opts?.emitPlanReady === 'function' && opts.chain) {
+      const payload = mintChainPlanReady(opts.chain);
+      if (payload !== null) {
+        try {
+          opts.emitPlanReady(payload);
+        } catch (e: any) {
+          console.warn(`[Planner] plan-ready chain emission failed (bypass): ${e?.message ?? e}`);
+        }
+      }
+    }
+    return tasks;
   } catch (e: any) {
     // 容错解析的失败面也要留痕（与上方 no-array 分支同律）—— LLM 输出畸形的
     // 事实不落日志，降级 [] 就成了不可诊断的静默失败

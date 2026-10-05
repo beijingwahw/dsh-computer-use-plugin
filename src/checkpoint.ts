@@ -7,8 +7,9 @@
 //   loadCheckpoint   —— 版本校验 + 逐子系统恢复；单字段损坏不拖垮整档（防御性恢复）
 // 接线：启动时自动恢复（checkpointPath 配置时）+ 卸载时自动保存 + save_checkpoint 手动档。
 // 价值：崩溃/重启后，Agent 的「肌肉记忆」原地满血 —— 会话可中断，认知不回零。
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs';
+import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs';
 import path from 'path';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { uiMemory } from './uiMemory';
 import { probeMemory } from './probeMemory';
 import { skillLibrary } from './skillLibrary';
@@ -28,6 +29,12 @@ import { sandboxLog } from './sandbox/log';
 import { selfModel } from './selfmodel/index';
 import { approvalQueue } from './approval';
 import type { QueuedApprovalEntry } from './approval';
+// ΠΑΝ-80（approvalQueue 段完整性）：信封版本常量与队列档 ΠΑΝ-3 同源（F1 波
+// approval.constants 立法件 —— 同一数字，两种载体共享同一信封形状契约）
+import { APPROVAL_QUEUE_ENVELOPE_VERSION } from './approval.constants';
+// 密钥档权限收紧：与队列档同律的共享加固面（尽力 + 诚实）
+import { tightenFilePerms } from './filePerms';
+import { readHexKeyFile, loadOrCreateHexKeyFile } from './hmacKeyFile';
 // W3-6（H3）：岔路账采集面 —— 每步决策的 Top-K 候选环形账（见 src/branchCards.ts）
 import { branchLedger } from './branchCards';
 import type { BranchLedgerSnapshot } from './branchCards';
@@ -74,9 +81,12 @@ interface Checkpoint {
   selfModel?: ReturnType<typeof selfModel.dump>;
   /** W2-1（H4 暂存式离线批准队列·第五次原地扩展）：待批/已批未续跑条目随档
    * 存活 —— 崩溃后晨报照常列出待批清单、已批条目照常可续跑。会话恢复主源
-   * （队列另有独立的文件持久化面 —— 见 approval.ts W2-1 段两层互补注记）；
+   *（队列另有独立的文件持久化面 —— 见 approval.ts W2-1 段两层互补注记）；
    * 缺段 = 队列不动（W2-1 前旧档 / 未武装）；结构坏段 = 归零冷启动；
-   * 段内坏条目 = 弃置保好（防御性恢复，垃圾值归零不连坐）。 */
+   * 段内坏条目 = 弃置保好（防御性恢复，垃圾值归零不连坐）。
+   * ΠΑΝ-80：**盘面形状**为 HMAC-SHA256 信封 {v:2, alg, mac?, payload}（见
+   * sealApprovalQueueSection —— 内存形状不变，封装/开封收敛在序列化路径）；
+   * 恢复三态 = trusted 照常 / untrusted 剥 granted / tampered 整段拒绝。 */
   approvalQueue?: { entries: QueuedApprovalEntry[] };
   /** W3-6（H3 反事实岔路账·第六次原地扩展）：每步决策的 Top-K 候选岔路环形账
    *  —— goal 失败/中止后由 branchCards.generateBranchCard 铸岔路卡、
@@ -117,12 +127,15 @@ export function migrateCheckpoint(raw: unknown): Checkpoint | null {
 // 问题：collect() 后 saveCheckpoint 对整个认知态做同步全量 JSON.stringify ——
 // 日志段（每步行动全参数）随会话线性膨胀，卸载/周期保存路径的序列化成本
 // O(全量) 放大。
-// 修法：每 section 附指纹，未变段复用上次序列化字符串缓存，最终档按段拼接：
+// 修法（ΠΑΝ-80 后的诚实承诺面）：缓存**只对 journal 段**成立 ——
 //   · journal 段指纹 = count:tip:base（追加式哈希链上 count+链尖+链基唯一
 //     确定 content —— 过程内 append-only，恢复走 restoreChain 会翻转 tip/base）
 //     —— 指纹计算零序列化，命中即整段复用（大头：日志段）；
-//   · 其余段指纹 = 序列化内容的 (length, FNV-1a) 双指纹（子系统无廉价变更
-//     计数面 —— 以内容哈希保真判定，命中即复用同一缓存文本实例）；
+//   · 其余段**每保必付序列化**（C1-1 M3：旧实现「先无条件 stringify 再算
+//     (length, FNV-1a) 指纹、命中复用同一文本实例」是性能剧场 —— 序列化
+//     成本一分未省，还倒贴一次 FNV 全串扫描；子系统无廉价变更计数面，
+//     指纹缓存实际零收益）。死缓存已移除，计数器语义收窄为「真实序列化
+//     次数」的如实观测；
 //   · 防御式：任何缓存/指纹面故障 ⇒ 该段全量重算（try/catch 兜底 —— 缓存只
 //     是加速器，内容永远以现场序列化为准）；loadCheckpoint 恢复整体失效缓存
 //    （恢复会替换子系统内容 —— 键失效路径防御）。
@@ -135,46 +148,131 @@ interface SectionCacheEntry {
 const sectionTextCache = new Map<string, SectionCacheEntry>();
 const sectionSerializeCounts = new Map<string, number>();
 
-/** FNV-1a 32 位滚动哈希（段内容指纹 —— 纯函数，无依赖） */
-function fnv1a32(text: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16);
-}
-
-/** 单段序列化（带指纹缓存）：journal 段零序列化命中；其余段内容哈希命中复用 */
+/** 单段序列化：journal 段零序列化命中（count:tip:base 指纹）；其余段直付 */
 function sectionTextOf(name: string, value: unknown): string {
   try {
-    const hit = sectionTextCache.get(name);
     if (name === 'journal') {
       const j = value as Checkpoint['journal'];
       const key = `j:${j.entries.length}:${j.chainTip}:${j.chainBase}`;
+      const hit = sectionTextCache.get(name);
       if (hit !== undefined && hit.key === key) return hit.text; // 命中：整段复用（零序列化）
       const text = JSON.stringify(value);
       sectionTextCache.set(name, { key, text });
       sectionSerializeCounts.set(name, (sectionSerializeCounts.get(name) ?? 0) + 1);
       return text;
     }
-    const text = JSON.stringify(value);
-    const key = `c:${text.length}:${fnv1a32(text)}`;
-    if (hit !== undefined && hit.key === key) return hit.text; // 命中：复用缓存文本实例
-    sectionTextCache.set(name, { key, text });
+    // ΠΑΝ-80（C1-1 M3）：非 journal 段无缓存 —— 序列化每保必付、计数如实
     sectionSerializeCounts.set(name, (sectionSerializeCounts.get(name) ?? 0) + 1);
-    return text;
+    return JSON.stringify(value);
   } catch {
     return JSON.stringify(value); // 防御式：缓存面故障 ⇒ 全量重算（内容永远正确）
+  }
+}
+
+// ─── ΠΑΝ-80（C1-5 H3 / F1-1 对接点3）：approvalQueue 段的 HMAC-SHA256 完整性信封 ───
+//
+// 威胁模型：checkpoint 是会话恢复主源 —— 盘面上的 approvalQueue 段含 granted
+// 裁决（预授权凭据：恢复后可经 takeGranted 铸已授予执行令牌派发不可逆动作）。
+// 旧实现整档明文 JSON（原子写齐备但无完整性保护），任何能写该文件的进程/
+// 用户可预授权；队列档已有 ΠΑΝ-3 信封，checkpoint 段此前是同一凭据的第二块
+// 裸奔盘面（双标残留）。
+//
+// 修法：该段落盘为信封 `{ v:2, alg:'hmac-sha256', mac?, payload }`（与队列档
+// ΠΑΝ-3 同形状同常量 —— APPROVAL_QUEUE_ENVELOPE_VERSION 同源；密钥为
+// `<checkpoint档>.aq.key` 的独立 32B CSPRNG，tmp+fsync+rename 原子写 +
+// filePerms 尽力收紧）。**验证/封装算法与队列档逐字节同律**（hmac-sha256 +
+// 恒定时间比对 + 「验证路径禁用密钥铸造」的诚实三态）——实现为本文件内镜像
+// （queueContracts 的私有面不可 import；两处同律由测试锁定，见报告对接点）。
+//
+// 读侧三态（与 queueState.ensureQueueLoaded 的 ΠΑΝ-3 语义一致）：
+//   · trusted（mac 在场 + 密钥可读 + 比对通过）⇒ 条目照常恢复（granted 在场）；
+//   · untrusted（无 mac 降级档 / 密钥缺席 / 旧版明文段）⇒ 条目恢复但 granted
+//     裁决**剥离降回待批**（pending/denied 照常恢复供晨报 —— fail-closed：
+//     未经完整性验证的「已授予」不可恢复；配合 ΠΑΝ-1 证据仅内存驻留，重启后
+//     该条目也无法再被批量批准 —— 重走完整审批是唯一出路）；
+//   · tampered（mac 在场但比对失配）⇒ **整段拒绝**（队列归零，绝不冒充恢复，
+//     报告置顶）。
+// 已知边界（与队列档同律诚实申报）：密钥与数据同目录，能读密钥的攻击者可
+// 离线伪造自洽信封 —— HMAC 防的是「只写不读密钥」的篡改者（filePerms 收紧
+// 后的边界）；读密钥 ⇒ 已等价于该账户本体。
+
+function aqHmac(key: Buffer, payload: string): Buffer {
+  return createHmac('sha256', key).update(payload, 'utf8').digest();
+}
+
+/** 恒定时间比对（两侧等长摘要；任何异常 ⇒ false） */
+function aqMacMatches(key: Buffer, payload: string, mac: string): boolean {
+  try {
+    const expected = aqHmac(key, payload);
+    const provided = Buffer.from(mac, 'hex');
+    return provided.length === expected.length && timingSafeEqual(expected, provided);
+  } catch {
+    return false;
+  }
+}
+
+// 密钥档读写已收编为共享件（修复潮 F3-7 / BC-5：此处的 readAqKey/
+// loadOrCreateAqKey 与队列档 ΠΑΝ-3 的实现曾是逐字克隆 ×2）：读侧
+// readHexKeyFile（绝不铸造）、写侧 loadOrCreateHexKeyFile（铸新 + 原子
+// 落盘 + 权限收紧）—— 语义头注见共享件 src/hmacKeyFile.ts。
+
+/** 写侧封装：段文本 → 信封 JSON（密钥缺席 ⇒ 省略 mac 的降级信封；封装故障 ⇒ 原文兜底） */
+function sealApprovalQueueSection(sectionText: string, key: Buffer | null): string {
+  try {
+    return JSON.stringify({
+      v: APPROVAL_QUEUE_ENVELOPE_VERSION,
+      alg: 'hmac-sha256',
+      ...(key !== null ? { mac: aqHmac(key, sectionText).toString('hex') } : {}),
+      payload: sectionText,
+    });
+  } catch {
+    return sectionText; // 防御式：封装故障 ⇒ 原文落盘（读侧按旧版明文 = 不可信处理）
+  }
+}
+
+/** approvalQueue 段开封的三态产出（entries 为 payload 解析后的段对象） */
+type AqSectionOpen =
+  | { state: 'trusted'; entries: unknown }
+  | { state: 'untrusted'; entries: unknown }
+  | { state: 'tampered' };
+
+/** 读侧开封（绝不抛）：信封形态三态判定；旧版明文段 ⇒ untrusted（升级部署不
+ *  丢队列，但在途 granted 须重新人证）。payload 解析失败按结构非法处理。 */
+function openApprovalQueueSection(sectionValue: unknown, keyPath: string): AqSectionOpen {
+  const parsePayload = (payload: string): unknown => {
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return undefined;
+    }
+  };
+  try {
+    if (sectionValue !== null && typeof sectionValue === 'object') {
+      const root = sectionValue as Record<string, unknown>;
+      if (root.v === APPROVAL_QUEUE_ENVELOPE_VERSION && typeof root.payload === 'string') {
+        const mac = typeof root.mac === 'string' && root.mac !== '' ? root.mac : undefined;
+        if (mac === undefined) {
+          return { state: 'untrusted', entries: parsePayload(root.payload) }; // 无密钥环境降级档
+        }
+        const key = readHexKeyFile(keyPath); // 只读验证 —— 铸造禁用于此（诚实三态）
+        if (key === null) return { state: 'untrusted', entries: parsePayload(root.payload) };
+        if (!aqMacMatches(key, root.payload, mac)) return { state: 'tampered' };
+        return { state: 'trusted', entries: parsePayload(root.payload) };
+      }
+    }
+    return { state: 'untrusted', entries: sectionValue }; // 旧版明文段（ΠΑΝ-80 前档）
+  } catch {
+    return { state: 'untrusted', entries: undefined };
   }
 }
 
 /**
  * ΝΩ-22：快照档组装 —— 与 JSON.stringify(cp) 同构的紧凑 JSON（键序对齐
  * collect() 的字面序；undefined 段省略 —— JSON.stringify 同律），未变段
- * 直接拼接缓存文本。
+ * 直接拼接缓存文本。ΠΑΝ-80：approvalQueue 段经 seal 封信封（密钥由
+ * saveCheckpoint 侧铸造后注入 —— 本函数保持纯函数）。
  */
-function serializeCheckpoint(cp: Checkpoint): string {
+function serializeCheckpoint(cp: Checkpoint, sealApprovalQueue?: (sectionText: string) => string): string {
   const sections: Array<[string, unknown]> = [
     ['uiMemory', cp.uiMemory],
     ['probeMemory', cp.probeMemory],
@@ -196,7 +294,11 @@ function serializeCheckpoint(cp: Checkpoint): string {
   const parts: string[] = [`{"version":${cp.version},"savedAt":${cp.savedAt}`];
   for (const [name, value] of sections) {
     if (value === undefined) continue;
-    parts.push(`,${JSON.stringify(name)}:${sectionTextOf(name, value)}`);
+    let text = sectionTextOf(name, value);
+    if (name === 'approvalQueue' && sealApprovalQueue !== undefined) {
+      text = sealApprovalQueue(text); // ΠΑΝ-80：预授权凭据段信封化
+    }
+    parts.push(`,${JSON.stringify(name)}:${text}`);
   }
   parts.push('}');
   return parts.join('');
@@ -281,18 +383,22 @@ export function resetCheckpointSectionCache(): void {
 }
 
 /** 原子写：先写临时文件再改名。写一半崩溃 ⇒ 旧档完好，新档不存在，绝无损坏的半档。
- *  ΝΩ-22：序列化走分段缓存组装（serializeCheckpoint）—— 未变段零重序列化。 */
+ *  ΝΩ-22：序列化走分段缓存组装（serializeCheckpoint）—— 未变段零重序列化。
+ *  ΠΑΝ-80：approvalQueue 段（预授权凭据）以 HMAC-SHA256 信封落盘 —— 密钥
+ *  在此铸造（写侧允许；`<档>.aq.key`），读侧只读验证。 */
 export function saveCheckpoint(filePath: string): { ok: boolean; steps?: number; error?: string; warnings?: string[] } {
   if (!filePath) return { ok: false, error: 'checkpointPath is not configured' };
   const { cp, warnings } = collect();
   const tmp = filePath + '.tmp';
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
+    // ΠΑΝ-80：密钥铸造（只读 fs ⇒ null ⇒ 明文信封降级，读侧同律剥离 granted）
+    const aqKey = loadOrCreateHexKeyFile(filePath + '.aq.key');
     // fsync 落盘后再换名：rename 可先于数据块持久化 —— 崩溃后可能读到空/截断档
     //（与 journal.ts 磁盘写的崩溃一致性同律：页缓存不算落盘）
     const fd = openSync(tmp, 'w');
     try {
-      writeSync(fd, Buffer.from(serializeCheckpoint(cp), 'utf8'));
+      writeSync(fd, Buffer.from(serializeCheckpoint(cp, t => sealApprovalQueueSection(t, aqKey)), 'utf8'));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -369,14 +475,46 @@ export function loadCheckpoint(filePath: string): { restored: boolean; report: s
     //   缺段（W2-1 前旧档）⇒ 不触队列（新进程即空队列，非错误）；
     //   结构坏段（非对象 / entries 非数组）⇒ 队列归零 + 上抛 ⇒ SKIPPED 注记；
     //   段内坏条目 ⇒ 弃置保好（dropped 计数进报告 —— 好条目照常恢复）。
+    //   ΠΑΝ-80：段先过 HMAC 信封三态开封（trusted / untrusted / tampered，
+    //   见 openApprovalQueueSection 头注）—— granted 裁决只在 trusted 下恢复；
+    //   untrusted 剥离降回待批（与 queueState.ensureQueueLoaded 的队列档
+    //   ΠΑΝ-3 语义逐字同律）；tampered 整段拒绝（队列归零 + 报告置顶）。
     ['approvalQueue', () => {
       if (cp.approvalQueue === undefined) return;
-      const snap = cp.approvalQueue as unknown as { entries?: unknown } | null;
+      const opened = openApprovalQueueSection(cp.approvalQueue, filePath + '.aq.key');
+      if (opened.state === 'tampered') {
+        approvalQueue.restoreQueue([]); // 篡改档整段归零（绝不冒充恢复）
+        report.unshift(
+          'APPROVAL QUEUE TAMPERED: approvalQueue section HMAC mismatch — section rejected, queue zeroed ' +
+          '(fail-closed; staged items are lost by design, never honored from a tampered file)',
+        );
+        throw new Error('approvalQueue 段完整性失配（HMAC mismatch ⇒ 弃置归零，绝不冒充恢复）');
+      }
+      const snap = opened.entries as { entries?: unknown } | null | undefined;
       if (!snap || typeof snap !== 'object' || !Array.isArray(snap.entries)) {
         approvalQueue.restoreQueue([]); // 垃圾段 ⇒ 归零（不残留进程内旧账冒充恢复产物）
         throw new Error('approvalQueue 段结构非法（弃置 ⇒ 空队列冷启动）');
       }
-      const r = approvalQueue.restoreQueue(snap.entries);
+      let entries = snap.entries as QueuedApprovalEntry[];
+      if (opened.state === 'untrusted') {
+        // ΠΑΝ-80：不可信盘面 ⇒ granted 决不恢复（裁决剥回待批 —— 与队列档
+        // ΠΑΝ-3 同一执法点；'absorbed'/'denied' 终态无兑付风险，照常接回）。
+        // 注记只在确有剥离时发声（空队列的不可信态无可保护对象 —— 不制造噪声行）
+        let stripped = 0;
+        for (const e of entries) {
+          if (e && typeof e === 'object' && (e as { decision?: { verdict?: string } }).decision?.verdict === 'granted') {
+            delete (e as { decision?: unknown }).decision;
+            stripped++;
+          }
+        }
+        if (stripped > 0) {
+          report.push(
+            `approvalQueue: INTEGRITY UNPROVEN (${stripped} granted verdict(s) stripped to pending — ` +
+            `fail-closed; re-adjudication requires fresh out-of-band human evidence per ΠΑΝ-1)`,
+          );
+        }
+      }
+      const r = approvalQueue.restoreQueue(entries);
       if (r.dropped > 0) {
         report.push(`approvalQueue: DROPPED ${r.dropped} malformed entr${r.dropped === 1 ? 'y' : 'ies'} (defensive restore, garbage zeroed)`);
       }

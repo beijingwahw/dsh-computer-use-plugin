@@ -27,8 +27,18 @@
 // 测试注入桩。全模块随机源/时钟/端口可注入，skillFederation.reset() 供测试隔离。
 //（ΑΩ-R34：旧注释写作 resetSkillFederation —— 该名从未存在，真实隔离缝是
 //  单例的 reset() 方法：端口/候选/计数归零并解除持久化武装。）
+//
+// ΠΑΝ-69（值域分离）：stepsDigest 的契约值是 hashArgsNumeric 的 32 位哈希
+//（uint32），旧管线却按屏域坐标裁剪 ±4096 + 0.05 网格量化 —— 哈希几乎必然
+// 全裁到 4096 ⇒ 指纹桶号坍缩成常量、slotStats 中位数恒 4096、IQR 检疫阈永不
+// 触发。修复：typed channels（坐标类 |v| ≤ 4096 走 ±4096 + 0.05 网格（旧律
+// 逐字节）；哈希/计数类 v > 4096 走 uint32 原生域、网格 1、不裁剪）+ LSH 桶按
+// 值域分族（哈希 token 带 `h` 族标）+ 槽统计按通道取噪声尺度与检疫阈地板
+//（见 SKILL_SLOT_CLIP 节的 ΠΑΝ-69 立法注记）。
 import { Telemetry } from './telemetry.js';
-import { iqrOf } from './federation/aggregate.js';
+// ΤΕΛ-5 D-G25③：robustDispersionOf（IQR 等价 MAD 口径离散臂）；iqrOf 仍是
+// 上传统计量（share 槽 iqr 的 DP 加噪面）的口径原语
+import { iqrOf, robustDispersionOf } from './federation/aggregate.js';
 import { laplaceNoise, mulberry32, federationTrustOf, DEFAULT_FEDERATION_EPSILON, DEFAULT_MAX_REMOTE_SHARE, } from './federation/index.js';
 import { swarm } from './swarm.js';
 // ΝΩ-41（方言克隆律）：本地 FNV-1a→base36 副本退役 —— 单源 src/dialects/random.ts
@@ -51,6 +61,45 @@ export const SKILL_LSH_GRID = 0.05;
 /** 数值槽对称裁剪域 [-CLIP, +CLIP]：屏域坐标 / 长度 / 位移的宽界（margin 裁剪
  *  [-1,1] 的 DIGEST_MARGIN_CLIP 同律思想 —— 域外夹到边界，分布尾保守收拢） */
 export const SKILL_SLOT_CLIP = 4096;
+// ─── ΠΑΝ-69（值域分离）：typed channels —— 联邦数学复活的前提 ───
+//
+// 缝隙（C1-3 H-2）：stepsDigest 的契约值是 hashArgsNumeric 的 **32 位 FNV 哈希**
+//（0..2³²−1，skillLibrary.signatures.ts 的 W4-1 摘要律），而本管线把每个数值槽
+// 当屏域坐标裁剪 ±4096 再按 0.05 网格量化 —— 32 位哈希几乎必然 >4096 ⇒ **全部
+// 裁剪到边界 4096** ⇒ 指纹每个数值槽桶号恒 81920（指纹退化为「场景前 8 位 +
+// 工具序列形状」）、slotStats 中位数恒 4096 / IQR 恒 0、IQR 检疫阈 T = 0.15 永不
+// 触发 —— 差分隐私机制对常量加噪：数学正确但语义空转。0.05 网格的 LSH 局部性
+// 对哈希值也不成立（哈希对输入微扰是雪崩的）。
+// 修复律（值域标注 / typed channels）：
+//   · **坐标通道（coord）**：|v| ≤ SKILL_SLOT_CLIP —— 屏域坐标/长度/归一化参数/
+//     小计数的原生域；裁剪 ±4096 + 0.05 网格量化（LSH 局部性对真坐标成立，
+//     量化网格提供 <0.025 抖动的碰撞）；指纹桶号域恰为旧律（零回归）。
+//   · **哈希通道（hash）**：v > SKILL_SLOT_CLIP（上至 2³²−1）—— hashArgsNumeric
+//     的 uint32 原生域 / 大计数域；**不裁剪**（裁剪正是病灶），量化网格 = 1（哈希
+//     是身份件不是测量值：雪崩性下唯一诚实的「局部性」就是恒等匹配）；值夹回
+//     [0, 2³²−1] 是防御性钳制（非语义裁剪）。
+//   · **LSH 桶按值域分族**：指纹 token 对坐标通道不带族标（旧律逐字节保持 ——
+//     既有金样不动），哈希通道带 `h` 族标（`i.key.h<v>` vs `i.key.<bucket>`）——
+//     两族桶号空间不相交，坐标桶 5 ≠ 哈希值 5。
+//   · 槽统计的 DP 噪声尺度按通道取桶宽/ε（coord: 0.05/ε；hash: 1/ε）；
+//     聚合检疫阈的地板同律按通道（coord: 3×0.05；hash: 3×1 —— ε=1 的 Laplace
+//     噪声中位 |noise|≈0.69 < 3，诚实源不吃票）。
+// 分类判据是**幅度域**（|v| ≤ 4096 即坐标类）：哈希落入坐标域的概率 ≈ 4096/2³²
+// ≈ 1e-6（届时按坐标量化 —— 指纹粒度损失可忽略）；真坐标越界 4096 在屏域语义
+// 下不存在。防御式：负值越界照旧坐标裁剪（margin 类）。
+/** ΠΑΝ-69：哈希通道的原生域上界（uint32 —— hashArgsNumeric 的值域） */
+export const SKILL_HASH_DOMAIN_MAX = 0xFFFFFFFF;
+/** ΠΑΝ-69：哈希通道的量化网格 = 1（身份件精确匹配 —— 雪崩哈希上更粗的网格是伪局部性） */
+export const SKILL_HASH_GRID = 1;
+/**
+ * ΠΑΝ-69：数值槽的值域分类（纯函数、绝不抛）。v 非有限 ⇒ null（缺席，不入管线）；
+ * v > SKILL_SLOT_CLIP ⇒ 'hash'（uint32 原生域）；其余（含负值）⇒ 'coord'。
+ */
+export function slotChannelOf(v) {
+    if (typeof v !== 'number' || !Number.isFinite(v))
+        return null;
+    return v > SKILL_SLOT_CLIP ? 'hash' : 'coord';
+}
 /** 聚合最低同指纹源数：k < 3 拒聚（两源的「共识」无鲁棒性 —— 中位数需要
  *  ≥3 才有 50% 崩溃点的语义；与 robustMergeDigests 的 k≥3 中位数同律） */
 export const SKILL_MIN_AGGREGATE_SOURCES = 3;
@@ -79,6 +128,10 @@ function numOr(x, dflt, min, max) {
  *   · 参数 LSH 桶：每步每数值槽按 0.05 网格量化取桶（键字典序 + 步序确定
  *     枚举序 ⇒ 键序无关、抖动 <半网格宽即碰撞 —— LSH 的 locality），序列化后
  *     FNV-1a 哈希成 base36 短串。**只留桶号，不留原值** —— 指纹本身是匿名件。
+ *   · ΠΑΝ-69（值域分族）：坐标通道（|v| ≤ 4096）token = `${i}.${key}.${bucket}`
+ *     （旧律逐字节 —— 金样不动）；哈希通道（v > 4096）token =
+ *     `${i}.${key}.h${v}`（uint32 原生域精确身份 + `h` 族标 —— 两族桶号空间
+ *     不相交，且哈希值不再被 ±4096 裁剪坍缩成常量桶 81920）。
  * 场景指纹缺席 ⇒ 'noscene' 占位（诚实：无锚点的技能仍可按参数形状聚合）。
  */
 export function skillFingerprintOf(sceneFingerprint, stepsDigest) {
@@ -95,6 +148,11 @@ export function skillFingerprintOf(sceneFingerprint, stepsDigest) {
                     const v = step[key];
                     if (typeof v !== 'number' || !Number.isFinite(v))
                         continue; // 非数值槽不进指纹
+                    // ΠΑΝ-69：哈希通道 —— 原生域精确身份（不裁剪不量化），h 族标与坐标桶分族
+                    if (v > SKILL_SLOT_CLIP) {
+                        tokens.push(`${i}.${key}.h${Math.min(SKILL_HASH_DOMAIN_MAX, Math.max(0, Math.round(v)))}`);
+                        continue;
+                    }
                     const clipped = Math.min(SKILL_SLOT_CLIP, Math.max(-SKILL_SLOT_CLIP, v));
                     const bucket = Math.round(clipped / SKILL_LSH_GRID);
                     tokens.push(`${i}.${key}.${bucket}`);
@@ -114,7 +172,12 @@ function medianF(values) {
     const mid = Math.floor(s.length / 2);
     return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
-/** 单槽值的收集与量化：有限数值 ⇒ 裁剪进对称域再按 LSH 网格量化；其余缺席 */
+/**
+ * 单槽值的收集与量化（ΠΑΝ-69 typed channels）：按值分类通道 —— 坐标通道（|v| ≤
+ * 4096）裁剪进对称域再按 0.05 网格量化（旧律）；哈希通道（v > 4096）不裁剪、
+ * 网格 1（uint32 原生域精确值 —— 哈希是身份件，量化网格在雪崩值上是伪局部性）。
+ * 其余（非有限）缺席。返回 槽 →（量化值表, 值域标注）。
+ */
 function collectQuantized(stepsDigest) {
     const slotValues = new Map();
     if (!Array.isArray(stepsDigest))
@@ -126,11 +189,21 @@ function collectQuantized(stepsDigest) {
             const v = step[key];
             if (typeof v !== 'number' || !Number.isFinite(v))
                 continue;
-            const clipped = Math.min(SKILL_SLOT_CLIP, Math.max(-SKILL_SLOT_CLIP, v));
-            const q = Math.round(clipped / SKILL_LSH_GRID) * SKILL_LSH_GRID;
-            const arr = slotValues.get(key) ?? [];
-            arr.push(q);
-            slotValues.set(key, arr);
+            const channel = slotChannelOf(v) ?? 'coord';
+            let q;
+            if (channel === 'hash') {
+                // ΠΑΝ-69：哈希通道 —— 原生域（[0, 2³²−1] 防御性钳制），网格 1，不裁到 ±4096
+                q = Math.min(SKILL_HASH_DOMAIN_MAX, Math.max(0, Math.round(v)));
+            }
+            else {
+                const clipped = Math.min(SKILL_SLOT_CLIP, Math.max(-SKILL_SLOT_CLIP, v));
+                q = Math.round(clipped / SKILL_LSH_GRID) * SKILL_LSH_GRID;
+            }
+            const cur = slotValues.get(key) ?? { values: [], domain: channel };
+            cur.values.push(q);
+            if (channel === 'hash')
+                cur.domain = 'hash'; // 混合域槽按哈希口径申报（保守：噪声/阈取宽的一侧）
+            slotValues.set(key, cur);
         }
     }
     return slotValues;
@@ -174,15 +247,25 @@ export function buildSkillUploads(port, opts) {
                 const slotValues = collectQuantized(rec.stepsDigest);
                 const slotStats = {};
                 for (const key of [...slotValues.keys()].sort()) { // 键字典序 ⇒ 序列化确定性
-                    const values = slotValues.get(key);
-                    // 噪声尺度：桶宽/ε（见 JSDoc 隐私机制注记）；后处理夹回裁剪域（多掩蔽方向）
-                    const scale = SKILL_LSH_GRID / epsilon;
-                    const med = Math.min(SKILL_SLOT_CLIP, Math.max(-SKILL_SLOT_CLIP, medianF(values) + laplaceNoise(scale, rng())));
-                    const spr = Math.min(SKILL_SLOT_CLIP, Math.max(0, iqrOf(values) + laplaceNoise(scale, rng())));
-                    slotStats[key] = {
-                        median: Math.round(med * 1000) / 1000,
-                        iqr: Math.round(spr * 1000) / 1000,
-                    };
+                    const { values, domain } = slotValues.get(key);
+                    // ΠΑΝ-69：噪声尺度 = 通道桶宽/ε（coord: 0.05/ε —— 分位数敏感度的工程口径；
+                    // hash: 1/ε —— 身份域的桶宽是 1）；后处理夹回各自值域（多掩蔽方向 ——
+                    // 哈希通道夹回 uint32 域而非 ±4096：裁剪到 4096 正是要修的坍缩）
+                    const scale = (domain === 'hash' ? SKILL_HASH_GRID : SKILL_LSH_GRID) / epsilon;
+                    const lo = domain === 'hash' ? 0 : -SKILL_SLOT_CLIP;
+                    const hi = domain === 'hash' ? SKILL_HASH_DOMAIN_MAX : SKILL_SLOT_CLIP;
+                    const med = Math.min(hi, Math.max(lo, medianF(values) + laplaceNoise(scale, rng())));
+                    const spr = Math.min(hi - lo, Math.max(0, iqrOf(values) + laplaceNoise(scale, rng())));
+                    slotStats[key] = domain === 'hash'
+                        ? {
+                            median: Math.round(med * 1000) / 1000,
+                            iqr: Math.round(spr * 1000) / 1000,
+                            domain, // ΠΑΝ-69：值域标注随摘要上行（聚合侧检疫阈按通道取地板）；坐标通道不带键 —— 旧形状零迁移
+                        }
+                        : {
+                            median: Math.round(med * 1000) / 1000,
+                            iqr: Math.round(spr * 1000) / 1000,
+                        };
                 }
                 const useCount = Math.max(1, Math.floor(numOr(rec.useCount, 1, 0, 1e9)));
                 const relRaw = numOr(rec.reliability, 0.5, 0, 1);
@@ -278,8 +361,9 @@ export function aggregateSkillShares(shares, opts) {
                 const iqr = st && typeof st.iqr === 'number' && Number.isFinite(st.iqr) && st.iqr >= 0 ? st.iqr : null;
                 if (med === null)
                     continue; // 坏槽：缺席（不参与聚合也不参与检疫）
+                const domain = st && st.domain === 'hash' ? 'hash' : 'coord'; // ΠΑΝ-69：缺省 coord（旧份额零迁移）
                 const arr = g.slots.get(key) ?? [];
-                arr.push({ i, median: med });
+                arr.push({ i, median: med, domain });
                 g.slots.set(key, arr);
                 if (iqr !== null) {
                     const ia = g.iqrs.get(key) ?? [];
@@ -303,7 +387,16 @@ export function aggregateSkillShares(shares, opts) {
                 const entries = g.slots.get(key);
                 const values = entries.map(e => e.median);
                 const robust = medianF(values);
-                const T = Math.max(SKILL_OUTLIER_FLOOR_BUCKETS * SKILL_LSH_GRID, SKILL_OUTLIER_IQR_SCALE * iqrOf(values));
+                // ΠΑΝ-69：检疫阈按槽的值域标注取地板 —— 坐标通道 3×桶宽（0.05 网格 ⇒
+                // 0.15，旧律）；哈希通道 3×1 = 3（uint32 身份域的桶宽 1 —— ε=1 的 Laplace
+                // 噪声中位 |noise|≈0.69 < 3，诚实源不吃票；旧律对哈希中位数用 0.15 的
+                // 地板 ⇒ DP 噪声本身就会逐槽计票）。缺省（旧格式份额）= 'coord'。
+                const domain = entries[0]?.domain ?? 'coord';
+                const gridFloor = SKILL_OUTLIER_FLOOR_BUCKETS * (domain === 'hash' ? SKILL_HASH_GRID : SKILL_LSH_GRID);
+                // ΤΕΛ-5 D-G25③：离散臂换 robustDispersionOf（IQR 等价 MAD 口径 —— 少源
+                // 时四分位插值不再把毒隙半程混进阈，3 诚实 + 1 毒的 k=4 组毒源照常计票；
+                // ≥4 诚实源域与旧 2×IQR 律同尺度 —— 见 aggregate.madOf 头注）
+                const T = Math.max(gridFloor, SKILL_OUTLIER_IQR_SCALE * robustDispersionOf(values));
                 for (const { i, median } of entries) {
                     if (Math.abs(median - robust) > T) {
                         const label = labelOf(i);
@@ -314,6 +407,7 @@ export function aggregateSkillShares(shares, opts) {
                 slotStats[key] = {
                     median: Math.round(robust * 1000) / 1000,
                     iqr: Math.round(iqrConsensus * 1000) / 1000,
+                    ...(domain === 'hash' ? { domain: 'hash' } : {}), // ΠΑΝ-69：值域标注随聚合产物透传
                 };
             }
             aggregated.push({
@@ -492,7 +586,10 @@ class SkillFederation {
                                 ? st.median : 0;
                             const iqr = st && typeof st.iqr === 'number' && Number.isFinite(st.iqr) && st.iqr >= 0
                                 ? st.iqr : 0;
-                            slotStats[key] = { median: med, iqr: iqr };
+                            // ΠΑΝ-69：值域标注随候选透传（激活登记草案携带 —— 下游消费同口径）
+                            slotStats[key] = st.domain === 'hash'
+                                ? { median: med, iqr: iqr, domain: 'hash' }
+                                : { median: med, iqr: iqr };
                         }
                     }
                     this.candidates.set(a.fingerprint, {
@@ -618,7 +715,7 @@ class SkillFederation {
         this.candidates.clear();
         this.totals = { localHits: 0, activations: 0, thompsonAttempts: 0 };
         this.lastReceivedAt = 0;
-        disarmSkillFedPersistence();
+        disarmSkillFederationPersistence();
     }
     // ── W7-0（W6-4 接线收尾）：持久化面 —— 序列化 / 防御恢复（绝不抛） ──
     /**
@@ -685,6 +782,7 @@ class SkillFederation {
                         slotStats[key] = {
                             median: typeof st.median === 'number' && Number.isFinite(st.median) ? st.median : 0,
                             iqr: typeof st.iqr === 'number' && Number.isFinite(st.iqr) && st.iqr >= 0 ? st.iqr : 0,
+                            ...(st.domain === 'hash' ? { domain: 'hash' } : {}), // ΠΑΝ-69：值域标注持久化往返保持
                         };
                     }
                 }
@@ -761,8 +859,13 @@ function noteSkillFedMutation() {
 function resetSkillFedMutationClock() {
     skillFedMutations = 0;
 }
-/** W7-0：解除武装（reset 的摘线面 + 测试隔离缝 —— 端口摘除、阈值回缺省、计数归零） */
-function disarmSkillFedPersistence() {
+/**
+ * W7-0：解除武装（reset 的摘线面 + 测试隔离缝 —— 端口摘除、阈值回缺省、计数归零）。
+ * ΤΕΛ-1 起导出：生产卸载链的摘线面（组合根 flush 后调用 —— 信任账的
+ * resetFederationRuntime 同律；不导出则热重载后武装残留在旧存储端口，下个
+ * 会话的突变会写进上个会话的目录）。绝不抛。
+ */
+export function disarmSkillFederationPersistence() {
     skillFedStore = null;
     skillFedFlushEvery = DEFAULT_SKILL_FED_FLUSH_EVERY;
     skillFedMutations = 0;

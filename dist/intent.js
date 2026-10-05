@@ -243,6 +243,31 @@ export function getEnabledPhysicsRules(enabledKinds) {
     }
     return out;
 }
+// ─── R2-4：菜单项语义探测（纯函数）───
+//
+// 实战冒烟（R1-8 记事本 文件→另存为 9 连败）的确定性根因之一：下拉菜单未开时
+// 点击菜单项坐标，落点是正文/编辑区 —— 交互性闸门以 I-beam 光标拦下后，通用
+// 「STATIC CONTENT」话术没有告诉模型「回到第一阶段把菜单点开」。本探测让闸门
+// 与意图指引在目标描述命中菜单项词形时切换到两段式菜单协议话术（先开菜单 →
+// 验证 menu_expand → 再按展开后截图读坐标点菜单项）。纯词形匹配，零物理调用，
+// 未命中 ⇒ 调用方保持原文案（零回归）。
+const MENU_ITEM_PATTERNS = [
+    /菜单项/, /下拉菜单/, /下拉项/, /菜单里的/, /菜单中的/,
+    /menu\s*item/i, /dropdown/i, /drop-down/i, /menu\s*entry/i,
+    /context\s*menu/i, /right-click\s*menu/i, /子菜单/, /submenu/i,
+];
+/** R2-4：目标描述（可多路：target_description / expected_text 等）是否命中菜单项语义 */
+export function menuItemSemantics(...texts) {
+    for (const t of texts) {
+        if (typeof t !== 'string' || t === '')
+            continue;
+        for (const p of MENU_ITEM_PATTERNS) {
+            if (p.test(t))
+                return true;
+        }
+    }
+    return false;
+}
 /** 解析工具参数中的期望声明（JSON 字符串或简写 kind 字符串）。
  *  J 纪元修正：JSON 分支与简写分支**同一 kind 词表校验** —— 旧实现 JSON 分支
  *  任意字符串直接 as 断言（两分支强度不对称），模型拼错 kind 会得到

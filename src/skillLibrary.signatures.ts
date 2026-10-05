@@ -6,6 +6,8 @@
 // 原模块私有面（REPLAYABLE/stepSignature/canonicalStringify/hashArgsFuzzy/hashArgsNumeric）
 // 在本文件升为导出（卫星件间供给）；skillLibrary.ts 不再转发它们 —— 公共面零新增。
 import type { SparseVector } from './semanticHash';
+// ΠΑΝ-49：canonical 单源消费（canonicalStringify 的实现体 —— 见该函数注释）
+import { canonicalJson } from './dialects';
 
 export interface SkillStep {
   tool: string;
@@ -102,16 +104,18 @@ export function betaReliability(successCount: number, attemptCount: number): { m
   return { mean, hw };
 }
 
-/** 递归键排序的稳定字符串化：replacer 数组只在顶层过滤键、嵌套对象的键
- *  会被整层丢弃（JSON.stringify({a:{x:1}}, ['a']) → {"a":{}}）——
- *  drag_mouse 这类嵌套 args 会全部坍缩成同一符号。排序保证键序无关性。 */
+/**
+ * 递归键排序的稳定字符串化：replacer 数组只在顶层过滤键、嵌套对象的键
+ * 会被整层丢弃（JSON.stringify({a:{x:1}}, ['a']) → {"a":{}}）——
+ * drag_mouse 这类嵌套 args 会全部坍缩成同一符号。排序保证键序无关性。
+ * ΠΑΝ-49：实现收编为 dialects/canonical.ts 单源（全库 6 份 canonical 同族
+ * 实现自此逐字节同律）。语义对齐两处（均为修复而非漂移）：① undefined 值
+ * 自有键与缺键同域（旧形态串成 `"k":null`，与 JSON.stringify 落盘 dropping
+ * 键不一致 —— 持久化-恢复往返会得出不同签名）；② 真环/超深 ⇒ 哨兵降级
+ *（旧形态栈溢出 —— 运行层铁律「一切方法永不抛」的残余破口）。
+ */
 export function canonicalStringify(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalStringify).join(',')}]`;
-  if (v && typeof v === 'object') {
-    const keys = Object.keys(v as Record<string, unknown>).sort();
-    return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalStringify((v as Record<string, unknown>)[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v) ?? 'null';
+  return canonicalJson(v);
 }
 
 /** F-1 符号化：args → 稳定短哈希（FNV-1a —— semanticHash 同源密码学原语） */

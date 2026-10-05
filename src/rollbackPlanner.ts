@@ -37,50 +37,19 @@ import type { ScoringContext } from './autonomy/counterfactual';
 
 // ─── 常量（值即边界） ───
 
-/** 回滚步数预算：回滚是「退回良好态」的偿债，不是无限重试 —— 12 步与
- *  W3-6 换支重放预算同量级（branchCards.BRANCH_REPLAY_BUDGET_STEPS=12，
- *  同为「第二尝试不继承全额」原则）。 */
-export const ROLLBACK_BUDGET_STEPS = 12;
 /** 分支重规划总预算（替代分支注入后的重规划步数上限 —— 半额原则）。 */
 export const REPLAN_BUDGET_STEPS = 8;
 /** 复原验证容差：dHash similarity ≥ 0.9（与 reversalEscrow.DEFAULT_VERIFY_THRESHOLD
  *  同律 —— 「回到良好态」的抖动容忍带）。 */
 export const RESTORATION_TOLERANCE = 0.9;
-/** 轨迹步数上限（防御：脏调用方塞巨数组不得拖垮定位 —— 有界计算）。 */
-const TRACE_HARD_CAP = 10_000;
 
 // ─── 轨迹输入面（journal 的投影 —— 定位良好态的唯一事实源） ───
-
-/** 回放轨迹步：调用方从 journal 投影（含 status/effect_detected 判据核与
- *  每步时刻的场景指纹 —— 复原验证的锚点从良好态步上取）。 */
-export interface RollbackTraceStep {
-  tool: string;
-  /** 判据核：'SUCCESS' | 'FAILED' | ...（journal.status） */
-  status?: string;
-  /** 动作验证过：true 验证生效 / false 验证无效 / undefined 未验证 */
-  effect_detected?: boolean;
-  args?: Record<string, unknown>;
-  /** 该步时刻的场景指纹（良好态步自带时作为复原验证的锚点） */
-  fingerprint?: string;
-}
-
-/** 防御净化：脏步收敛（tool 非字符串 ⇒ 整步弃置 —— 不把噪声当轨迹） */
-export function sanitizeTrace(steps: readonly RollbackTraceStep[]): RollbackTraceStep[] {
-  const out: RollbackTraceStep[] = [];
-  if (!Array.isArray(steps)) return out;
-  for (const s of steps.slice(0, TRACE_HARD_CAP)) {
-    if (!s || typeof s !== 'object' || typeof (s as RollbackTraceStep).tool !== 'string' || (s as RollbackTraceStep).tool === '') continue;
-    const c = s as RollbackTraceStep;
-    out.push({
-      tool: c.tool.slice(0, 64),
-      ...(typeof c.status === 'string' ? { status: c.status.slice(0, 32) } : {}),
-      ...(typeof c.effect_detected === 'boolean' ? { effect_detected: c.effect_detected } : {}),
-      ...(c.args && typeof c.args === 'object' && !Array.isArray(c.args) ? { args: c.args as Record<string, unknown> } : {}),
-      ...(typeof c.fingerprint === 'string' && c.fingerprint !== '' ? { fingerprint: c.fingerprint.slice(0, 256) } : {}),
-    });
-  }
-  return out;
-}
+// ΠΑΝ-127（D-F5 清偿）：RollbackTraceStep/sanitizeTrace/ROLLBACK_BUDGET_STEPS
+// 下沉至零出边叶 rollbackPlanner.trace.ts（桶-卫星 value 二环拆解 —— 桶与卫星
+// 皆改 import 叶；此处再分发保导入面兼容，行为零变化）。
+export { sanitizeTrace, ROLLBACK_BUDGET_STEPS } from './rollbackPlanner.trace';
+export type { RollbackTraceStep } from './rollbackPlanner.trace';
+import { sanitizeTrace, type RollbackTraceStep } from './rollbackPlanner.trace';
 
 // W6-2（doctor smell.over-engineering 清偿）：①良好态定位/②模态逆映射/③计划铸造（纯函数）
 // 已分区提取至 rollbackPlanner.plan.ts（行为零变化）；导入面不变 —— 再分发。

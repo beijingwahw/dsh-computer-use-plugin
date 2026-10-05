@@ -1,4 +1,6 @@
-import { sleep } from './actionVerifier.js';
+// ΠΑΝ-127（D-F5 清偿）：sleep 改自零出边叶导入（原借桶 actionVerifier.ts 构成
+// value 二环；桶面同名符号仍经再分发可用）。
+import { sleep } from './actionVerifier.shared.js';
 import * as backend from './physicalBackend.js';
 import { normalizeHash, hammingDistance, dhash } from './perceptualHash.js';
 import { kernelRegistry } from './kernel/registry.js';

@@ -291,3 +291,16 @@ export const failureMemory = new FailureMemory();
 export function configureFailureMemory(opts: { capacity?: number; now?: () => number }): void {
   failureMemory.configure(opts);
 }
+
+/**
+ * ΤΕΛ-1（C2-9 主题1 B 级 · 生产接线）：DSH_FAILURE_MEMORY_CAPACITY 的解析律
+ * （纯函数、单源立法 —— 组合根只消费不解析）。缺省关红律：env 未设（undefined
+ * /空串）⇒ null ⇒ 组合根零调用、库容钉死 30（历史语义逐字节不变）。合法值 =
+ * 正有限整数字面（'5'/'128'）；其余（小数/负数/零/非数/前后缀垃圾）一律 null
+ * （部署方拼错不静默改库容 —— 组合根侧出警告日志）。绝不抛。
+ */
+export function failureMemoryCapacityFromEnv(raw: string | undefined): number | null {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const n = Number(raw.trim());
+  return Number.isInteger(n) && n >= 1 && n <= 1_000_000 ? n : null;
+}

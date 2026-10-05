@@ -36,11 +36,6 @@ export function makeScore(raw: number): Score | null {
   return Number.isFinite(raw) && raw >= 0 && raw <= SCORE_MAX ? (raw as Score) : null;
 }
 
-/** 分数消费侧守门：跨事件/持久化边界重铸；非法即降级（不信任何越界而来的 brand 声明） */
-export function remintScore(raw: number, fallback: Score): Score {
-  return makeScore(raw) ?? fallback;
-}
-
 /**
  * doctor/verdict 事件载荷 —— D-4 发射、D-5 消费的唯一事实源。
  * Skinny 载荷原则：只传信号与定位锚，全量证据走 D-4 自己的 reportPath（Token 纪律）。

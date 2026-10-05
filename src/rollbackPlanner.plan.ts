@@ -6,8 +6,11 @@ import { ltlF, violationsOf, reactTraceProperties, type TraceEntry, type TracePr
 import { similarity } from './perceptualHash';
 import { withSteerBias } from './branchCards';
 import type { ScoringContext } from './autonomy/counterfactual';
-import { sanitizeTrace, ROLLBACK_BUDGET_STEPS } from './rollbackPlanner';
-import type { RollbackTraceStep } from './rollbackPlanner';
+// ΠΑΝ-127（D-F5 清偿）：轨迹契约改从零出边叶 rollbackPlanner.trace.ts 导入
+// （原自桶 rollbackPlanner.ts 借 sanitizeTrace/ROLLBACK_BUDGET_STEPS 构成桶-卫星
+// value 二环；桶面同名符号仍经再分发可用 —— 导入面零破坏，行为零变化）。
+import { sanitizeTrace, ROLLBACK_BUDGET_STEPS } from './rollbackPlanner.trace';
+import type { RollbackTraceStep } from './rollbackPlanner.trace';
 
 // ─── ① 良好态定位（纯函数 —— LTLf 只读消费） ───
 

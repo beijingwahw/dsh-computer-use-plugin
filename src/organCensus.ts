@@ -108,3 +108,90 @@ export function organCensus(): { total: number; healthy: number; degraded: strin
   }).map(o => o.id);
   return { total: ORGAN_CENSUS.length, healthy: ORGAN_CENSUS.length - degraded.length, degraded };
 }
+
+// ─── ΠΑΝ-124：器官面漂移检测（器官册的静态形状是健康资产 —— 变化即事件） ───
+//
+// 病灶（C1-2 L1/L2 侧写）：器官册是纯静态数组 —— 运行时被注入/篡改/裁撤
+// （测试污染、热插拔、未来装配代码）时无任何观测面；「33 件器官在岗」的
+// 健康叙事对册面漂移失明。修法：模块装载时冻结基线快照（id/层/探针形态），
+// organCensusDrift() 把**当前册**与基线逐项对比 —— 器官面任何变化即事件
+// （新增/裁撤/层迁移/探针形态翻转 static↔环境探针），纯函数、确定性、
+// 零成本（≤33 项比对）。消费面：quality_checkup 自省段/审计测试 —— 基线
+// 之外多出来的器官不是「免费健康资产」，是需要解释的漂移。
+
+/** ΠΑΝ-124：器官册形状的最小指纹（漂移检测的比对单元） */
+export interface OrganCensusShape {
+  id: string;
+  layer: string;
+  /** true = 纯数学器官（static 标记）；false = 挂环境探针 */
+  static: boolean;
+}
+
+/** ΠΑΝ-124：器官面漂移事件（每事件 = 册面的一处形状变化） */
+export interface OrganCensusDriftEvent {
+  kind: 'organ-added' | 'organ-removed' | 'layer-changed' | 'probe-flip';
+  id: string;
+  detail: string;
+}
+
+/** ΠΑΝ-124：模块装载基线（冻结 —— 册面的「出厂形状」） */
+const CENSUS_BASELINE: readonly OrganCensusShape[] = Object.freeze(
+  ORGAN_CENSUS.map(o => ({ id: o.id, layer: o.layer, static: o.static === true })));
+
+function censusShape(
+  specs: ReadonlyArray<{ id: string; layer: string; static?: boolean }>,
+): Map<string, OrganCensusShape> {
+  const m = new Map<string, OrganCensusShape>();
+  for (const o of specs) m.set(o.id, { id: o.id, layer: o.layer, static: o.static === true });
+  return m;
+}
+
+/**
+ * ΠΑΝ-124：器官册漂移比对（纯函数，确定性 —— 测试与跨版本对比的执法原子）。
+ * prev/cur 任一侧缺席的 id 记 added/removed；layer 变化记 layer-changed；
+ * static 标记翻转记 probe-flip（纯数学器官 ↔ 环境探针器官是健康语义的变化）。
+ */
+export function diffOrganCensus(
+  prev: readonly OrganCensusShape[],
+  cur: readonly OrganCensusShape[],
+): OrganCensusDriftEvent[] {
+  const p = censusShape(prev), c = censusShape(cur);
+  const events: OrganCensusDriftEvent[] = [];
+  for (const [id, cs] of c) {
+    const ps = p.get(id);
+    if (!ps) {
+      events.push({ kind: 'organ-added', id, detail: `organ "${id}" (layer ${cs.layer}) not in baseline census` });
+    } else {
+      if (ps.layer !== cs.layer) {
+        events.push({ kind: 'layer-changed', id, detail: `organ "${id}" layer ${ps.layer} -> ${cs.layer}` });
+      }
+      if (ps.static !== cs.static) {
+        events.push({
+          kind: 'probe-flip', id,
+          detail: `organ "${id}" probe form ${ps.static ? 'static (pure math)' : 'environment probe'} -> ` +
+            `${cs.static ? 'static (pure math)' : 'environment probe'}`,
+        });
+      }
+    }
+  }
+  for (const [id] of p) {
+    if (!c.has(id)) {
+      events.push({ kind: 'organ-removed', id, detail: `organ "${id}" present in baseline census but absent now` });
+    }
+  }
+  // 确定性输出序：kind 字典序 + id 字典序（无 Map 迭代序依赖）
+  events.sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return events;
+}
+
+/**
+ * ΠΑΝ-124：当前册 vs 模块装载基线的漂移事件（ organside 变化即事件）。
+ * 干净进程恒 []（执法测试锁定）；非空 ⇒ 册面被运行时改动 —— 上报给
+ * quality_checkup 消费方作 AMBER 级注记（接线面：观测 API 在场，消费方
+ * 按需点名 —— 与 organCensus() 同步契约）。
+ */
+export function organCensusDrift(): OrganCensusDriftEvent[] {
+  return diffOrganCensus(CENSUS_BASELINE, ORGAN_CENSUS.map(o => ({
+    id: o.id, layer: o.layer, static: o.static === true,
+  })));
+}

@@ -92,3 +92,57 @@ export function organCensus() {
     }).map(o => o.id);
     return { total: ORGAN_CENSUS.length, healthy: ORGAN_CENSUS.length - degraded.length, degraded };
 }
+/** ΠΑΝ-124：模块装载基线（冻结 —— 册面的「出厂形状」） */
+const CENSUS_BASELINE = Object.freeze(ORGAN_CENSUS.map(o => ({ id: o.id, layer: o.layer, static: o.static === true })));
+function censusShape(specs) {
+    const m = new Map();
+    for (const o of specs)
+        m.set(o.id, { id: o.id, layer: o.layer, static: o.static === true });
+    return m;
+}
+/**
+ * ΠΑΝ-124：器官册漂移比对（纯函数，确定性 —— 测试与跨版本对比的执法原子）。
+ * prev/cur 任一侧缺席的 id 记 added/removed；layer 变化记 layer-changed；
+ * static 标记翻转记 probe-flip（纯数学器官 ↔ 环境探针器官是健康语义的变化）。
+ */
+export function diffOrganCensus(prev, cur) {
+    const p = censusShape(prev), c = censusShape(cur);
+    const events = [];
+    for (const [id, cs] of c) {
+        const ps = p.get(id);
+        if (!ps) {
+            events.push({ kind: 'organ-added', id, detail: `organ "${id}" (layer ${cs.layer}) not in baseline census` });
+        }
+        else {
+            if (ps.layer !== cs.layer) {
+                events.push({ kind: 'layer-changed', id, detail: `organ "${id}" layer ${ps.layer} -> ${cs.layer}` });
+            }
+            if (ps.static !== cs.static) {
+                events.push({
+                    kind: 'probe-flip', id,
+                    detail: `organ "${id}" probe form ${ps.static ? 'static (pure math)' : 'environment probe'} -> ` +
+                        `${cs.static ? 'static (pure math)' : 'environment probe'}`,
+                });
+            }
+        }
+    }
+    for (const [id] of p) {
+        if (!c.has(id)) {
+            events.push({ kind: 'organ-removed', id, detail: `organ "${id}" present in baseline census but absent now` });
+        }
+    }
+    // 确定性输出序：kind 字典序 + id 字典序（无 Map 迭代序依赖）
+    events.sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return events;
+}
+/**
+ * ΠΑΝ-124：当前册 vs 模块装载基线的漂移事件（ organside 变化即事件）。
+ * 干净进程恒 []（执法测试锁定）；非空 ⇒ 册面被运行时改动 —— 上报给
+ * quality_checkup 消费方作 AMBER 级注记（接线面：观测 API 在场，消费方
+ * 按需点名 —— 与 organCensus() 同步契约）。
+ */
+export function organCensusDrift() {
+    return diffOrganCensus(CENSUS_BASELINE, ORGAN_CENSUS.map(o => ({
+        id: o.id, layer: o.layer, static: o.static === true,
+    })));
+}

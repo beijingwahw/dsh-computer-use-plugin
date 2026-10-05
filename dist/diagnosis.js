@@ -651,3 +651,87 @@ export const ROOT_CAUSE_LADDER = {
 export function recoveryLadderFor(rootCause) {
     return ROOT_CAUSE_LADDER[parseRootCause(rootCause)];
 }
+// ─── ΠΑΝ-115（F2-1 移交项②）：OCR 焦点锚质量校验（低置信锚不作硬依据）───
+//
+// 病灶（F2-1 第七节 2 + C1-2 H3 的锚点面残余）：escrow 的补偿前焦点校验
+// （ΠΑΝ-35）以 focusPort 的标题带 OCR 实读为寻址锚点 —— 锚点质量完全依赖
+// OCR，而 OCR 读数自带置信方言（服务端 L2 的 score 真值态 / tesseract 的词级
+// confidence / 旧服务的 confidenceAssumed 假设态）。一枚低置信垃圾读数进入
+// 锚点面的两条硬依据路径都是事故面：
+//   · 铸造面：垃圾标题被嵌入预案 focusWindow —— 补偿期「互为包含」的宽松
+//     匹配（cur.includes(ref) || ref.includes(cur)）让短垃圾读数极易假匹配；
+//   · 补偿面：垃圾当帧读数假「匹配」⇒ Ctrl+Z/Backspace 自动打进用户当前
+//     聚焦的无关应用 = 第二次事故（F2-1 立法的场景）。
+// 修法（纯函数判定面，接线在 index.ts focusPort）：低置信锚**不作硬依据**——
+// usable=false ⇒ 端口返回 null：铸造面 ⇒ 预案不携带锚点（诚实缺席 + degraded
+// 标注，escrow captureFromPort 既有通道）；补偿面 ⇒ 无法确认寻址 ⇒ 拒绝补偿
+// 转人工（fail-closed）。两端都是既定降级方言，本函数只负责「这条读数够不够
+// 格当硬依据」的质量判决 + 降级注记（note —— 审计面的降级标注）。
+/** ΠΑΝ-115：锚文本的最小可用长度（归一化后字符数）—— 短于 4 的读数（「×」「on」
+ *  级残片）对任何标题都无法寻址，宽松包含匹配下只会假匹配（形状字面量，
+ *  与 NOTARY_LABEL_MIN_CHARS 同族的防误杀/防误信界）。 */
+export const OCR_ANCHOR_MIN_TEXT_CHARS = 4;
+/** ΠΑΝ-115：测量置信中位数下限（0-100 方言 —— textReader OcrWord.confidence 的
+ *  双路径同尺度）。词级 floor 60（kernelRegistry ocr.wordConfidenceFloor）是
+ *  「单词是不是垃圾」的线；锚是**多词聚合体**，取中位数要求 70：标题带是大
+ *  字号高对比目标，好读数的中位数显著高于此线；低于此线的整带读数不可作
+ *  补偿寻址的硬依据（一次性拒绝 = 可自愈：下次 OCR 质量恢复即恢复锚点，
+ *  不写任何持久折减账 —— F2-9 移交的「诚实源不进永试用期」纪律）。 */
+export const OCR_ANCHOR_MIN_MEDIAN_CONFIDENCE = 70;
+/** ΠΑΝ-115：词置信的真值测量过滤（confidenceAssumed=true 是 P2a-3 的假设值
+ *  方言 —— 有测量值不标假设；假设值不构成质量证据）。 */
+function measuredConfidences(words) {
+    const out = [];
+    for (const w of words) {
+        if (!w || typeof w !== 'object' || w.confidenceAssumed === true)
+            continue;
+        const c = w.confidence;
+        if (typeof c === 'number' && Number.isFinite(c))
+            out.push(Math.min(Math.max(c, 0), 100));
+    }
+    return out;
+}
+/**
+ * ΠΑΝ-115：OCR 焦点锚质量校验（纯函数、确定性、绝不抛、任意输入防御收口）。
+ * 判决序（首中即断，与 diagnose 同哲学）：
+ *   ① 归一化锚文本（空白折叠）短于 OCR_ANCHOR_MIN_TEXT_CHARS ⇒ 拒绝
+ *      （anchor-too-short —— 残片对任何标题都无法寻址）；
+ *   ② 词级证据缺席（words 空/非数组）⇒ 拒绝（no-word-evidence —— legacy
+ *      路径词级 floor 已滤走全部低置信词时 text 仍可能非空：整带皆垃圾的
+ *      确定性信号）；
+ *   ③ 零真值测量词（全部 confidenceAssumed —— 旧服务方言）⇒ 拒绝
+ *      （confidence-unmeasured —— 无测量即无质量主张，假设值 90 不冒充证据）；
+ *   ④ 测量词置信中位数低于 OCR_ANCHOR_MIN_MEDIAN_CONFIDENCE ⇒ 拒绝
+ *      （low-confidence-median:值 —— 低置信锚不作硬依据）；
+ *   ⑤ 通过（note 携带测量词数与中位数 —— 证据摘要）。
+ */
+export function ocrFocusAnchorQuality(input) {
+    try {
+        const raw = typeof input?.text === 'string' ? input.text : '';
+        const norm = raw.replace(/\s+/g, ' ').trim();
+        if (norm.length < OCR_ANCHOR_MIN_TEXT_CHARS) {
+            return { usable: false, note: 'anchor-too-short' };
+        }
+        const words = Array.isArray(input?.words) ? input.words : [];
+        if (words.length === 0) {
+            return { usable: false, note: 'no-word-evidence' };
+        }
+        const measured = measuredConfidences(words);
+        if (measured.length === 0) {
+            return { usable: false, note: 'confidence-unmeasured' };
+        }
+        const sorted = [...measured].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        const median = sorted.length % 2 === 1
+            ? sorted[mid]
+            : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+        if (median < OCR_ANCHOR_MIN_MEDIAN_CONFIDENCE) {
+            return { usable: false, note: `low-confidence-median:${median}` };
+        }
+        return { usable: true, note: `measured:${measured.length} median:${median}` };
+    }
+    catch {
+        // 防御式：判决面故障 = 无质量主张 = 不作硬依据（fail-closed 方向）
+        return { usable: false, note: 'quality-check-failed' };
+    }
+}

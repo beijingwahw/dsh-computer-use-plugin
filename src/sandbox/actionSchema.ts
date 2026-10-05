@@ -11,8 +11,11 @@
 // 拒绝原因如实返回给调用方进 FAILED 结果（《异常诚实分层契约》第二条：不抛）。
 import {
   EXPECTED_EFFECT_SCALES, SANDBOX_ACTION_KINDS,
-  type SandboxAction,
+  type SandboxAction, type VirtualWidget,
 } from './types';
+// ΠΑΝ-40b：场景铸造卫兵复用 virtualScreen.asVirtualWidget（同一防御方言 ——
+// 畸形 rect 拒收、值即边界；本文件绝不复制第二份几何校验）。
+import { asVirtualWidget } from './virtualScreen';
 
 /** 防御性上限（结构性常量而非部署调调参 —— 拒绝面的边界，不是行为旋钮） */
 export const ACTION_LIMITS = {
@@ -178,4 +181,44 @@ export function validateActionChainInput(rawActions: unknown): ActionSchemaVerdi
     if (err !== null) return { ok: false, reason: err };
   }
   return { ok: true, actions: rawActions as SandboxAction[] };
+}
+
+// ── ΠΑΝ-40b：rehearse_chain 的 virtual_scene 入参执法 ──
+// 病灶（C2-3 H2-2）：manual 工具构造的链无 virtualScene ⇒ 生产排练恒 degraded
+// （零验证层）⇒ 双闸门恒 freeze ⇒ 肌肉记忆库恒空。修法：工具边界收场景参数；
+// 校验复用 asVirtualWidget 同一防御铸造（畸形控件**逐条拒收整链** —— 半截
+// 场景排练出的证词是毒证，与 actions 同律）。全畸形/空数组同样拒绝（调用方
+// 想要 degraded 语义就不该带场景参数 —— 显式缺席优于隐性坍缩）。
+/** 场景校验裁决：ok = 全部控件合格（收窄为 VirtualWidget[]） */
+export type VirtualSceneVerdict =
+  | { ok: true; scene: VirtualWidget[] }
+  | { ok: false; reason: string };
+
+/** 单链场景控件数上限（结构性常量 —— 无界场景 = 无界排练世界） */
+const MAX_SCENE_WIDGETS = 256;
+
+/** virtual_scene 入参校验（工具边界执法）。纯函数、永不抛。 */
+export function validateVirtualSceneInput(rawScene: unknown): VirtualSceneVerdict {
+  if (!Array.isArray(rawScene)) {
+    return { ok: false, reason: 'virtual_scene must be a JSON array of widgets' };
+  }
+  if (rawScene.length === 0) {
+    return { ok: false, reason: 'virtual_scene: empty array — omit the parameter for honest degraded rehearsal' };
+  }
+  if (rawScene.length > MAX_SCENE_WIDGETS) {
+    return { ok: false, reason: `virtual_scene: length ${rawScene.length} exceeds limit ${MAX_SCENE_WIDGETS}` };
+  }
+  const scene: VirtualWidget[] = [];
+  for (let i = 0; i < rawScene.length; i++) {
+    const w = asVirtualWidget(rawScene[i]);
+    if (w === null) {
+      return {
+        ok: false,
+        reason: `virtual_scene[${i}]: malformed widget (rect must be finite, normalized `
+          + '[0,1] with positive width/height)',
+      };
+    }
+    scene.push(w);
+  }
+  return { ok: true, scene };
 }

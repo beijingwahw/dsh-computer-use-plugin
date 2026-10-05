@@ -3,12 +3,19 @@
 // 规范对齐 journal.ts（sha256 链式防篡改），但独立成链 —— 零侵入红线：
 // journal 的 JournalMarker 是封闭联合类型，沙箱事件不越权注入宿主账本；
 // D-4 审查沙箱链时以 doctor/verdict 的 chainTip 锚点定位本账本。
-// canonical/chainHash 是 journal.ts 的模块私有纯函数，此处按同一密码学规范复刻
-// （纯密码学原语复刻 ≠ 业务逻辑越权；哈希域构造必须逐字节一致才能保持链语义）。
+// canonical/chainHash：canonical 自 ΠΑΝ-49 起收编为 dialects/canonical.ts 单源
+//（旧注释「按同一密码学规范复刻」的复刻律因实证漂移退役 —— 与 journal 逐字节
+// 一致的前提只能靠单源，不能靠复刻纪律）；chainHash 仍是本账本私有纯函数。
 import { appendFile, mkdir } from 'fs/promises';
 import { createHash } from 'crypto';
 import path from 'path';
 import { mmrRoot, mmrInclusionProof, type InclusionProof } from '../proof';
+// ΠΑΝ-49：canonical 单源消费（原为 journal.canonical 的无守卫复刻 —— C1-9 H1
+// 实证漂移点之一）。收编后三处语义统一：① undefined 值自有键与缺键同域（旧
+// 形态把 undefined 值串成非法 JSON 字面 `"k":undefined`，与 JSON.stringify
+// 落盘 dropping 键的行为不一致 —— 收编即修复该潜在往返失配）；② 深度上限 64
+// 哨兵；③ WeakSet 真环哨兵。全部来自 dialects/canonical.ts 单源（ΝΩ-24 形态）。
+import { canonicalJson } from '../dialects';
 
 /** 沙箱账本条目：语义事件（非宿主工具镜像）。kind 即事件分类学。
  *  链段扩展（P1-5 可观测性对齐）：D-6 流水线（'pipeline-*'）与 D-7 隐知识中枢
@@ -43,7 +50,10 @@ export type SandboxLogKind =
   // ── D-7 神经纪元（睡眠整合：海马体→皮层的 run-end 蒸馏报告）──
   | 'knowledge-consolidated'
   // ── D-7 预测编码纪元（世界模型：转移结算 + 惊讶计费 —— L3 花钱权的审计面）──
-  | 'world-transition';
+  | 'world-transition'
+  // ── ΤΕΛ-13（D-G16 留案 M3）：否决钉面容量逐出的告警链段（安全事件 ——
+  //    rejected 判决失忆绝不静默，铸造点见 engine.noteDoctorVerdict）──
+  | 'veto-pin-evicted';
 
 export interface SandboxLogEntry {
   ts: number;
@@ -84,13 +94,8 @@ function forensicClone<T>(v: T): T {
   }
 }
 
-/** 稳定序列化：键排序 —— 同一对象永远产生同一字符串（哈希链的前提；对齐 journal.canonical） */
-function canonical(obj: any): string {
-  if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
-  if (Array.isArray(obj)) return '[' + obj.map(canonical).join(',') + ']';
-  return '{' + Object.keys(obj).sort()
-    .map(k => JSON.stringify(k) + ':' + canonical(obj[k])).join(',') + '}';
-}
+// ΠΑΝ-49：canonical 单源别名（见文件头 import —— dialects/canonical.ts 单源）
+const canonical = canonicalJson;
 
 function sha256(s: string): string {
   return createHash('sha256').update(s).digest('hex');

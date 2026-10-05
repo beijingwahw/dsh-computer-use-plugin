@@ -1,10 +1,3 @@
-// src/actionVerifier.channels.ts
-// W6-2（doctor smell.over-engineering 清偿）：自 actionVerifier.ts 低风险分区提取
-// （>500 行拆分信号）—— W5-3 跨机互证判决函数与 W4-8 声学证据通道的类型/净化
-// 面整体搬迁。行为零变化；立法常量（REMOTE_EVIDENCE_OVERLAP_MIN / AUDIO_*）按
-// 「立法在源」测试锁定留守 actionVerifier.ts（w5cross ⑩ / w4audio ⑧a）；
-// actionVerifier.ts 以再导出保持导入面不变。
-import { REMOTE_EVIDENCE_OVERLAP_MIN } from './actionVerifier.js';
 // ─── W5-3（L3 跨机互证）：判决函数 ───
 /** W5-3 防御式净化：归一化矩形形状/值域不合法或退化（x1≤x0 等）⇒ null */
 export function sanitizeRemoteRegion(r) {
@@ -51,11 +44,13 @@ export function sanitizeRemoteChange(c) {
  *     在哪，就无权互证）；
  *   · 无有效变化区域 ⇒ unverified 'no-change-regions'（B 屏没变 —— 诚实
  *     缺席而非反驳：region 证据链断在哪环都不臆造）；
- *   · 判据：max over regions of（区域∩期望）/（期望面积）≥ REMOTE_EVIDENCE_
- *     OVERLAP_MIN ⇒ corroborated；否则 unverified 'overlap-below-min'
+ *   · 判据：max over regions of（区域∩期望）/（期望面积）≥ overlapMin
+ *     ⇒ corroborated；否则 unverified 'overlap-below-min'
  *     （overlap 照报最优值 —— 证据保留）。
+ * ΠΑΝ-127：阈值经参数注入（公开二参面 = 桶 actionVerifier.ts 的包装，注入
+ * 立法常量 REMOTE_EVIDENCE_OVERLAP_MIN —— 立法在源桶，环拆于参数缝）。
  */
-export function judgeRemoteChange(hint, change) {
+export function judgeRemoteChange(hint, change, overlapMin) {
     const un = (reason) => ({ verdict: 'unverified', overlap: 0, reason });
     try {
         if (change === null)
@@ -76,7 +71,7 @@ export function judgeRemoteChange(hint, change) {
                 best = Math.max(best, (iw * ih) / hArea);
         }
         const overlap = Math.round(best * 10000) / 10000;
-        return overlap >= REMOTE_EVIDENCE_OVERLAP_MIN
+        return overlap >= overlapMin
             ? { verdict: 'corroborated', overlap }
             : { verdict: 'unverified', overlap, reason: 'overlap-below-min' };
     }

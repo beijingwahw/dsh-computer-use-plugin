@@ -132,8 +132,13 @@ export function buildVirtualScene(scene) {
                 x: Math.min(1, x), y: Math.min(1, y),
                 width: Math.min(1, width), height: Math.min(1, height),
             },
-            acceptsText: w.acceptsText === true,
-            scrollable: w.scrollable === true,
+            // ΤΕΛ-13（D-G16 留案 M8）：三态保全 —— acceptsText/scrollable 缺席不铸键
+            // （键缺席 = 未申报），申报布尔原样透传。旧铸造 `=== true` 把缺席折叠成
+            // false ⇒ 排练弃权语义（virtualScreen 贫乏场景臂）失据。uiMemory 锚点
+            // 供源本就不携带这两标志 —— 保守折叠等于结构性反证（C2-3 M8 病灶）。
+            // 不铸 undefined 值键：ΠΑΝ-49 canonical「undefined 值自有键与缺键同域」。
+            ...(typeof w.acceptsText === 'boolean' ? { acceptsText: w.acceptsText } : {}),
+            ...(typeof w.scrollable === 'boolean' ? { scrollable: w.scrollable } : {}),
             popup: w.popup === true,
             // ΝΩ-30：popup 铸高层（asVirtualWidget 缺省方言同律 —— 单源 VIRTUAL_POPUP_Z）
             z: w.popup === true ? VIRTUAL_POPUP_Z : 0,

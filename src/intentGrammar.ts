@@ -121,10 +121,21 @@ export function classifyMotor(text: string): MotorClass | null {
 }
 
 /** 残差铸造：意图切除全部引号段与全部动词 token 后的剩余 token。
- *  切除按字符串手术（先删引号段再分词）—— 引号内的词不参加落点选举。 */
+ *  切除按字符串手术（先删引号段再分词）—— 引号内的词不参加落点选举。
+ *  ΠΑΝ-30（多引号段错位修正）：span 的 range 基于**原文**索引 —— 旧实现按
+ *  原文序（左→右）逐段 splice，第一段切除后字符串已收缩，后续段仍持陈旧
+ *  索引做手术：实测 'type "aa" then "bb" press ctrl' 的残差为
+ *  ["then","\"bb","ess","ctrl"] —— 第二载荷 'bb' 泄漏进残差（获得落点投票
+ *  权，正是残差机制要排除的东西）、'press' 被腰斩成 'ess'（动词词表失明，
+ *  热键弧误拒）。修法：**自右向左**切除 —— 右侧段先切不移动左侧段的原文
+ *  索引，每一段的 range 都在其被切除的那一刻仍然有效（多段场景的确定性
+ *  承诺恢复；单段路径逐字节不变）。extractQuotedSpans 的产出恒按 start
+ *  升序且互不重叠（consumed 掩码保证），倒序遍历即安全。 */
 export function residueTokens(text: string): string[] {
   let rest = text;
-  for (const span of extractQuotedSpans(text)) {
+  const spans = extractQuotedSpans(text);
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const span = spans[i];
     rest = rest.slice(0, span.range.start) + ' ' + rest.slice(span.range.end);
   }
   const verbs = new Set([...TYPE_VERBS, ...SCROLL_VERBS, ...HOTKEY_VERBS]);

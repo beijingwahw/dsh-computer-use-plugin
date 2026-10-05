@@ -18,6 +18,12 @@
 //     缺省铸高层；esc 关最上层弹窗；scroll 按 direction 带符号记账且落点坐标
 //     参与证据；switch_tab = 有序数组 + 索引（重排跟随元素）。无 z 场景行为
 //     逐字节不变（同层按场景序）。
+//   - ΤΕΛ-13（D-G16 留案 M8）排练弃权语义：场景角色贫乏（全 'unknown' ——
+//     生产供源 uiMemory 锚点的常态）时，「控件未申报能力」（acceptsText/
+//     scrollable 缺席、<2 个 role='tab'）是诚实缺席 ⇒ 该步弃权（双 null +
+//     零层），绝不铸成世界反证 —— 真机可行的宏不再被元数据贫乏结构性误拒。
+//     申报过角色/能力布尔的世界断言保持既有严格反证语义（弃权 ≠ 宽纵：
+//     纯弃权链零验证层 ⇒ verdict 'degraded' ⇒ 宏门禁照旧拒绝）。
 import type { SandboxAction, VirtualWidget } from './types';
 
 export type { VirtualWidget } from './types';
@@ -29,6 +35,13 @@ export interface StepEvidence {
   note: string;
   /** 本步产生的验证层（计入 RehearsalOutcome.verificationLayers 的评分） */
   layers: Array<'L1-pixel' | 'L3-semantic' | 'L4-expectation'>;
+}
+
+/** ΤΕΛ-13（D-G16 留案 M8）排练弃权证据形状：effectDetected/expectationMet 双
+ *  null、零验证层 —— 「本步不可判」的规范形（非反证、非通过）。集中铸造
+ *  保证全库弃权注记同方言。 */
+function abstentionEvidence(note: string): StepEvidence {
+  return { effectDetected: null, expectationMet: null, note, layers: [] };
 }
 
 const NO_EVIDENCE: StepEvidence = {
@@ -59,12 +72,20 @@ export function asVirtualWidget(raw: unknown): VirtualWidget | null {
   if (x > 1 || y > 1 || x + w > 1 + 1e-9 || y + h > 1 + 1e-9) return null;
   const popup = (raw as any).popup === true; // K 纪元补全：esc 可关闭对象
   const rawZ = Number((raw as any).z);
+  // ΤΕΛ-13（D-G16 留案 M8）：acceptsText/scrollable 的三态保全 —— 申报布尔
+  // 原样透传；缺席**不铸键**（键缺席 = 未申报）。旧铸造 `=== true` 把缺席折叠成
+  // false，使「场景元数据贫乏」与「世界明断不可」不可区分 —— 排练弃权语义
+  // （见 applyAction 各臂）依赖本处的三态保真。不铸 undefined 值键是纪律而非
+  // 风格：ΠΑΝ-49 canonical「undefined 值自有键与缺键同域」—— 直接缺键让
+  // 哈希域/JSON 往返/测试复刻三面零分歧。幂等性保持：缺键再铸仍缺键。
+  const rawAccepts = (raw as any).acceptsText;
+  const rawScrollable = (raw as any).scrollable;
   return {
     role: String((raw as any).role ?? 'unknown'),
     name: String((raw as any).name ?? '').slice(0, WIDGET_NAME_MAX),
     rect: { x, y, width: w, height: h },
-    acceptsText: (raw as any).acceptsText === true,
-    scrollable: (raw as any).scrollable === true, // K 纪元补全：滚动证据前提
+    ...(typeof rawAccepts === 'boolean' ? { acceptsText: rawAccepts } : {}),
+    ...(typeof rawScrollable === 'boolean' ? { scrollable: rawScrollable } : {}), // K 纪元补全：滚动证据前提（三态）
     popup,
     // ΝΩ-30：z 序 —— 显式有限值优先（调用方主权）；缺席时 popup 铸高层、
     // 其余缺省 0。无 z 场景同层按场景序 —— 既有行为逐字节不变。
@@ -93,6 +114,15 @@ export class VirtualScreen {
    *  与宿主 ctrl+tab 的文档序循环对齐；场景序懒快照，reorderTabs 可重排） */
   private tabOrder: VirtualWidget[] | null = null;
   private activeTabIndex = 0;
+  /** ΤΕΛ-13（D-G16 留案 M8）：场景角色贫乏标记 —— 构造时定格。全场景无任何
+   *  控件申报非缺省角色（全 'unknown'）⇒ 分类元数据贫乏。C2-3 M8 病灶：生产
+   *  供源（uiMemory 锚点 / skillTools 的 rehearsalSceneFromMemory）role 多为
+   *  unknown，旧方言把「控件未申报能力」（acceptsText/scrollable 缺席、<2 个
+   *  role='tab'）铸成世界反证（false ⇒ 链 failed ⇒ 低可靠宏结构性误拒 —— 真机
+   *  完全可行）。立法：贫乏场景下「未申报」是诚实缺席 ⇒ 弃权（null，不计层），
+   *  绝不铸成反证；申报过角色的场景（curated/test/规划期 UI 树提取）保持既有
+   *  严格反证语义逐字节不变 —— 弃权只发生在「世界自认不知道」的场景。 */
+  private readonly rolePoor: boolean;
 
   constructor(rawWidgets: unknown) {
     const casted = Array.isArray(rawWidgets)
@@ -101,6 +131,9 @@ export class VirtualScreen {
     this.widgets = casted;
     // 稳定排序：同 z 层保持场景序（V8 sort 稳定）—— 无 z 场景行为不变
     this.hitOrder = [...casted].sort((a, b) => (b.z ?? 0) - (a.z ?? 0));
+    // ΤΕΛ-13（M8）：贫乏判定 = 零申报角色（'unknown' 是 asVirtualWidget 的缺省
+    // 铸造值 —— 供源未携带角色证据的信号，非世界断言）
+    this.rolePoor = !casted.some(w => w.role !== 'unknown');
   }
 
   get isEmpty(): boolean { return this.widgets.length === 0; }
@@ -164,7 +197,12 @@ export class VirtualScreen {
             layers.push('L3-semantic', 'L4-expectation');
             note += `; scene-ocr "${this.sceneOcr(x!, y!).slice(0, 24)}" vs expected "${action.expect.expectedText}"`;
           } else {
-            expectationMet = hit?.acceptsText === true; // 聚焦可输入控件 = 文字可落
+            // ΤΕΛ-13（M8）：无 expectedText 的 text-level 期望 = 「聚焦可输入控件
+            // 即可落字」。贫乏场景下命中控件未申报接受性 ⇒ 期望不可判（弃权
+            // null，非反证）；申报/富场景保持 `=== true` 旧律零回归。
+            expectationMet = hit !== null && this.rolePoor && hit.acceptsText === undefined
+              ? null
+              : hit?.acceptsText === true; // 聚焦可输入控件 = 文字可落
             layers.push('L4-expectation');
           }
         } else {
@@ -182,6 +220,18 @@ export class VirtualScreen {
         return { effectDetected: false, expectationMet: action.expect ? false : null,
           note: 'typed with no focused widget — text has nowhere to land',
           layers: action.expect ? ['L1-pixel', 'L4-expectation'] : ['L1-pixel'] };
+      }
+      // ΤΕΛ-13（D-G16 留案 M8 排练弃权）：贫乏场景 + 焦点控件未申报 acceptsText
+      // ⇒ 弃权（null ≠ false —— 元数据缺席不是世界反证）。旧方言在此铸 false ⇒
+      // 链 failed ⇒ 含 type 的低可靠宏被结构性误拒（真机可行）。世界演化按
+      // 「宏在真机录成」假设性入账缓冲（下游期望在乐观世界判定 —— 不因我方
+      // 无知制造下游反证），但本步判定弃权、零验证层计入。
+      if (this.rolePoor && target.acceptsText === undefined) {
+        const buf = (this.buffers.get(target) ?? '') + text;
+        this.buffers.set(target, buf);
+        return abstentionEvidence(
+          `focused ${target.role}(${target.name}) does not declare text acceptance — scene metadata poor, `
+          + 'verdict withheld (honest abstention, not counter-evidence)');
       }
       if (!target.acceptsText) {
         return { effectDetected: false, expectationMet: action.expect ? false : null,
@@ -215,10 +265,19 @@ export class VirtualScreen {
       let scrollable: VirtualWidget | null = null;
       let landing: { x: number; y: number };
       if (px !== null && py !== null) {
-        // 落点权威：落点上的控件可滚 ⇒ 就是它；否则反证（绝不隔空找容器）
+        // 落点权威：落点上的控件可滚 ⇒ 就是它；否则反证（绝不隔空找容器）。
+        // ΤΕΛ-13（M8）：贫乏场景的落点控件未申报滚动能力 ⇒ 弃权（缺席 ≠ 反证）；
+        // 申报 false（世界明断不可滚）或富场景未申报 ⇒ 保持旧律反证。
         landing = { x: px, y: py };
         const hit = this.widgetAt(px, py);
-        scrollable = hit?.scrollable === true ? hit : null;
+        if (hit?.scrollable === true) {
+          scrollable = hit;
+        } else if (hit !== null && this.rolePoor && hit.scrollable === undefined) {
+          return abstentionEvidence(
+            `scroll at (${px.toFixed(2)},${py.toFixed(2)}) landed on ${hit.role}(${hit.name}) `
+            + 'which does not declare scrollability — scene metadata poor, '
+            + 'verdict withheld (honest abstention, not counter-evidence)');
+        }
       } else if (this.focus?.scrollable === true) {
         scrollable = this.focus;
         landing = {
@@ -233,6 +292,15 @@ export class VirtualScreen {
           : { x: 0.5, y: 0.5 };
       }
       if (!scrollable) {
+        // ΤΕΛ-13（M8）：贫乏场景且全场景零滚动申报 ⇒ 「无容器」是元数据缺席
+        // 不是世界断言 ⇒ 弃权（旧方言铸 false —— 真机滚轮在未知场景完全可行）。
+        // 任一控件申报过 scrollable（含 false —— 世界明断滚动性）或富场景
+        // （有申报角色）⇒ 保持旧律反证零回归。
+        if (this.rolePoor && !this.widgets.some(w => w.scrollable !== undefined)) {
+          return abstentionEvidence(
+            'scroll found no declared scrollable container — scene metadata poor, '
+            + 'verdict withheld (honest abstention, not counter-evidence)');
+        }
         return { effectDetected: false, expectationMet: null,
           note: px !== null && py !== null
             ? `scroll at (${px.toFixed(2)},${py.toFixed(2)}) landed off any scrollable container — content cannot move`
@@ -305,6 +373,14 @@ export class VirtualScreen {
       const dir = action.args?.direction;
       const tabs = this.ensureTabOrder();
       if (tabs.length < 2) {
+        // ΤΕΛ-13（M8）：贫乏场景的「<2 标签」是分类缺席不是世界断言 —— 真机
+        // ctrl+tab 完全可行（宿主浏览器标签不在场景角色知识内）⇒ 弃权。
+        // 申报过角色的场景（curated/test，含单标签栈）保持旧律反证零回归。
+        if (this.rolePoor) {
+          return abstentionEvidence(
+            `tab stack shows ${tabs.length} declared tab(s) but scene roles are unclassified — `
+            + 'cannot falsify switch_tab (honest abstention, not counter-evidence)');
+        }
         return { effectDetected: false, expectationMet: null,
           note: `tab stack has ${tabs.length} tab(s) — nothing to switch to`,
           layers: ['L1-pixel'] };

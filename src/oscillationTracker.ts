@@ -25,7 +25,18 @@ const RING_SIZE = 12;   // 3 × 最大周期 4：容纳三份完整周期块的�
 const MAX_PERIOD = 4;
 const FUZZ_TOL = 6;     // 64 位指纹的容差位（同律阈值：既视感 6 / 场景切换 ≥24）
 
-const ring: string[] = [];
+// ─── ΠΑΝ-123：键域 LRU + 上界（有界化立法） ───
+//
+// 病灶（C1-2 L7）：单一模块级环跨任务/跨场景共用 —— 任务 A 的尾部观测混入
+// 任务 B 的首批帧，跨任务指纹错配可假报振荡（或延迟告警）。修法：观测环
+// **键域化**（key = 任务/代理/屏面归属，缺省 '' = 旧行为逐字节兼容），
+// 键集合本身有界：LRU 逐出（Map 插入序 + 命中重插刷新 —— 真 LRU，非 FIFO）
+// + 键数上界 MAX_RINGS。内存上界 = MAX_RINGS × ringSize 条指纹字符串
+// （8 × 12 × 64 字符 —— 常量级，无增长面）。告警只清所属键的环（跨键
+// 隔离）；reset(key?) 定点清或全清（插件卸载走全清 —— index.ts 既有接线
+// 语义不变）。
+const MAX_RINGS = 8;    // ΠΑΝ-123：键域上界（并发任务/代理/屏面的现实容量）
+const rings = new Map<string, string[]>();
 
 /** 逐位汉明距离（等长二进制指纹；长度不等 ⇒ 最大距离，绝不假装可比） */
 function hamming(a: string, b: string): number {
@@ -46,12 +57,18 @@ function isPCycle(w: string[], p: number, fuzzTol: number): boolean {
 }
 
 export const oscillationTracker = {
-  /** 记录一次稳定帧指纹，返回振荡告警（或 null）。非阻塞、不抛错。 */
-  observe(hash: string): string | null {
+  /**
+   * 记录一次稳定帧指纹，返回振荡告警（或 null）。非阻塞、不抛错。
+   * ΠΑΝ-123：可选 key（任务/代理/屏面归属）—— 同键同环，跨键隔离；
+   * 缺省 '' = 旧行为（单环语义逐字节兼容）。键域 LRU + MAX_RINGS 上界见上注。
+   */
+  observe(hash: string, key = ''): string | null {
     // Ξ-D：三键每次 observe 单次读取（set 即时生效）；ringSize 结构序兜底见上注
     const maxPeriod = Math.round(kernelRegistry.getOrDefault('osc.maxPeriod', MAX_PERIOD));
     const fuzzTol = kernelRegistry.getOrDefault('osc.fuzzTol', FUZZ_TOL);
     const ringSize = Math.max(3 * maxPeriod, Math.round(kernelRegistry.getOrDefault('osc.ringSize', RING_SIZE)));
+    const ring = ringFor(key);
+
     ring.push(hash);
     if (ring.length > ringSize) ring.shift();
 
@@ -61,6 +78,7 @@ export const oscillationTracker = {
         ? 'same state repeating ≥3 times'
         : `${p}-state cycle (A→B→${p === 2 ? 'A' : '…'}→A loop, 3 full periods)`;
       // 告警后清环：下次检测基于全新窗口，避免同一停滞反复刷屏
+      // ΠΑΝ-123：只清本键的环（跨键不串扰）
       ring.length = 0;
       return `OSCILLATION DETECTED (${shape}): the screen keeps cycling back through ` +
         `${p === 1 ? 'the same state' : `${p} states`} across recent actions. ` +
@@ -70,7 +88,33 @@ export const oscillationTracker = {
     return null;
   },
 
-  reset(): void {
-    ring.length = 0;
+  /** ΠΑΝ-123：在册键数（上界执法的可观测面 —— 恒 ≤ MAX_RINGS） */
+  ringCount(): number { return rings.size; },
+
+  /**
+   * 生命周期归零。ΠΑΝ-123：带 key ⇒ 定点清该键；缺省全清（插件卸载/
+   * 测试隔离的既有语义不变）。
+   */
+  reset(key?: string): void {
+    if (key === undefined) { rings.clear(); return; }
+    rings.delete(key);
   },
 };
+
+/** ΠΑΝ-123：键 → 观测环（LRU：命中刷新位序；新键入册前逐出最久未用键） */
+function ringFor(key: string): string[] {
+  const existing = rings.get(key);
+  if (existing) {
+    rings.delete(key);
+    rings.set(key, existing); // 位序刷新（Map 尾部 = 最近使用）
+    return existing;
+  }
+  while (rings.size >= MAX_RINGS) {
+    const oldest = rings.keys().next().value; // Map 首键 = 最久未用
+    if (oldest === undefined) break;
+    rings.delete(oldest);
+  }
+  const fresh: string[] = [];
+  rings.set(key, fresh);
+  return fresh;
+}

@@ -22,6 +22,13 @@
 //   （省 token + 保信息：图片走了，变化留下）。关 ⇒ 记录形状与驱逐文本与
 //   现状逐字节一致（回归锁）。参数式开关：不读 config、不读注册表 —— 部署
 //   决策（DEBTS D-C3「宿主编码层取投递产物」）降维成拨本开关。
+// ΠΑΝ-31（钉扎引擎数值修复）：在窗图片 relevance 旧实现恒 0.5（textSummary
+//   仅驱逐时铸造 ⇒ 语义余弦通道对钉扎候选池是死码）—— 基线上限 0.4 永不可
+//   钉、惊异帧衰减下限 0.61 永不解钉，C-4「核心目标钉扎永生」名存实亡。
+//   修法：assessSalience 无 textSummary 时回退任务锚点语义通道（锚点关联帧
+//   取 taskRelevance 缺省满分；锚文本与当前任务正交 ⇒ 让路），新近度钟以
+//   「引用即鲜活」计龄；合成公式本体提炼为 records.composeSalience 纯函数，
+//   惊异加成随新近度包络衰减 —— 钉扎/解钉施密特滞回带真正可达。
 import { journal } from './journal.js';
 import { embed, cosine } from './semanticHash.js';
 import { hammingDistance, similarity } from './perceptualHash.js';
@@ -32,7 +39,7 @@ import { gazeRouter, estimateVlmTokens } from './vlm/codec.js';
 import { ScreenStateLedger } from './visualDiff.js';
 // W6-2（doctor smell.over-engineering 清偿）：记录类型与纯小函数已分区提取至
 // contextManager.records.ts（行为零变化）；导入面不变 —— 再分发。
-import { clampUnit, SURPRISE_BIT_FLOOR, approxKb, DEFAULT_INCREMENTAL_SUMMARY_CHARS, MIN_INCREMENTAL_SUMMARY_CHARS, cleanIncrementalDelta, incrementalEvictionSummary, } from './contextManager.records.js';
+import { clampUnit, approxKb, DEFAULT_INCREMENTAL_SUMMARY_CHARS, MIN_INCREMENTAL_SUMMARY_CHARS, cleanIncrementalDelta, incrementalEvictionSummary, composeSalience, SALIENCE_PIN_THRESHOLD, SALIENCE_UNPIN_THRESHOLD, SALIENCE_RECENCY_HALF_LIFE_MIN, SALIENCE_ANCHOR_TEXT_GATE, } from './contextManager.records.js';
 class ContextManager {
     history = [];
     maxImageCount;
@@ -266,6 +273,10 @@ class ContextManager {
                 && typeof vp.height === 'number' && Number.isFinite(vp.height) && vp.height >= 1;
             const rel = a.taskRelevance;
             const sid = a.screenshotId;
+            // ΠΑΝ-31：锚文本防御规整 —— 非串拒收；trim 后空串视为缺席；截 120 字符
+            const rawText = a.text;
+            const text = typeof rawText === 'string' && rawText.trim() !== ''
+                ? rawText.trim().slice(0, 120) : undefined;
             const rec = {
                 bbox: { x0: rx0, y0: ry0, x1: rx1, y1: ry1 },
                 center: { x: cx, y: cy },
@@ -278,6 +289,7 @@ class ContextManager {
                     },
                 } : {}),
                 ...(typeof rel === 'number' && Number.isFinite(rel) ? { taskRelevance: clampUnit(rel) } : {}),
+                ...(text !== undefined ? { text } : {}),
                 ...(typeof sid === 'number' && Number.isFinite(sid) && sid >= 0 ? { screenshotId: sid } : {}),
             };
             this.taskAnchor = rec;
@@ -299,6 +311,7 @@ class ContextManager {
             capturedAt: a.capturedAt,
             ...(a.normalized ? { normalized: { ...a.normalized } } : {}),
             ...(a.taskRelevance !== undefined ? { taskRelevance: a.taskRelevance } : {}),
+            ...(a.text !== undefined ? { text: a.text } : {}),
             ...(a.screenshotId !== undefined ? { screenshotId: a.screenshotId } : {}),
         };
     }
@@ -353,7 +366,17 @@ class ContextManager {
     /**
      * C-4 显著度评估：类型加权 × 任务相关度 × 时间衰减。
      * 任务相关度 = 旧图遗像/摘要与当前任务描述的语义余弦（C-2 地基供血）。
-     * 无任务/无摘要 ⇒ 相关度取中位 0.5，退化为「类型 × 新近度」的弱焦点。
+     * ΠΑΝ-31（钉扎引擎数值修复）：在窗图片**没有** textSummary（遗像只在驱逐时
+     * 铸造 —— 旧实现据此把 relevance 恒置 0.5，基线上限 0.4 永不可钉）。修法：
+     * 无 textSummary 时回退到**任务锚点语义通道**（recordTaskAnchor 的锚文本与
+     * 图的区域关联，见 anchorRelevanceOf）而非常数 0.5 —— 锚点指向的帧定义上
+     * 就是任务目标（相关度取锚点 taskRelevance，缺省满分 1）；锚文本与当前任务
+     * 描述语义正交（旧任务遗物）时诚实让路。新近度钟同样升级：被锚点引用的帧
+     * 以 max(记录时间, 锚定时间) 计龄 —— 「任务还在引用它」即鲜活（核心目标
+     * 钉扎永生的兑现面）。合成公式本体见 contextManager.records.composeSalience
+     * （纯函数唯一事实源）：惊异加成随同一新近度包络衰减，钉扎/解钉阈值间的
+     * 滞回带对锚点帧与惊异帧都真正可达（旧实现惊异帧衰减下限 0.61 > 0.5 解钉
+     * 线 ⇒ 钉住即永不释放）。
      */
     assessSalience(record, now) {
         // 类型加权：携带 OCR 遗像的记录信息密度高；纯墓志铭次之
@@ -362,27 +385,80 @@ class ContextManager {
         let relevance = 0.5;
         const task = journal.currentTask();
         if (task && record.textSummary) {
-            if (!this.taskQueryCache || this.taskQueryCache.text !== task) {
-                this.taskQueryCache = { text: task, vec: embed(task) };
-            }
-            relevance = Math.max(0.2, cosine(embed(record.textSummary), this.taskQueryCache.vec));
+            relevance = Math.max(0.2, cosine(embed(record.textSummary), this.taskVec(task)));
         }
-        // 时间衰减：半衰期 5 分钟 —— 「刚看过」的记忆天然更鲜活
-        const ageMin = (now - record.timestamp) / 60_000;
-        const recency = Math.exp(-ageMin / 5);
-        const base = Math.round(typeWeight * relevance * (0.4 + 0.6 * recency) * 1000) / 1000;
-        // E-4 预测残差加成：页面级跳变帧（≥SURPRISE_BIT_FLOOR/64 位）+0.45（封顶 1）。基线帧
-        // 0.8×0.5×1.0=0.4 被抬到 0.85 —— 跨过 0.8 钉扎线，世界剧变锚点获得
-        // 与任务目标同级的钉扎优先权（预测处理理论：注意力跟随预测误差）。
-        // SURPRISE_BIT_FLOOR 与 0.45 是算法形状字面量：24 位 ≈ 全屏 dHash 的页面级变化下界
-        // （元素级反馈撑不满此距离，不误伤）；0.45 恰把满新近度基线抬过钉扎线。
-        if ((record.surpriseBits ?? 0) >= SURPRISE_BIT_FLOOR)
-            return Math.min(1, base + 0.45);
-        return base;
+        else {
+            // ΠΑΝ-31：在窗图片（钉扎候选池全部成员）走锚点/任务语义回退通道
+            const anchored = this.anchorRelevanceOf(record, task);
+            if (anchored !== null)
+                relevance = anchored;
+        }
+        // ΠΑΝ-31 新近度钟：锚点引用即鲜活 —— 被当前锚点关联的帧以锚定时刻刷新计龄
+        const refTs = this.taskAnchor && this.anchorAssociates(this.taskAnchor, record)
+            ? Math.max(record.timestamp, this.taskAnchor.capturedAt)
+            : record.timestamp;
+        const ageMin = Math.max(0, (now - refTs) / 60_000);
+        const recency = Math.exp(-ageMin / SALIENCE_RECENCY_HALF_LIFE_MIN); // 半衰期 5 分钟
+        return composeSalience({ typeWeight, relevance, recency, surpriseBits: record.surpriseBits });
+    }
+    /** 任务向量缓存（单一事实源 —— 语义余弦与锚文本语义门共用） */
+    taskVec(task) {
+        if (!this.taskQueryCache || this.taskQueryCache.text !== task) {
+            this.taskQueryCache = { text: task, vec: embed(task) };
+        }
+        return this.taskQueryCache.vec;
     }
     /**
-     * C-4 钉扎决策：显著度 >= 0.8 且钉扎名额未满 ⇒ 钉扎。
+     * ΠΑΝ-31：锚点 ↔ 记录的关联判决（几何/时间面）—— 该记录是否是任务锚点
+     * 指向的帧。关联规则（由强到弱）：① 显式 screenshotId 精确挂钩；② 时间窗
+     * 关联 —— 锚定时刻仍在窗、且是当时最新的在窗图（recordTaskAnchor 的生产
+     * 调用方不带 screenshotId 时的诚实回退：锚定时刻的「当前屏幕」）。
+     * 防御式绝不抛；无锚/无关联 ⇒ false。
+     */
+    anchorAssociates(anchor, record) {
+        try {
+            if (anchor.screenshotId !== undefined)
+                return anchor.screenshotId === record.id;
+            let best = null;
+            for (const h of this.history) {
+                if (!h.base64)
+                    continue;
+                if (h.timestamp <= anchor.capturedAt && (best === null || h.timestamp >= best.timestamp))
+                    best = h;
+            }
+            return best === record;
+        }
+        catch {
+            return false; // 绝不抛：锚点通道是增益不是依赖
+        }
+    }
+    /**
+     * ΠΑΝ-31：锚点通道的任务相关度 —— 关联记录取锚点 taskRelevance（缺省满分：
+     * 锚点定义即「上一轮任务目标」）；锚文本语义门：锚携带文本且当前任务在场时，
+     * 两者余弦 < SALIENCE_ANCHOR_TEXT_GATE（正交 ⇒ 旧任务遗物）⇒ 让路返回 null
+     * （回退中性 0.5，绝不冒充当前任务目标）。
+     */
+    anchorRelevanceOf(record, task) {
+        try {
+            const anchor = this.taskAnchor;
+            if (!anchor || !this.anchorAssociates(anchor, record))
+                return null;
+            if (task && anchor.text) {
+                if (cosine(embed(anchor.text), this.taskVec(task)) < SALIENCE_ANCHOR_TEXT_GATE)
+                    return null;
+            }
+            return anchor.taskRelevance ?? 1;
+        }
+        catch {
+            return null; // 绝不抛：锚点通道是增益不是依赖
+        }
+    }
+    /**
+     * C-4 钉扎决策：显著度 >= SALIENCE_PIN_THRESHOLD 且钉扎名额未满 ⇒ 钉扎。
      * 名额约束保证 while 驱逐循环必然终止（安全阀：全部被钉扎时逐最旧钉扎图）。
+     * ΠΑΝ-31：阈值具名常量自 records 分区（钉扎 > 解钉的施密特滞回 —— 且经
+     * composeSalience 的可达域执法，两条阈值都在候选真实值域内，不再是有名无实
+     * 的装饰性差值）。
      */
     refreshPins() {
         if (!this.salienceFocus)
@@ -402,13 +478,13 @@ class ContextManager {
             .sort((a, b) => b.s - a.s);
         let pinnedCount = this.history.filter(h => h.pinned && h.base64).length;
         for (const { h, s } of candidates) {
-            if (s >= 0.8 && pinnedCount < this.pinBudget) {
+            if (s >= SALIENCE_PIN_THRESHOLD && pinnedCount < this.pinBudget) {
                 if (!h.pinned) {
                     h.pinned = true;
                     pinnedCount++;
                 }
             }
-            else if (h.pinned && s < 0.5) {
+            else if (h.pinned && s < SALIENCE_UNPIN_THRESHOLD) {
                 h.pinned = false; // 显著度衰减 ⇒ 解钉（焦点随任务漂移）
             }
             h.salience = s;

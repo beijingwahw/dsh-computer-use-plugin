@@ -200,7 +200,10 @@ export class DefaultExecutionStation {
         this.opts = opts;
     }
     async execute(env) {
-        const { seq, action, intentRef } = env.payload;
+        // ΠΑΝ-64（止损链断裂修复）：接收 ExecutionOrder.signal 并传播给宿主执行通道 ——
+        // 旧实现解构丢弃 signal、HostExecutor 接口无此形参 ⇒ 编排器铸造的止损信号
+        // 在执行工位断链（只有感知路径真正吃 signal），abort 后在途动作照常执行。
+        const { seq, action, intentRef, signal } = env.payload;
         const startAt = Date.now();
         const base = { seq, latencyMs: 0, rehearsed: false, rehearsalChainId: undefined };
         // D-5 预演闸门（DRILL, THEN DELIVER —— 沙箱是彩排，宿主是首演）
@@ -250,7 +253,9 @@ export class DefaultExecutionStation {
             };
         }
         try {
-            const r = await this.opts.host.execute(action);
+            // ΠΑΝ-64：signal 随动作下发（signal 缺席 ⇒ 旧路径逐字节保持）—— 宿主侧
+            // 消费即可断流在途 HTTP（d7HostPort → router → adapter → microFetch）。
+            const r = await this.opts.host.execute(action, signal);
             return { ...base, ...r, latencyMs: Date.now() - startAt, rehearsed: base.rehearsed };
         }
         catch (e) {

@@ -107,7 +107,3 @@ export function mmrVerify(proof, root) {
 export function mmrRoot(leafValues) {
     return bagPeaks(cutMountains(leafValues.map(leafHash)).map(m => m.hash));
 }
-/** 纯度证明（确定性）：同流同根 —— 跨进程/跨会话独立复核的前提 */
-export function mmrDeterministic(a, b) {
-    return a.length === b.length && mmrRoot(a) === mmrRoot(b);
-}

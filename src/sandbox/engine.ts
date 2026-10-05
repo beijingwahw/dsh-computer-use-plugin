@@ -26,18 +26,27 @@ import {
 // 与宿主 replayActions.replayOneTraced 同一判定函数（重放不豁免安全闸）。
 // 破环审计：actionGate 的导入闭包 = {riskGate, fuzzy, approval.*, focusTracker}，
 // 无一 import 沙箱面 ⇒ 无环（engine 既有 '../doctorEvents' 根层先例同律）。
-import { assertActionAllowed, SAFETY_GATE_BLOCK } from '../tools/actionGate';
-import { MuscleMemoryStore } from './memory';
+// ΠΑΝ-42：闭集宇宙 ACTION_KIND_UNIVERSE 同源引入（click/type/hotkey/drag/
+// scroll 五通道全覆盖 —— 与 F1 波 ActionKind 扩员对齐，只 import 常量零环）。
+import { assertActionAllowed, SAFETY_GATE_BLOCK, ACTION_KIND_UNIVERSE, type ActionKind } from '../tools/actionGate';
+import { MuscleMemoryStore, sharedMuscleMemoryStore } from './memory';
 import { VirtualScreen, asVirtualWidget } from './virtualScreen';
 import { sandboxLog, REHEARSAL_FP_FORMAT } from './log';
 import {
-  createDefaultIdGenerator, muscleReliability, resolveConsolidation,
-  type ActionChain, type HostExecutor, type HostExecutorStepResult,
+  createDefaultIdGenerator, fpSimilarity, muscleReliability, resolveConsolidation,
+  type ActionChain, type FpComparison, type HostChainEffectVerdict,
+  type HostExecutor, type HostExecutorStepResult,
   type HostReplayDivergence, type HostReplayOutcome, type IdGenerator,
   type RehearsalOutcome, type RehearsalStepResult, type RehearsalVerdict,
   type Result, type SandboxAction, type SandboxConfig, type SandboxEngine,
   type SandboxSnapshot, type VerificationLayer, type VirtualWidget,
 } from './types';
+
+// ΠΑΝ-41：指纹相似度唯一事实源已收编契约层（types.fpSimilarity —— 位宽鲁棒：
+// 按实际比对长度归一，128 位等宽串不再产出负数）。此处再导出维持引擎既有的
+// 公开导入面（epochChi 等测试自 engine 导入 fpSimilarity —— 单源，非克隆）。
+export { fpSimilarity };
+export type { FpComparison };
 
 /** Laplace 中性先验 = (0+1)/(0+2) —— 数学中性值，非部署调优魔法数字 */
 const DEFAULT_MIN_RELIABILITY = 0.5;
@@ -47,35 +56,48 @@ const DEFAULT_SCENE_SIMILARITY = 0.9;
 const REPLAY_TOKEN_TTL_MS = 120_000;
 /** 判决缓存容量上限（无界 Map = 缓慢泄漏 —— 对齐 orchestration/index boundedSet 先例） */
 const VERDICT_CACHE_MAX = 256;
+// ΤΕΛ-13（D-G16 留案 M3 否决钉住立法）：rejected 判决的钉面容量。主缓存
+// VERDICT_CACHE_MAX 是「全部判决」的滚动窗，approved/needs_review 的驱逐无害
+// （它们不拦截任何门）；唯 rejected 驱逐 = 安全否决权失忆 —— 门3 latest===
+// undefined 即放行（C2-3 M3 的病灶）。钉面只收 rejected（远稀于全量），
+// 4× 主缓存容量让「普通流量挤出否决」需要 1024 条**其他 rejected 判决**——
+// 工程上不可达的噪声水位；仍是有界（无界 Map = 缓慢泄漏，本库既有立法），
+// 真到上限的逐出必入链告警（noteDoctorVerdict 内）—— 否决失忆是安全事件，
+// 绝不静默。
+const VETO_PIN_MAX = 1024;
 /** 重放令牌容量上限（铸造时驱逐最旧未决令牌 —— 过期未确认的令牌不许无界滞留） */
 const REPLAY_TOKENS_MAX = 64;
 /** 待配对排练结果容量（chainId → 最近 outcome；医生判决迟到时的配对面） */
 const PENDING_OUTCOMES_MAX = 32;
 
-/** 指纹比对结果（ΑΩ-R19：相似度 + 位宽注记） */
-export interface FpComparison {
-  /** 0-1 域相似度（比对长度上的汉明距离归一） */
-  similarity: number;
-  /** 截断位宽注记：两侧位宽不等时的公共前缀长度（诚实降级 —— 宿主指纹格式
-   *  演进（64→128 位等）不再静默全拒；undefined = 等宽全量比对） */
-  truncatedTo?: number;
-}
+/** ΠΑΝ-42：步级安全扫描的闭集宇宙（单源自 tools/actionGate.ACTION_KIND_
+ *  UNIVERSE —— click/type/hotkey/drag/scroll 五物理写通道；绝不复制第二份词表） */
+const GATE_SCANNED_KINDS: ReadonlySet<string> = new Set<string>(ACTION_KIND_UNIVERSE);
 
-/** 指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
- *  D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖）。
- *  ΑΩ-R19 位宽鲁棒：等宽 ⇒ 按实际位宽逐位比对（除数为长度而非硬编码 64 ——
- *  对现行 64 位串数值逐字节不变）；不等宽 ⇒ 按较短侧前缀比对并注记 truncatedTo
- *  （诚实降级优于静默 0 —— 格式演进静默全拒 = 把升级伪装成全局失配）；
- *  空串（0 位证据）仍 0。纯函数、永不抛。 */
-export function fpSimilarity(a: string, b: string): FpComparison {
-  if (a.length === 0 || b.length === 0) return { similarity: 0 };
-  const n = Math.min(a.length, b.length);
-  let dist = 0;
-  for (let i = 0; i < n; i++) if (a[i] !== b[i]) dist++;
-  return {
-    similarity: 1 - dist / n,
-    ...(a.length !== b.length ? { truncatedTo: n } : {}),
-  };
+/** ΠΑΝ-40e：步的不可逆性判据 —— actionGate 判定为审批域（dangerous/
+ *  requiresApproval）或命中不可逆拒因（危险词无令牌 / 凭据语义 / 黑名单和弦 /
+ *  公证不符）的步。判定器崩溃 ⇒ 不可逆（fail-closed：不可判定按危险处理）。
+ *  词表外 kind（switch_tab 等）不在审批语义面 ⇒ 可逆（导航可 undo）。 */
+const IRREVERSIBLE_GATE_REASONS: ReadonlySet<string> = new Set([
+  'irreversible-action', 'token-not-granted-or-expired', 'sensitive-input',
+  'blacklisted-hotkey', 'notary-mismatch',
+]);
+
+function stepIrreversible(step: SandboxAction, hotkeyBlacklistCsv?: string): boolean {
+  if (!step || !GATE_SCANNED_KINDS.has(step.kind)) return false;
+  try {
+    // 类型收窄注记：GATE_SCANNED_KINDS.has 已在运行时把 kind 收进闸门闭集
+    //（SandboxActionKind ⊋ ActionKind —— switch_tab 等词表外 kind 上面已让渡）。
+    const d = assertActionAllowed(
+      step.kind as ActionKind, step.args,
+      // ΠΑΝ-42：黑名单透传在场 ⇒ 不可逆性判定把黑名单和弦计入（fail-closed 方向）
+      hotkeyBlacklistCsv !== undefined ? { hotkeyBlacklist: hotkeyBlacklistCsv } : undefined,
+    );
+    return d.dangerous === true || d.requiresApproval === true
+      || (d.reason !== undefined && IRREVERSIBLE_GATE_REASONS.has(d.reason));
+  } catch {
+    return true; // fail-closed：判定器崩溃 = 不可逆
+  }
 }
 
 /** 验证层典范序（铸造点排序依据：验证栈自底向上，序即语义） */
@@ -99,11 +121,24 @@ interface VirtualBookkeeping {
 export class SandboxEngineImpl implements SandboxEngine {
   private cfg: SandboxConfig = {};
   private idGen: IdGenerator = createDefaultIdGenerator();
-  private readonly memory = new MuscleMemoryStore();
+  // ΠΑΝ-41（双账本合一）：引擎记账与宏排练门禁（macroRehearsal.sharedMacro
+  // RehearsalGate 缺省注入）统一走 memory.ts 的 sharedMuscleMemoryStore ——
+  // 此前的私有 `new MuscleMemoryStore()` 与共享实例互不可见：宏排练登记
+  // （生产真实发生的唯一写入路径，skillTools run_skill）引擎 recall/replay
+  // 永远看不到，引擎 recordHostReplay 也永远记不到宏条目头上；memory.ts 与
+  // macroRehearsal.ts 注释宣称的「同账本、跨会话存活」是虚假陈述。构造接受
+  // 显式注入独立实例（离线测试隔离 —— MacroRehearsalGate 同律）。
+  private readonly memory: MuscleMemoryStore;
   /** 宿主观察缓存（TRUST IS A FINGERPRINT 的镜像源头；嗅探缺席 = null = 保守拒绝） */
   private hostFingerprint: string | null = null;
   /** D-4 判决缓存（subject=chainId → 最新回执；重放时刻的复核源） */
   private verdictCache = new Map<string, DoctorVerdictPayload>();
+  // ΤΕΛ-13（D-G16 留案 M3）：否决钉面 —— subject → 最新 rejected 判决。
+  // 独立于 256-FIFO 主缓存：普通判决的滚动驱逐不再连带挤出安全否决
+  // （钉面只受自身容量约束 + 逐出入链告警）。同 subject 的更新判决按
+  // 「最新否决即刻拦截 / 最新批准即刻放行」既有语义换钉（新 rejected 换旧
+  // rejected；新 approved/needs_review 解钉 —— 被复核推翻的否决不永生）。
+  private pinnedVetoes = new Map<string, DoctorVerdictPayload>();
   private replayTokens = new Map<string, ReplayToken>();
   /** 最近排练结果（chainId → outcome，容量执法 FIFO —— 判决迟到时的配对面） */
   private pendingOutcomes = new Map<string, import('./types').RehearsalOutcome>();
@@ -113,8 +148,10 @@ export class SandboxEngineImpl implements SandboxEngine {
   private hostExecutor: HostExecutor | null = null;
 
   // 显式字段赋值（非参数属性）：Node strip-only 运行时契约 —— 现世源码同方言
-  constructor(ctx: Context | null) {
+  constructor(ctx: Context | null, store?: MuscleMemoryStore) {
     this.ctx = ctx;
+    // ΠΑΝ-41：缺省 = 共享持久实例（与宏排练门禁同一账本）；显式注入优先（测试隔离）
+    this.memory = store ?? sharedMuscleMemoryStore;
   }
 
   /** 加载层方法（《异常诚实分层契约》第一条）：校验失败 throw —— 拒绝带病上线 */
@@ -133,11 +170,20 @@ export class SandboxEngineImpl implements SandboxEngine {
       && typeof config.enableHostReplayExecution !== 'boolean') {
       errors.push(`enableHostReplayExecution must be a boolean, got ${typeof config.enableHostReplayExecution}`);
     }
+    // ΠΑΝ-42：热键黑名单透传面的加载层执法（类型伪装 = 带病配置）
+    if (config.hotkeyBlacklistCsv !== undefined && typeof config.hotkeyBlacklistCsv !== 'string') {
+      errors.push(`hotkeyBlacklistCsv must be a string (CSV), got ${typeof config.hotkeyBlacklistCsv}`);
+    }
     if (errors.length > 0) {
       throw new Error(`[SandboxEngine] invalid configuration:\n  - ${errors.join('\n  - ')}`);
     }
     this.cfg = { ...config };
     this.idGen = config.idGenerator ?? createDefaultIdGenerator();
+    // ΠΑΝ-41：configure 现在武装的是**共享**账本（此前 sharedMuscleMemoryStore
+    // 全库无人 configure ⇒ macroRehearsal 的 save() 走「无路径旁路 true」静默
+    // no-op，「排练通过即刻落盘（崩溃安全）」实为空转）。引擎 configure =
+    // 共享账本的唯一持久化武装点：memoryPath 在场 ⇒ 引擎与宏门禁的登记/回写
+    // 全部真实落盘；load() 防御恢复（崩溃/重启后跨会话召回 —— 单条畸形不连坐）。
     this.memory.configure(config.memoryPath ?? '');
     this.memory.load();
   }
@@ -157,7 +203,12 @@ export class SandboxEngineImpl implements SandboxEngine {
   }
 
   /** D-4 判决登记（onDoctorVerdict 接线后喂数据；双闸门与重放复核的缓存源）。
-   *  容量执法：超上限 FIFO 驱逐最旧条目（Map 迭代序 = 插入序） */
+   *  容量执法：超上限 FIFO 驱逐最旧条目（Map 迭代序 = 插入序）。
+   *  ΤΕΛ-13（D-G16 留案 M3 否决钉住）：rejected 判决同时钉入钉面 —— 主缓存
+   *  被普通流量挤出后门3 仍可复核到否决（安全否决权不失忆）；非 rejected 的
+   *  新判决到达 ⇒ 解钉（最新判决语义分毫不变）。钉面自身超容量 ⇒ 逐出最旧
+   *  并入链告警 —— 否决失忆绝不静默（C2-3 M3 的「驱逐无任何告警注记」半面
+   *  同步闭合）。 */
   noteDoctorVerdict(p: DoctorVerdictPayload): void {
     this.verdictCache.delete(p.subject); // 重置插入位：更新即最新
     this.verdictCache.set(p.subject, p);
@@ -165,6 +216,27 @@ export class SandboxEngineImpl implements SandboxEngine {
       const oldest = this.verdictCache.keys().next().value;
       if (oldest === undefined) break;
       this.verdictCache.delete(oldest);
+    }
+    // ΤΕΛ-13（M3）：钉面执法 —— 主缓存驱逐 rejected 不再等于否决失忆
+    if (p.verdict === 'rejected') {
+      this.pinnedVetoes.delete(p.subject); // 重置插入位：换钉即最新
+      this.pinnedVetoes.set(p.subject, p);
+      while (this.pinnedVetoes.size > VETO_PIN_MAX) {
+        const oldestPinned = this.pinnedVetoes.keys().next().value;
+        if (oldestPinned === undefined) break;
+        this.pinnedVetoes.delete(oldestPinned);
+        // 告警入链（fire-and-forget 同 consolidate 既有方言）：被逐出的否决
+        // 所属链此后走门3 主缓存复核（缺席 = 放行）—— 该事实对审计可见。
+        void sandboxLog.append('veto-pin-evicted', {
+          subject: oldestPinned,
+          pinnedSize: this.pinnedVetoes.size, cap: VETO_PIN_MAX,
+          note: 'rejected verdict dropped from veto pin map (capacity) — chain re-verdict required to re-arm the veto',
+        });
+      }
+    } else {
+      // 最新判决不再否决 ⇒ 解钉：approved/needs_review 复核推翻旧否决，
+      // 门3 回到主缓存语义（钉面不持有被推翻的否决 —— 换钉律的单调半边）
+      this.pinnedVetoes.delete(p.subject);
     }
   }
 
@@ -300,7 +372,12 @@ export class SandboxEngineImpl implements SandboxEngine {
     return this.finishRehearsal(chain.id, snapshotId, {
       verdict, steps, failedAtIndex, layers: [...activeLayers],
       totalLatencyMs, budgetMs: chain.budgetMs, startedAt,
-      entrySceneFingerprint: chain.entrySceneFingerprint,
+      // ΠΑΝ-40d（指纹生产侧铸造）：链自带入口指纹优先（manual/planner 供源）；
+      // 缺席 ⇒ 铸造排练时刻的宿主最新观察（TRUST IS A FINGERPRINT 的镜像源）。
+      // 此前该字段全库无生产赋值点 ⇒ 即便条目入库，门 4B 仍恒拒（空 entryFp ⇒
+      // cmp=null）。铸造只在世界证据在场时发生 —— hostFingerprint 为 null（嗅探
+      // 缺席）⇒ 保持 undefined（诚实缺席，门 4B 按 ΠΑΝ-40e 语义分道），绝不伪造。
+      entrySceneFingerprint: chain.entrySceneFingerprint ?? this.hostFingerprint ?? undefined,
       note: aborted ? `budget exceeded at step ${failedAtIndex}` : undefined,
     });
   }
@@ -434,6 +511,11 @@ export class SandboxEngineImpl implements SandboxEngine {
       this.idGen, trigger, outcome.chainId, outcome.steps.map(s => s.action),
       outcome.entrySceneFingerprint, // K 纪元：真实链指纹（同屏加成从此可命中）
     );
+    // ΠΑΝ-41（崩溃安全落盘）：固化即刻持久化 —— 登记寿命不再依赖卸载钩子
+    // （进程崩溃时卸载钩子不运行）。共享账本已由 configure 武装持久路径 ⇒
+    // 此 save 真实落盘（此前引擎持私有库 + 共享库无人 configure，两侧 save
+    // 均为静默 no-op）。save 永不抛：失败 warn 旁路（持久化是资产不是命脉）。
+    this.memory.save();
     const reliability = muscleReliability(entry);
     void sandboxLog.append('consolidation', { entryId: entry.id, reliability, reinforced: entry.rehearsalPassCount });
     if (this.ctx) {
@@ -511,10 +593,15 @@ export class SandboxEngineImpl implements SandboxEngine {
   }
 
   /**
-   * ΝΩ-1 第五门原语：步级安全扫描（纯扫描、永不抛、不派发）。只扫闸门约束的
-   * 动作种类（click_mouse / type_text —— 与 replayOneTraced 的 `entry.tool ===
-   * 'click_mouse' || entry.tool === 'type_text'` 同律）；其余种类（scroll/hotkey/
-   * drag/switch/dismiss/noop）不在审批/风险语义面内，与宿主重放同口径。
+   * ΝΩ-1 第五门原语：步级安全扫描（纯扫描、永不抛、不派发）。
+   * ΠΑΝ-42（覆盖面扩员）：扫描种类自「click/type 双臂」扩为 actionGate 的完整
+   * 闭集宇宙（ACTION_KIND_UNIVERSE 单源 import：click_mouse/type_text/
+   * press_hotkey/drag_mouse/scroll_page —— 与 F1 波 ActionKind 扩员对齐）。
+   * 此前热键/拖拽步不在扫描面内：`[无害 type_text, press_hotkey alt+f4]` 链会
+   * 先执行第一步、在热键步被 system 层黑名单抛错才停 = 部分执行已经发生，
+   * 「危险步在链中段也绝不产生部分执行」的注释承诺不成立。其余种类
+   * （switch_tab/switch_window/dismiss_popup/noop）不在审批/风险语义面内，
+   * 与宿主重放同口径（switch_tab 的 ctrl+tab 和弦不在黑名单、无自述通道）。
    * 返回首犯步（index + kind + 拒因）；全过 ⇒ null。判定器崩溃 ⇒ 首犯步 +
    * 'gate-threw'（fail-closed：不可判定的步按危险处理，绝不放行）。
    */
@@ -523,9 +610,16 @@ export class SandboxEngineImpl implements SandboxEngine {
   ): { stepIndex: number; kind: string; reason: string } | null {
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      if (!step || (step.kind !== 'click_mouse' && step.kind !== 'type_text')) continue;
+      if (!step || !GATE_SCANNED_KINDS.has(step.kind)) continue;
       try {
-        const d = assertActionAllowed(step.kind, step.args);
+        // 类型收窄注记：同 stepIrreversible —— 运行时闭集成员（词表外 kind 上面已让渡）。
+        // ΠΑΝ-42：黑名单 CSV 透传在场 ⇒ 扫描对黑名单和弦前置结构化拒绝。
+        const d = assertActionAllowed(
+          step.kind as ActionKind, step.args,
+          this.cfg.hotkeyBlacklistCsv !== undefined
+            ? { hotkeyBlacklist: this.cfg.hotkeyBlacklistCsv }
+            : undefined,
+        );
         if (!d.allowed) {
           return { stepIndex: i, kind: step.kind, reason: String(d.reason ?? 'unknown') };
         }
@@ -560,8 +654,14 @@ export class SandboxEngineImpl implements SandboxEngine {
       return gate('invalid or expired confirm token');
     }
     this.replayTokens.delete(opts.confirmToken);
-    // 门禁三：重放时刻医生复核（固化时的 approved 前提之上，最新否决即刻拦截）
-    const latest = this.verdictCache.get(entry.chainId);
+    // 门禁三：重放时刻医生复核（固化时的 approved 前提之上，最新否决即刻拦截）。
+    // ΤΕΛ-13（D-G16 留案 M3）：复核源升级为「钉面优先，主缓存兜底」—— 主缓存
+    // 256-FIFO 被普通流量挤出后，rejected 判决仍在钉面在场（旧病灶：latest===
+    // undefined 即放行 —— 安全否决权以可失忆缓存为唯一事实源）。钉面语义 =
+    // 该 subject 的最新判决是 rejected（换钉/解钉在 noteDoctorVerdict 执法），
+    // 故钉面命中即拦截；未命中回主缓存既有语义（approved/needs_review 不拦）。
+    const latest = this.pinnedVetoes.get(entry.chainId)
+      ?? this.verdictCache.get(entry.chainId);
     if (latest && latest.verdict === 'rejected') {
       await sandboxLog.append('host-replay-gate', { entryId, gate: 'doctor-rejected' });
       return gate(`doctor rejected chain ${entry.chainId}: ${latest.rationale ?? 'no rationale'}`);
@@ -576,22 +676,50 @@ export class SandboxEngineImpl implements SandboxEngine {
     // 门禁四B：TRUST IS A FINGERPRINT —— 宿主最新观察与排练入口同屏方可放行
     // ΑΩ-R19：比对位宽鲁棒（等宽全量 / 不等宽前缀 + truncated 注记入链 ——
     // 拒绝理由可见降级证据，而非静默 0 黑箱）
+    // ΠΑΝ-40e（指纹缺席分道语义）：旧语义「任一侧指纹缺席 ⇒ 恒拒」与 ΠΑΝ-40c
+    // 之前的嗅探恒空叠加成死门（结构上永不放行）。新语义按可逆性分道：
+    //   · 条目含不可逆步（审批域/凭据/黑名单 —— stepIrreversible）⇒ 指纹缺席
+    //     仍拒（fail-closed：无同屏证据绝不放行不可逆宏 —— 指纹门的价值排序
+    //     高于可用性）；
+    //   · 全可逆步 ⇒ 降级放行并在链/report 标注 fingerprintLane=
+    //     'degraded-reversible'（诚实降级 ≠ 假装验证过 —— 世界可被后续观察纠正）。
+    // 两侧指纹均在场 ⇒ 既有相似度闸（≥ minSim）零回归。
     const minSim = this.cfg.entrySceneMinSimilarity ?? DEFAULT_SCENE_SIMILARITY;
     const entryFp: string = entry.entrySceneFingerprint ?? '';
     const hostFp: string = this.hostFingerprint ?? '';
     const cmp = entryFp.length > 0 && hostFp.length > 0 ? fpSimilarity(entryFp, hostFp) : null;
-    if (!cmp || cmp.similarity < minSim) {
-      await sandboxLog.append('host-replay-gate', {
-        entryId, gate: 'fingerprint-mismatch',
-        entryHasFp: entryFp.length > 0, hostObserved: hostFp.length > 0,
-        ...(cmp ? {
+    /** ΠΑΝ-40e 降级车道注记（可逆宏指纹缺席放行时携带入 report；否则 undefined） */
+    let fingerprintLane: string | undefined;
+    if (cmp) {
+      if (cmp.similarity < minSim) {
+        await sandboxLog.append('host-replay-gate', {
+          entryId, gate: 'fingerprint-mismatch',
+          entryHasFp: entryFp.length > 0, hostObserved: hostFp.length > 0,
           similarity: Math.round(cmp.similarity * 1000) / 1000, minSim,
           ...(cmp.truncatedTo !== undefined
             ? { truncatedToBits: cmp.truncatedTo, entryBits: entryFp.length, hostBits: hostFp.length }
             : {}),
-        } : {}),
+        });
+        return gate('host state does not match rehearsal entry scene (stale rehearsal is a lie)');
+      }
+    } else {
+      // 指纹证据缺席（入口指纹未铸 / 宿主观察未嗅探到）
+      const hasIrreversible = entry.steps.some(s => stepIrreversible(s, this.cfg.hotkeyBlacklistCsv));
+      if (hasIrreversible) {
+        await sandboxLog.append('host-replay-gate', {
+          entryId, gate: 'fingerprint-absent-irreversible',
+          entryHasFp: entryFp.length > 0, hostObserved: hostFp.length > 0,
+          note: 'fail-closed: fingerprint evidence absent for irreversible step(s)',
+        });
+        return gate('fingerprint evidence absent (entry scene not fingerprinted or host '
+          + 'observation unavailable) — irreversible steps never replay without scene match (fail-closed)');
+      }
+      fingerprintLane = 'degraded-reversible';
+      await sandboxLog.append('host-replay-gate', {
+        entryId, gate: 'fingerprint-degraded-reversible',
+        entryHasFp: entryFp.length > 0, hostObserved: hostFp.length > 0,
+        note: 'honest degradation: all steps reversible; replay allowed without scene fingerprint',
       });
-      return gate('host state does not match rehearsal entry scene (stale rehearsal is a lie)');
     }
 
     // 门禁五（ΝΩ-1 步级安全扫描门）：重放不豁免安全闸 —— entry.steps 逐条过
@@ -625,6 +753,7 @@ export class SandboxEngineImpl implements SandboxEngine {
         hostDid: 'no host executor wired (developer preview)',
       }], muscleReliability(entry), {
         gate: 'passed', executor: 'not-wired', entryId, createdAt,
+        ...(fingerprintLane !== undefined ? { fingerprintLane } : {}),
       });
     }
 
@@ -633,6 +762,7 @@ export class SandboxEngineImpl implements SandboxEngine {
     // 成功与否都记 —— 失败也是校准）。
     const divergences: HostReplayDivergence[] = [];
     let executed = 0;
+    let dispatchFailed = false;
     for (let i = 0; i < entry.steps.length; i++) {
       const step = entry.steps[i];
       let r: HostExecutorStepResult;
@@ -649,18 +779,56 @@ export class SandboxEngineImpl implements SandboxEngine {
           sandboxSaid: `step ${i} (${step.kind}) should land on the host`,
           hostDid: r && typeof r.note === 'string' && r.note ? r.note : 'unattributed step failure',
         });
+        dispatchFailed = true;
         break;
       }
       executed++;
     }
-    const dispatchOk = divergences.length === 0;
-    const updatedEntry = this.memory.recordHostReplay(entryId, dispatchOk);
+    // ── ΠΑΝ-42（效果验证门）：派发完成 ≠ 世界承接。可靠度回写从「派发完成」
+    // 升级为「效果验证」—— 全部步派发成功后，经执行器的可选链级验证端口
+    // （装配层适配 actionVerifier 的终帧 dHash 路径：before 取自首物理步前、
+    // settleAndVerify 产双尺度效果判决）复核世界确有变化。诚实分层：
+    //   · verified=true ⇒ confirmed（效果与派发双证）；
+    //   · verified=false ⇒ 'diverged' + effect-missing divergence（打偏/遮挡/
+    //     输入落空不再虚增 hostSuccessCount —— 门 4A 从此度量任务可靠度）；
+    //   · null（端口缺席/取证失败/全非物理链）⇒ 派发基线 confirmed，report
+    //     如实标注 reliabilityBasis='dispatch'（诚实降级，绝不虚报已验证）。
+    // 端口调用永不抛：实现违约收敛为缺席（双保险层，端口契约同律）。
+    let effectBasis: 'effect-verified' | 'dispatch' = 'dispatch';
+    if (!dispatchFailed && typeof this.hostExecutor.verifyChainEffect === 'function') {
+      let verdict: HostChainEffectVerdict | null = null;
+      try {
+        verdict = await this.hostExecutor.verifyChainEffect({ steps: entry.steps });
+      } catch {
+        verdict = null; // 验证面故障 = 缺席（诚实降级，不虚报也不误杀）
+      }
+      if (verdict === null) {
+        effectBasis = 'dispatch';
+      } else if (verdict.verified === true) {
+        effectBasis = 'effect-verified';
+      } else {
+        effectBasis = 'dispatch';
+        divergences.push({
+          stepIndex: Math.max(0, executed - 1),
+          kind: 'effect-missing',
+          sandboxSaid: `dispatched ${executed}/${entry.steps.length} step(s) — the world should reflect the chain`,
+          hostDid: typeof verdict.note === 'string' && verdict.note
+            ? verdict.note : 'effect verifier refuted the world impact (no screen change observed)',
+        });
+      }
+    }
+    const replayOk = divergences.length === 0;
+    const updatedEntry = this.memory.recordHostReplay(entryId, replayOk);
+    const finalVerdict: HostReplayOutcome['verdict'] = replayOk
+      ? 'confirmed'
+      : dispatchFailed ? 'failed' : 'diverged';
     return this.settleHostReplay(
-      entryId, createdAt, dispatchOk ? 'confirmed' : 'failed', divergences,
+      entryId, createdAt, finalVerdict, divergences,
       muscleReliability(updatedEntry ?? entry),
       {
         gate: 'passed', executor: 'wired', entryId, executed, steps: entry.steps.length,
-        divergences, createdAt,
+        effectBasis, divergences, createdAt,
+        ...(fingerprintLane !== undefined ? { fingerprintLane } : {}),
         // journalRefs 诚实空注记：宿主动作面不回 journal 哈希 —— 伪造引用即伪造
         // 因果链成员籍，宁可空且如实说明。ΝΩ-1：每次派发已在装配层适配器内经
         // journal.appendMarker 提交 SANDBOX_HOST_REPLAY 存证行（三态脱敏）——
@@ -708,10 +876,13 @@ export class SandboxEngineImpl implements SandboxEngine {
   }
 
   reset(): void {
-    // 持久化资产已在 ctx.effect 清理函数先行落盘（对齐主插件卸载时序）
+    // 持久化资产已在 ctx.effect 清理函数先行落盘（对齐主插件卸载时序）。
+    // ΠΑΝ-41：归零的是共享账本的内存态（与 MacroRehearsalGate.reset 同律 ——
+    // 落盘资产由卸载时序/固化即存先行持久化，configure+load 下一会话恢复）。
     this.memory.reset();
     this.replayTokens.clear();
     this.verdictCache.clear();
+    this.pinnedVetoes.clear(); // ΤΕΛ-13（M3）：钉面随引擎归零（进程内生命周期语义）
     this.pendingOutcomes.clear();
     this.hostFingerprint = null;
     sandboxLog.reset();

@@ -3,7 +3,7 @@
 // Planner-Actor 编排引擎。原版即干净可用，核心协议原样保留：
 //   Actor 状态协议([SUCCESS]/[FAILED]) + fail-fast 短路 + 完整执行轨迹汇总。
 // 融合增强：空计划守卫（Planner 不可用时响亮失败，而非静默零循环）。
-import { planTasks, topoSortSubTasks, type SubTask, type ChatFn } from './planner';
+import { planTasks, topoSortSubTasks, type SubTask, type ChatFn, type PlanTasksOptions, type PlanReadyChainInput } from './planner';
 import { kernelRegistry } from './kernel/registry';
 // W3-4（G2 就绪层并行 + takeGranted 续跑接线）：全部只读消费 —— planner 冻结不改，
 // subAgent 只增量（preseed/retire），approval 只消费 takeGranted，journal 只读步账。
@@ -14,6 +14,9 @@ import { coordinator, type SubAgentSpec, type SubAgentState, type SubAgentReport
 // W5-3（L3 跨机编排）：barrier 步注入缝 —— crossMachine 方言只读消费
 //（crossMachine.ts 冻结不改；缺省缺席 = 现状逐字节一致）。
 import { parseBarrierStep, type CrossBarrierOutcome } from './crossMachine';
+// ΤΕΛ-4（D-G16③）：plan-ready chain 臂发射载荷类型 —— type-only 装载（运行时
+// 零新增边）；联合方言的收窄/铸造全部留在 planner/cognitionEvents 单源。
+import type { CognitionPlanReadyPayload } from './cognitionEvents';
 
 export type { ChatFn } from './planner';
 
@@ -256,6 +259,23 @@ export interface RunOrchestratorOptions {
    * 等跨机同步是分布式死锁（ioMutex 的分布式类比不反噬本地互斥）。
    */
   crossMachine?: CrossMachineSeam;
+  /**
+   * ΤΕΛ-4（D-G16③ 清偿）：plan-ready chain 臂的生产发射消费面 —— ΠΑΝ-40a
+   * 铸造/发射面（planner.mintChainPlanReady）就绪后 F2-3 移交的交班接线：
+   * runOrchestrator 两处 planTasks（首规划 + Σ-4 重规划）自此统一透传 opts。
+   *   · emit：发射钩（生产组合根注入 `p => emitCognitionPlanReady(ctx, p)`；
+   *     发射是旁路义务 —— planner 内部 try/catch 收敛，事件面故障绝不毒化计划）；
+   *   · chain：动作链供源，**每次规划调用现取**（闭包供源方按调用时刻派生 ——
+   *     重规划时刻 journal 已含本任务已执行步，可派生「失败任务的成功前缀」
+   *     进 D-5 排练场；首规划时刻任务窗恒空 ⇒ 空链不铸造 = 诚实缺席）。
+   *     返回 null/undefined = 该次不发射；供源方自身抛错 ⇒ 该次不发射
+   *     （防御式，绝不炸计划主流程）。
+   * 整字段缺席 = 零发射，与接线前逐字节一致（保守兼容律）。
+   */
+  planReady?: {
+    emit: (payload: CognitionPlanReadyPayload) => void;
+    chain?: () => PlanReadyChainInput | null | undefined;
+  };
 }
 
 /** W5-3：跨机协同注入面（arriveAndWait = crossMachine.ts 客户端的窄面） */
@@ -558,21 +578,24 @@ interface PlannerPhaseOutcome {
 
 /** planTasks 的预算包裹：deadline 内未落定 ⇒ tasks=[] + budgetTimeout=true；
  *  planTasks 自身的 reject 原样上抛（与裸 await 语义逐字节一致 —— 零回归），
- *  预算获胜后迟到的落定/拒绝不升级 unhandledRejection（静音收养）。 */
+ *  预算获胜后迟到的落定/拒绝不升级 unhandledRejection（静音收养）。
+ *  ΤΕΛ-4（D-G16③）：增补第四参 planOpts 透传 planTasks（emitPlanReady/chain
+ *  发射面——两条路径（无预算直通 / 预算 race）同律透传；缺席 = 逐字节旧调用）。 */
 async function planTasksGuarded(
   userPrompt: string,
   chat: ChatFn | undefined,
   budgetMs: number | undefined,
+  planOpts?: PlanTasksOptions,
 ): Promise<PlannerPhaseOutcome> {
   if (budgetMs === undefined || !Number.isFinite(budgetMs) || budgetMs <= 0) {
-    return { tasks: await planTasks(userPrompt, chat), budgetTimeout: false };
+    return { tasks: await planTasks(userPrompt, chat, planOpts), budgetTimeout: false };
   }
   let handle: ReturnType<typeof setTimeout> | undefined;
   const gate = new Promise<null>(resolve => {
     handle = setTimeout(() => resolve(null), budgetMs);
     (handle as unknown as { unref?: () => void } | undefined)?.unref?.(); // 预算门不阻进程退出
   });
-  const planned = planTasks(userPrompt, chat);
+  const planned = planTasks(userPrompt, chat, planOpts);
   planned.catch(() => {}); // 预算获胜后迟到拒绝静音（诚实归因已定，不再翻案）
   try {
     const raced = await Promise.race([planned, gate]);
@@ -604,7 +627,18 @@ export async function runOrchestrator(
   const plannerDeadline = plannerBudgetMs !== undefined ? startAt + plannerBudgetMs : undefined;
 
   // 1. 调用 Planner 拆解任务（ΝΩ-3：预算包裹 —— 挂起的流不再能冻结整个工具调用）
-  const initialPlan = await planTasksGuarded(userPrompt, chat, plannerBudgetMs);
+  // ΤΕΛ-4（D-G16③）：chain 臂发射供源现取（首规划时刻任务窗恒空 ⇒ 空链诚实
+  // 缺席；供源方抛错 ⇒ 该次不发射，绝不毒化计划主流程）
+  const planOptsOf = (): PlanTasksOptions | undefined => {
+    if (!opts?.planReady) return undefined;
+    try {
+      const chain = opts.planReady.chain ? opts.planReady.chain() : undefined;
+      return chain ? { emitPlanReady: opts.planReady.emit, chain } : undefined;
+    } catch {
+      return undefined; // 供源面故障 = 该次不发射（旁路义务）
+    }
+  };
+  const initialPlan = await planTasksGuarded(userPrompt, chat, plannerBudgetMs, planOptsOf());
   if (initialPlan.budgetTimeout) {
     return `[Planner] planner-budget exceeded：规划阶段超过 ${Math.round(plannerBudgetMs ?? 0)}ms 预算上限` +
       `（timeBudget 的 10% 派生），任务未执行。`;
@@ -656,9 +690,11 @@ export async function runOrchestrator(
       // 重规划的合计上限）；余额耗尽 ⇒ 不再发起调用，直接按预算超限落回
       // fail-fast（tasks=[] 与空计划同路，诚实归因由 warn 留痕）
       const replanLeft = plannerDeadline !== undefined ? plannerDeadline - Date.now() : undefined;
+      // ΤΕΛ-4（D-G16③）：重规划同律透传发射面——chain 供源此刻现取（journal
+      // 已含本任务已执行步 ⇒ 供源方可派生成功前缀进排练场）
       const replanOutcome = replanLeft !== undefined && replanLeft <= 0
         ? { tasks: [] as SubTask[], budgetTimeout: true }
-        : await planTasksGuarded(replanPrompt, chat, replanLeft);
+        : await planTasksGuarded(replanPrompt, chat, replanLeft, planOptsOf());
       if (replanOutcome.budgetTimeout) {
         console.warn('[Orchestrator] Replan exceeded planner budget (planner-budget) — falling back to fail-fast.');
       }

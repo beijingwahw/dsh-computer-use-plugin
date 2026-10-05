@@ -1,4 +1,8 @@
 import { EMPTY_CATCH_FIX, finding, lines, MARKER_TOOLS } from './doctorRules.helpers.js';
+// ΠΑΝ-116（F2-1 移交项⑤）：escrow WAL 篡改观测面的检视消费方 —— 只读
+// reversalEscrow.stats()（模块无环：其依赖图 = node 内建 + perceptualHash，
+// 不回指 doctor 族；CLI 语境下模块态全新 ⇒ 计数恒零 ⇒ 规则静默，无误报）。
+import { reversalEscrow } from './reversalEscrow.js';
 // ─── 规则注册表（数据驱动静态配置 —— 进化记忆绝不反向修改） ───
 export const DOCTOR_RULES_CORE = [
     {
@@ -242,6 +246,39 @@ export const DOCTOR_RULES_CORE = [
                 if (MARKER_TOOLS.has(e.tool) && e.status !== 'MARKER') {
                     out.push(finding(this, 'structural', 'journal', i, `${e.tool} status=${e.status}`, 'lifecycle marker with non-MARKER status — the D-1 gating bypass may be broken', 'Markers must go through appendMarker (status恒为MARKER), never append.'));
                 }
+            }
+            return out;
+        },
+    },
+    {
+        // ΠΑΝ-116（F2-1 移交项⑤ / F1-1 对接点④同族）：WAL/链篡改计数的检视消费方。
+        // 病灶：ΠΑΝ-35 给 escrow WAL 装了行哈希链（重放面逐行校验、篡改行弃置不
+        // 应用、walTamperedLines 计数入 stats()），journal 自带 verify() 链校验 ——
+        // 但两个篡改观测面都没有 doctor 消费方：「档的完整性已被触碰」这个安全
+        // 事件只沉在 stats()/warnings 里等宿主主动轮询，诊断报告（红action面）对
+        // 它不可见。本规则把两路观测接进医生报告：
+        //   · escrow WAL：stats().walTamperedLines 持续非零 ⇒ critical finding
+        //    （恢复面已 fail-closed：篡改行弃置 + 在途预案转人工 —— 本规则的义务
+        //     是让「必须人工检视」这件事在报告里红着，不是重新执法）；
+        //   · journal：ctx.chain.chainIntact=false（qualityDoctor 喂入的 verify()
+        //     结果）⇒ 同律 critical finding。
+        // 防御式：stats() 读取故障 ⇒ 该臂缺席（规则契约：失败返回 [] 不抛）。
+        id: 'chain.wal-tampered', category: 'chain', severity: 'critical', laws: ['honest-degradation'],
+        baseWeight: 2, tags: ['chain', 'integrity'],
+        description: 'WAL/链篡改计数非零 = 档完整性已被触碰（红action报告：恢复面已弃置篡改行，宿主必须人工检视）',
+        async scan(ctx) {
+            const out = [];
+            try {
+                const st = reversalEscrow.stats();
+                if (typeof st.walTamperedLines === 'number' && st.walTamperedLines > 0) {
+                    out.push(finding(this, 'structural', 'escrow-wal.jsonl', 0, `walTamperedLines=${st.walTamperedLines}`, `escrow WAL chain verification rejected ${st.walTamperedLines} tampered line(s) — the reversal archive's integrity has been touched; tampered events were discarded (fail-closed) and affected in-flight plans escalated to human attention`, 'RED ACTION: inspect escrow-wal.jsonl and its rotations — someone or something rewrote history. Re-derive in-flight reversal plans by hand; treat recent ledger entries as unverified until cross-checked against independent evidence.'));
+                }
+            }
+            catch {
+                return out; // stats 面故障 = 观测缺席（绝不炸诊断主流程）
+            }
+            if (!ctx.chain.chainIntact) {
+                out.push(finding(this, 'structural', 'journal', 0, 'chainIntact=false', 'journal action-chain verification reports a broken link — entries may have been tampered with or corrupted', 'RED ACTION: cross-check the journal JSONL on disk against the in-memory chain; treat post-break entries as unverified evidence and investigate the write path.'));
             }
             return out;
         },

@@ -70,6 +70,13 @@ export const DEFAULT_LOW_STEP_THRESHOLD = 0.35;
 export const DEFAULT_LATE_BIAS = 0.5;
 // ── W3-8 工具面(与 journal.ts 的 ACTION_TOOLS/MARKER_TOOLS 同步;
 //    本模块零依赖(离线 CLI 可直接 strip-types 加载),故自持副本 + 执法测试防漂移) ──
+//    ΠΑΝ-109（副本漂移清偿）：旧副本只有 6 个 marker，权威面（journal.ts）已
+//    扩到 9（AGENT_NOTE/GUARD_PROBE/SANDBOX_HOST_REPLAY 相继入白名单）——
+//    「执法测试防漂移」名不副实（漂移已发生而测试全绿：靠 entry.status===
+//    'MARKER' 的兜底才没把 marker 行当动作步评分）。修法：副本对齐权威全集
+//    （9 个）+ 两个集合导出为公共面 + 同源锁测试（test/pan105-113.misc.test.ts
+//    直接对 journal 的导出面/源文本锁逐元素对账 —— journal.ts 的 MARKER_TOOLS
+//    未导出，锁测试读源提取字面集合，任何一侧漂移即闸红）。
 const SCORED_TOOLS = new Set([
     'click_mouse', 'type_text', 'scroll_page', 'press_hotkey',
     'drag_mouse', 'click_element', 'switch_tab', 'switch_window', 'dismiss_popup',
@@ -77,7 +84,16 @@ const SCORED_TOOLS = new Set([
 ]);
 const MARKER_TOOLS = new Set([
     'AGENT_BEGIN', 'AGENT_END', 'ENV_SHAPED', 'SENSE_SHIFT', 'GUARD_BLOCKED', 'AUDIT_PRE',
+    // ΠΑΝ-109：与 journal.ts MARKER_TOOLS 白名单对齐的三个迟到成员
+    'AGENT_NOTE', // W6-4：黑板行经 appendMarker 入链
+    'GUARD_PROBE', // ΑΩ-R4：守卫物理探针存证行
+    'SANDBOX_HOST_REPLAY', // 沙箱宿主重放存证行
 ]);
+/** ΠΑΝ-109：自持副本的公共面（同源锁测试的对账锚 —— 不改变任何运行行为） */
+export const SCORE_TOOL_SETS = Object.freeze({
+    scored: SCORED_TOOLS,
+    markers: MARKER_TOOLS,
+});
 /** 环境被重塑/感知相变/代理重生 ⇒ 同签名的「连续性」被打断(物理直觉) */
 const OSC_RESET_MARKERS = new Set(['AGENT_BEGIN', 'ENV_SHAPED', 'SENSE_SHIFT']);
 // ─── W3-8 防御原语(绝不抛) ───

@@ -62,6 +62,102 @@ export const BARRIER_FETCH_TIMEOUT_MS = 5_000;
 /** W5-3：barrier 步声明方言 —— action 文本内嵌 `barrier:<name>#<n>`（planner 冻结，
  *  声明走文本约定 + 注入覆写双通道；n 钳 [1, BARRIER_MAX_PARTICIPANTS]） */
 export const BARRIER_STEP_RE = /barrier:([A-Za-z0-9._-]{1,64})#(\d{1,3})/;
+// ─── ΠΑΝ-106（对端鉴权）：barrier 会话密钥 HMAC 握手（federation W6R-A5 同方言） ───
+//
+// 病灶（C1-1 M5）：allocate/commit 接受任意自报 peer 字符串、HTTP POST 无认证头
+// —— 网络可达的第三方可用伪造 peer 名填满名册提前触发 release（支柱①失效），
+// 或替他人 commit（支柱③失效）。「全到达才放行」建立在自报身份上。
+//
+// 修法（与 federation/sync.ts 的 W6R-A5 共享密钥方言一字同律）：
+//   · 共享密钥：DSH_BARRIER_TOKEN 环境变量分发（客户端与服务端同字面量 ——
+//     协议契约，双端漂移由测试把守；镜像 DSH_FEDERATION_TOKEN）；
+//   · 会话密钥握手：sessionKey = HMAC-SHA256(共享密钥, `barrier-session:v1:
+//     ${name}`) —— 名册协商期（allocate 创建 generation）由双方从部署共享
+//     密钥**各自推导**，不经网络传输（比在线交换更强：窃听者拿到全部 MAC
+//     也推不出会话密钥；每个 barrier 名一个会话域，跨名册 MAC 不通用）；
+//   · 消息带 MAC：每个变更类请求（allocate/commit）携带 ts + mac，
+//     mac = HMAC-SHA256(sessionKey, `${ts}.${canonical}`)，canonical 为
+//     {op,name,peer,n?,seq?} 的稳定序列化 —— **peer 身份与凭证绑定**（为
+//     peer A 签的包改报 peer B 即失配）；
+//   · 缺席拒绝（fail-closed）：武装态（共享密钥非空）下 ts/mac 缺席、失配、
+//     或时间戳超出 ±BARRIER_AUTH_SKEW_MS（federation 同值 5min）⇒
+//     'unauthorized' 拒绝，状态分毫不动。status（只读视图）保持开放
+//     （federation /health 同律 —— 无状态变更面）；
+//   · 零回归律：DSH_BARRIER_TOKEN 未设置（缺省环回/进程内部署）⇒ 行为与
+//     既往逐字节一致（open 模式 —— 与 federation 服务端「未设置 ⇒ 零配置
+//     环回可用」同取舍）。密钥卫生：token 绝不进日志/错误注记/视图对象。
+/** ΠΑΝ-106：共享密钥环境变量名（barrier 客户端与中继端同字面量 —— 协议契约） */
+export const BARRIER_AUTH_ENV = 'DSH_BARRIER_TOKEN';
+/** ΠΑΝ-106：签名时间戳容差 ±5 分钟（federation FEDERATION_AUTH_SKEW_MS 同值 ——
+ *  时钟偏移容忍与重放窗口的上界；MAC 域内含 ts，时间戳剥离即失配） */
+export const BARRIER_AUTH_SKEW_MS = 5 * 60_000;
+/** ΠΑΝ-106：MAC 的规范化请求域（稳定序列化 —— 键排序、仅收已定义字段；
+ *  n/seq 非有限数视为缺席。peer 在域内 = 身份与凭证绑定） */
+export function barrierMacInput(req) {
+    const domain = { op: req.op, name: req.name, peer: req.peer };
+    if (typeof req.n === 'number' && Number.isFinite(req.n))
+        domain.n = req.n;
+    if (typeof req.seq === 'number' && Number.isFinite(req.seq))
+        domain.seq = req.seq;
+    const keys = Object.keys(domain).sort();
+    return keys.map(k => `${k}=${JSON.stringify(domain[k])}`).join('&');
+}
+/** ΠΑΝ-106：会话密钥派生（名册协商期双方各自推导 —— 纯函数导出供双端/测试同源） */
+export function barrierSessionKey(token, name) {
+    return createHmac('sha256', token).update(`barrier-session:v1:${name}`).digest();
+}
+/** ΠΑΝ-106：请求签名（hex HMAC-SHA256；ts 与 canonical 正文一并入 MAC 域 ——
+ *  中间人换 body 失配、剥 ts 失配）。crypto 故障 ⇒ ''（宁可不签被拒，
+ *  绝不发可伪造的弱签名 —— federation federationAuthHeaders 同律）。 */
+export function signBarrierRequest(token, req, ts) {
+    try {
+        if (typeof token !== 'string' || token === '')
+            return '';
+        const t = Number.isFinite(ts) ? Math.floor(ts) : Date.now();
+        return createHmac('sha256', barrierSessionKey(token, req.name))
+            .update(`${t}.${barrierMacInput(req)}`)
+            .digest('hex');
+    }
+    catch {
+        return '';
+    }
+}
+/** ΠΑΝ-106：MAC 验签（恒定时间比较；任何形状垃圾 ⇒ false，绝不抛）。
+ *  导出供中继端/测试复用 —— 验签逻辑的单源权威。 */
+export function verifyBarrierMac(token, req, ts, mac, nowMs, skewMs = BARRIER_AUTH_SKEW_MS) {
+    try {
+        if (typeof token !== 'string' || token === '')
+            return true; // open 态：无钥即无需验
+        if (typeof ts !== 'number' || !Number.isFinite(ts))
+            return false;
+        if (typeof mac !== 'string' || mac === '')
+            return false;
+        if (Math.abs(nowMs - ts) > skewMs)
+            return false; // 防重放时间窗（federation 同律）
+        const expected = signBarrierRequest(token, req, ts);
+        if (expected === '' || expected.length !== mac.length)
+            return false;
+        return timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(mac, 'utf8'));
+    }
+    catch {
+        return false;
+    }
+}
+/** ΠΑΝ-106：共享密钥解析（显式注入优先；'' = 显式 open；缺省读 env —— open 语义零变化） */
+function resolveBarrierToken(explicit) {
+    if (typeof explicit === 'string')
+        return explicit;
+    try {
+        const v = process.env[BARRIER_AUTH_ENV];
+        return typeof v === 'string' ? v : '';
+    }
+    catch {
+        return '';
+    }
+}
+// W6-2（doctor smell.over-engineering 清偿）：传输方言（纯类型面）已分区提取至 crossMachine.dialect.ts
+// （行为零变化；立法常量按「立法在源」测试锁定留守本文件）；导入面不变 —— export * 再分发。
+import { createHmac, timingSafeEqual } from 'node:crypto'; // ΠΑΝ-106：会话密钥 HMAC 握手（federation 同依赖面）
 export * from './crossMachine.dialect.js';
 /** 数值护栏：整数 ∈ [min, max]，非法 ⇒ 缺省（federation numOr 同律） */
 function intOr(x, dflt, min, max) {
@@ -79,6 +175,11 @@ export function createBarrierCore(opts) {
     const maxTombstones = intOr(opts?.maxTombstones, BARRIER_MAX_TOMBSTONES, 1, 1_000_000);
     const ttlMs = intOr(opts?.ttlMs, BARRIER_TTL_MS, 1, Number.MAX_SAFE_INTEGER);
     const maxParticipants = intOr(opts?.maxParticipants, BARRIER_MAX_PARTICIPANTS, 1, 10_000);
+    // ΠΑΝ-106：鉴权武装（显式注入优先，缺省读 env —— 中继端设 env 即武装；
+    // 解析为 '' ⇒ open 模式，行为与既往逐字节一致 —— 零回归律）
+    const authSecret = resolveBarrierToken(opts?.auth?.token);
+    const authSkewMs = intOr(opts?.auth?.skewMs, BARRIER_AUTH_SKEW_MS, 1, Number.MAX_SAFE_INTEGER);
+    const armed = authSecret !== '';
     const live = new Map(); // 插入序 = 创建序（FIFO 驱逐依据）
     const tomb = new Map(); // name → 最后退休 seq（重放视野）
     const bad = (reason, extra) => ({ ok: false, reason, ...(extra ?? {}) });
@@ -133,6 +234,17 @@ export function createBarrierCore(opts) {
                 return bad('bad-request');
             if (op !== 'status' && (typeof peer !== 'string' || peer === '' || peer.length > BARRIER_PEER_MAX)) {
                 return bad('bad-request');
+            }
+            // ΠΑΝ-106：对端鉴权闸（fail-closed）—— 武装态下变更类请求（allocate/
+            // commit）必须携带合法 ts+mac：缺席/失配/超时间窗 ⇒ 'unauthorized'，
+            // 名册/放行/退休状态分毫不动。伪造 peer 名填名册或替他人 commit 的
+            // 攻击自此要求持有共享部署密钥。status（只读视图）保持开放（/health
+            // 同律）。ts/mac 不入 barrierMacInput（ts 是 MAC 输入的一部分，mac
+            // 自身绝不能进 MAC 域）。
+            if (armed && op !== 'status') {
+                const authOk = verifyBarrierMac(authSecret, req, req.ts, req.mac, now(), authSkewMs);
+                if (!authOk)
+                    return bad('unauthorized');
             }
             if (op === 'status') {
                 const g = live.get(name);
@@ -307,8 +419,13 @@ function sanitizeView(p) {
  * W5-3：HTTP barrier 传输壳（POST /barrier/{allocate|commit|status}；单次不重试、
  * AbortSignal.timeout(5s)、错误上抛由等待循环的 poll 即重试纪律吸收 ——
  * federation 网络纪律同源）。endpoint 尾斜杠容忍；fetch 注入 null = 显式禁网络。
+ * ΠΑΝ-106：token 解析非空 ⇒ 每个请求体附 ts+mac（消息带 MAC —— 会话密钥由
+ * 共享密钥+barrier 名派生，与服务端各自推导一致）；签名失败 ⇒ 不附（服务端
+ * 'unauthorized' 拒绝 —— 宁可诚实被拒，绝不发可伪造的弱签名）。token 显式
+ * 注入优先（'' = 显式 open），缺省读 DSH_BARRIER_TOKEN env。
  */
 export function makeHttpBarrierTransport(o) {
+    const token = resolveBarrierToken(o.token);
     return async (req) => {
         let fetchFn = null;
         if (typeof o.fetchImpl === 'function')
@@ -320,6 +437,9 @@ export function makeHttpBarrierTransport(o) {
         if (!fetchFn)
             throw new Error('fetch unavailable (crossMachine barrier transport)');
         const base = typeof o.endpoint === 'string' ? o.endpoint.replace(/\/+$/, '') : '';
+        // ΠΑΝ-106：MAC 附签（open 态零字段 —— 与既往请求体逐字节一致）
+        const ts = typeof o.now === 'function' ? o.now() : Date.now();
+        const mac = token !== '' ? signBarrierRequest(token, req, ts) : '';
         const res = await fetchFn(`${base}/barrier/${req.op}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -328,6 +448,7 @@ export function makeHttpBarrierTransport(o) {
                 ...(req.op === 'status' ? {} : { peer: req.peer }),
                 ...(req.n !== undefined ? { n: req.n } : {}),
                 ...(req.seq !== undefined ? { seq: req.seq } : {}),
+                ...(mac !== '' ? { ts: Math.floor(ts), mac } : {}),
             }),
             signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
                 ? AbortSignal.timeout(BARRIER_FETCH_TIMEOUT_MS)

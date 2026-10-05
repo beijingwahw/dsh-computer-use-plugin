@@ -9,6 +9,18 @@
 // 接线：guards 的 post-execute 观察位纯旁路记录；暴露 get_metrics 工具给模型自省
 // （模型能看到「我最近 20% 的点击疑似无效」并主动换策略 —— 自观测的 Agent）。
 const LATENCY_RING = 512; // 每工具延迟样本环形缓冲；世界级标准：精确分位而非桶近似
+// ─── ΠΑΝ-112（键域上界）：统计引擎的 Map 键不再无界 ───
+//
+// 病灶（C1-3 L-3 的收紧面）：环形缓冲定长，但 `tools`/`counters` 两个 Map 的
+// 键域无上界 —— observe/note 的键是自由字符串（journal 行的 tool 名 / 计数器
+// 名），长会话 + 高基数键（脏档恢复、调用方笔误、注入路径）下内存无界增长。
+// 修法（诚实上界方言）：
+//   · 键域 LRU：Map 插入序 + 访问即重插（delete+set）—— 淘汰最久未访问键；
+//     淘汰计数入账（toolsEvicted/countersEvicted）；
+//   · 溢出诚实标注：snapshot() 携带 key_domain 面（在役键数/上界/累计淘汰数）
+//     —— 消费方看得到「统计面被裁过」，绝不装全量。
+const TOOL_KEY_CAP = 128;
+const COUNTER_KEY_CAP = 128;
 // ─── G-2/G-6（第七维·过程感知）：CUSUM 变点 + Hurst 指数 ───
 /** 失败指示环容量（64 次最近结局 —— CUSUM/Hurst 的观测窗） */
 const OUTCOME_RING = 64;
@@ -252,10 +264,35 @@ export class Telemetry {
     counters = new Map();
     startedAt = Date.now();
     enabled = true;
+    // ΠΑΝ-112：键域溢出账（LRU 淘汰累计 —— snapshot 的 key_domain 溢出标注源）
+    toolsEvicted = 0;
+    countersEvicted = 0;
     configure(enabled) {
         this.enabled = enabled;
     }
+    /** ΠΑΝ-112：键域 LRU 原语 —— 访问即重插（Map 插入序 = 最近使用序），
+     *  超上界淘汰最久未使用键并计数（绝不抛；键为任意字符串的脏输入面） */
+    static touchLRU(map, key, cap) {
+        const hit = map.get(key);
+        if (hit !== undefined) {
+            map.delete(key);
+            map.set(key, hit);
+            return { evicted: 0 };
+        }
+        let evicted = 0;
+        while (map.size >= cap) { // cap ≥ 1 保证循环终止
+            const oldest = map.keys().next().value;
+            if (oldest === undefined)
+                break;
+            map.delete(oldest);
+            evicted++;
+        }
+        return { evicted };
+    }
     slot(tool) {
+        // ΠΑΝ-112：新键入册前先让位（LRU）；既有键访问即重插（最近使用序）
+        const { evicted } = Telemetry.touchLRU(this.tools, tool, TOOL_KEY_CAP);
+        this.toolsEvicted += evicted;
         let s = this.tools.get(tool);
         if (!s) {
             s = { calls: 0, successes: 0, failures: 0, noops: 0, totalMs: 0, latencies: new Ring(LATENCY_RING), outcomeRing: new Ring(OUTCOME_RING) };
@@ -615,6 +652,9 @@ export class Telemetry {
     note(counter, hit) {
         if (!this.enabled)
             return;
+        // ΠΑΝ-112：计数器键域 LRU + 溢出账（自由字符串键的无界增长面）
+        const { evicted } = Telemetry.touchLRU(this.counters, counter, COUNTER_KEY_CAP);
+        this.countersEvicted += evicted;
         let c = this.counters.get(counter);
         if (!c) {
             c = { hits: 0, misses: 0 };
@@ -654,6 +694,16 @@ export class Telemetry {
             },
             tools,
             counters,
+            // ΠΑΝ-112：键域溢出诚实标注 —— 消费方看得到统计面被 LRU 裁过
+            //（evicted > 0 即有键被淘汰，历史计数随之缺席 —— 绝不装全量）
+            key_domain: {
+                tools: this.tools.size,
+                tools_cap: TOOL_KEY_CAP,
+                tools_evicted: this.toolsEvicted,
+                counters: this.counters.size,
+                counters_cap: COUNTER_KEY_CAP,
+                counters_evicted: this.countersEvicted,
+            },
         };
     }
     /** 人类可读渲染（get_metrics 工具输出） */
@@ -726,6 +776,8 @@ export class Telemetry {
     reset() {
         this.tools.clear();
         this.counters.clear();
+        this.toolsEvicted = 0; // ΠΑΝ-112：溢出账随会话清零（fresh start）
+        this.countersEvicted = 0;
         this.startedAt = Date.now();
     }
 }

@@ -418,17 +418,19 @@ export const PLANNER_BUDGET_FRACTION = 0.1;
 const PLANNER_BUDGET_MIN_MS = 5000;
 /** planTasks 的预算包裹：deadline 内未落定 ⇒ tasks=[] + budgetTimeout=true；
  *  planTasks 自身的 reject 原样上抛（与裸 await 语义逐字节一致 —— 零回归），
- *  预算获胜后迟到的落定/拒绝不升级 unhandledRejection（静音收养）。 */
-async function planTasksGuarded(userPrompt, chat, budgetMs) {
+ *  预算获胜后迟到的落定/拒绝不升级 unhandledRejection（静音收养）。
+ *  ΤΕΛ-4（D-G16③）：增补第四参 planOpts 透传 planTasks（emitPlanReady/chain
+ *  发射面——两条路径（无预算直通 / 预算 race）同律透传；缺席 = 逐字节旧调用）。 */
+async function planTasksGuarded(userPrompt, chat, budgetMs, planOpts) {
     if (budgetMs === undefined || !Number.isFinite(budgetMs) || budgetMs <= 0) {
-        return { tasks: await planTasks(userPrompt, chat), budgetTimeout: false };
+        return { tasks: await planTasks(userPrompt, chat, planOpts), budgetTimeout: false };
     }
     let handle;
     const gate = new Promise(resolve => {
         handle = setTimeout(() => resolve(null), budgetMs);
         handle?.unref?.(); // 预算门不阻进程退出
     });
-    const planned = planTasks(userPrompt, chat);
+    const planned = planTasks(userPrompt, chat, planOpts);
     planned.catch(() => { }); // 预算获胜后迟到拒绝静音（诚实归因已定，不再翻案）
     try {
         const raced = await Promise.race([planned, gate]);
@@ -454,7 +456,20 @@ export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs, o
     })();
     const plannerDeadline = plannerBudgetMs !== undefined ? startAt + plannerBudgetMs : undefined;
     // 1. 调用 Planner 拆解任务（ΝΩ-3：预算包裹 —— 挂起的流不再能冻结整个工具调用）
-    const initialPlan = await planTasksGuarded(userPrompt, chat, plannerBudgetMs);
+    // ΤΕΛ-4（D-G16③）：chain 臂发射供源现取（首规划时刻任务窗恒空 ⇒ 空链诚实
+    // 缺席；供源方抛错 ⇒ 该次不发射，绝不毒化计划主流程）
+    const planOptsOf = () => {
+        if (!opts?.planReady)
+            return undefined;
+        try {
+            const chain = opts.planReady.chain ? opts.planReady.chain() : undefined;
+            return chain ? { emitPlanReady: opts.planReady.emit, chain } : undefined;
+        }
+        catch {
+            return undefined; // 供源面故障 = 该次不发射（旁路义务）
+        }
+    };
+    const initialPlan = await planTasksGuarded(userPrompt, chat, plannerBudgetMs, planOptsOf());
     if (initialPlan.budgetTimeout) {
         return `[Planner] planner-budget exceeded：规划阶段超过 ${Math.round(plannerBudgetMs ?? 0)}ms 预算上限` +
             `（timeBudget 的 10% 派生），任务未执行。`;
@@ -501,9 +516,11 @@ export async function runOrchestrator(userPrompt, actorFn, chat, timeBudgetMs, o
             // 重规划的合计上限）；余额耗尽 ⇒ 不再发起调用，直接按预算超限落回
             // fail-fast（tasks=[] 与空计划同路，诚实归因由 warn 留痕）
             const replanLeft = plannerDeadline !== undefined ? plannerDeadline - Date.now() : undefined;
+            // ΤΕΛ-4（D-G16③）：重规划同律透传发射面——chain 供源此刻现取（journal
+            // 已含本任务已执行步 ⇒ 供源方可派生成功前缀进排练场）
             const replanOutcome = replanLeft !== undefined && replanLeft <= 0
                 ? { tasks: [], budgetTimeout: true }
-                : await planTasksGuarded(replanPrompt, chat, replanLeft);
+                : await planTasksGuarded(replanPrompt, chat, replanLeft, planOptsOf());
             if (replanOutcome.budgetTimeout) {
                 console.warn('[Orchestrator] Replan exceeded planner budget (planner-budget) — falling back to fail-fast.');
             }

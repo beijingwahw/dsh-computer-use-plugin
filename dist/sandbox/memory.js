@@ -7,7 +7,9 @@
 // 抛错契约：一切方法永不抛错；落盘失败 warn（旁路义务）。
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
-import { muscleReliability, } from './types.js';
+import { fpSimilarity, muscleReliability, } from './types.js';
+// ΠΑΝ-49：canonical 单源消费（canonicalArgs 的实现体 —— 见该函数注释）
+import { canonicalJson } from '../dialects/index.js';
 /**
  * ΝΩ-30：递归规范化序列化 —— 深排序 + 环检测。旧实现的 replacer 数组只排
  * 顶层键：嵌套对象的键序不同即误判新技能（{point:{x,y}} vs {point:{y,x}} 同
@@ -15,25 +17,15 @@ import { muscleReliability, } from './types.js';
  * 不同参数被当同一技能去重强化）。递归排序保证键序无关性；WeakSet 出口即删
  * （journal.canonical 同律）：共享子对象是合法 DAG 载荷，只有真环降级哨兵 ——
  * 环形 args 不再击穿签名（运行层铁律：一切方法永不抛错）。
+ * ΠΑΝ-49：实现收编为 dialects/canonical.ts 单源（全库 6 份 canonical 同族实现
+ * 自此逐字节同律）。语义对齐两处（均为修复而非漂移）：① 环/超深哨兵统一为
+ * '"#unserializable"'（旧 '"<cycle>"' 废弃 —— 同机同载荷跨模块指纹一致）；
+ * ② undefined 值自有键与缺键同域（旧形态串成 `"k":null`，与 JSON.stringify
+ * 落盘 dropping 键不一致 —— restore 往返会得出不同签名）。seen 形参保留
+ *（签名兼容），实现忽略之（单源自管环检测）。
  */
-function canonicalArgs(v, seen) {
-    if (v === null || typeof v !== 'object')
-        return JSON.stringify(v) ?? 'null';
-    if (seen.has(v))
-        return '"<cycle>"';
-    seen.add(v);
-    try {
-        if (Array.isArray(v)) {
-            return `[${v.map(item => canonicalArgs(item, seen)).join(',')}]`;
-        }
-        const rec = v;
-        return `{${Object.keys(rec).sort()
-            .map(k => `${JSON.stringify(k)}:${canonicalArgs(rec[k], seen)}`)
-            .join(',')}}`;
-    }
-    finally {
-        seen.delete(v);
-    }
+function canonicalArgs(v, _seen) {
+    return canonicalJson(v);
 }
 /** 步骤签名：同签名 = 同动作序列（去重强化的判定基准，对齐技能库去重哲学） */
 export function stepSignature(steps) {
@@ -76,36 +68,110 @@ function overlapCoefficient(a, b) {
             hit++;
     return hit / Math.min(a.size, b.size);
 }
-/** 64 位指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
- *  纯字符串距离，不拖入 sharp 图像二进制运行时依赖 —— D-5 与宿主共享算法规范而非依赖链） */
-function fingerprintSimilarity(a, b) {
-    if (a.length !== b.length)
-        return 0;
-    let dist = 0;
-    for (let i = 0; i < a.length; i++)
-        if (a[i] !== b[i])
-            dist++;
-    return 1 - dist / 64;
-}
 /** 召回权重（config-driven 铁律的例外说明：四维相对权重是算法结构常量而非部署魔法数字，
  *  与 skillLibrary 的 0.3/0.1 同性质 —— 改动它们改变的是算法而非部署形态） */
 const W_SCENE_BONUS = 0.3;
 const W_RECENCY = 0.1;
 const RECENCY_HALF_LIFE_H = 72;
 const SCENE_SIMILARITY_GATE = 0.9;
+// ── ΤΕΛ-13（D-G16 留案 M7 遗忘淘汰立法）：肌肉记忆库的清除面 ──
+// C2-3 M7 病灶：全文无 delete/decay/上限 —— 污染只增不减、坏技能只能手改 JSON、
+// save 全量重写的 IO 随库无界增长。立法三律（全部有界、确定性、绝不抛）：
+//   ① 容量上界：新签名入库时库满 ⇒ 逐出「最不值得留」的条目（不是 FIFO ——
+//      排序键：过期条目优先（> STALE_AFTER_MS 无任何活动），其次可靠度最低
+//      （Beta 后验均值），再次最久未活动，最后 Map 插入序 —— 完全确定性）；
+//   ② 宿主重放崩塌除名：hostReplayCount ≥ HOST_COLLAPSE_MIN_TRIALS 且后验
+//      可靠度 < HOST_COLLAPSE_RELIABILITY ⇒ 条目除名（「失败只降可靠度不除名」
+//      的旧病收口 —— 但保留 Laplace 先验的举证门槛：单次失败绝不除名，
+//      3 次以上持续失败才构成「坏技能」证据）；
+//   ③ 逐出审计账：evictions 台账（有界）记录每一次除名（id/理由/时刻）——
+//      「坏技能如何清除」的审计要求有账可查；load() 恢复超限同样执法。
+// 语义边界：淘汰面只影响「库里有谁」，不动召回评分/可靠度公式/冻结纪律；
+// 被逐条目的同签名宏再排练通过 ⇒ 走 consolidate 正常重新入库（先验重置 ——
+// 与「技能是先验不是保证」哲学一致：旧账不复活，新证据重新积累）。
+/** 库容量上界（对齐 engine VERDICT_CACHE_MAX 的有界 Map 立法量级） */
+export const MUSCLE_MEMORY_MAX_ENTRIES = 256;
+/** 条目过期线：超过此时长无排练/重放活动 ⇒ 淘汰排序中的第一优先（遗忘律） */
+export const MUSCLE_STALE_AFTER_MS = 30 * 24 * 3_600_000;
+/** 崩塌除名的最低举证次数（Laplace 先验保护：单次失败不除名） */
+export const MUSCLE_HOST_COLLAPSE_MIN_TRIALS = 3;
+/** 崩塌除名的后验可靠度线（Beta(α=成功+1, β=失败+1) 均值下界） */
+export const MUSCLE_HOST_COLLAPSE_RELIABILITY = 0.2;
+/** 逐出台账容量（有界 —— 审计面自身不许无界增长） */
+const EVICTION_LEDGER_MAX = 64;
 export class MuscleMemoryStore {
     entries = new Map();
     bySignature = new Map(); // signature → entryId（去重强化索引）
     filePath = '';
+    // ΤΕΛ-13（M7）：逐出台账 —— 有界审计面（最新 EVICTION_LEDGER_MAX 条）
+    evictions = [];
     configure(filePath) {
         this.filePath = filePath;
     }
     reset() {
         this.entries.clear();
         this.bySignature.clear();
+        this.evictions = []; // ΤΕΛ-13（M7）：台账随账本归零（同生命周期语义）
     }
     get(id) {
         return this.entries.get(id);
+    }
+    // ── ΤΕΛ-13（M7）：遗忘淘汰执法面（私有 —— 唯一公开面是 evictionLog 台账）──
+    /** 条目最近活动时刻（排练与宿主重放取晚者 —— 两类活动都算「还活着」） */
+    static lastActivityOf(e) {
+        return Math.max(e.lastRehearsedAt, e.lastHostReplayedAt);
+    }
+    /** 除名 + 记账（唯一删除点 —— bySignature 索引同步剥离，绝不留孤儿索引） */
+    evict(entryId, reason, detail) {
+        const entry = this.entries.get(entryId);
+        if (!entry)
+            return;
+        this.entries.delete(entryId);
+        for (const [sig, id] of this.bySignature) {
+            if (id === entryId)
+                this.bySignature.delete(sig);
+        }
+        this.evictions.push({ id: entryId, reason, at: Date.now(), detail });
+        while (this.evictions.length > EVICTION_LEDGER_MAX)
+            this.evictions.shift();
+    }
+    /**
+     * 容量执法：库满时逐出「最不值得留」的一条（确定性排序，见模块头立法①）。
+     * 排序键依次：过期（> STALE_AFTER_MS 无活动）优先 → 后验可靠度最低 →
+     * 最久未活动 → Map 插入序（entries 迭代序稳定 ⇒ 全序确定）。
+     * 返回被逐条目 id（无条目可逐 ⇒ null —— 空库调用是防御面）。
+     */
+    evictWorstForCapacity(reason) {
+        if (this.entries.size === 0)
+            return null;
+        const now = Date.now();
+        let worstId = null;
+        let worstKey = null;
+        let insertion = 0;
+        for (const [id, e] of this.entries) {
+            const activity = MuscleMemoryStore.lastActivityOf(e);
+            const key = [
+                activity < now - MUSCLE_STALE_AFTER_MS ? 0 : 1, // 过期者先走
+                Math.round(muscleReliability(e) * 1e6), // 可靠度低者先走（整数化避免浮点平票漂移）
+                activity, // 久未活动者先走
+                insertion, // 插入序最终裁决（确定性）
+            ];
+            if (worstKey === null || key < worstKey) {
+                worstKey = key;
+                worstId = id;
+            }
+            insertion++;
+        }
+        if (worstId !== null) {
+            const e = this.entries.get(worstId);
+            this.evict(worstId, reason, `stale=${MuscleMemoryStore.lastActivityOf(e) < now - MUSCLE_STALE_AFTER_MS}, `
+                + `reliability=${muscleReliability(e).toFixed(3)}`);
+        }
+        return worstId;
+    }
+    /** 逐出台账（审计面只读镜像 —— 调用方不得改账） */
+    evictionLog() {
+        return [...this.evictions];
     }
     /**
      * 铸造入库：同签名步骤序列已存在 ⇒ 只强化 rehearsalPassCount（可靠度计数不动 ——
@@ -119,6 +185,12 @@ export class MuscleMemoryStore {
             existing.rehearsalPassCount += 1;
             existing.lastRehearsedAt = Date.now();
             return existing;
+        }
+        // ΤΕΛ-13（M7 容量律）：新签名入库前库满 ⇒ 先逐出最不值得留的条目
+        // （强化路径不增长库容 —— 只有新签名触发执法；确定性排序见 evictWorstForCapacity）
+        while (this.entries.size >= MUSCLE_MEMORY_MAX_ENTRIES) {
+            if (this.evictWorstForCapacity('capacity') === null)
+                break;
         }
         const entry = {
             id: idGen.next('muscle'),
@@ -147,7 +219,9 @@ export class MuscleMemoryStore {
             const reliability = muscleReliability(entry);
             let scene = 0;
             if (query.currentSceneFingerprint && entry.entrySceneFingerprint &&
-                fingerprintSimilarity(query.currentSceneFingerprint, entry.entrySceneFingerprint) >= SCENE_SIMILARITY_GATE) {
+                // ΠΑΝ-41：单源 fpSimilarity（位宽鲁棒 —— 128 位演进格式不再静默失配/
+                // 负数，召回侧与重放门禁侧行为同源）
+                fpSimilarity(query.currentSceneFingerprint, entry.entrySceneFingerprint).similarity >= SCENE_SIMILARITY_GATE) {
                 scene = W_SCENE_BONUS;
             }
             const ageH = (now - entry.lastRehearsedAt) / 3_600_000;
@@ -156,7 +230,13 @@ export class MuscleMemoryStore {
         }
         return hits.filter(h => h.score > 0.05).sort((a, b) => b.score - a.score).slice(0, limit);
     }
-    /** 宿主重放结局回写：计数是唯一事实源，可靠度永远是导出值 */
+    /** 宿主重放结局回写：计数是唯一事实源，可靠度永远是导出值。
+     *  ΤΕΛ-13（M7 崩塌除名律）：失败回写后若 hostReplayCount ≥ 3 且后验可靠度
+     *  < 0.2（持续失败多于成功 —— Beta 后验崩塌）⇒ 条目除名（旧病「失败只降
+     *  可靠度不除名」收口：坏技能不再永生）。除名 ⇒ 返回终态快照（条目已不在
+     *  库但调用方可如实报告崩塌后的可靠度 —— engine 的 `?? 旧引用` 兜底不受
+     *  影响）。Laplace 先验的举证门槛（≥3 次）保证单次/两次失败绝不除名 ——
+     *  先验保护与「技能是先验不是保证」哲学一致。 */
     recordHostReplay(entryId, success) {
         const entry = this.entries.get(entryId);
         if (!entry)
@@ -165,6 +245,14 @@ export class MuscleMemoryStore {
         if (success)
             entry.hostSuccessCount += 1;
         entry.lastHostReplayedAt = Date.now();
+        // ΤΕΛ-13（M7）：成功绝不除名；失败且后验崩塌 + 举证足额 ⇒ 除名
+        if (!success
+            && entry.hostReplayCount >= MUSCLE_HOST_COLLAPSE_MIN_TRIALS
+            && muscleReliability(entry) < MUSCLE_HOST_COLLAPSE_RELIABILITY) {
+            const snapshot = { ...entry };
+            this.evict(entryId, 'host-replay-collapse', `trials=${entry.hostReplayCount}, reliability=${muscleReliability(snapshot).toFixed(3)}`);
+            return snapshot; // 已除名：返回终态快照（非 undefined —— 调用方可如实报告崩塌值）
+        }
         return entry;
     }
     /** 原子落盘（tmp+rename 方言，对齐 qualityDoctor.atomicWrite） */
@@ -214,6 +302,13 @@ export class MuscleMemoryStore {
                 catch {
                     continue; // 单条水合失败：跳过（持久化是资产不是命脉）
                 }
+            }
+            // ΤΕΛ-13（M7 容量律的恢复面）：外部文件（手改/旧格式堆积）超限 ⇒ 载入后
+            // 同律执法逐出至 ≤ 上限（理由 capacity-on-load —— 台账可审计）。中段return
+            // 不经过此处：畸形档整体丢弃（空库）无从逐出。
+            while (this.entries.size > MUSCLE_MEMORY_MAX_ENTRIES) {
+                if (this.evictWorstForCapacity('capacity-on-load') === null)
+                    break;
             }
             return restored;
         }

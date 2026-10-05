@@ -16,7 +16,3 @@ export const SCORE_MAX = 100;
 export function makeScore(raw) {
     return Number.isFinite(raw) && raw >= 0 && raw <= SCORE_MAX ? raw : null;
 }
-/** 分数消费侧守门：跨事件/持久化边界重铸；非法即降级（不信任何越界而来的 brand 声明） */
-export function remintScore(raw, fallback) {
-    return makeScore(raw) ?? fallback;
-}

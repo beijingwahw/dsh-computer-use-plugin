@@ -243,6 +243,20 @@ export interface HostExecutorStepResult {
   note: string;
 }
 
+// ── ΠΑΝ-42：链级效果验证端口（可靠度从「派发完成」升级为「效果验证」）──
+// 病灶（C2-3 M1）：HostExecutorStepResult 只证「派发返回」，replayOnHost 以
+// divergences.length===0 判 confirmed 并 recordHostReplay(true) —— 打偏/遮挡/
+// 输入落空等「派发成功但零效果」链条持续抬高 hostSuccessCount ⇒ muscleReliability
+// 虚高，门 4A 度量的是派发可靠度而非任务可靠度。修法：端口扩一个**可选**链级
+// 验证方法（装配层适配器复用 actionVerifier 的终帧 dHash 路径实现）；引擎在
+// 全部步派发完毕后调用。诚实分层：返回 null = 验证面缺席（适配器取证失败/
+// 全非物理链）⇒ 引擎回落派发基线并**如实标注**，绝不虚报「已验证效果」。
+/** 链级效果验证裁决：verified = 世界确有该链的效果证据；note = 紧凑归因 */
+export interface HostChainEffectVerdict {
+  verified: boolean;
+  note: string;
+}
+
 /**
  * 宿主执行器端口 —— 结构注入（engine 不 import 根层模块，破环纪律；装配主权
  * 在 sandbox/index.ts apply 装配层）。端口契约与《异常诚实分层契约》第二条同律：
@@ -252,6 +266,45 @@ export interface HostExecutorStepResult {
 export interface HostExecutor {
   /** 派发单步沙箱动作到宿主物理面（调用方按 entry.steps 顺序逐步调用） */
   executeAction(action: SandboxAction): Promise<HostExecutorStepResult>;
+  /** ΠΑΝ-42：链级效果验证（可选 —— 缺席 = 验证面缺席，引擎诚实降级为派发基线）。
+   *  全部步派发完毕后由引擎调用一次；实现永不抛（故障收敛为 null 诚实缺席）。 */
+  verifyChainEffect?(input: {
+    steps: ReadonlyArray<SandboxAction>;
+  }): Promise<HostChainEffectVerdict | null>;
+}
+
+// ─── 6.6 指纹相似度单一纯函数（ΠΑΝ-41：双源收编）───
+// 病灶（C2-3 M6）：memory.fingerprintSimilarity（等宽才比 + 除数硬编码 64）与
+// engine.fpSimilarity（位宽鲁棒）双源漂移 —— 128 位等宽串在召回侧算出负数、
+// dist≤6 时虚高过 0.9 闸；重放门禁侧却正常。同库两处实现、两种语义，正是
+// 注释里反复立法反对的「方言克隆」。修法：位宽鲁棒版收编进契约层（本文件）
+// 作唯一事实源，memory（召回侧同屏加成）与 engine（门 4B 同屏判定）统一消费。
+/** 指纹比对结果（ΑΩ-R19：相似度 + 位宽注记） */
+export interface FpComparison {
+  /** 0-1 域相似度（比对长度上的汉明距离归一） */
+  similarity: number;
+  /** 截断位宽注记：两侧位宽不等时的公共前缀长度（诚实降级 —— 宿主指纹格式
+   *  演进（64→128 位等）不再静默全拒；undefined = 等宽全量比对） */
+  truncatedTo?: number;
+}
+
+/**
+ * 指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
+ * D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖）。
+ * ΑΩ-R19/ΠΑΝ-41 位宽鲁棒：等宽 ⇒ 按实际位宽逐位比对（除数为长度而非硬编码
+ * 64 —— 对现行 64 位串数值逐字节不变；128 位串不再产出负数）；不等宽 ⇒ 按
+ * 较短侧前缀比对并注记 truncatedTo（诚实降级优于静默 0 —— 格式演进静默全拒
+ * = 把升级伪装成全局失配）；空串（0 位证据）仍 0。纯函数、永不抛。
+ */
+export function fpSimilarity(a: string, b: string): FpComparison {
+  if (a.length === 0 || b.length === 0) return { similarity: 0 };
+  const n = Math.min(a.length, b.length);
+  let dist = 0;
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) dist++;
+  return {
+    similarity: 1 - dist / n,
+    ...(a.length !== b.length ? { truncatedTo: n } : {}),
+  };
 }
 
 // ─── 7. 双闸门矩阵：D-5 自审 × D-4 外审，两权威正交，绝不合并枚举 ───
@@ -337,6 +390,12 @@ export interface SandboxConfig {
    *  根层 physicalBackend 动作面适配为 HostExecutor 注入（四门全过 ⇒ 真派发，
    *  派发失败/装配失败仍诚实 failed 归因）。 */
   enableHostReplayExecution?: boolean;
+  /** ΠΑΝ-42：热键黑名单 CSV（Config.hotkeyBlacklist 的结构子集 —— 装配层透传）。
+   *  在场 ⇒ 步级安全扫描对黑名单和弦**前置**结构化拒绝（链中段黑名单步在
+   *  任何派发之前被拦 —— 「危险步绝不部分执行」对热键面成立）；缺席 ⇒ 扫描
+   *  不重复执法黑名单（事实源仍是 system.pressHotkey 派发时刻 —— P1-3 立法，
+   *  DEFAULT_ACTION_GATE_CONFIG 同注）。缺省缺席 = 零回归。 */
+  hotkeyBlacklistCsv?: string;
 }
 
 export interface SandboxEngine {

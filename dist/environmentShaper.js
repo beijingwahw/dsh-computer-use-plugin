@@ -10,7 +10,7 @@
 //
 // 撤销模型（审查修正版）：UndoRecipe.kind 恒等于原始动作 kind（无特殊值混入），
 // 还原由 before 快照驱动；z-order 不可逆与浏览器缩放不可读两处诚实降级均在注释文档化。
-import { execFile, spawnSync } from 'child_process';
+import { execFile, spawn, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import { serialize } from './ioMutex.js';
 import { journal } from './journal.js';
@@ -100,6 +100,10 @@ export class LinuxAdapter {
                 await this.execFn('gsettings', ['set', GTK_THEME_KEY, GTK_THEME_PROP, HIGH_CONTRAST]);
                 return { kind: 'set_contrast', before: { theme } };
             }
+            // R2-5：launch_app 诚实缺席（win32 专属能力 —— capabilities 从不申报，
+            // 此臂是类型穷尽性的守门：能力闸门拦截外的直呼按适配器契约抛错）
+            case 'launch_app':
+                throw new Error('launch_app is not available on linux (honest absence)');
         }
     }
     async undo(recipe) {
@@ -190,6 +194,60 @@ function psLiteral(s) {
 export function psEncodeCommand(script) {
     return Buffer.from(String(script), 'utf16le').toString('base64');
 }
+// ─── R2-5：GUI 应用直启面（沙箱/host-replay 预置应用窗口的唯一合法通道）───
+//
+// 病灶（R1-8 遗留②，实战冒烟 attempt3 实锤）：沙箱（宿主受限 token）内经
+// pwsh `Start-Process notepad` 启动的 GUI 应用秒死。本机四联探针定性（详见
+// .survey/practice/R2-5.md）双机制叠加：
+//   ① job 连坐：Windows 上 libuv 给**每个非 detached 子进程**挂
+//     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 作业对象；pwsh -Command / .NET
+//     Process.Start 产生的 GUI 孙代自动继承该作业 —— 工具调用进程树被收割时
+//     （job 句柄关闭）GUI 应用一并被杀（探针 M1/M2b：牺牲进程 3s 内死）。
+//   ② Shell 激活断裂：唯一能逃出作业的 Start-Process 走 ShellExecute/UWP
+//     打包激活代理路径 —— 正是宿主受限 token 下断裂的那条（R1-8 实测
+//     「Start-Process 型全死」；而 bash 直接 exec = 裸 CreateProcess 存活）。
+//     Win11 记事本/calc 均为打包应用别名（appexeclink 重解析点），Start-Process
+//     必经代理；裸 CreateProcess 直接命中重解析点，不经代理 —— 两者的分岔
+//     即「Start-Process 死 / 直接 exec 活」的机制解释。
+// 修法（任务选型 c —— 最干净）：白名单 + 裸 CreateProcess 直启目标 exe：
+//   · shell:false + argv 数组 —— 命令行上零 shell 解析点，注入面在传输层
+//     不存在（比 W6R-A8 对 PS 的 -EncodedCommand 加固更前移一层：PS 路径
+//     照旧只走 EncodedCommand，本路径根本不经 PS，两条加固律零触碰零回退）；
+//   · detached:true + stdio:'ignore' + unref —— 逃出 kill-on-close 作业
+//     （探针 M3：父进程退出后 3s 存活），也不持任何管道句柄；
+//   · 白名单闭集 —— 目标 exe 已知（沙箱预置应用场景），不接受任意命令。
+// GUI 可见性：windowsHide 必须 false（启动的就是要给视觉管线看的窗口）。
+/** R2-5：GUI 应用白名单（canonical 键 → exe 名）。闭集立法：launch_app 只
+ *  接受此表键名 —— 任意命令注入在此被结构性拒绝（白名单外即拒，无逃逸臂）。
+ *  收录标准：预置 GUI 操场常用应用 + System32 在场（CreateProcess 搜索序
+ *  内直接命中，无需 PATH 假定）。 */
+const GUI_APP_WHITELIST = Object.freeze({
+    notepad: 'notepad.exe',
+    calc: 'calc.exe',
+    mspaint: 'mspaint.exe',
+    paint: 'mspaint.exe',
+});
+/** R2-5：白名单解析（纯函数，永不抛）。接受 canonical 键（大小写不敏感、
+ *  容忍 .exe 后缀与首尾空白）；未命中 ⇒ null（调用方如实拒绝并申报白名单）。 */
+export function resolveLaunchableApp(name) {
+    if (typeof name !== 'string')
+        return null;
+    const key = name.trim().toLowerCase().replace(/\.exe$/, '');
+    const exe = GUI_APP_WHITELIST[key];
+    return exe !== undefined ? { canonical: key, exe } : null;
+}
+/** R2-5：GUI 直启的 spawn 选项（纯函数面 —— 单测钉死四不变量：
+ *  detached=true 作业逃逸 / stdio=ignore 零管道 / shell=false 零注入面 /
+ *  windowsHide=false GUI 必须可见）。Object.freeze 防调用方篡改。 */
+export function guiLaunchSpawnOptions() {
+    return Object.freeze({ detached: true, stdio: 'ignore', shell: false, windowsHide: false });
+}
+/** R2-5：缺省通道 = node child_process.spawn 窄化（filePerms 的
+ *  `spawnSync as unknown as ...` 同律 —— 窄形状承担可测性，真实语义不变）。 */
+const defaultGuiAppSpawnChannel = spawn;
+/** R2-5：启动后存活观察窗（ms）。GUI 应用若被激活策略秒杀（受限 token 场景）
+ *  会在此窗内退出 —— 「已启动」的战报必须经此窗对账，绝不虚报交付。 */
+export const GUI_LAUNCH_PROBE_MS = 600;
 /** 默认探针（win32）：where 定位可执行文件 */
 function probeWindows(cmd) {
     try {
@@ -243,6 +301,7 @@ export function coalesceAdjacentRuns(items, channelOf) {
 /**
  * 复原步的执行通道：'ps'（Win32/SPI P/Invoke，可并入单脚本）、'hotkey'
  * （set_zoom 的 Ctrl+0 —— 走 system 热键管线，黑名单执法面不可绕）、
+ * 'kill'（R2-5 launch_app 的 taskkill /PID —— argv 数组经 execFile，零 shell）、
  * 'noop'（raise_window：z-order 不可逆，文档化 no-op —— 无需任何往返）。
  */
 function undoChannelOf(recipe) {
@@ -251,6 +310,9 @@ function undoChannelOf(recipe) {
         case 'move_window':
         case 'set_contrast': return 'ps';
         case 'set_zoom': return 'hotkey';
+        // R2-5：launch_app 的复原 = 终结自己拉起的 pid（对称复原律：改变世界的
+        // 权力与复原世界的义务严格对称 —— 预置的窗口由预置者收回）
+        case 'launch_app': return 'kill';
         default: return 'noop'; // raise_window
     }
 }
@@ -309,9 +371,16 @@ export class WindowsAdapter {
     platform = 'win32';
     probe;
     execFn;
+    /** R2-5：GUI 直启通道（注入纪律同 probe/execFn —— 类体零裸进程调用） */
+    launchFn;
+    /** R2-5：启动存活观察窗（AdapterDeps 注入面 —— 测试小窗加速，真机缺省 600ms） */
+    launchProbeMs;
     constructor(deps = {}) {
         this.probe = deps.probe ?? probeWindows;
         this.execFn = deps.exec ?? exec;
+        this.launchFn = deps.launchGuiApp ?? defaultGuiAppSpawnChannel;
+        this.launchProbeMs = typeof deps.launchProbeMs === 'number' && Number.isFinite(deps.launchProbeMs)
+            ? Math.max(0, deps.launchProbeMs) : GUI_LAUNCH_PROBE_MS;
     }
     /**
      * W6R-A8：PS 执行统一通道 —— 脚本整体经 psEncodeCommand 编码后挂
@@ -323,9 +392,12 @@ export class WindowsAdapter {
         return this.execFn(PS_EXE, [...PS_FLAGS, psEncodeCommand(script)]);
     }
     /** 能力探测：PowerShell 在场 ⇒ 窗口四动作；set_contrast 诚实缺席
-     *  （注册表 + SPI_SETHIGHCONTRAST 往返不可靠 —— 留白如实申报，绝不虚报） */
+     *  （注册表 + SPI_SETHIGHCONTRAST 往返不可靠 —— 留白如实申报，绝不虚报）
+     *  R2-5：launch_app 无条件在场 —— 直启通道是 Node 内建 spawn（零外部工具
+     *  依赖，无需探测；诚实申报的前提「已探测」由平台内置满足）。 */
     async capabilities() {
         const caps = new Set();
+        caps.add('launch_app'); // R2-5：GUI 直启（不依赖 PowerShell 在场）
         try {
             if (this.probe(PS_EXE)) {
                 caps.add('raise_window');
@@ -364,7 +436,8 @@ export class WindowsAdapter {
         // O 纪元（#17 真机执法抓出的潜伏 bug）：set_contrast 是系统级动作，
         // 不需要窗口句柄 —— 旧实现无条件解析 hwnd 且空标题必 throw，真机上
         // apply({kind:'set_contrast'}) 从未可达（注入式测试的 exec 恒返 '4\n' 掩盖）。
-        const needsWindow = action.kind !== 'set_contrast';
+        // R2-5：launch_app 同律 —— 直启的是尚不存在的窗口，无句柄可解析。
+        const needsWindow = action.kind !== 'set_contrast' && action.kind !== 'launch_app';
         const hint = action.titleHint ?? '';
         // ΝΩ-25(b)：raise_window 的查找+置前已并入单脚本（顶部不再预解析 —— 省一次
         // PS 冷启动）；maximize/move/set_zoom 仍预解析句柄（几何快照 / 热键前台 / 变异脚本复用）
@@ -373,6 +446,44 @@ export class WindowsAdapter {
         if (preResolve && hit.hwnd === 0)
             throw new Error(`no window with title containing ${JSON.stringify(hint)}`);
         switch (action.kind) {
+            // ── R2-5：GUI 应用直启（白名单 + 裸 CreateProcess，见模块头注释）──
+            // 诚实交付律：spawn 成功 ≠ 应用存活 —— 观察窗内退出（受限 token 打断
+            // 激活、白名单 exe 缺席等）如实抛错，绝不把「已启动」虚报为交付。
+            case 'launch_app': {
+                const resolved = resolveLaunchableApp(action.app);
+                if (!resolved) {
+                    throw new Error(`launch_app: unknown app ${JSON.stringify(action.app ?? '')} — whitelist: ${Object.keys(GUI_APP_WHITELIST).join(', ')}`);
+                }
+                const child = this.launchFn(resolved.exe, [], guiLaunchSpawnOptions());
+                let spawnError = null;
+                child.on('error', (err) => { spawnError = err.message; });
+                let earlyExit = null;
+                child.on('exit', (code, signal) => { earlyExit = { code, signal }; });
+                child.unref(); // R2-5：脱离事件循环引用计数 —— 宿主进程不因持有 GUI 应用而永不退出
+                const pid = child.pid;
+                if (typeof pid !== 'number') {
+                    throw new Error(`launch_app: spawn returned no pid for ${resolved.exe}`);
+                }
+                await new Promise(r => setTimeout(r, this.launchProbeMs));
+                if (spawnError !== null) {
+                    throw new Error(`launch_app: spawn failed for ${resolved.exe}: ${spawnError}`);
+                }
+                // R2-2: 编译解锁（并行轮 WIP 遗留）—— let 初值 null 经事件回调赋值后，
+                // TS 控制流分析仍按初始化窄化（const 注解也不能阻止初始赋值窄化），
+                // `!== null` 后被读成 never（TS2339）。函数读取面拿声明类型（TS 官方
+                // workaround），语义零变化。
+                const readExit = () => earlyExit;
+                const exited = readExit();
+                if (exited !== null) {
+                    throw new Error(`launch_app: ${resolved.exe} exited within ${this.launchProbeMs}ms `
+                        + `(code=${exited.code} signal=${exited.signal}) — activation may be policy-blocked; refusing to report delivery`);
+                }
+                // 撤销配方：pid 是复原（taskkill /PID）的全部知识 —— 与「改变必可复原」对称律同构
+                return {
+                    kind: 'launch_app', titleHint: resolved.canonical,
+                    before: { pid }, matchedTitle: `${resolved.canonical} (pid ${pid})`,
+                };
+            }
             case 'raise_window': {
                 // ΝΩ-25(b)：查找 + 置前合并为单次往返（旧路径 hwndOf→activate 两次 PS 冷启动；
                 // 未命中 ⇒ 脚本内零变更，JS 侧照旧抛 no-window —— 物理语义不变）
@@ -453,6 +564,35 @@ export class WindowsAdapter {
                     } // 归零策略：站点内部态不可读
                     catch (e) {
                         outcomes[s.index] = { ok: false, reason: e?.message ?? String(e) };
+                    }
+                }
+                continue;
+            }
+            // R2-5 kill 通道：launch_app 的对称复原 —— 终结自己拉起的 pid。
+            // taskkill 经 execFile（argv 数组、零 shell —— 与整库 spawn 纪律同律）；
+            // 进程已不在（用户先关掉 / 应用自退）= 复原义务已满足，幂等 ok（多杀
+            // 无害方向：pid 是配方快照，绝不误伤无关进程 —— 只杀自己启动的那个）。
+            if (run.channel === 'kill') {
+                for (const s of run.items) {
+                    const pid = s.recipe.before?.pid;
+                    if (typeof pid !== 'number' || !Number.isFinite(pid)) {
+                        outcomes[s.index] = { ok: false, reason: 'launch_app undo: recipe has no pid — cannot restore (honest failure)' };
+                        continue;
+                    }
+                    try {
+                        await this.execFn('taskkill', ['/PID', String(pid), '/F']);
+                        outcomes[s.index] = { ok: true };
+                    }
+                    catch (e) {
+                        // 128 = taskkill「进程不存在」退出码（R2-5 真机实测，locale 无关 ——
+                        // 中文 GBK 控制台的错误消息到 execFile 侧是乱码字节，消息匹配不可
+                        // 依赖；退出码是唯一稳定方言，消息正则仅作 UTF-8/英文环境纵深冗余）
+                        const msg = String(e?.message ?? e);
+                        const notFound = e?.code === 128
+                            || /not\s*found|找不到|没有找到|没有运行|no running/i.test(msg);
+                        outcomes[s.index] = notFound
+                            ? { ok: true } // 已退出 = 义务已满足（幂等；真机验证：taskkill 死 PID 恒退 128）
+                            : { ok: false, reason: `taskkill /PID ${pid} failed: ${msg}` };
                     }
                 }
                 continue;
@@ -597,6 +737,14 @@ class Shaper {
         if (needsHint && !action.titleHint?.trim()) {
             return { ok: false, reason: `${action.kind} requires a titleHint to address the target window` };
         }
+        // R2-5：launch_app 白名单前置校验 —— 结构化拒绝先于入队与任何物理动作
+        //（与能力闸门同层；适配器内还有同律二次校验 —— 纵深防御，非重复冗余）
+        if (action.kind === 'launch_app' && !resolveLaunchableApp(action.app)) {
+            return {
+                ok: false,
+                reason: `launch_app requires a whitelisted app name (notepad | calc | mspaint), got ${JSON.stringify(action.app ?? '')}`,
+            };
+        }
         try {
             // 物理动作入队：窗口操作改变真实桌面，经 D-1 互斥队列与其他动作串行
             const recipe = await serialize(() => this.adapter.apply(action));
@@ -605,7 +753,12 @@ class Shaper {
             void journal.appendMarker({
                 kind: 'ENV_SHAPED', action: `${action.kind}${action.titleHint ? ` "${action.titleHint}"` : ''}`,
             });
-            return { ok: true, token, matchedTitle: recipe.matchedTitle };
+            return {
+                ok: true, token, matchedTitle: recipe.matchedTitle,
+                // R2-5：直启动作回传 pid（撤销配方事实源的镜像 —— 对账/取证用）
+                ...(recipe.kind === 'launch_app' && typeof recipe.before?.pid === 'number'
+                    ? { pid: recipe.before.pid } : {}),
+            };
         }
         catch (e) {
             return { ok: false, reason: e?.message ?? String(e) }; // 非 Error 抛出也必有原因

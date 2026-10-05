@@ -3,7 +3,10 @@
 // （>500 行拆分信号）—— ① 良好态定位 / ② 模态逆映射表 / ③ 复合回滚计划铸造
 // （全部纯函数）整体搬迁。行为零变化；rollbackPlanner.ts 以再导出保持导入面不变。
 import { ltlF, violationsOf, reactTraceProperties } from './ltlf.js';
-import { sanitizeTrace, ROLLBACK_BUDGET_STEPS } from './rollbackPlanner.js';
+// ΠΑΝ-127（D-F5 清偿）：轨迹契约改从零出边叶 rollbackPlanner.trace.ts 导入
+// （原自桶 rollbackPlanner.ts 借 sanitizeTrace/ROLLBACK_BUDGET_STEPS 构成桶-卫星
+// value 二环；桶面同名符号仍经再分发可用 —— 导入面零破坏，行为零变化）。
+import { sanitizeTrace, ROLLBACK_BUDGET_STEPS } from './rollbackPlanner.trace.js';
 // ─── ① 良好态定位（纯函数 —— LTLf 只读消费） ───
 /** 良好步判据：判据核过（status SUCCESS）且动作验证过（effect_detected === true）。
  *  未验证（undefined）不算良好 —— 「已验证良好」的字面义（验证过 ≠ 没失败），

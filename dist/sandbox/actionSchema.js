@@ -10,6 +10,9 @@
 // 拒绝语义：任一条目非法 ⇒ 整链拒绝（不逐条丢弃 —— 半截链排练出的证词是毒证），
 // 拒绝原因如实返回给调用方进 FAILED 结果（《异常诚实分层契约》第二条：不抛）。
 import { EXPECTED_EFFECT_SCALES, SANDBOX_ACTION_KINDS, } from './types.js';
+// ΠΑΝ-40b：场景铸造卫兵复用 virtualScreen.asVirtualWidget（同一防御方言 ——
+// 畸形 rect 拒收、值即边界；本文件绝不复制第二份几何校验）。
+import { asVirtualWidget } from './virtualScreen.js';
 /** 防御性上限（结构性常量而非部署调调参 —— 拒绝面的边界，不是行为旋钮） */
 export const ACTION_LIMITS = {
     /** 单链动作数上限（无界数组 = 无界排练 = 无界账本） */
@@ -173,4 +176,31 @@ export function validateActionChainInput(rawActions) {
             return { ok: false, reason: err };
     }
     return { ok: true, actions: rawActions };
+}
+/** 单链场景控件数上限（结构性常量 —— 无界场景 = 无界排练世界） */
+const MAX_SCENE_WIDGETS = 256;
+/** virtual_scene 入参校验（工具边界执法）。纯函数、永不抛。 */
+export function validateVirtualSceneInput(rawScene) {
+    if (!Array.isArray(rawScene)) {
+        return { ok: false, reason: 'virtual_scene must be a JSON array of widgets' };
+    }
+    if (rawScene.length === 0) {
+        return { ok: false, reason: 'virtual_scene: empty array — omit the parameter for honest degraded rehearsal' };
+    }
+    if (rawScene.length > MAX_SCENE_WIDGETS) {
+        return { ok: false, reason: `virtual_scene: length ${rawScene.length} exceeds limit ${MAX_SCENE_WIDGETS}` };
+    }
+    const scene = [];
+    for (let i = 0; i < rawScene.length; i++) {
+        const w = asVirtualWidget(rawScene[i]);
+        if (w === null) {
+            return {
+                ok: false,
+                reason: `virtual_scene[${i}]: malformed widget (rect must be finite, normalized `
+                    + '[0,1] with positive width/height)',
+            };
+        }
+        scene.push(w);
+    }
+    return { ok: true, scene };
 }

@@ -38,6 +38,27 @@ export function hasVerificationLayer(o, layer) {
     return o.verificationLayers.includes(layer);
 }
 /**
+ * 指纹相似度（perceptualHash.similarity/hammingDistance 同构式本地复刻：
+ * D-5 只需纯字符串距离，不拖入 sharp 图像二进制运行时依赖）。
+ * ΑΩ-R19/ΠΑΝ-41 位宽鲁棒：等宽 ⇒ 按实际位宽逐位比对（除数为长度而非硬编码
+ * 64 —— 对现行 64 位串数值逐字节不变；128 位串不再产出负数）；不等宽 ⇒ 按
+ * 较短侧前缀比对并注记 truncatedTo（诚实降级优于静默 0 —— 格式演进静默全拒
+ * = 把升级伪装成全局失配）；空串（0 位证据）仍 0。纯函数、永不抛。
+ */
+export function fpSimilarity(a, b) {
+    if (a.length === 0 || b.length === 0)
+        return { similarity: 0 };
+    const n = Math.min(a.length, b.length);
+    let dist = 0;
+    for (let i = 0; i < n; i++)
+        if (a[i] !== b[i])
+            dist++;
+    return {
+        similarity: 1 - dist / n,
+        ...(a.length !== b.length ? { truncatedTo: n } : {}),
+    };
+}
+/**
  * 纯函数，永不抛错。passed × rejected 是合法且高价值的报警态：
  * 预演「达成了效果」但链触犯创世铁律（如点击成功但目标命中敏感字段）。
  * 闸一：医生否决权 universal；闸二：自知之明；

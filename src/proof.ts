@@ -134,8 +134,3 @@ export function mmrVerify(proof: InclusionProof, root: H): boolean {
 export function mmrRoot(leafValues: readonly string[]): H {
   return bagPeaks(cutMountains(leafValues.map(leafHash)).map(m => m.hash));
 }
-
-/** 纯度证明（确定性）：同流同根 —— 跨进程/跨会话独立复核的前提 */
-export function mmrDeterministic(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && mmrRoot(a) === mmrRoot(b);
-}

@@ -17,7 +17,6 @@
 // 可显式关闭）。缺省不启用：现有投递路径（saveScreenshotAttachment）零变化。
 
 import type { LedgerVerdict } from './visualDiff';
-import { incrementalEncodingEnabled } from './visualDiff';
 import { encodePatchForVlm, type PatchRect } from './vlm/codec';
 
 interface ImageAttachmentRef {
@@ -269,12 +268,4 @@ export async function deliverIncremental(
   } catch {
     return null; // 防御式收口：任何意外降级为 null（调用方走整帧旧路径）
   }
-}
-
-/**
- * W3-3：增量投递模式的模块开关读数（与账本同一注册表键 —— 单一事实源；
- * 缺省 false：增量关闭时投递层与现状逐字节一致，本节函数不被任何现有路径调用）。
- */
-export function incrementalDeliveryEnabled(): boolean {
-  return incrementalEncodingEnabled();
 }

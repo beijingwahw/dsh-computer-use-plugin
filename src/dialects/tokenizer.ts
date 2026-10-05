@@ -24,21 +24,37 @@ function normalizeWs(s: unknown): string {
   return typeof s === 'string' ? s.toLowerCase().replace(/\s+/g, ' ').trim() : '';
 }
 
+/** ΠΑΝ-46（分词单源化）：方言选项 —— 签名系模式。
+ *  缺省（signature 缺席/false）行为与既有方言逐字节相同（意图/判据文本里
+ *  坐标序号与孤立字母是噪声，滤除是原设计）。signature: true 供**签名系**
+ *  消费方（semanticHash.embed → worldModel 的 'A@22' 空间量化签名）：量化
+ *  网格坐标与单字母元素名（A/B/C/D 夹具风）是几何与身份信号不是噪声，滤除
+ *  会让屏幕类型学对「同名不同位」的屏幕失明、对「单字母名」的签名失忆。
+ *  ΝΩ-15 复盘补律（ΠΑΝ-46 收口残留）：签名系**不滤停用词** —— 停用词表含
+ *  'a'（英文功能词），而 'a' 同时是夹具风单字母元素名；签名文本是封闭协议
+ *  方言（名称 × 量化坐标），其中每个 token 都是身份/几何信号，「滤功能词」
+ *  在这门方言里没有语义。意图系（缺省）滤停用词的原设计不动。 */
+export interface TokenizeOpts {
+  /** true ⇒ 纯数字、单个英文字母与停用词全部保留（签名系封闭协议方言；缺省滤除 —— 意图系原设计不动） */
+  signature?: boolean;
+}
+
 /**
  * 轻量分词（中文 2-gram + 英文分词，单源实现）：
- * 中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字切开取词；
- * 滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
- * 入参宽收 unknown（非字符串 ⇒ 空表），string 调用方天然兼容。
+ *   中文连续段按字符 2-gram（单字段保留单字）；英文/数字段按非字母数字切开取词；
+ *   滤除停用词、纯数字与单个英文字母。输出按原文字符顺序（确定性）。
+ *   入参宽收 unknown（非字符串 ⇒ 空表），string 调用方天然兼容。
  */
-export function tokenizeText(text: unknown): string[] {
+export function tokenizeText(text: unknown, opts?: TokenizeOpts): string[] {
   const norm = normalizeWs(text);
   if (!norm) return [];
+  const signature = opts?.signature === true;
   const tokens: string[] = [];
   const push = (t: string): void => {
     if (t.length === 0) return;
-    if (/^\d+$/.test(t)) return;                    // 纯数字：坐标/序号噪声
-    if (STOPWORDS.has(t)) return;                   // 停用词
-    if (!CJK_RE.test(t) && t.length < 2) return;    // 单个英文字母噪声
+    if (!signature && /^\d+$/.test(t)) return;  // 纯数字：坐标/序号噪声（签名系保留）
+    if (!signature && STOPWORDS.has(t)) return; // 停用词：意图系滤除；签名系全保留（协议方言，见 TokenizeOpts 注记）
+    if (!signature && !CJK_RE.test(t) && t.length < 2) return; // 单个英文字母噪声（签名系保留）
     tokens.push(t);
   };
   let cjkRun = '';
