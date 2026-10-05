@@ -65,6 +65,14 @@ const BENCH_CONFIG: PipelineConfig = {
   timeout: { overall: 2000, perStep: 200, perPerception: 100 },
   retryPolicy: { maxRetries: 2, backoffMs: 1, maxBackoffMs: 2 },
   knowledgeTimeout: 50, knowledgeMaxResults: 5, knowledgeMaxChars: 300,
+  // ΑΝΒ-11 行为更新：ΠΑΝ-46 分词单源收口（停用词剥离）删掉了跨意图活路检索的
+  // 旧通道 —— E3/S3 Day2 的 workflow 条目（学自 'clear the log'）与意图
+  // 'delete the record' 无实词重合，旧 BM25 里靠 'the' 类功能词的意外命中才
+  // 进得检索面（父提交实测：空场景首轮查询 [error, workflow] 双条；收口后
+  // 仅 [error] —— 前额叶无米下锅，改道翻红）。O-#26 的首轮串行（场景信号入
+  // 查询 —— 元素名 'clear log' 是真实关联 token）以真通道取代意外通道。
+  // 七场景判据一字不改；缺省（并行/空场景首轮）语义不动 —— epochO #26 在案。
+  firstRoundSerialKnowledge: true,
 };
 
 interface Probe { l3Rounds: number; executions: number; trapHits: number }
@@ -352,7 +360,16 @@ test('Part B 契约校准：登记参数有效域 + 出册字面量的不变量�
   //   「共识 > 簇均值 且 < 1」的信息保留不变量（值塌到 0 或顶格 1 都会翻红）。
   {
     const kb = new InMemoryKnowledgeBase();
-    for (let i = 0; i < 3; i++) kb.learnFromOutcome(failedOutcome(`delete the record attempt ${i}`));
+    // ΑΝΒ-11 行为更新：ΠΑΝ-46 learnTopicKey 归一化抗原 —— 语义指纹剥停用词与
+    // 纯数字（序号是噪声，意图系原设计），旧 fixture `delete the record attempt
+    // ${i}` 的三情景仅差数字序号 ⇒ 同指纹 ⇒ 学习时即并入同一抗原（强化 3 次
+    // 铸 0.657 单条目），聚类通道永远见不到 3 条情景。序号区分 episode 的
+    // fixture 技巧随抗原语义升级而过时 —— 改真词区分（from menu / via dialog /
+    // in list view：同主题不同措辞 = 聚类通道的本意场景），被测不变量
+    // （MIN_CLUSTER_SIZE=3 蒸馏 + CONSENSUS_BONUS ∈ (均值, 1)）一字不改。
+    for (const t of ['delete the record from menu', 'delete the record via dialog', 'delete the record in list view']) {
+      kb.learnFromOutcome(failedOutcome(t));
+    }
     const r = kb.consolidate();
     assert.ok(r.ok && r.value.consolidated === 1, '3 条同主题蒸馏为 1 条语义记忆');
     const q = kb.query({ sceneDescription: 's', intentDescription: 'delete the record' });

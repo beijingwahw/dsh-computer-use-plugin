@@ -170,14 +170,22 @@ test('K-5: 部署档在场时 canonical 种子段逐字节前缀一致、追加�
   // 注入律执法①（仓内单源）：canonical 种子在部署档中逐字节原序前缀 —— 种子零手改/零删除/零重排
   assert.deepEqual(dRecs.slice(0, cRecs.length), cRecs,
     '部署拷贝的种子段必须由 canonical 生成（R4-8 注入律：仓内单源，部署零手改）');
-  // 注入律执法②（宿主学习豁免）：种子段之后只允许宿主 record() 运行时追加 —— id 自 canonical.nextId 连续无洞
+  // 注入律执法②（宿主学习豁免）：种子段之后只允许宿主 record() 运行时追加。
+  // ΑΝΒ-11 血统不变量修正：宿主多段/多重启分配会产生合法 id 空洞（实锤：批3 活宿主
+  // 学习段 15,16,17,21,25,32..51 —— 6-14 为运行期未持久化分配），"连续无洞"假设过窄。
+  // 保留的执法面：追加段 id 严格递增（零重排/零重复）且全部 ≥ canonical.nextId
+  // （零种子域冲突——异源低位 id 即手改漂移）。
   const learned = dRecs.slice(cRecs.length);
   learned.forEach((r, i) => {
-    assert.equal(r.id, canonical.nextId + i,
-      `追加段第 ${i + 1} 条 id=${r.id} 须为宿主连续分配（期望 ${canonical.nextId + i}）—— 异源追加即手改漂移`);
+    assert.ok(r.id >= canonical.nextId,
+      `追加段第 ${i + 1} 条 id=${r.id} 低于 canonical.nextId=${canonical.nextId} —— 种子域冲突即手改漂移`);
+    if (i > 0) {
+      assert.ok(r.id > learned[i - 1]!.id,
+        `追加段第 ${i + 1} 条 id=${r.id} 未严格递增（前条 ${learned[i - 1]!.id}）—— 重排/重复即漂移`);
+    }
   });
   // nextId 尾后一格律：无追加 = canonical.nextId；有追加 = 末条 id + 1
-  const expectNextId = learned.length ? learned[learned.length - 1].id + 1 : canonical.nextId;
+  const expectNextId = learned.length ? learned[learned.length - 1]!.id + 1 : canonical.nextId;
   assert.equal(deployed.failureMemory.nextId, expectNextId, 'nextId 须与记录序列连续（尾后一格）');
 });
 

@@ -79,6 +79,10 @@ const BENCH_CONFIG: PipelineConfig = {
   timeout: { overall: 2000, perStep: 200, perPerception: 100 },
   retryPolicy: { maxRetries: 2, backoffMs: 1, maxBackoffMs: 2 },
   knowledgeTimeout: 50, knowledgeMaxResults: 5, knowledgeMaxChars: 300,
+  // ΑΝΒ-11 行为更新：ΠΑΝ-46 停用词剥离删除跨意图活路检索的意外通道
+  //（'the' 命中）—— 启用 O-#26 首轮串行（场景 token 入查询）取代之。
+  // 详见 test/calibration.bench.ts BENCH_CONFIG 同源注释。
+  firstRoundSerialKnowledge: true,
 };
 
 let runCounter = 0;

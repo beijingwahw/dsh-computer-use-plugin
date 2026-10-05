@@ -71,7 +71,10 @@ async function startFederationServer(): Promise<{ port: number; child: ChildProc
   return { port, child, stop };
 }
 
-/** 一个独立 barrier 客户端进程(RESULT 行 → JSON;超时/退出码如实带回) */
+/** 一个独立 barrier 客户端进程(RESULT 行 → JSON;超时/退出码如实带回)
+ *  ΑΝΒ-3: 客户端已升维为优雅退出协议(零 process.exit,exitCode+自然排空)——
+ *  退出码断言(下方 ===0)语义不变;20s SIGKILL 仅为纯护栏(自然排空上限 ≈5s,
+ *  来自 transport 的 AbortSignal 定时器),非断言面的一部分。 */
 async function runClient(base: string, peer: string, name: string): Promise<{ rc: number | null; pid: number; parsed: Record<string, unknown> | null; raw: string }> {
   const script = fileURLToPath(new URL('../scripts/w9real-barrier-client.mjs', import.meta.url));
   const child = spawn(process.execPath, [script, '--endpoint', base, '--peer', peer, '--name', name,

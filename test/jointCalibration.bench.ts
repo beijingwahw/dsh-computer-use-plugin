@@ -237,7 +237,7 @@ const FAMILY: WorldDef[] = [
     intents: ['delete the record', 'delete the record', 'delete the record'],
     trapFineFromDay: 3, staleAfterDay: { 2: 60 }, retries: 2,
     seeds: { trapConf: 0.66, trapVerifiedDaysAgo: 60, trapSource: 'auto-learn' },
-    note: '60 天前亲证（trust 0.165 < θ=0.2）：Day1 压制+无活路 ⇒ 复活探针踩坑 ⇒ 学费铸新鲜亲证（新铸条目 0.3 —— auto-learn 文案与种子不同，不复证种子）⇒ Day2 保鲜期内自背书诚实接地（窗口期死锁，刚验证过，合理）⇒ Day2 后时间旅行 60 天 ⇒ Day3 trust 0.075 < θ ⇒ 复活探针 ⇒ 陷阱已修好 ⇒ completed 破局 —— 死锁率从「永远」（v3）变「窗口期」（v4）。θ=0.3 旧缺省在此翻红：新铸 0.3 × 衰减(毫秒) 恒微小于 0.3，初铸亲证永不安宁 ⇒ 采纳联合标定归宿 θ=0.2（conf 0.3 有 17.5 天保鲜期）' },
+    note: '60 天前亲证（trust 0.165 < θ=0.2）：Day1 压制+无活路 ⇒ 复活探针踩坑 ⇒ 学费铸新鲜亲证（新铸条目 0.3 —— auto-learn 文案与种子不同，不复证种子）⇒ Day2 保鲜期内自背书诚实接地（窗口期死锁，刚验证过，合理）⇒ Day2 后时间旅行 60 天 ⇒ Day3 破局（ΑΝΒ-11 行为更新：ΠΑΝ-45 出口衰减后破局通道 = 陈年压制衰减放行 —— 种子 eff 0.165/学费条目 eff 0.075 均 < 压制线 ⇒ 反射点击修好的陷阱 ⇒ completed/0t/0p；探针通道仍在 Day1 学费针与 D5 误告解药在案）—— 死锁率从「永远」（v3）变「窗口期」（v4）。θ=0.3 旧缺省在此翻红：新铸 0.3 × 衰减(毫秒) 恒微小于 0.3，初铸亲证永不安宁 ⇒ 采纳联合标定归宿 θ=0.2（conf 0.3 有 17.5 天保鲜期）' },
   { name: 'F2 新鲜亲证零学费', group: 'nuclear-grounding', trapMemo: true, elements: [TRAP], broken: ['delete item'],
     intents: ['delete the record'], retries: 2,
     seeds: { trapConf: 0.66, trapVerifiedDaysAgo: 0, trapSource: 'auto-learn' },
@@ -272,6 +272,11 @@ const BENCH_CONFIG: PipelineConfig = {
   timeout: { overall: 2000, perStep: 200, perPerception: 100 },
   retryPolicy: { maxRetries: 2, backoffMs: 1, maxBackoffMs: 2 },
   knowledgeTimeout: 50, knowledgeMaxResults: 5, knowledgeMaxChars: 300,
+  // ΑΝΒ-11 行为更新：ΠΑΝ-46 停用词剥离删除跨意图活路检索的意外通道
+  //（'the' 命中）—— 启用 O-#26 首轮串行（场景 token 入查询）取代之
+  //（C1/B2/E4 世界与 S3 门的 Day2 改道依赖该通道）。详见
+  // test/calibration.bench.ts BENCH_CONFIG 同源注释。
+  firstRoundSerialKnowledge: true,
 };
 
 let runCounter = 0;
@@ -878,8 +883,16 @@ test('扩族敏感性：误告权重扫描 → 阈值归宿与误告率对比（
       `传闻误告未被探针解药：误告率 ${pm.faRate} → ${qm.faRate}（应严格下降 —— D 组传闻世界须全数复活）`);
     assert.ok(qm.missRate <= pm.missRate + 1e-9,
       `核证学费被计为漏报：${qm.missRate} > ${pm.missRate}（探针踩坑 ≠ 压制失效 —— ratesOf 语义分离失败）`);
-    assert.ok(qd.deadlockRate < pd.deadlockRate,
-      `陈年死锁无时间出口：死锁率 ${pd.deadlockRate} → ${qd.deadlockRate}（F1 Day3 复活探针必须破局）`);
+    // ΑΝΒ-11 行为更新：ΠΑΝ-45 有效置信度出口执法后，「陈年死锁」的时间出口
+    // 不再为探针独占 —— θ=0（全信）下 F1 Day3 的 60 天陈年种子 eff
+    // 0.66×0.25=0.165 < 压制线 0.55 ⇒ 不压制 ⇒ 反射放行（陷阱已修好 ⇒
+    // completed，实测 F1 θ=0: D1=failed/0t/0p → D3=completed/0t/0p）。
+    // 「陈年错误模式不再永久把持本能弧」正是 C1-8 H4 的教义。旧判据
+    // `qd < pd`（探针严格降低死锁率）的前提「θ=0 恒死锁」不复成立 ——
+    // 新判据：缺省 θ 下死锁率恒 0（忏悔世界族全数破局 —— 出口存在，
+    // 探针（F1 D1 学费针 / D5 误告解药）与衰减（F1 D3 放行）双通道在案）。
+    assert.ok(qd.deadlockRate === 0,
+      `陈年死锁无时间出口：缺省 θ 下死锁率 ${qd.deadlockRate}（F1 Day3 必须破局 —— 探针/衰减双通道）`);
   }
 
   // ── F 组世界明细断言（核证接地的行为面证词）──
@@ -888,11 +901,16 @@ test('扩族敏感性：误告权重扫描 → 阈值归宿与误告率对比（
     const seq = (name: string) => perWorld.filter(p => p.name === name)
       .map(p => `${p.verdict}/t=${p.trap}/p=${p.probes}`);
     // F1 三态：探针学费（Day1）→ 窗口期死锁（Day2）→ 复活破局（Day3）
+    // ΑΝΒ-11 行为更新：ΠΑΝ-45 出口衰减后 Day3 的破局通道从「复活探针」
+    //（p=1）换成「陈年压制衰减放行」—— 60 天老化 ⇒ 种子 eff 0.165 与学费
+    // 条目 eff 0.075 均 < 压制线 ⇒ 不压制 ⇒ 反射点击修好的陷阱 ⇒
+    // completed/t=0/p=0（实测）。破局结果不变；探针通道仍在 F1 Day1
+    //（学费针）与 D5（陈年亲证误告解药）在案。
     const f1 = seq('F1 陈年忏悔之门');
-    lines.push(`── F1 陈年忏悔之门（v4 死锁出口）: ${f1.join(' → ')}（期望 failed/t=1/p=1 → failed/t=0/p=0 → completed/t=0/p=1）──`);
+    lines.push(`── F1 陈年忏悔之门（v4 死锁出口）: ${f1.join(' → ')}（期望 failed/t=1/p=1 → failed/t=0/p=0 → completed/t=0/p=0）──`);
     assert.equal(f1[0], 'failed/t=1/p=1', `F1 Day1 应为复活探针学费：got ${f1[0]}`);
     assert.equal(f1[1], 'failed/t=0/p=0', `F1 Day2 应为窗口期诚实接地（亲证保鲜）：got ${f1[1]}`);
-    assert.equal(f1[2], 'completed/t=0/p=1', `F1 Day3 应为复活探针破局（陷阱已修好）：got ${f1[2]}`);
+    assert.equal(f1[2], 'completed/t=0/p=0', `F1 Day3 应破局（ΑΝΒ-11：陈年压制衰减放行，非探针）：got ${f1[2]}`);
     // F2 零学费：新鲜亲证自背书 —— 一针都不多付
     const f2 = seq('F2 新鲜亲证零学费');
     lines.push(`── F2 新鲜亲证零学费: ${f2.join(' ')}（期望 failed/t=0/p=0）──`);

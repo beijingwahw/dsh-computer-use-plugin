@@ -1,0 +1,881 @@
+{
+  "schema": "bench-baseline/1",
+  "createdAt": "2026-10-05T07:25:38.884Z",
+  "environment": {
+    "node": "24.19.0",
+    "platform": "win32-x64",
+    "command": "node --experimental-strip-types --test --test-reporter tap --import ./test/register.mjs --test-skip-pattern 真机复测 test/w5*.bench.ts test/ablation.bench.ts test/calibration.bench.ts test/jointCalibration.bench.ts test/paramAblation.bench.ts test/organAblation.bench.ts test/fovea.ab.bench.ts",
+    "cwd": "C:\\2\\dsh-computer-use-plugin"
+  },
+  "summary": {
+    "tests": 29,
+    "pass": 29,
+    "fail": 0,
+    "durationMs": 74425.4107,
+    "passRateCI": {
+      "low": 0.883,
+      "high": 1,
+      "level": "wilson-95",
+      "n": 29,
+      "k": 29
+    }
+  },
+  "tests": [
+    {
+      "name": "E1 消融矩阵：每层的贡献都有数字（确定性世界，可复现）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 53.7535,
+      "metrics": {
+        "executions": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "trapHits": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "l3": {
+          "value": 0,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "E1b 陷阱改道：高置信陷阱记忆 + 字面诱惑 intent ⇒ 免疫压制 + 前额叶改道",
+      "ok": true,
+      "directive": null,
+      "durationMs": 38.1364,
+      "metrics": {
+        "executions": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "trapHits": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "l3": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "always.success": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "always.l3Rounds": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "surprise.success": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "surprise.l3Rounds": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "never.success": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "never.l3Rounds": {
+          "value": 0,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "E2 L3 计费：熟悉世界三策略成功率等价，成本 surprise=0 << always",
+      "ok": true,
+      "directive": null,
+      "durationMs": 80.3959,
+      "metrics": {}
+    },
+    {
+      "name": "E3 学习曲线：Day1 踩坑 → Day2 持久化改道成功；遗忘症对照组仍失败",
+      "ok": true,
+      "directive": null,
+      "durationMs": 72.8996,
+      "metrics": {
+        "executions": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "trapHits": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "l3": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "仪表盘.runs": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "仪表盘.Day1(success": {
+          "value": 0.5,
+          "unit": "plain"
+        },
+        "仪表盘.avgExec": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "仪表盘.Day2(success": {
+          "value": 1,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "Part A 参数敏感性：登记参数逐个扫值域，可行区间有数",
+      "ok": true,
+      "directive": null,
+      "durationMs": 12935.4175,
+      "metrics": {
+        "缺省": {
+          "value": 0.2,
+          "unit": "plain"
+        },
+        "REINFORCE_STEP.缺省": {
+          "value": 0.3,
+          "unit": "plain"
+        },
+        "DISCONFIRM_DECAY": {
+          "value": 0.5,
+          "unit": "plain"
+        },
+        "age": {
+          "value": 0,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "Part B 契约校准：登记参数有效域 + 出册字面量的不变量守护",
+      "ok": true,
+      "directive": null,
+      "durationMs": 2.9855,
+      "metrics": {}
+    },
+    {
+      "name": "Part C L3 分离带：熟悉底噪与新世界信号的实测带必须包含缺省 3",
+      "ok": true,
+      "directive": null,
+      "durationMs": 648.0813,
+      "metrics": {
+        "l3": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "REFLEX_SUPPRESS_CONFIDENCE": {
+          "value": 0.55,
+          "unit": "plain"
+        },
+        "DELIB_RELEVANCE_FLOOR": {
+          "value": 0.3,
+          "unit": "plain"
+        },
+        "DELIB_WORKFLOW_WEIGHT": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "AUTO_LEARN_SUCCESS_CONFIDENCE": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "W": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "REINFORCE_STEP": {
+          "value": 0.3,
+          "unit": "plain"
+        },
+        "step": {
+          "value": 0.15,
+          "unit": "plain"
+        },
+        "DISCONFIRM_DECAY": {
+          "value": 0.5,
+          "unit": "plain"
+        },
+        "L3_ESCALATION_BITS": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "信号": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "VERIFY_TRUST_FLOOR": {
+          "value": 0.2,
+          "unit": "plain"
+        },
+        "trust": {
+          "value": 0.3,
+          "unit": "plain"
+        },
+        "下界锚点": {
+          "value": 60,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "参数目录清点：登记处恰好 8 个承重参数，每个携带可行区间",
+      "ok": true,
+      "directive": null,
+      "durationMs": 0.9941,
+      "metrics": {}
+    },
+    {
+      "name": "Part 1 token/字节审计：均质 vs blur vs inset —— blur 的 token 节省是诚实零，inset ~75%",
+      "ok": true,
+      "directive": null,
+      "durationMs": 1290.4378,
+      "metrics": {}
+    },
+    {
+      "name": "Part 2 保真审计：inset 凹窗 ≤ JPEG 级容差；外围对高频内容有实测定量损失",
+      "ok": true,
+      "directive": null,
+      "durationMs": 508.0047,
+      "metrics": {}
+    },
+    {
+      "name": "成本模型：缺省向量的账单 + 世界族上的一维景观（平坦变梯度）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 10755.1401,
+      "metrics": {
+        "exec": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "trap": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "fail": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "l3": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "总损失.L": {
+          "value": 316,
+          "unit": "plain"
+        },
+        "总损失.exec": {
+          "value": 46,
+          "unit": "plain"
+        },
+        "总损失.trap": {
+          "value": 20,
+          "unit": "plain"
+        },
+        "总损失.fail": {
+          "value": 30,
+          "unit": "plain"
+        },
+        "总损失.l3Pipeline": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "总损失.l3Meter": {
+          "value": 5,
+          "unit": "plain"
+        },
+        "probe": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "L": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "误告率": {
+          "value": 0.125,
+          "unit": "percent"
+        },
+        "漏报率": {
+          "value": 0,
+          "unit": "percent"
+        },
+        "死锁率": {
+          "value": 0,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "联合标定：双序坐标下降 × 4 价格机制 —— 缺省 vs 标定的损失与四指标对照",
+      "ok": true,
+      "directive": null,
+      "durationMs": 7914.6997,
+      "metrics": {
+        "[balanced] 基准比率.L(缺省)": {
+          "value": 316,
+          "unit": "plain"
+        },
+        "[balanced] 基准比率.L(标定)": {
+          "value": 281,
+          "unit": "plain"
+        },
+        "双序对照: REFLEX先动→.L": {
+          "value": 826,
+          "unit": "plain"
+        },
+        "L(缺省)": {
+          "value": 826,
+          "unit": "plain"
+        },
+        "L(标定)": {
+          "value": 826,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "扩族敏感性：误告权重扫描 → 阈值归宿与误告率对比（v1 建议的复审判据）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 55227.4719,
+      "metrics": {
+        "W": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "w": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "L(缺省)": {
+          "value": 1015,
+          "unit": "plain"
+        },
+        "阈值归宿": {
+          "value": 0.55,
+          "unit": "plain"
+        },
+        "误告率": {
+          "value": 0.13,
+          "unit": "percent"
+        },
+        "漏报率": {
+          "value": 0,
+          "unit": "percent"
+        },
+        "A5.failed/t": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "A5.e": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "E2.failed/t": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "E2.e": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "门槛解剖.t": {
+          "value": 0.6,
+          "unit": "plain"
+        },
+        "(.t": {
+          "value": 0.6,
+          "unit": "plain"
+        },
+        "(.W": {
+          "value": 4,
+          "unit": "plain"
+        },
+        "缺省failed/t": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "缺省completed/t": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "t": {
+          "value": 0.55,
+          "unit": "plain"
+        },
+        "误告13%/漏报0%/L": {
+          "value": 902,
+          "unit": "plain"
+        },
+        "误告13%/漏报20%/L": {
+          "value": 1097,
+          "unit": "plain"
+        },
+        "failed/t": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "p": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "completed/t": {
+          "value": 0,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "V-A 模糊器官：OCR 变体恢复率 ≥95%（逐字节基线 ≪）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 19.5941,
+      "metrics": {
+        "n": {
+          "value": 32,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "V-B 三指纹：双指融合优于单指；环指独占 90° 类",
+      "ok": true,
+      "directive": null,
+      "durationMs": 1574.2791,
+      "metrics": {
+        "V-C BM25.MRR": {
+          "value": 0.583,
+          "unit": "plain"
+        },
+        "p_agents": {
+          "value": 0.3,
+          "unit": "plain"
+        },
+        "p_skill": {
+          "value": 0.8,
+          "unit": "plain"
+        },
+        "P50": {
+          "value": 0,
+          "unit": "percent"
+        },
+        "P95": {
+          "value": 0,
+          "unit": "percent"
+        },
+        "maxPath": {
+          "value": 9,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "V-C BM25：稀有词查询的 MRR 严格优于二值基线",
+      "ok": true,
+      "directive": null,
+      "durationMs": 47.8268,
+      "metrics": {}
+    },
+    {
+      "name": "V-D Hedge：劣质主通道场景，Hedge 累积收益压倒 always-agents",
+      "ok": true,
+      "directive": null,
+      "durationMs": 0.3459,
+      "metrics": {}
+    },
+    {
+      "name": "V-E 蓄水库：三分布分位绝对误差 ≤6%（m=512, n=2000）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 8.0102,
+      "metrics": {}
+    },
+    {
+      "name": "V-F MMR：证明长度 ≤ log₂(n)+1（千叶实测）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 2051.014,
+      "metrics": {}
+    },
+    {
+      "name": "V-G RRF：通道量纲失配时排名稳定性优于加权和",
+      "ok": true,
+      "directive": null,
+      "durationMs": 1.7346,
+      "metrics": {}
+    },
+    {
+      "name": "V-H LTLf：注入违例的逐位检出（执法精度 100%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 2.4587,
+      "metrics": {}
+    },
+    {
+      "name": "参数消融矩阵：基准全绿 + 每个承重参数至少击穿一个场景",
+      "ok": true,
+      "directive": null,
+      "durationMs": 2396.4219,
+      "metrics": {
+        "REFLEX_SUPPRESS_CONFIDENCE": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "DELIB_RELEVANCE_FLOOR": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "DELIB_WORKFLOW_WEIGHT": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "AUTO_LEARN_SUCCESS_CONFIDENCE": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "REINFORCE_STEP": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "DISCONFIRM_DECAY": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "L3_ESCALATION_BITS": {
+          "value": 99,
+          "unit": "plain"
+        },
+        "VERIFY_TRUST_FLOOR": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "✗.REFLEX_SUPPRESS_CONFIDENCE": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "✗.failed/exec": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "✗.trap": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.completed/exec": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "✗.DELIB_RELEVANCE_FLOOR": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "✗.failed/l3": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.completed/l3": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.DELIB_WORKFLOW_WEIGHT": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.AUTO_LEARN_SUCCESS_CONFIDENCE": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.REINFORCE_STEP": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.DISCONFIRM_DECAY": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "✗.L3_ESCALATION_BITS": {
+          "value": 99,
+          "unit": "plain"
+        },
+        "✗.VERIFY_TRUST_FLOOR": {
+          "value": 1,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "W5-6/C2: 级联路由 —— 混合负载省钱命中率与节省率（台账对账 + 闭式互证）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 9.8057,
+      "metrics": {
+        "级联路由节省率.N": {
+          "value": 20,
+          "unit": "plain"
+        },
+        "队列.eligible": {
+          "value": 15,
+          "unit": "plain"
+        },
+        "队列.cheapHit": {
+          "value": 12,
+          "unit": "plain"
+        },
+        "队列.escalated": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "队列.高危直行": {
+          "value": 5,
+          "unit": "plain"
+        },
+        "命中率.hitRate": {
+          "value": 0.8,
+          "unit": "plain"
+        },
+        "花费.spent": {
+          "value": 6.75,
+          "unit": "plain"
+        },
+        "花费.baseline": {
+          "value": 15,
+          "unit": "plain"
+        },
+        "净节省.saved": {
+          "value": 8.25,
+          "unit": "plain"
+        },
+        "净节省.savingsRate": {
+          "value": 0.55,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "W5-6/C2b: 反事实对照 —— 同负载全主力直行的花费（级联价值的经济下界）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 0.4845,
+      "metrics": {}
+    },
+    {
+      "name": "W5-6/C1: 免看门控 —— N 步无影响循环的重型感知跳过率（声明 >15–30%，实测缺省 50%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 21.35,
+      "metrics": {
+        "免看门控跳过率.N": {
+          "value": 12,
+          "unit": "plain"
+        },
+        "缺省(上限1).perceive": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "缺省(上限1).probe": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "缺省(上限1).skipRate": {
+          "value": 0.5,
+          "unit": "percent"
+        },
+        "上限3.perceive": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "上限3.probe": {
+          "value": 9,
+          "unit": "plain"
+        },
+        "上限3.skipRate": {
+          "value": 0.75,
+          "unit": "percent"
+        },
+        "总闸关(对照).perceive": {
+          "value": 12,
+          "unit": "plain"
+        },
+        "总闸关(对照).probe": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "总闸关(对照).skipRate": {
+          "value": 0,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "W5-6/P2C3: 增量编码 —— K 帧混合负载的补丁/关键帧比与 token 当量缩减（声明 >30%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 740.0296,
+      "metrics": {
+        "当量.K": {
+          "value": 18,
+          "unit": "plain"
+        },
+        "分诊.keyframe": {
+          "value": 4,
+          "unit": "plain"
+        },
+        "分诊.patch": {
+          "value": 10,
+          "unit": "plain"
+        },
+        "分诊.scroll": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "分诊.silent": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "缩减率": {
+          "value": 0.746,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "W5-6/A1: 宏重放 —— 同一任务字面量的决策调用缩减（声明 ≥30%，实测 ~71%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 24.1401,
+      "metrics": {
+        "逐步臂.decide": {
+          "value": 7,
+          "unit": "plain"
+        },
+        "逐步臂.perceive": {
+          "value": 7,
+          "unit": "plain"
+        },
+        "逐步臂.exec": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "逐步臂.clicks": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "逐步臂.types": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "逐步臂.截屏": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "宏臂.decide": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "宏臂.perceive": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "宏臂.exec": {
+          "value": 1,
+          "unit": "plain"
+        },
+        "宏臂.clicks": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "宏臂.types": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "宏臂.截屏": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "宏臂.抽查": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "决策调用缩减": {
+          "value": 0.7140000000000001,
+          "unit": "percent"
+        },
+        "感知调用缩减": {
+          "value": 0.7140000000000001,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "name": "W5-6/A2: ROI 三证 vs 全屏 dhash —— 开销不劣化 + 噪声判决在岗（守护「不倒贴」）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 13.7495,
+      "metrics": {
+        "dhash.M": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.截屏": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.JS全帧哈希": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.尺寸": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "全屏臂.OCR": {
+          "value": 2,
+          "unit": "plain"
+        },
+        "ROI臂.截屏": {
+          "value": 3,
+          "unit": "plain"
+        },
+        "ROI臂.JS全帧哈希": {
+          "value": 0,
+          "unit": "plain"
+        },
+        "ROI臂.meta采样": {
+          "value": 18,
+          "unit": "plain"
+        },
+        "字节当量缩减": {
+          "value": 0.5,
+          "unit": "percent"
+        },
+        "调用次数比": {
+          "value": 1.2,
+          "unit": "plain"
+        }
+      }
+    },
+    {
+      "name": "W5-6/A5: 稳态门 —— 两帧即稳世界的等待当量相对固定等待缩减（声明 ≥40%，实测 50%）",
+      "ok": true,
+      "directive": null,
+      "durationMs": 11.1255,
+      "metrics": {
+        "稳态门等待当量.M": {
+          "value": 6,
+          "unit": "plain"
+        },
+        "缩减率": {
+          "value": 0.5,
+          "unit": "percent"
+        }
+      }
+    }
+  ]
+}

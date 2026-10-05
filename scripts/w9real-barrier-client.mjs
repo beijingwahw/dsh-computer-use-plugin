@@ -14,6 +14,18 @@
 //   node scripts/w9real-barrier-client.mjs --endpoint http://127.0.0.1:PORT \
 //        --peer A --name w9-real [--n 2] [--poll-ms 25] [--timeout-ms 8000]
 // 输出:恰一行 "RESULT <json>"(ok/seq/peers/ackOk/waitedMs/pid);退出码 0=放行。
+//
+// ΑΝΒ-3(D-E3 源头消红,决策 D3 B 案):退出协议升维为**版本无关的优雅退出**——
+// 全文件零 process.exit,只设 process.exitCode 后让事件循环自然排空。原
+// `process.exit(rc)` 在 node v24/Windows 与 libuv 异步句柄关闭(未决 undici
+// keep-alive socket / AbortSignal 定时器)竞态 ⇒ 0xC0000409 fastfail
+// (src\win\async.c:94 断言):barrier 协议本身已成功(RESULT ok:true)而退出码
+// 变 3221226505,测试断言「退出码 0」确定性红。自然排空退出下,所有 handle 的
+// close 回调跑完进程才退 ⇒ 竞态面消除;退出码语义(0=放行/1=未放行/2=用法错)
+// 在任何 node 版本下不变;残留 handle 至多为 transport 每请求的 5s
+// AbortSignal.timeout 定时器(≤5s 内自然退,远低于编排侧 20s SIGKILL 护栏)。
+// 附带收益:stdout 管道在自然退出前必然冲刷(process.exit 截断管道缓冲的经典
+// flake 面一并消除)。
 import { createBarrierClient, makeHttpBarrierTransport } from '../dist/crossMachine.js';
 
 function arg(name, dflt) {
@@ -30,25 +42,30 @@ const timeoutMs = Number(arg('timeout-ms', '8000'));
 
 if (!endpoint || !peer || !name) {
   console.error('usage: w9real-barrier-client.mjs --endpoint URL --peer P --name N');
-  process.exit(2);
+  // ΑΝΒ-3: 用法错同样零 process.exit —— 本路径尚无任何 handle,设 exitCode 后
+  // 模块自然终结、进程立即以 2 退出(语义与原 process.exit(2) 逐字节同)。
+  process.exitCode = 2;
+} else {
+  const client = createBarrierClient({
+    peer,
+    transport: makeHttpBarrierTransport({ endpoint }),
+    pollMs,
+    timeoutMs,
+  });
+  const res = await client.arriveAndWait(name, n);
+  console.log(`RESULT ${JSON.stringify({
+    ok: res.ok === true,
+    peer,
+    name,
+    seq: res.seq ?? null,
+    peers: Array.isArray(res.peers) ? res.peers : null,
+    ackOk: res.ack ? res.ack.ok === true : null,
+    reason: res.reason ?? null,
+    waitedMs: res.waitedMs ?? null,
+    pid: process.pid,
+  })}`);
+  // ΑΝΒ-3: 优雅退出协议核心 —— 只设退出码,绝强杀事件循环。fetch/undici 的
+  // keep-alive socket 与 AbortSignal 定时器由 node 自身的排空纪律收敛后再退
+  // (v24/Windows 的 libuv async.c:94 竞态无从触发;老版本行为不变)。
+  process.exitCode = res.ok === true ? 0 : 1;
 }
-
-const client = createBarrierClient({
-  peer,
-  transport: makeHttpBarrierTransport({ endpoint }),
-  pollMs,
-  timeoutMs,
-});
-const res = await client.arriveAndWait(name, n);
-console.log(`RESULT ${JSON.stringify({
-  ok: res.ok === true,
-  peer,
-  name,
-  seq: res.seq ?? null,
-  peers: Array.isArray(res.peers) ? res.peers : null,
-  ackOk: res.ack ? res.ack.ok === true : null,
-  reason: res.reason ?? null,
-  waitedMs: res.waitedMs ?? null,
-  pid: process.pid,
-})}`);
-process.exit(res.ok === true ? 0 : 1);

@@ -59,6 +59,12 @@ const BENCH_CONFIG: PipelineConfig = {
   timeout: { overall: 2000, perStep: 200, perPerception: 100 },
   retryPolicy: { maxRetries: 2, backoffMs: 1, maxBackoffMs: 2 },
   knowledgeTimeout: 50, knowledgeMaxResults: 5, knowledgeMaxChars: 300,
+  // ΑΝΒ-11 行为更新：ΠΑΝ-46 停用词剥离删除跨意图活路检索的意外通道
+  //（'the' 命中）—— E3 Day2 的 workflow 条目（学自 'clear the log'）与意图
+  // 'delete the record' 无实词重合，空场景首轮检索放走活路证据 ⇒ 改道翻红。
+  // 启用 O-#26 首轮串行（场景 token 'clear log' 入查询）以真通道取代意外
+  // 通道。E1/E1b/E2 判据不变。详见 test/calibration.bench.ts 同源注释。
+  firstRoundSerialKnowledge: true,
 };
 
 /** 种子知识：「老员工的笔记」（manual 通道 —— D-7 的经验先验） */
