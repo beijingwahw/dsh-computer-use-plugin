@@ -1491,6 +1491,13 @@
       "reason": "仅测试宇宙消费（test/w1exec.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
     },
     {
+      "file": "src/focusTracker.ts",
+      "name": "WINDOW_CENTER_PSEUDO",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΑΝΒ-2（W-07·D2-c 窗口中心伪锚）：本文件内部消费在案 —— writePseudoAnchor/resolveCaretAnchor 的伪锚坐标唯一事实源（屏幕中心 = 目标窗中心的无信息代理，python 窗口后端无边界矩形 API）；测试面 test/anab2.selectionVerify.test.ts 源级锁定；导出面冗余、实现活。"
+    },
+    {
       "file": "src/fuzzy.ts",
       "name": "approximateSubstring",
       "kind": "function",
@@ -1573,6 +1580,41 @@
       "kind": "function",
       "category": "test-only",
       "reason": "仅测试宇宙消费（test/epochR.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
+    },
+    {
+      "file": "src/guards/hostToolPolicy.ts",
+      "name": "HOST_TOOL_CLASS_MIRROR",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΑΝΒ-7（D9 升维）：anti-cheat HOST_TOOL_CLASSES 的 src 侧逐类镜像 —— 同源测试锁（anab7 7b-③）双源不漂移的机械闸；仅测试消费（派生 HOST_SESSION_CLASS_TOOLS 属内部引用）。"
+    },
+    {
+      "file": "src/guards/hostToolPolicy.ts",
+      "name": "NON_BARREL_PLUGIN_TOOLS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΑΝΒ-7（D9 升维）：barrel 外注册面名册（start_complex_task + 沙箱演武四件）—— 闭集 PLUGIN_TOOL_ALLOWLIST 的组成部分 + anab7 装配面同源断言消费；组合根零调用至 ΑΝΒ-4 挂线。"
+    },
+    {
+      "file": "src/guards/hostToolPolicy.ts",
+      "name": "PLUGIN_TOOL_ALLOWLIST",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΑΝΒ-7（D9 升维）：插件 50 件工具闭集（anti-cheat PLUGIN_TOOL_NAMES 的 src 侧镜像）—— benchToolVerdict 内部消费 + anab7 同源测试锁；组合根零调用至 ΑΝΒ-4 挂线。"
+    },
+    {
+      "file": "src/guards/hostToolPolicy.ts",
+      "name": "HOST_SESSION_CLASS_TOOLS",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "ΑΝΒ-7（D9 升维）：host-meta/job session 类只读工具族——PLUGIN_TOOL_ALLOWLIST 的派生内部引用+anab7 同源断言消费；组合根零调用（applyBenchDiscipline 已于 ΑΝΒ-10 挂线 index.ts，本 const 属其内部数据面）。"
+    },
+    {
+      "file": "src/guards/hostToolPolicy.ts",
+      "name": "benchToolVerdict",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "ΑΝΒ-7（D9 升维）：宿主工具名单→放行/拒绝判决纯函数——applyBenchDiscipline 内部经闭集消费+anab7 16 拍测试面；导出面为同源测试锁服务。"
     },
     {
       "file": "src/guards/popupGuard.ts",
@@ -3567,6 +3609,20 @@
       "reason": "仅本文件内部引用（3 处正文引用）—— 导出面冗余但实现活（同文件消费方在用）；收编为私有导出或接线后删本条。"
     },
     {
+      "file": "src/tools/askScreen.ts",
+      "name": "_overrideAskClock_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R5-4 测试注入口（墙钟覆写，TTL 判定）—— 仅测试宇宙消费（test/r54.vlmEconomy.test.ts）；与 _overrideGroundingClock_forTest 同律。"
+    },
+    {
+      "file": "src/tools/askScreen.ts",
+      "name": "_resetAskCache_forTest",
+      "kind": "function",
+      "category": "test-only",
+      "reason": "R5-4 测试注入口（回放缓存+摘要单槽清零）—— 仅测试宇宙消费（test/r54.vlmEconomy.test.ts）；与 _resetGroundingCache_forTest 同律（ΝΩ-48 先例）：TTL/LRU 会话态的隔离面，组合根零调用。"
+    },
+    {
       "file": "src/tools/clickElement.ts",
       "name": "elementVerify",
       "kind": "const",
@@ -3576,13 +3632,6 @@
     {
       "file": "src/tools/clickMouse.ts",
       "name": "frameTicketing",
-      "kind": "const",
-      "category": "test-only",
-      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
-    },
-    {
-      "file": "src/tools/clickMouse.ts",
-      "name": "mouseVerify",
       "kind": "const",
       "category": "test-only",
       "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
@@ -3600,6 +3649,13 @@
       "kind": "function",
       "category": "internal-surface",
       "reason": "R2-4 话术纯函数：clickMouse.ts 内 interactivityStage 生产消费（同文件消费方在用）；导出面仅为 test/r24.menuTwoStage.test.ts 直测话术要素。接线（跨文件消费）落地后删本条。"
+    },
+    {
+      "file": "src/tools/clickMouse.ts",
+      "name": "mouseVerify",
+      "kind": "const",
+      "category": "test-only",
+      "reason": "仅测试宇宙消费（test/epochBeta.refute.test.ts）—— 器官自带电源测试的注入面；组合根零调用（C2-9 主题 1：测试纪律防得住器官内回归，防不住器官失联）。"
     },
     {
       "file": "src/tools/dragMouse.ts",
@@ -3656,6 +3712,13 @@
       "kind": "function",
       "category": "internal-surface",
       "reason": "R5-2（T8·选区回执）代登记（并行工位在途新增，ΠΑΝ-130 同律）：本文件内部消费在案 —— 选族和弦（shift+导航键）回执注记位（光标锚定区域 dHash 验证未接线，见 R5-2 报告 §T8-2）；测试面 test/r52.typeTextNewline.test.ts；导出面冗余、实现活。"
+    },
+    {
+      "file": "src/tools/pressHotkey.ts",
+      "name": "SELECTION_VERIFY_REGION_SIM_MAX_PCT",
+      "kind": "const",
+      "category": "internal-surface",
+      "reason": "ΑΝΒ-2（W-08·D2-d 选族效果验证）：本文件内部消费在案 —— 选区可见性判定阈（区域相似度百分比上界，比 noopSimilarityThreshold 缺省 0.97 更严：假 VERIFIED 是 T8 盲插入危害方向），verified 判定 + 回执话术双消费；测试面 test/anab2.selectionVerify.test.ts 源级锁定；导出面冗余、实现活。"
     },
     {
       "file": "src/tools/replayActions.ts",
@@ -4384,27 +4447,6 @@
       "kind": "function",
       "category": "internal-surface",
       "reason": "R2-5 补登记（R2-3 并行工位在途新增）：本文件内 config 解析消费；导出面为测试的纯函数执法锚。"
-    },
-    {
-      "file": "src/windowFocusGuard.ts",
-      "name": "peekTargetWindow",
-      "kind": "function",
-      "category": "internal-surface",
-      "reason": "R2-5 补登记（R2-3 并行工位在途新增）：本文件内焦点判定消费；导出面为测试的只读观察锚。"
-    },
-    {
-      "file": "src/tools/askScreen.ts",
-      "name": "_resetAskCache_forTest",
-      "kind": "function",
-      "category": "test-only",
-      "reason": "R5-4 测试注入口（回放缓存+摘要单槽清零）—— 仅测试宇宙消费（test/r54.vlmEconomy.test.ts）；与 _resetGroundingCache_forTest 同律（ΝΩ-48 先例）：TTL/LRU 会话态的隔离面，组合根零调用。"
-    },
-    {
-      "file": "src/tools/askScreen.ts",
-      "name": "_overrideAskClock_forTest",
-      "kind": "function",
-      "category": "test-only",
-      "reason": "R5-4 测试注入口（墙钟覆写，TTL 判定）—— 仅测试宇宙消费（test/r54.vlmEconomy.test.ts）；与 _overrideGroundingClock_forTest 同律。"
     }
   ]
 }

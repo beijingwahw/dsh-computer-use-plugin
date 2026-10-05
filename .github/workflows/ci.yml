@@ -191,8 +191,9 @@ jobs:
       - name: Bench regression gate (W7-6 vs baseline)
         if: runner.os == 'Linux'
         shell: bash
-        env:
-          NODE_OPTIONS: --test-reporter=tap
+        # ΑΝΒ-10: NODE_OPTIONS=--test-reporter=tap 对普通脚本启动是非法参数
+        # （ERR_INVALID_ARG_VALUE，node22/24 双实证）——bench_gate 内部自行
+        # 构造子进程报告器口径，CI 侧不再外设 env。
         run: |
           set -o pipefail
           node scripts/bench_gate.mjs --check 2>&1 | tee bench-gate.log
