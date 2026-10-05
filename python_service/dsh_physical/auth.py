@@ -4,11 +4,15 @@ Layer 1: Transport Binding
   - UDS 文件权限 0600 + chown $UID（进程启动时设置，跨用户隔离）
   - TCP 仅绑定 127.0.0.1，绝不开 0.0.0.0
 
-Layer 2: PID Attestation（Linux 独有）
-  - 校验 token payload.pid 对应的 ``/proc/<PID>/exe`` 存在性
+Layer 2: PID Attestation
+  - Linux：校验 token payload.pid 对应的 ``/proc/<PID>/exe`` 存在性
   - 二进制哈希白名单（``_NODE_BINARY_HASHES``）非空时升级为严格身份校验
-  - 传输层 SO_PEERCRED 取对端 PID 需自定义 uvicorn handler —— 本纪元留白，
-    由 Layer 1（传输绑定）+ Layer 3（HMAC token）承担主力
+  - 传输层 SO_PEERCRED 取对端 PID 需自定义 uvicorn handler（peercred.py
+    服务端半边已落地）
+  - ΠΑΝ-27：Windows 不再恒 True —— 用可得内核信号（进程存在性、可执行
+    路径、创建时间/PID 复用检测）做真实校验；信号不可得时**诚实降级**为
+    「仅回环 + HMAC」（``attestation_mode()`` 可查，启动日志申报），绝不
+    在降级时误报已校验、也绝不在降级时阻断正路径
 
 Layer 3: Capability Token（细粒度能力位图）
   - HMAC-SHA256 签名的 base64 payload
@@ -21,6 +25,7 @@ Layer 3: Capability Token（细粒度能力位图）
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import heapq
 import hmac
@@ -42,11 +47,19 @@ from .errors import ErrorKind, PhysicalError
 Capability = Literal[
     "click", "type", "scroll", "hotkey", "drag",
     "screenshot", "ui_tree", "switch_window", "shm_delete",
+    # ΠΑΝ-25: 管理面能力位 —— shutdown 独立 admin 位（关停是最高权动作，
+    # 与读写动作位隔离）；stats/input_events/devices 归 observe（只读观测，
+    # input_events 是键盘 vk 审计流 —— 敏感度对齐独立观测位而非复用截图位）。
+    # 闭集扩位 ⇒ TS 端 src/physicalExecution/contracts.ts 的 Capability 联合
+    # 与 ALL_CAPS 数组必须同步镜像（对接点；本工单不碰 TS 文件）—— 未镜像
+    # 期间旧 Node token 不含新位 ⇒ 管理端点对其 401（fail-closed 方向正确）。
+    "admin", "observe",
 ]
 
 ALL_CAPS: tuple[Capability, ...] = (
     "click", "type", "scroll", "hotkey", "drag",
     "screenshot", "ui_tree", "switch_window", "shm_delete",
+    "admin", "observe",
 )
 
 # 端点 → 所需 capability 映射（路由层据此校验）
@@ -84,6 +97,16 @@ ENDPOINT_CAPABILITY: dict[str, Capability] = {
     "/v1/hid/scroll": "scroll",
     "/v1/hid/hotkey": "hotkey",
     "/v1/hid/type_text": "type",
+    # ΠΑΝ-25: 管理面入位图（C2-5 H-3 —— 旧实现管理端点不在映射内 ⇒
+    # server._match_capability 返回 None ⇒ 中间件跳过能力校验，单能力
+    # token 亦可关停服务/读键盘审计流/读内部拓扑）。
+    # shutdown → 独立 admin 位（关停权与一切读写动作位隔离）；
+    # stats/input_events/devices → observe（只读观测族 —— input_events 暴露
+    # 键盘 vk 流，stats 暴露池/shm/流内部拓扑，devices 暴露 adb 设备清单）。
+    "/v1/shutdown": "admin",
+    "/v1/stats": "observe",
+    "/v1/input_events": "observe",
+    "/v1/devices": "observe",
 }
 
 
@@ -106,11 +129,185 @@ class AuthResult:
 # ─── HMAC 密钥管理（启动期一次性生成，落盘 0600）───
 
 
+# ΠΑΝ-27: Windows DACL 收口的 ctypes 绑定（结构体布局以 mingw-w64 头为
+# 事实源：TRUSTEE_W x64 = 32B、EXPLICIT_ACCESS_W x64 = 48B —— 与
+# dxgi_capture 的 ABI 钉死纪律同方言）。绑定按调用现建（仅 ensure_key 的
+# 生成/加载两条低频路径触达），任一跳失败 ⇒ None/warn 诚实降级，绝不抛。
+class _TRUSTEE_W(ctypes.Structure):
+    _fields_ = [
+        ("pMultipleTrustee", ctypes.c_void_p),
+        ("pMultipleTrusteeAction", ctypes.c_int),
+        ("TrusteeForm", ctypes.c_int),
+        ("TrusteeType", ctypes.c_int),
+        ("ptstrName", ctypes.c_void_p),
+    ]
+
+
+class _EXPLICIT_ACCESS_W(ctypes.Structure):
+    _fields_ = [
+        ("grfAccessPermissions", ctypes.c_ulong),
+        ("grfAccessMode", ctypes.c_int),
+        ("grfInheritance", ctypes.c_ulong),
+        ("Trustee", _TRUSTEE_W),
+    ]
+
+
+def _win_current_user_sid() -> str | None:
+    """ΠΑΝ-27: 当前进程用户 SID（``S-1-5-21-...`` 字符串形态）。
+
+    GetUserNameW → LookupAccountNameW → ConvertSidToStringSidW 三跳。
+    运行层方法：任一跳失败返回 None（调用方诚实降级），绝不抛。
+    """
+    try:
+        from ctypes import wintypes  # 局部导入：非 Windows 平台无 wintypes 面
+
+        adv = ctypes.WinDLL("advapi32", use_last_error=True)
+        adv.GetUserNameW.restype = wintypes.BOOL
+        adv.GetUserNameW.argtypes = [wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        adv.LookupAccountNameW.restype = wintypes.BOOL
+        adv.LookupAccountNameW.argtypes = [
+            wintypes.LPWSTR, wintypes.LPWSTR, ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        ]
+        adv.ConvertSidToStringSidW.restype = wintypes.BOOL
+        adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+
+        name = ctypes.create_unicode_buffer(256)
+        n = wintypes.DWORD(256)
+        if not adv.GetUserNameW(name, ctypes.byref(n)):
+            return None
+        sid = ctypes.create_string_buffer(68)  # SID 结构体上限 68B
+        cb = wintypes.DWORD(68)
+        dom = ctypes.create_unicode_buffer(256)
+        dcb = wintypes.DWORD(256)
+        use = wintypes.DWORD()
+        if not adv.LookupAccountNameW(
+            None, name.value, sid, ctypes.byref(cb), dom, ctypes.byref(dcb), ctypes.byref(use)
+        ):
+            return None
+        sid_str = ctypes.c_wchar_p()
+        if not adv.ConvertSidToStringSidW(sid, ctypes.byref(sid_str)):
+            return None
+        out = sid_str.value
+        ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(sid_str)
+        return out
+    except Exception:  # noqa: BLE001 —— 信号不可得 = 降级，绝不抛
+        return None
+
+
+def _tighten_key_acl_windows(path: str) -> bool:
+    """ΠΑΝ-27: Windows 密钥文件 DACL 收紧 —— 仅当前用户 + SYSTEM 全权，
+    切断继承（PROTECTED_DACL；icacls ``/inheritance:r`` 等价语义）。
+
+    动机（C2-4 M-4）：NTFS 上 ``chmod 0600`` 近 no-op —— 未收口时密钥被
+    同机其他账户/继承 ACE 读取即可铸任意 caps/pid/exp 的合法 token，
+    三层纵深在主平台退化为「同用户全信」。
+    返回 True = 收紧成功；失败仅 warn 不 raise（密钥仍可用，Layer 1+3
+    照常承担 —— 与 chmod_uds_file 同款诚实降级方言）。
+    """
+    user_sid = _win_current_user_sid()
+    if user_sid is None:
+        print(
+            f"[warn] cannot resolve current user SID; skip ACL tightening for {path}",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        from ctypes import wintypes
+
+        adv = ctypes.WinDLL("advapi32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        adv.ConvertStringSidToSidW.restype = wintypes.BOOL
+        adv.ConvertStringSidToSidW.argtypes = [wintypes.LPWSTR, ctypes.POINTER(ctypes.c_void_p)]
+        adv.SetEntriesInAclW.restype = wintypes.DWORD
+        adv.SetEntriesInAclW.argtypes = [
+            ctypes.c_ulong, ctypes.POINTER(_EXPLICIT_ACCESS_W),
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+        ]
+        adv.SetNamedSecurityInfoW.restype = wintypes.DWORD
+        adv.SetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ]
+        k32.LocalFree.restype = ctypes.c_void_p
+        k32.LocalFree.argtypes = [ctypes.c_void_p]
+
+        def _sid_ptr(sid_str: str) -> ctypes.c_void_p:
+            out = ctypes.c_void_p()
+            if not adv.ConvertStringSidToSidW(sid_str, ctypes.byref(out)):
+                raise OSError(f"ConvertStringSidToSidW({sid_str}) failed")
+            return out
+
+        FILE_ALL_ACCESS = 0x001F01FF
+        GRANT_ACCESS = 1
+        TRUSTEE_IS_SID = 0
+        TRUSTEE_IS_USER = 1
+        SE_FILE_OBJECT = 1
+        DACL_SECURITY_INFORMATION = 0x4
+        PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+
+        # S-1-5-18 = NT AUTHORITY\SYSTEM（按 SID 寻址 —— 账户显示名在本地化
+        # Windows 上不稳定，SID 是语言无关事实源）
+        user_p = _sid_ptr(user_sid)
+        system_p = _sid_ptr("S-1-5-18")
+        ea = (_EXPLICIT_ACCESS_W * 2)()
+        for i, sp in enumerate((user_p, system_p)):
+            ea[i].grfAccessPermissions = FILE_ALL_ACCESS
+            ea[i].grfAccessMode = GRANT_ACCESS
+            ea[i].grfInheritance = 0
+            ea[i].Trustee.TrusteeForm = TRUSTEE_IS_SID
+            ea[i].Trustee.TrusteeType = TRUSTEE_IS_USER
+            ea[i].Trustee.ptstrName = sp
+
+        new_acl = ctypes.c_void_p()
+        try:
+            rc = adv.SetEntriesInAclW(2, ea, None, ctypes.byref(new_acl))
+            if rc != 0:
+                raise OSError(f"SetEntriesInAclW rc={rc}")
+            rc = adv.SetNamedSecurityInfoW(
+                path, SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None, None, new_acl, None,
+            )
+            if rc != 0:
+                raise OSError(f"SetNamedSecurityInfoW rc={rc}")
+        finally:
+            if new_acl.value:
+                k32.LocalFree(new_acl)
+            k32.LocalFree(user_p)
+            k32.LocalFree(system_p)
+        return True
+    except Exception as e:  # noqa: BLE001 —— 收紧失败 = 诚实降级（warn），不阻断
+        print(f"[warn] ACL tightening failed for {path}: {e}", file=sys.stderr)
+        return False
+
+
+def _tighten_key_permissions(path: str) -> None:
+    """ΠΑΝ-27: 密钥文件权限复查/收紧（新生成与既有加载两条路径都走）。
+
+    - POSIX：``chmod 0600``（旧实现仅 O_EXCL 创建时带 0600，已存在文件
+      从不复查 —— umask 放宽过的旧文件持续暴露）。
+    - Windows：DACL 收口为「当前用户 + SYSTEM」（见 _tighten_key_acl_windows）。
+    运行层方言：失败仅 warn 不 raise（密钥仍可用 —— Layer 1+3 照常承担）。
+    """
+    if os.name == "nt":
+        _tighten_key_acl_windows(path)
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        print(f"[warn] chmod key {path} failed: {e}", file=sys.stderr)
+
+
 def ensure_key(path: str) -> bytes:
     """加载或生成 HMAC 密钥。
 
     加载层方法：失败 ``raise`` —— 拒绝带病上线（异常诚实第一条）。
     密钥落盘权限 0600 + 父目录 0700；跨会话稳定。
+    ΠΑΝ-27: 已存在文件的权限**复查/收紧**（旧实现只查长度 —— C2-4 M-4：
+    Windows 上 ``chmod 0600`` 近 no-op，密钥可被同机继承 ACE 读取 ⇒ 铸
+    任意 token）。收紧失败仅 warn 不 raise（密钥仍可用，诚实降级）。
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -125,17 +322,64 @@ def ensure_key(path: str) -> bytes:
         data = p.read_bytes()
         if len(data) < 32:
             raise ValueError(f"auth key {path} too short ({len(data)} bytes, need ≥32)")
+        # ΠΑΝ-27: 既有文件复查/收紧（与新生成同一条收口路径）
+        _tighten_key_permissions(path)
         return data
 
     # 生成 32 字节随机密钥
     key = secrets.token_bytes(32)
-    # O_EXCL：避免与其他进程竞态写
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # ΠΑΝ-27: 缓冲写 + fsync + **回读复核**。实测依据：本机（py3.14/Win）
+    # raw ``os.write`` 约 1 成概率落盘字节漂移（32B 写入读回 33B+，中间插
+    # 字节）—— 旧实现不回读，内存返回干净 32B、盘上是漂移字节 ⇒ 后继任何
+    # 重读（含 Node 端 ensure_key）与首次内存副本 HMAC 必然失配，且无法
+    # 自愈。缓冲写 + fsync 实测 0 漂移；回读复核兜住一切残余路径（失配 ⇒
+    # 删掉重写，3 次不成 ⇒ 加载层 raise：密钥落盘不稳定 = 拒绝带病上线）。
+    last_disk: bytes = b""
     try:
-        os.write(fd, key)
+        for _attempt in range(3):
+            _write_key_exclusive(str(p), key)
+            _tighten_key_permissions(path)
+            last_disk = p.read_bytes()
+            if last_disk == key:
+                return key
+            try:
+                p.unlink()  # 漂移落盘：删掉诚实重写，绝不静默用漂移字节
+            except OSError:
+                pass
+    except FileExistsError:
+        # O_EXCL 竞态：他进程刚建好密钥 —— 重读即得合法密钥（旧实现直接
+        # raise 拒绝上线，而此时合法密钥已在盘上）
+        data = p.read_bytes()
+        if len(data) < 32:
+            raise ValueError(
+                f"auth key {path} too short ({len(data)} bytes, need ≥32)"
+            )
+        _tighten_key_permissions(path)
+        return data
+    raise RuntimeError(
+        f"auth key {path} persisted bytes diverge from generated key "
+        f"(disk={len(last_disk)}B, want 32B) after 3 attempts — refusing to "
+        "start with a key whose on-disk form is unstable"
+    )
+
+
+def _write_key_exclusive(path: str, key: bytes) -> None:
+    """O_EXCL 创建 + 缓冲写 + fsync（fd 单一所有权，异常路径必关）。
+
+    用 ``os.fdopen`` 缓冲写而非 raw ``os.write``：见 ensure_key 内的落盘
+    漂移实测注记。0600 在 ``os.open`` 期即生效（POSIX 无默认权限窗口）。
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    wrapped = False
+    try:
+        with os.fdopen(fd, "wb") as f:
+            wrapped = True
+            f.write(key)
+            f.flush()
+            os.fsync(f.fileno())
     finally:
-        os.close(fd)
-    return key
+        if not wrapped:  # fdopen 自身失败的窄窗：fd 尚未被接管
+            os.close(fd)
 
 
 # ─── Cap Token 铸造与解析 ───
@@ -256,28 +500,186 @@ def _hash_binary(path: str) -> str | None:
         return None
 
 
+# ─── ΠΑΝ-27: Windows PID 信号（存在性/可执行路径/创建时间）───
+
+_win_attest_degraded_at: float = 0.0
+"""最近一次「信号不可得」降级的墙钟时刻（0 = 从未/平台无关）。
+``attestation_mode()`` 据此把 Windows 形态诚实降报为 loopback_hmac_only。"""
+
+_DEGRADE_REPORT_WINDOW_S = 600.0
+"""降级态的报告窗：窗内 attestation_mode 报 loopback_hmac_only；窗外恢复
+win_signals（下一次 attestation 尝试会重探真实信号）。"""
+
+_pid_creation_cache: dict[int, tuple[int, float]] = {}
+"""ΠΑΝ-27: ``pid → (创建时间 FILETIME, 最近校验墙钟)`` —— PID 复用检测。
+同 pid 创建时间漂移 ⇒ 旧进程已死、pid 被新进程复用 ⇒ 诚实拒绝（旧 token
+声称的进程身份已失效）。条目 600s 未刷新即弃（≫ token TTL 60s：旧 token
+早已过期，弃条目避免把未来的合法新进程误拒）。"""
+
+_PID_CREATION_CACHE_TTL_S = 600.0
+_PID_CREATION_CACHE_MAX = 1024
+"""缓存上界（防爆）：不同 pid 数远超此值 ⇒ 异常流量，整体清场重来
+（最坏效果 = 复用检测短暂失效一轮，存在性/白名单校验不受影响）。"""
+
+
+def _win_pid_signals(pid: int) -> tuple[str, str | None, int | None]:
+    """ΠΑΝ-27: Windows 内核 PID 信号 —— (status, exe_path, creation_filetime)。
+
+    - ``("ok", exe, creation)``：进程存活，可执行路径与创建时间均可得；
+    - ``("dead", None, None)``：进程**确证不存在/已终止** —— OpenProcess 报
+      ERROR_INVALID_PARAMETER（pid 无对应进程），或 GetProcessTimes 的
+      exit time ≠ 0（已终止但句柄仍被持有 —— 父进程持有子句柄的僵尸形态；
+      活进程 exit time 恒 0。死 PID 的 token 诚实拒绝）；
+    - ``("unknown", None, None)``：存活但身份信号不可得（查询失败/权限）——
+      诚实降级为「仅回环 + HMAC」，绝不误报已校验、也不阻断正路径。
+    运行层方法：永不抛错。
+    """
+    try:
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE  # 全宽句柄（64 位截断防线）
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        k32.GetProcessTimes.restype = wintypes.BOOL
+        k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        k32.CloseHandle.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        ERROR_INVALID_PARAMETER = 87
+
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            err = ctypes.get_last_error()
+            if err == ERROR_INVALID_PARAMETER:
+                return ("dead", None, None)  # pid 无对应进程 —— 确证死亡
+            return ("unknown", None, None)  # 权限/环境不可得 —— 降级
+        try:
+            # GetProcessTimes 先行：对僵尸（已终止、句柄被持有）同样成功 ——
+            # exit time ≠ 0 即确证已终止（活进程恒 0）。
+            ct = wintypes.FILETIME()
+            et = wintypes.FILETIME()
+            kt = wintypes.FILETIME()
+            ut = wintypes.FILETIME()
+            if not k32.GetProcessTimes(
+                handle, ctypes.byref(ct), ctypes.byref(et), ctypes.byref(kt), ctypes.byref(ut)
+            ):
+                return ("unknown", None, None)
+            exit_ft = (et.dwHighDateTime << 32) | et.dwLowDateTime
+            if exit_ft != 0:
+                return ("dead", None, None)  # 僵尸形态：已终止但句柄仍被持有
+            creation = (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+            buf = ctypes.create_unicode_buffer(1024)
+            n = wintypes.DWORD(1024)
+            if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(n)):
+                return ("unknown", None, None)  # 存活但路径不可得 —— 降级
+            return ("ok", buf.value, creation)
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 —— 信号不可得 = 降级，绝不抛
+        return ("unknown", None, None)
+
+
+def _gc_pid_creation_cache(now: float) -> None:
+    """过期条目清除 + 上界防爆（每请求 O(条目)，条目数 = 活跃 pid 数）。"""
+    global _pid_creation_cache
+    stale = [p for p, (_c, seen) in _pid_creation_cache.items() if now - seen > _PID_CREATION_CACHE_TTL_S]
+    for p in stale:
+        _pid_creation_cache.pop(p, None)
+    if len(_pid_creation_cache) > _PID_CREATION_CACHE_MAX:
+        _pid_creation_cache.clear()  # 异常流量防爆：复用检测短暂失效一轮
+
+
+def attest_pid_supported() -> bool:
+    """ΠΑΝ-27: 平台是否具备真实 PID attestation 信号。
+
+    linux（/proc）与 win32（内核信号）为真；其余平台（darwin 等）无信号 ⇒
+    False（中间件不调用 attestation —— 启动日志诚实申报降级形态）。
+    """
+    return sys.platform in ("linux", "win32")
+
+
+def attestation_mode() -> str:
+    """当前 Layer 2 attestation 的诚实形态（ΠΑΝ-27: 启动日志/信封标注源）。
+
+    - ``proc_exe_whitelist`` / ``proc_existence``：Linux /proc 两形态；
+    - ``win_exe_whitelist`` / ``win_signals``：Windows 白名单/信号形态；
+    - ``loopback_hmac_only``：无真实信号（信号不可得降级 / 不支持平台）——
+      认证实际仅由 Layer 1（回环/UDS 绑定）+ Layer 3（HMAC token）承担。
+    """
+    if sys.platform == "linux":
+        return "proc_exe_whitelist" if _NODE_BINARY_HASHES else "proc_existence"
+    if sys.platform == "win32":
+        if _NODE_BINARY_HASHES:
+            return "win_exe_whitelist"
+        degraded = _win_attest_degraded_at > 0 and (
+            time.time() - _win_attest_degraded_at < _DEGRADE_REPORT_WINDOW_S
+        )
+        return "loopback_hmac_only" if degraded else "win_signals"
+    return "loopback_hmac_only"
+
+
 def attest_pid(pid: int) -> bool:
     """校验 PID 的可执行路径白名单。
 
     空白名单（缺省）= 仅做存在性校验（任意进程都可访问）；
     非空白名单 = 严格二进制身份校验。
-    运行层方法：永不抛错（读 /proc 失败 → False）。
+    运行层方法：永不抛错（读 /proc / 内核信号失败 → 按下述语义判决）。
+
+    ΠΑΝ-27: 非 Linux 不再恒 True ——
+
+    - Linux：/proc ``<pid>/exe`` 存在性 + 可选哈希白名单（语义不变）；
+    - Windows：OpenProcess 信号 —— 进程**确证死亡** ⇒ False（诚实拒绝）；
+      信号可得 ⇒ PID 复用检测（同 pid 创建时间漂移 = 旧进程已死被复用
+      ⇒ False）+ 可选 exe 哈希白名单；信号**不可得** ⇒ 诚实降级放行
+      （attestation_mode 报 loopback_hmac_only —— 绝不误报已校验）；
+    - 其余平台：True（无可得信号 —— Layer 1+3 兜底，启动日志申报）。
     """
-    if sys.platform != "linux":
-        return True  # 非 Linux 平台无 PID attestation，Layer 1+3 兜底
+    global _win_attest_degraded_at
 
-    try:
-        exe_path = os.readlink(f"/proc/{pid}/exe")
-    except OSError:
-        return False  # 进程不存在 / 无权限
+    if sys.platform == "linux":
+        try:
+            exe_path = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return False  # 进程不存在 / 无权限
+        if not _NODE_BINARY_HASHES:
+            return True  # 白名单未配置：开放模式（CI/开发）
+        binary_hash = _hash_binary(exe_path)
+        if binary_hash is None:
+            return False
+        return binary_hash in _NODE_BINARY_HASHES
 
-    if not _NODE_BINARY_HASHES:
-        return True  # 白名单未配置：开放模式（CI/开发）
+    if sys.platform == "win32":
+        status, exe_path, creation = _win_pid_signals(pid)
+        if status == "dead":
+            return False  # 死 PID：token 声称的进程身份已失效 —— 诚实拒绝
+        if status == "unknown":
+            # 信号不可得：降级为「仅回环 + HMAC」（mode 可查）—— 不阻断
+            # 正路径（CI 容器/权限受限环境下服务仍可用），但绝不误报已校验。
+            _win_attest_degraded_at = time.time()
+            return True
+        # ok：PID 复用检测 —— 创建时间漂移 ⇒ 旧进程已死被新进程复用
+        if creation is not None:
+            now = time.time()
+            _gc_pid_creation_cache(now)
+            cached = _pid_creation_cache.get(pid)
+            if cached is not None and cached[0] != creation:
+                return False
+            _pid_creation_cache[pid] = (creation, now)
+        if not _NODE_BINARY_HASHES:
+            return True  # 白名单未配置：存在性 + 复用检测即全部可得信号
+        if exe_path is None:
+            return False
+        binary_hash = _hash_binary(exe_path)
+        if binary_hash is None:
+            return False
+        return binary_hash in _NODE_BINARY_HASHES
 
-    binary_hash = _hash_binary(exe_path)
-    if binary_hash is None:
-        return False
-    return binary_hash in _NODE_BINARY_HASHES
+    return True  # 其余平台：无可得信号（Layer 1+3 兜底 —— 诚实降级）
 
 
 # ─── Nonce 防重放（Layer 3 加固）───

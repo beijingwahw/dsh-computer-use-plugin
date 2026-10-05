@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import math
 import random
 import sys
@@ -572,6 +573,124 @@ def _decode_to_mono(addr: int, frames: int, channels: int, tag: int, bits: int) 
     return [sum(raw[i * channels:(i + 1) * channels]) / channels for i in range(frames)]
 
 
+# ─── ΠΑΝ-83: WAVEFORMATEX(/EXTENSIBLE) ABI 锚点 + 双引擎共享解析器 ───
+#
+# mingw-w64 mmreg.h 核对（定义位于 #pragma pack(1) 区段）：
+#   WAVEFORMATEX: wFormatTag@0 WORD / nChannels@2 / nSamplesPerSec@4 DWORD /
+#     nAvgBytesPerSec@8 DWORD / nBlockAlign@12 WORD / wBitsPerSample@14 WORD /
+#     cbSize@16 WORD ⇒ sizeof = 18
+#   WAVEFORMATEXTENSIBLE = WAVEFORMATEX + wValidBitsPerSample@18 WORD /
+#     dwChannelMask@20 DWORD / SubFormat GUID@24 ⇒ sizeof = 40（cbSize = 22）
+#
+# 旧实现两病灶（批判报告 C2-4 H-1/H-2，本修复的靶）：
+#   1. comtypes 引擎的 WAVEFORMATEX 字段序写错（wBitsPerSample 排在
+#      nAvgBytesPerSec/nBlockAlign 之前）⇒ wBitsPerSample 落偏移 8，读到
+#      **字节率低 16 位**（如 48k 立体声 float32 ⇒ 384000 & 0xFFFF = 56320）
+#      ⇒ ``_decode_to_mono`` 无分支命中 ⇒ 全零假静默 —— 违反本模块宪法
+#      「『没采到』绝不伪装成『静默』」；
+#   2. 两引擎的 EXTENSIBLE 真标签都读 ``sizeof(WFX)``（未 pack 的 ctypes
+#      sizeof = 20）⇒ 读到 **dwChannelMask 低 16 位** 而非 SubFormat@24：
+#      立体声掩码 0x3 恰 = IEEE float 标签（真机 D-A4 通过纯属巧合）；
+#      单声道 0x4 / 5.1 掩码 0x3F ⇒ 未知标签 ⇒ 全零假静默。
+# 修复纪律（对齐 dxgi_capture 的「布局 ABI 锚点钉死在 selftest」）：
+#   - 布局单源 = 本节锚点结构体；两引擎一律经 ``parse_wave_format`` 解析；
+#   - ``--selftest`` / tests/test_audio.py 以手工字节流夹具（单声道 float32 /
+#     5.1 float32 / 立体声 PCM16 / 非 EXTENSIBLE PCM·float）断言解析值，
+#     堵死「selftest 全绿但引擎把所有样本解成 0」的盲区（C2-4 H-3）。
+
+
+class _WaveFormatEx(ctypes.Structure):
+    """mmreg.h WAVEFORMATEX（pack(1)，18B）—— 布局 ABI 锚点（ΠΑΝ-83）。"""
+
+    _pack_ = 1
+    _fields_ = [
+        ("wFormatTag", ctypes.c_uint16),
+        ("nChannels", ctypes.c_uint16),
+        ("nSamplesPerSec", ctypes.c_uint32),
+        ("nAvgBytesPerSec", ctypes.c_uint32),
+        ("nBlockAlign", ctypes.c_uint16),
+        ("wBitsPerSample", ctypes.c_uint16),
+        ("cbSize", ctypes.c_uint16),
+    ]
+
+
+class _WaveFormatExtensible(ctypes.Structure):
+    """mmreg.h WAVEFORMATEXTENSIBLE（pack(1)，40B）；SubFormat 是 16B GUID。"""
+
+    _pack_ = 1
+    _fields_ = [
+        ("Format", _WaveFormatEx),
+        ("wValidBitsPerSample", ctypes.c_uint16),
+        ("dwChannelMask", ctypes.c_uint32),
+        ("SubFormat", ctypes.c_uint8 * 16),
+    ]
+
+
+WAVE_FORMAT_EXTENSIBLE = 0xFFFE
+_WFX_SIZE = 18    # sizeof(WAVEFORMATEX)（selftest 钉死）
+_WFXE_SIZE = 40   # sizeof(WAVEFORMATEXTENSIBLE)（selftest 钉死）
+_OFF_SUBFORMAT = 24  # SubFormat GUID 偏移（selftest 钉死 = _WFX_SIZE + 6）
+
+# KSDATAFORMAT_SUBTYPE_* 的 GUID Data1（首 DWORD，LE）：
+#   PCM = {00000001-…} ⇒ 首 2 字节 0x0001；IEEE_FLOAT = {00000003-…} ⇒ 0x0003
+_SUBFORMAT_PCM = 0x00000001
+_SUBFORMAT_IEEE_FLOAT = 0x00000003
+
+
+def _wfx_total_size(head: bytes) -> int:
+    """按头 18B 计算完整应读长度（EXTENSIBLE ⇒ 18 + cbSize；防御钳到合法下限）。
+
+    WASAPI GetMixFormat 的共享模式 mix format 几乎恒为 EXTENSIBLE（cbSize=22
+    ⇒ 总 40B）；非 EXTENSIBLE 的纯 WAVEFORMATEX 恒 18B。
+    """
+    if len(head) >= _WFX_SIZE and int.from_bytes(head[0:2], "little") == WAVE_FORMAT_EXTENSIBLE:
+        return _WFX_SIZE + int.from_bytes(head[16:18], "little")
+    return _WFX_SIZE
+
+
+def parse_wave_format(buf: bytes) -> dict:
+    """WAVEFORMATEX(/EXTENSIBLE) 字节流 → 格式字典（纯函数，ΠΑΝ-83 夹具靶）。
+
+    EXTENSIBLE 判据（``wFormatTag==0xFFFE`` 且 ``cbSize>=22`` 且缓冲足长）成立
+    ⇒ 真标签取 **SubFormat GUID 首 2 字节**（Data1 低 16 位 @24），并解析
+    wValidBitsPerSample / dwChannelMask；判据不成立 ⇒ 原样返回头部 tag（可能
+    仍是 0xFFFE —— 调用方按未知编码走「宁可缺席不造假」分支）。
+    缓冲不足（<18B / EXTENSIBLE 截断）⇒ ``ValueError`` —— 离线字节夹具与
+    在线 GetMixFormat 读共用同一执法面。raw-vtable / comtypes 双引擎同经
+    此函数解析（布局单源，杜绝「一个引擎一错序、另一个错偏移」再发）。
+    """
+    if len(buf) < _WFX_SIZE:
+        raise ValueError(f"wave format buffer too short: {len(buf)} < {_WFX_SIZE}")
+    fmt = _WaveFormatEx.from_buffer_copy(bytes(buf[:_WFX_SIZE]))
+    out = {
+        "raw_tag": int(fmt.wFormatTag),
+        "tag": int(fmt.wFormatTag),
+        "channels": int(fmt.nChannels),
+        "sr": int(fmt.nSamplesPerSec),
+        "byterate": int(fmt.nAvgBytesPerSec),
+        "block_align": int(fmt.nBlockAlign),
+        "bits": int(fmt.wBitsPerSample),
+        "cb_size": int(fmt.cbSize),
+        "extensible": False,
+        "valid_bits": None,
+        "channel_mask": None,
+    }
+    if out["raw_tag"] == WAVE_FORMAT_EXTENSIBLE and out["cb_size"] >= _WFXE_SIZE - _WFX_SIZE:
+        need = _WFX_SIZE + out["cb_size"]
+        if len(buf) < need:
+            raise ValueError(
+                f"extensible wave format truncated: {len(buf)} < {need} "
+                f"(cbSize={out['cb_size']})"
+            )
+        ext = _WaveFormatExtensible.from_buffer_copy(bytes(buf[:_WFXE_SIZE]))
+        out["extensible"] = True
+        out["valid_bits"] = int(ext.wValidBitsPerSample)
+        out["channel_mask"] = int(ext.dwChannelMask)
+        # SubFormat GUID 首 2 字节 = Data1 低 16 位（PCM=1 / IEEE_FLOAT=3）
+        out["tag"] = int(ext.SubFormat[0]) | (int(ext.SubFormat[1]) << 8)
+    return out
+
+
 class _RawVtableWasapiLink:
     """ΑΩ-R1（D-E2）：原始 vtable WASAPI 客户端 —— py≥3.14 首选引擎。
 
@@ -644,28 +763,20 @@ class _RawVtableWasapiLink:
         self._tls.mta_init = True
 
     def _mix_format(self, client: int) -> dict:
-        """GetMixFormat → 解析 WAVEFORMATEX(/EXTENSIBLE) 真格式标签（ΑΩ-R1）。"""
+        """GetMixFormat → 解析 WAVEFORMATEX(/EXTENSIBLE) 真格式标签（ΑΩ-R1；
+        ΠΑΝ-83：布局经 mmreg.h 锚点 + 共享 ``parse_wave_format`` —— 真标签读
+        SubFormat@24，不再误读 dwChannelMask/字节率）。"""
         ct = self.ct
-
-        class WFX(ct.Structure):  # WAVEFORMATEX（ΑΩ-R1：与 real_probe D-A4 探针一致）
-            _fields_ = [
-                ("tag", ct.c_ushort), ("channels", ct.c_ushort), ("sr", ct.c_uint),
-                ("byterate", ct.c_uint), ("align", ct.c_ushort), ("bits", ct.c_ushort),
-                ("cbSize", ct.c_ushort),
-            ]
-
         pwfx = ct.c_void_p()
         hr = self._fn(client, self.SLOT_CLI_GETMIXFMT, ct.c_long, ct.POINTER(ct.c_void_p))(
             ct.c_void_p(client), ct.byref(pwfx))
         if hr != 0 or not pwfx.value:
             raise OSError(f"GetMixFormat hr=0x{hr & 0xFFFFFFFF:08x}")
-        fmt = ct.cast(pwfx, ct.POINTER(WFX)).contents
-        tag = int(fmt.tag)
-        if tag == 0xFFFE and int(fmt.cbSize) >= 22:  # EXTENSIBLE：SubFormat 首 2 字节 = 真标签
-            raw = ct.cast(pwfx, ct.POINTER(ct.c_ubyte * (ct.sizeof(WFX) + int(fmt.cbSize)))).contents
-            tag = raw[ct.sizeof(WFX)] | (raw[ct.sizeof(WFX) + 1] << 8)
-        return {"tag": tag, "channels": max(1, int(fmt.channels)), "bits": int(fmt.bits),
-                "sr": int(fmt.sr), "wfx_ptr": pwfx.value}
+        # ΠΑΝ-83：先读头 18B 定长 → 按 cbSize 决定整块长度 → 共享解析器。
+        head = ct.string_at(pwfx.value, _WFX_SIZE)
+        parsed = parse_wave_format(ct.string_at(pwfx.value, _wfx_total_size(head)))
+        return {"tag": parsed["tag"], "channels": max(1, parsed["channels"]),
+                "bits": parsed["bits"], "sr": parsed["sr"], "wfx_ptr": pwfx.value}
 
     def open_session(self) -> dict:
         """建链：enumerator → 默认 render 端点 → IAudioClient(LOOPBACK) → capture。
@@ -715,10 +826,16 @@ class _RawVtableWasapiLink:
         clip = self._keep(client)
 
         fmt = self._mix_format(clip)
-        hr = self._fn(clip, self.SLOT_CLI_INITIALIZE, ct.c_long, ct.c_uint32, ct.c_uint32,
-                      ct.c_longlong, ct.c_longlong, ct.c_void_p, ct.c_void_p)(
-            ct.c_void_p(clip), 0, 0x00020000, 20_000_000, 0,  # SHARED | LOOPBACK，2s 缓冲
-            ct.c_void_p(fmt["wfx_ptr"]), None)                 # 回环必须用 mix format 原样
+        # ΠΑΝ-83：GetMixFormat 的缓冲由**调用方**负责 CoTaskMemFree（MSDN ——
+        # CoTaskMemAlloc'd；旧注释「归 IAudioClient 生命周期管」为错误论断，
+        # C2-4 L-11）。Initialize 返回（成败皆然）后即释放 —— SDK 样例同款方言。
+        try:
+            hr = self._fn(clip, self.SLOT_CLI_INITIALIZE, ct.c_long, ct.c_uint32, ct.c_uint32,
+                          ct.c_longlong, ct.c_longlong, ct.c_void_p, ct.c_void_p)(
+                ct.c_void_p(clip), 0, 0x00020000, 20_000_000, 0,  # SHARED | LOOPBACK，2s 缓冲
+                ct.c_void_p(fmt["wfx_ptr"]), None)                 # 回环必须用 mix format 原样
+        finally:
+            self.ole32.CoTaskMemFree(ct.c_void_p(fmt["wfx_ptr"]))
         if hr != 0:
             self._release_all()
             raise OSError(f"IAudioClient.Initialize(SHARED,LOOPBACK) hr=0x{hr & 0xFFFFFFFF:08x}")
@@ -749,7 +866,8 @@ class _RawVtableWasapiLink:
             "sr": fmt["sr"],
             "silent_flag": 0x2,  # AUDCLNT_BUFFERFLAGS_SILENT
             "endpoint_id": endpoint_id,
-            "wfx_ptr": fmt["wfx_ptr"],  # 保活：mix format 内存归 IAudioClient 生命周期管
+            # ΠΑΝ-83：mix format 缓冲已在 Initialize 后 CoTaskMemFree（归调用方，
+            # MSDN）—— 不再持有/保活（旧注释的「IAudioClient 生命周期管」论断有误）。
         }
 
     def read_block(self, session: dict) -> list[float]:
@@ -919,18 +1037,12 @@ class WasapiLoopbackRunner:
                           (["out"], POINTER(c_uint32), "pNumFramesInNextPacket")),
             ]
 
-        class WAVEFORMATEX(ctypes.Structure):  # type: ignore[misc]
-            _fields_ = [
-                ("wFormatTag", c_ushort),
-                ("nChannels", c_ushort),
-                ("nSamplesPerSec", c_uint),
-                ("wBitsPerSample", c_ushort),
-                ("nBlockAlign", c_ushort),
-                ("nAvgBytesPerSec", c_uint),
-                ("cbSize", c_ushort),
-            ]
-
-        return (IMMDeviceEnumerator, IAudioClient, IAudioCaptureClient, WAVEFORMATEX)
+        # ΠΑΝ-83：此处的内联 WAVEFORMATEX 定义已删除 —— 旧定义字段序错误
+        # （wBitsPerSample 排在 nAvgBytesPerSec/nBlockAlign 之前 ⇒ 读到字节率
+        # 低 16 位 ⇒ bits 恒垃圾值 ⇒ 永久假静默，C2-4 H-1）。布局权威移至
+        # 模块级锚点 ``_WaveFormatEx/_WaveFormatExtensible`` + 共享解析器
+        # ``parse_wave_format`` —— 与 raw-vtable 引擎单源同律。
+        return (IMMDeviceEnumerator, IAudioClient, IAudioCaptureClient)
 
     def _ensure_session(self) -> dict | None:
         """惰性建立 WASAPI loopback 会话；失败记因返回 None（绝不抛）。"""
@@ -972,7 +1084,7 @@ class WasapiLoopbackRunner:
         try:
             import ctypes
             import comtypes
-            Enumerator, AudioClient, CaptureClient, WaveFormatEx = built
+            Enumerator, AudioClient, CaptureClient = built
 
             CLSID_MMDeviceEnumerator = comtypes.GUID("{bcde0395-e52f-467c-8e3d-c4579291692e}")
             IID_IAudioClient = comtypes.GUID("{1cb9ad4c-dbfa-4c32-b178-c2f568a703b2}")
@@ -999,17 +1111,16 @@ class WasapiLoopbackRunner:
             client = ctypes.cast(pv_client, ctypes.POINTER(AudioClient)).contents
 
             pv_fmt = client.GetMixFormat()
-            fmt = ctypes.cast(pv_fmt, ctypes.POINTER(WaveFormatEx)).contents
-            format_tag = int(fmt.wFormatTag)
-            bits = int(fmt.wBitsPerSample)
-            channels = max(1, int(fmt.nChannels))
-            sample_rate = int(fmt.nSamplesPerSec)
-            if format_tag == 0xFFFE and int(fmt.cbSize) >= 22:
-                # WAVEFORMATEXTENSIBLE：SubFormat GUID 首 2 字节才是真格式标签
-                ext = ctypes.cast(
-                    pv_fmt, ctypes.POINTER(ctypes.c_ubyte * (ctypes.sizeof(WaveFormatEx) + int(fmt.cbSize)),
-                )).contents
-                format_tag = ext[ctypes.sizeof(WaveFormatEx)] | (ext[ctypes.sizeof(WaveFormatEx) + 1] << 8)
+            # ΠΑΝ-83：解析经 mmreg.h 锚点 + 共享 ``parse_wave_format`` ——
+            # 旧内联 WAVEFORMATEX 字段序错误（wBitsPerSample 读到字节率低 16 位
+            # ⇒ bits 恒垃圾值 ⇒ 假静默，C2-4 H-1）且 EXTENSIBLE 真标签误读
+            # sizeof(20) 处（dwChannelMask 而非 SubFormat@24，C2-4 H-2）。
+            head = ctypes.string_at(pv_fmt, _WFX_SIZE)
+            parsed = parse_wave_format(ctypes.string_at(pv_fmt, _wfx_total_size(head)))
+            format_tag = parsed["tag"]
+            bits = parsed["bits"]
+            channels = max(1, parsed["channels"])
+            sample_rate = parsed["sr"]
 
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -1017,6 +1128,9 @@ class WasapiLoopbackRunner:
                 ctypes.cast(pv_fmt, ctypes.c_void_p),  # mix format 原样回传（回环必须用设备格式）
                 None,
             )
+            # ΠΑΝ-83：GetMixFormat 缓冲归调用方释放（MSDN —— CoTaskMemAlloc'd；
+            # 旧注释「归 IAudioClient 生命周期管」论断有误，C2-4 L-11）。
+            ctypes.windll.ole32.CoTaskMemFree(ctypes.c_void_p(pv_fmt))
             client.Start()
 
             pv_capture = client.GetService(ctypes.byref(IID_IAudioCaptureClient))
@@ -1031,7 +1145,8 @@ class WasapiLoopbackRunner:
                 "format_tag": format_tag,
                 "sr": sample_rate,
                 "silent_flag": AUDCLNT_BUFFERFLAGS_SILENT,
-                "wave_format_ptr": pv_fmt,  # 保活：mix format 内存归 IAudioClient 生命周期管
+                # ΠΑΝ-83：mix format 缓冲已在 Initialize 后 CoTaskMemFree
+                # （归调用方，MSDN）—— 会话不再持有（旧「保活」注释论断有误）。
             }
         except Exception as e:  # noqa: BLE001 —— 运行层铁律：绝不抛
             self._reason = f"wasapi loopback unavailable: {type(e).__name__}: {e}"
@@ -1399,6 +1514,120 @@ def synth_silence(sr: int = SAMPLE_RATE) -> list[float]:
     return [rng.uniform(-1e-5, 1e-5) for _ in range(int(sr * WINDOW_SECONDS))]
 
 
+# ─── ΠΑΝ-83 自测：布局锚点 + 手工字节流夹具（与 tests/test_audio.py 同源执法）───
+
+
+def _selftest_wave_format() -> list[str]:
+    """WAVEFORMATEX/EXTENSIBLE 字节级夹具（ΠΑΝ-83 —— 堵死 C2-4 H-3 盲区：
+    旧 selftest 五类合成波形全绿与「引擎把所有样本解成 0」完全兼容，因为
+    0 窗口判 silence 正是合成静默的期望值；字节夹具直接钉死解析层）。
+
+    夹具全部**手工构造**（struct.pack 显式字节序/偏移，不经被测代码生成 ——
+    拒绝自证循环）；每例同时是旧病灶的回归哨（注释标明旧错读会得到什么）。
+    """
+    import struct
+
+    failures: list[str] = []
+
+    def check(name: str, cond: bool) -> None:
+        print(f"[{'PASS' if cond else 'FAIL'}] {name}")
+        if not cond:
+            failures.append(name)
+
+    # ── 布局锚点（mmreg.h pack(1)；对齐 dxgi_capture「sizeof 钉死 selftest」纪律）──
+    check("ABI sizeof(WAVEFORMATEX)==18", ctypes.sizeof(_WaveFormatEx) == _WFX_SIZE)
+    check("ABI sizeof(WAVEFORMATEXTENSIBLE)==40",
+          ctypes.sizeof(_WaveFormatExtensible) == _WFXE_SIZE)
+    check("ABI SubFormat@24", _WaveFormatExtensible.SubFormat.offset == _OFF_SUBFORMAT)
+    check("ABI wBitsPerSample@14 (after nBlockAlign/nAvgBytesPerSec)",
+          _WaveFormatEx.wBitsPerSample.offset == 14
+          and _WaveFormatEx.nBlockAlign.offset == 12
+          and _WaveFormatEx.nAvgBytesPerSec.offset == 8)
+    check("ABI dwChannelMask@20 / wValidBitsPerSample@18",
+          _WaveFormatExtensible.dwChannelMask.offset == 20
+          and _WaveFormatExtensible.wValidBitsPerSample.offset == 18)
+
+    def _guid(data1: int) -> bytes:
+        # KSDATAFORMAT_SUBTYPE_*：Data1(LE DWORD) + Data2/Data3 + Data4 常量尾
+        return (struct.pack("<IHH", data1, 0x0000, 0x0010)
+                + bytes((0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71)))
+
+    def _ext(ch: int, sr: int, bits: int, mask: int, data1: int,
+             valid_bits: int | None = None) -> bytes:
+        align = ch * bits // 8
+        return (
+            struct.pack("<HHIIHHH", WAVE_FORMAT_EXTENSIBLE, ch, sr, sr * align, align, bits, 22)
+            + struct.pack("<H", bits if valid_bits is None else valid_bits)
+            + struct.pack("<I", mask)
+            + _guid(data1)
+        )
+
+    def _plain(tag: int, ch: int, sr: int, bits: int) -> bytes:
+        align = ch * bits // 8
+        return struct.pack("<HHIIHHH", tag, ch, sr, sr * align, align, bits, 0)
+
+    # ── 夹具 1：单声道 float32 EXTENSIBLE（mask=0x4）──
+    # 旧病灶读数：真标签误读 mask 低 16 位 ⇒ tag=4（未知）⇒ 全零假静默；
+    # comtypes 字段序下 bits 读字节率低 16 位（192000 & 0xFFFF = 0xEE00）。
+    d = parse_wave_format(_ext(1, 48_000, 32, 0x4, _SUBFORMAT_IEEE_FLOAT))
+    check("fixture mono float32: tag=3 bits=32 ch=1 sr=48000",
+          d["tag"] == 3 and d["bits"] == 32 and d["channels"] == 1 and d["sr"] == 48_000)
+    check("fixture mono float32: extensible fields (valid=32, mask=0x4)",
+          d["extensible"] and d["valid_bits"] == 32 and d["channel_mask"] == 0x4)
+
+    # ── 夹具 2：5.1 float32 EXTENSIBLE（mask=0x3F）──
+    # 旧病灶读数：真标签误读 mask ⇒ tag=63（未知）⇒ 全零假静默。
+    d = parse_wave_format(_ext(6, 48_000, 32, 0x3F, _SUBFORMAT_IEEE_FLOAT))
+    check("fixture 5.1 float32: tag=3 (not channel-mask 63) bits=32 ch=6",
+          d["tag"] == 3 and d["bits"] == 32 and d["channels"] == 6
+          and d["channel_mask"] == 0x3F)
+
+    # ── 夹具 3：立体声 PCM16 EXTENSIBLE（mask=0x3，SubFormat=PCM）──
+    # 旧病灶读数：真标签误读 mask ⇒ tag=3（IEEE float）与 bits=16 不匹配 ⇒ 全零。
+    d = parse_wave_format(_ext(2, 44_100, 16, 0x3, _SUBFORMAT_PCM))
+    check("fixture stereo pcm16: tag=1 bits=16 align=4 byterate=176400",
+          d["tag"] == 1 and d["bits"] == 16 and d["block_align"] == 4
+          and d["byterate"] == 176_400)
+
+    # ── 夹具 4/5：非 EXTENSIBLE 的纯 WAVEFORMATEX（PCM16 / float32）──
+    d = parse_wave_format(_plain(1, 2, 44_100, 16))
+    check("fixture plain pcm16: tag=1 extensible=False",
+          d["tag"] == 1 and not d["extensible"] and d["bits"] == 16)
+    d = parse_wave_format(_plain(3, 2, 48_000, 32))
+    check("fixture plain float32: tag=3 extensible=False",
+          d["tag"] == 3 and not d["extensible"] and d["bits"] == 32)
+
+    # ── 防御：截断缓冲 ⇒ ValueError（在线读与离线夹具共用同一执法面）──
+    try:
+        parse_wave_format(_ext(2, 48_000, 32, 0x3, 3)[:30])
+        check("fixture truncated extensible raises ValueError", False)
+    except ValueError:
+        check("fixture truncated extensible raises ValueError", True)
+    try:
+        parse_wave_format(b"\x01\x00")
+        check("fixture short buffer raises ValueError", False)
+    except ValueError:
+        check("fixture short buffer raises ValueError", True)
+
+    # ── 头长计算（两引擎读长单源）──
+    check("_wfx_total_size: extensible→40 / plain→18",
+          _wfx_total_size(_ext(2, 48_000, 32, 0x3, 3)[:18]) == 40
+          and _wfx_total_size(_plain(1, 2, 44_100, 16)) == 18)
+
+    # ── 解码联动：解析出的 (tag, bits) 必须命中 _decode_to_mono 分支 ──
+    # （H-1 的实际伤害路径：旧 bits 垃圾值 ⇒ 无分支命中 ⇒ [0.0]*frames 假静默）
+    pcm16 = (ctypes.c_int16 * 4)(0, 16384, -16384, 8192)
+    mono = _decode_to_mono(ctypes.addressof(pcm16), 2, 2, 1, 16)
+    check("decode linkage: pcm16 stereo pairs averaged",
+          len(mono) == 2 and abs(mono[0] - 0.25) < 1e-9 and abs(mono[1] + 0.125) < 1e-9)
+    flt = (ctypes.c_float * 2)(1.0, -1.0)
+    mono_f = _decode_to_mono(ctypes.addressof(flt), 1, 2, 3, 32)
+    check("decode linkage: float32 stereo pair averaged to 0.0",
+          len(mono_f) == 1 and abs(mono_f[0]) < 1e-9)
+
+    return failures
+
+
 # ─── 自测（合成波形 + mock 注入 —— exit 0 = 五类分类全对）───
 
 
@@ -1561,13 +1790,18 @@ def run_selftest() -> int:
         failures.append(f"poll dedup: {emissions}")
         print(f"[FAIL] poll dedup: {emissions}")
 
+    # ── ΠΑΝ-83：WAVEFORMATEX/EXTENSIBLE 布局锚点 + 字节级夹具 ──
+    # （selftest 盲区收口：解析层从此有离线执法面，详见 _selftest_wave_format）
+    failures.extend(_selftest_wave_format())
+
     if failures:
         print(f"audio selftest FAILED ({len(failures)}):")
         for f in failures:
             print(f"  - {f}")
         return 1
     print("audio selftest OK: 5/5 classes + mock e2e + edge-trigger"
-          + (" + honest-unsupported" if not desc.get("available", False) else ""))
+          + (" + honest-unsupported" if not desc.get("available", False) else "")
+          + " + wave-format byte fixtures (PAN-83)")
     return 0
 
 

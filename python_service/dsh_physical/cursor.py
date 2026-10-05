@@ -76,6 +76,10 @@ def cursor_position() -> dict:
 
     ΝΩ-53 的读取面：镜像在场时零系统调用（dict 快照）；否则单次
     GetCursorPos（与 pyautogui.position 同一底层调用）。永不抛。
+
+    ΠΑΝ-81: 读数为**物理像素**（进程 per-monitor(-v2) 感知契约，见
+    ``dpi.py``）—— 与点击换算（input.py）、截图、显示器枚举同域；镜像
+    路径的坐标同样来自虚拟屏幕物理域（rawinput 按全虚拟桌面 clamp）。
     """
     pos = _raw_mirror_position()
     if pos is not None:
@@ -119,6 +123,7 @@ def _read_kind_windows() -> dict:
     # ΝΩ-53：CURSORINFO 结构本就携带 ptScreenPos —— 同一次调用的免费位置
     # （临时键，cursor_kind 决定去留：镜像开启 ⇒ 转正为 position；关闭 ⇒ 剥除
     # 保持旧响应形状）
+    # ΠΑΝ-81：感知契约下 ptScreenPos 与 GetCursorPos 同为物理像素域。
     pos = {"x": int(ci.ptScreenPos.x), "y": int(ci.ptScreenPos.y)}
 
     if not (ci.flags & _CURSOR_SHOWING):

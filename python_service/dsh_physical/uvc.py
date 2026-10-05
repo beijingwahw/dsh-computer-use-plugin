@@ -90,6 +90,12 @@ class UvcConfig:
     # 丢失时 read 可无限挂起(旧实现会拖死 device 池 worker);后台缓冲线程
     # + 队列超时读把它变成有界等待 + 诚实超时信封。
     read_timeout_s: float = 5.0
+    # ΠΑΝ-92:热拔插后 cap.read() 立即返 (False, None) —— 旧读线程无退避无
+    # 重枚举,单核 100% 空转直到下一次 open()/close()。指数退避的封顶(秒)
+    # 与「每 N 次连续失败重开句柄」的重枚举周期(重插的设备经 DirectShow
+    # 重新枚举,新句柄才拿得到)。
+    reader_backoff_cap_s: float = 1.0
+    reader_reopen_every: int = 8
 
 
 def load_uvc_config_from_env() -> UvcConfig:
@@ -110,6 +116,9 @@ def load_uvc_config_from_env() -> UvcConfig:
         jpeg_quality=max(0, min(100, _env_int("DSH_PHYSICAL_UVC_JPEG_QUALITY", 85))),
         gate_distance=max(0, min(64, _env_int("DSH_PHYSICAL_UVC_GATE_DISTANCE", 3))),
         read_timeout_s=max(0.1, _env_float("DSH_PHYSICAL_UVC_READ_TIMEOUT_S", 5.0)),
+        # ΠΑΝ-92:空转治理旋钮(本加载器自声明的 clamp 方言 —— 越界钳回安全域)
+        reader_backoff_cap_s=max(0.02, _env_float("DSH_PHYSICAL_UVC_BACKOFF_CAP_S", 1.0)),
+        reader_reopen_every=max(1, _env_int("DSH_PHYSICAL_UVC_REOPEN_EVERY", 8)),
     )
 
 
@@ -276,20 +285,31 @@ class Cv2FrameSource:
         height: int | None = None,
         fps: int | None = None,
         read_timeout_s: float = 5.0,
+        backoff_cap_s: float = 1.0,
+        reopen_every: int = 8,
     ) -> None:
         self.index = index
         self.width = width
         self.height = height
         self.fps = fps
         self.read_timeout_s = max(0.1, float(read_timeout_s))
+        # ΠΑΝ-92:读线程空转治理参数(热拔插 ⇒ read 立即返 False ⇒ 忙转)
+        self._backoff_cap_s = max(0.02, float(backoff_cap_s))
+        self._reopen_every = max(1, int(reopen_every))
         self._cap = None
+        self._cap_lock = threading.Lock()  # ΠΑΝ-92:读线程重开句柄与 open/close 换柄互斥
         # ΝΩ-36:后台缓冲读线程状态(线程绑定构造时的 cap —— 换 cap 必换线程,
-        # 杜绝两线程并发读同一 cv2 句柄)
+        # 杜绝两线程并发读同一 cv2 句柄;ΠΑΝ-92 例外:读线程**串行**地释放旧柄
+        # 再开新柄(同一时刻仍只有一个线程持有活跃句柄,不变量保持))
         self._frames_q: queue.Queue = queue.Queue(maxsize=1)  # 满则丢旧保新
         self._reader_stop = threading.Event()
         self._reader_thread: threading.Thread | None = None
         self._reader_cap = None
         self.read_timeouts = 0  # 超时计数(describe 申报 —— 信号健壮度的可观测面)
+        # ΠΑΝ-92 可观测面:连续读失败数 / 重枚举次数 / 重枚举失败次数
+        self.read_failures = 0
+        self.reopens = 0
+        self.reopen_failures = 0
 
     def open(self) -> None:
         self._stop_reader()  # ΝΩ-36:旧 cap 的读线程先停再换新句柄
@@ -300,28 +320,39 @@ class Cv2FrameSource:
                 ErrorKind.SCREEN_CAPTURE_FAILED,
                 f"cv2 unavailable (UVC capture needs opencv-python): {e}",
             ) from e
-        if sys.platform == "win32":
-            # DirectShow 后端:MSMF 在部分采集卡上首帧超时(DirectShow 更稳)
-            self._cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
-        else:
-            self._cap = cv2.VideoCapture(self.index)
-        if not self._cap.isOpened():
-            self._cap.release()
-            self._cap = None
-            raise PhysicalError(
-                ErrorKind.SCREEN_CAPTURE_FAILED,
-                f"cv2.VideoCapture({self.index}) cannot open (no UVC device?)",
-            )
-        if self.width:
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        if self.height:
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        if self.fps:
-            self._cap.set(cv2.CAP_PROP_FPS, self.fps)
+        with self._cap_lock:  # ΠΑΝ-92:与读线程的重开换柄互斥
+            if sys.platform == "win32":
+                # DirectShow 后端:MSMF 在部分采集卡上首帧超时(DirectShow 更稳)
+                self._cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
+            else:
+                self._cap = cv2.VideoCapture(self.index)
+            if not self._cap.isOpened():
+                self._cap.release()
+                self._cap = None
+                raise PhysicalError(
+                    ErrorKind.SCREEN_CAPTURE_FAILED,
+                    f"cv2.VideoCapture({self.index}) cannot open (no UVC device?)",
+                )
+            if self.width:
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            if self.height:
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            if self.fps:
+                self._cap.set(cv2.CAP_PROP_FPS, self.fps)
 
     def _reader_loop(self, cap) -> None:
-        """后台缓冲:持续 ``cap.read()`` → 有界队列(满则丢旧保新)。"""
+        """后台缓冲:持续 ``cap.read()`` → 有界队列(满则丢旧保新)。
+
+        ΠΑΝ-92:热拔插后 ``cap.read()`` 立即返 ``(False, None)`` —— 旧实现对
+        失联设备无退避无重枚举,守护线程单核 100% 空转。现在:连续失败 ⇒
+        指数退避(20ms 起、封顶 ``backoff_cap_s``,对 ``_reader_stop`` 等待
+        —— 关停仍即时响应);每 ``reopen_every`` 次连续失败 ⇒ 释放旧柄 +
+        重开设备(重插的设备经 DirectShow **重新枚举**,新句柄才拿得到)。
+        信号恢复(读到帧)⇒ 计数与退避归零,自然续流全速。
+        """
         q = self._frames_q
+        backoff = 0.02
+        consecutive = 0
         while not self._reader_stop.is_set():
             try:
                 ok, frame = cap.read()  # 信号丢失时可无限挂起 —— 挂的是本守护线程
@@ -329,6 +360,22 @@ class Cv2FrameSource:
                 ok, frame = False, None
             if self._reader_stop.is_set():
                 return
+            if ok and frame is not None:
+                consecutive = 0
+                backoff = 0.02
+                self.read_failures = 0
+            else:
+                consecutive += 1
+                self.read_failures = consecutive
+                # ΠΑΝ-92:设备重枚举(release + reopen;同线程串行换柄 ——
+                # 「两线程并发读同一句柄」的不变量不破)
+                if consecutive % self._reopen_every == 0:
+                    new_cap = self._try_reopen(cap)
+                    if new_cap is not None:
+                        cap = new_cap
+                # ΠΑΝ-92:指数退避(wait 而非 sleep —— 关停旗标即刻可见)
+                self._reader_stop.wait(backoff)
+                backoff = min(backoff * 2, self._backoff_cap_s)
             try:
                 q.put_nowait((ok, frame))
             except queue.Full:
@@ -340,6 +387,42 @@ class Cv2FrameSource:
                     q.put_nowait((ok, frame))
                 except queue.Full:
                     pass
+
+    def _try_reopen(self, old_cap):
+        """ΠΑΝ-92:重枚举一次设备(尽力;失败返 None 保持旧循环继续退避)。"""
+        if self._reader_stop.is_set():
+            return None
+        try:
+            import cv2
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            try:
+                old_cap.release()  # 失联句柄先释放(枚举/驱动资源的诚实归还)
+            except Exception:  # noqa: BLE001
+                pass
+            if sys.platform == "win32":
+                new = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
+            else:
+                new = cv2.VideoCapture(self.index)
+            if not new.isOpened():
+                new.release()
+                self.reopen_failures += 1
+                return None
+            if self.width:
+                new.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            if self.height:
+                new.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            if self.fps:
+                new.set(cv2.CAP_PROP_FPS, self.fps)
+            with self._cap_lock:
+                self._cap = new
+                self._reader_cap = new
+            self.reopens += 1
+            return new
+        except Exception:  # noqa: BLE001 —— 重开失败 = 继续退避循环(诚实计数)
+            self.reopen_failures += 1
+            return None
 
     def _ensure_reader(self) -> None:
         """当前 cap 的读线程在场性保证(线程↔cap 一一绑定)。"""
@@ -394,9 +477,10 @@ class Cv2FrameSource:
 
     def close(self) -> None:
         self._stop_reader()  # ΝΩ-36:先停读线程再释放句柄(正常路径无并发读)
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+        with self._cap_lock:  # ΠΑΝ-92:与读线程的重开换柄互斥
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
 
     def describe(self) -> dict:
         return {
@@ -409,6 +493,12 @@ class Cv2FrameSource:
             "reader_alive": bool(
                 self._reader_thread is not None and self._reader_thread.is_alive()
             ),
+            # ΠΑΝ-92:空转治理的可观测面(连续失败/重枚举成败计数)
+            "read_failures": self.read_failures,
+            "reopens": self.reopens,
+            "reopen_failures": self.reopen_failures,
+            "backoff_cap_s": self._backoff_cap_s,
+            "reopen_every": self._reopen_every,
         }
 
 
@@ -521,7 +611,9 @@ def resolve_frame_source(cfg: UvcConfig, source: FrameSource | None = None) -> F
         import cv2  # noqa: F401
 
         return Cv2FrameSource(cfg.device_index, cfg.width, cfg.height, cfg.fps,
-                              read_timeout_s=cfg.read_timeout_s)
+                              read_timeout_s=cfg.read_timeout_s,
+                              backoff_cap_s=cfg.reader_backoff_cap_s,
+                              reopen_every=cfg.reader_reopen_every)
     except Exception:  # noqa: BLE001
         return UnsupportedFrameSource("cv2 not importable in current environment")
 

@@ -6,19 +6,23 @@
   3. 触发退出钩子 hook(force) —— 钩子缺席（测试形态）⇒ 仅排空不退出。
 
 Windows 上 SIGTERM 即硬杀，Node 端 3s 优雅窗形同虚设 —— 本端点是其躯体。
+
+ΠΑΝ-93 追加：执行器池的关停纪律（deadline + abandon —— 卡 adb 15s 的
+worker 不拖住进程退出）与背压纪律（队列上界 ⇒ busy 信封 + 深度指标）。
 """
+import asyncio
 import sys
 import time
+import unittest
 from pathlib import Path
 
 _SVC_ROOT = str(Path(__file__).resolve().parents[1])
 if _SVC_ROOT not in sys.path:
     sys.path.insert(0, _SVC_ROOT)
 
-import asyncio  # noqa: E402
-import unittest  # noqa: E402
-
-from dsh_physical import routes  # noqa: E402
+from dsh_physical import executors, routes  # noqa: E402
+from dsh_physical.config import ExecutorConfig  # noqa: E402
+from dsh_physical.errors import ErrorKind, PhysicalError  # noqa: E402
 
 
 class ShutdownDrainTests(unittest.TestCase):
@@ -142,6 +146,95 @@ class ShutdownDrainTests(unittest.TestCase):
             self.assertFalse(routes.drain_should_reject("/v1/shutdown"))
 
         asyncio.run(scenario())
+
+
+class ExecutorPoolDisciplineTests(unittest.TestCase):
+    """ΠΑΝ-93：队列上界 busy 拒绝 + 深度指标 + deadline/abandon 关停纪律。"""
+
+    def setUp(self):
+        executors.shutdown_all()
+        executors.configure(ExecutorConfig(
+            input_workers=1, screen_workers=1, device_workers=1, tree_workers=1,
+            input_queue=2, screen_queue=2, device_queue=2, tree_queue=2,
+        ))
+
+    def tearDown(self):
+        # 还原缺省配置并清池：小容量/小队列不泄漏给后续测试（隔离铁律）
+        for f in getattr(self, "_cleanup_futures", []):
+            f.cancel()
+        executors.shutdown_all()
+        executors.configure(ExecutorConfig())
+        executors.shutdown_all()
+
+    def _wait_in_flight(self, pool, target=1, budget=2.0) -> None:
+        dl = time.monotonic() + budget
+        while pool.in_flight < target and time.monotonic() < dl:
+            time.sleep(0.01)
+
+    def test_queue_full_rejects_as_busy_envelope(self):
+        """队满 ⇒ PhysicalError(BUSY)（safe_call ⇒ 200 + 结构化 busy 信封）。"""
+        pool = executors.get(executors.INPUT_POOL)  # 1 worker / queue 2
+        self._cleanup_futures = [pool.submit(time.sleep, 0.8)]
+        self._wait_in_flight(pool)
+        # 恰好两条排队项填满队列（首条已被 worker 取走在飞）
+        self._cleanup_futures += [pool.submit(time.sleep, 0.8) for _ in range(2)]
+
+        async def probe():
+            await executors.run_in(executors.INPUT_POOL, time.sleep, 0.01)
+
+        with self.assertRaises(PhysicalError) as ctx:
+            asyncio.run(probe())
+        self.assertIs(ctx.exception.kind, ErrorKind.BUSY)
+        self.assertIn("queue full", ctx.exception.detail)
+
+    def test_depth_metrics_visible_in_describe(self):
+        """背压可观测：queue_depth/queue_limit/in_flight/rejected_total 在场。"""
+        pool = executors.get(executors.DEVICE_POOL)
+        self._cleanup_futures = [pool.submit(time.sleep, 0.6)]
+        self._wait_in_flight(pool)
+        self._cleanup_futures.append(pool.submit(time.sleep, 0.6))
+        face = executors.describe()["pools"]["device"]
+        self.assertEqual(face["queue_limit"], 2)
+        self.assertEqual(face["max_workers"], 1)
+        self.assertGreaterEqual(face["queue_depth"], 1)
+        self.assertGreaterEqual(face["in_flight"], 1)
+        self.assertIn("rejected_total", face)
+
+    def test_shutdown_deadline_abandons_stuck_worker(self):
+        """卡 3s 的 worker：关停在期限内返回、放弃汇合并如实申报。"""
+        pool = executors.get(executors.SCREEN_POOL)
+        stuck = pool.submit(time.sleep, 3.0)  # 模拟卡在 adb/长编码的 worker
+        self._cleanup_futures = [stuck]
+        self._wait_in_flight(pool)
+        t0 = time.monotonic()
+        shut = executors.shutdown_all(join_timeout_s=0.05)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 1.0, "关停有界（deadline 语义，不被卡死 worker 拖住）")
+        self.assertGreaterEqual(shut["screen"]["abandoned_workers"], 1,
+                                "放弃汇合的 worker 如实申报（诚实 abandon）")
+        rebuilt = executors.get(executors.SCREEN_POOL)
+        self.assertIsNot(rebuilt, pool, "关停后 get() 按需重建（迟到请求降级）")
+
+    def test_workers_are_daemon_interpreter_exit_not_joined(self):
+        """worker 是 daemon 且不经 concurrent.futures 退出注册表 —— 解释器
+        退出不汇合（卡 adb 15s 的 worker 不拖住进程下线的结构保证）。"""
+        pool = executors.get(executors.TREE_POOL)
+        self.assertTrue(all(w.daemon for w in pool._workers))
+        import concurrent.futures.thread as cft
+
+        registered = [t for t, _q in getattr(cft, "_threads_queues", {}).items()
+                      if t in pool._workers]
+        self.assertEqual(registered, [], "不在 concurrent.futures 全局 join 注册表")
+
+    def test_queued_futures_cancelled_on_shutdown(self):
+        """cancel_futures：排队未启动的任务直接取消（await 侧 CancelledError）。"""
+        pool = executors.get(executors.INPUT_POOL)
+        self._cleanup_futures = [pool.submit(time.sleep, 0.05)]
+        self._wait_in_flight(pool)
+        queued = pool.submit(lambda: "never-run")
+        executors.shutdown_all(join_timeout_s=0.0)
+        self.assertTrue(queued.cancelled() or queued.done(),
+                        "排队任务被取消/未执行（关停语义，不是丢帧）")
 
 
 if __name__ == "__main__":

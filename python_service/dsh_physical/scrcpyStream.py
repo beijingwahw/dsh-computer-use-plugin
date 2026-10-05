@@ -100,6 +100,10 @@ class StreamConfig:
     # ``port = base + (scid % 512)`` 的随机冲突曾直接判 spawn 失败 ⇒ 30s
     # 冷却退避;冲突(而非永久故障)场景下重掷即愈。
     port_conflict_retries: int = 3
+    # ΠΑΝ-91:连续失败退避的上限(秒)。冷却按 2^n 指数升级直至本上限,
+    # 封顶后**重试窗口保持开放**(每过一个上限周期仍重试一次 —— 永久性
+    # 退避 = 设备重插后永不自愈,是资源纪律的反面;真机热插拔场景必然发生)。
+    max_backoff_s: float = 300.0
     # ΝΩ-52:控制通道单次 send 墙钟上限 —— server 常驻读控制 socket,健康时
     # 写入 <1ms;超时 ⇒ 通道病亡(socket close)降级 adb(写延迟有界铁律)。
     control_send_timeout_s: float = 2.0
@@ -145,6 +149,8 @@ def stream_config_from_env() -> StreamConfig:
         framing_profile=profile,
         port_conflict_retries=max(0, _i(f"{pfx}_PORT_RETRIES", 3)),
         control_send_timeout_s=max(0.05, _f(f"{pfx}_CONTROL_SEND_TIMEOUT_S", 2.0)),
+        # ΠΑΝ-91:退避上限(钳到 ≥ start_cooldown —— 上限小于基数无意义)
+        max_backoff_s=max(0.0, _f(f"{pfx}_MAX_BACKOFF_S", 300.0)),
     )
 
 
@@ -709,6 +715,19 @@ class AdbScrcpyServerSpawner:
         scid, port, _attempts = reroll_tunnel_port(
             _fwd, self._scfg.tunnel_port, self._scfg.port_conflict_retries,
         )
+        # ΠΑΝ-91:forward 已立 —— 此后**任何**失败路径都必须撤销它。旧实现只在
+        # AdbTunnelByteSource.close 撤(失败路径从未构造该对象):版本不匹配等
+        # 持续失败场景每次尝试泄漏一条 forward,512 端口窗(base + scid%512)
+        # 逐步耗尽 ⇒ reroll 永远失败 ⇒ 30s 冷却死循环,直到 adb server 重启。
+        def _undo_forward() -> None:
+            try:
+                subprocess.run(
+                    [self._acfg.adb_path, "forward", "--remove", f"tcp:{port}"],
+                    capture_output=True, timeout=3,
+                )
+            except Exception:  # noqa: BLE001 —— 尽力撤销;失败不掩盖原失败
+                pass
+
         argv = [
             self._acfg.adb_path, "-s", serial, "shell",
             f"CLASSPATH={self._DEV_JAR}", "app_process", "/",
@@ -727,6 +746,8 @@ class AdbScrcpyServerSpawner:
         sock: socket.socket | None = None
         while time.monotonic() < deadline:
             if proc.poll() is not None:
+                self._reap(proc)
+                _undo_forward()  # ΠΑΝ-91
                 raise RuntimeError(
                     f"scrcpy-server exited rc={proc.returncode} before accepting "
                     "(version mismatch with jar? see true-device checklist)"
@@ -740,6 +761,7 @@ class AdbScrcpyServerSpawner:
                 time.sleep(0.25)
         if sock is None:
             self._reap(proc)
+            _undo_forward()  # ΠΑΝ-91
             raise RuntimeError(f"scrcpy video socket never accepted on tcp:{port}: {last_err}")
         # ΝΩ-52:控制通道 = 同一 forward 端口的第二次 connect(server 侧
         # accept 顺序 video→control,此刻正阻塞等此连接,连上即开流)。
@@ -761,6 +783,7 @@ class AdbScrcpyServerSpawner:
             except OSError:
                 pass
             self._reap(proc)
+            _undo_forward()  # ΠΑΝ-91
             raise RuntimeError(
                 f"scrcpy control socket never accepted on tcp:{port}: {last_err}"
             )
@@ -1087,8 +1110,9 @@ class ScrcpyStream:
 class StreamHub:
     """serial → ScrcpyStream 的生命周期枢纽。
 
-    - 惰性启动:首次 ``grab`` 才 spawn;启动失败 ⇒ ``start_cooldown_s``
-      退避(不每次 grab 都付 spawn 税);流死/首帧超时 ⇒ 移除 + 退避。
+    - 惰性启动:首次 ``grab`` 才 spawn;启动失败 ⇒ 退避(ΠΑΝ-91 起指数
+      升级、``max_backoff_s`` 封顶 —— 封顶后重试窗口仍开放,永不永久退避;
+      出帧成功即清零失败计数);流死/首帧超时 ⇒ 移除 + 退避。
     - idle 看门狗:单线程周期巡检,``now - last_access > idle_timeout_s``
       ⇒ ``stop()``(省电);下次 grab 自动重启。
     - ``close()``:全停 + join 看门狗(进程退出清理)。
@@ -1102,6 +1126,8 @@ class StreamHub:
         self._decoder_factory = decoder_factory
         self._streams: dict[str, ScrcpyStream] = {}
         self._cooldown: dict[str, float] = {}  # serial → until(monotonic)
+        # ΠΑΝ-91:serial → 连续失败计数(指数退避的指数)。成功出帧即清零。
+        self._fail_streaks: dict[str, int] = {}
         self._lock = threading.Lock()
         self._watchdog_stop = threading.Event()
         self._watchdog: threading.Thread | None = None
@@ -1119,6 +1145,9 @@ class StreamHub:
             reason = st.last_error or f"no frame within {budget}s"
             self._retire(serial, st, f"grab failed: {reason}")
             return None
+        # ΠΑΝ-91:出帧 = 流健康,连续失败计数清零(下次失败从基数退避重计)。
+        with self._lock:
+            self._fail_streaks.pop(serial, None)
         return rec
 
     def stats(self) -> dict:
@@ -1161,6 +1190,26 @@ class StreamHub:
 
     # -- 内部 --
 
+    def _backoff_for(self, serial: str, now: float | None = None) -> float:
+        """ΠΑΝ-91:该 serial 最近一次失败所落的退避时长 —— ``min(base·2^(streak-1), cap)``。
+
+        第 1 次失败退 base,连续失败逐次翻倍,封顶后**重试窗口保持开放**
+        (退避周期到点仍重试 —— 设备重插即自愈,绝不演化为永久退避)。
+        streak=0(无失败)⇒ 0。cap < base 时以 base 为准(环境误配防御)。
+        """
+        streak = self._fail_streaks.get(serial, 0)
+        if streak <= 0:
+            return 0.0
+        base = max(self.cfg.start_cooldown_s, 0.0)
+        cap = max(self.cfg.max_backoff_s, base)
+        return min(base * (2 ** (streak - 1)), cap)
+
+    def _penalize(self, serial: str, now: float) -> None:
+        """ΠΑΝ-91:失败记账 —— streak + 1 并按指数退避置冷却(持锁调用方保证)。"""
+        streak = self._fail_streaks.get(serial, 0)
+        self._fail_streaks[serial] = streak + 1
+        self._cooldown[serial] = now + self._backoff_for(serial, now)
+
     def _acquire(self, serial: str) -> ScrcpyStream | None:
         now = time.monotonic()
         with self._lock:
@@ -1178,7 +1227,8 @@ class StreamHub:
         try:
             st.start()
         except Exception:
-            self._cooldown[serial] = time.monotonic() + self.cfg.start_cooldown_s
+            with self._lock:
+                self._penalize(serial, time.monotonic())
             return None
         with self._lock:
             existing = self._streams.get(serial)  # 并发双检:后到者让位
@@ -1194,7 +1244,7 @@ class StreamHub:
         with self._lock:
             if self._streams.get(serial) is st:
                 self._streams.pop(serial, None)
-            self._cooldown[serial] = time.monotonic() + self.cfg.start_cooldown_s
+            self._penalize(serial, time.monotonic())
             _ = reason  # 死因已在 st.last_error;这里只管退避
 
     def _ensure_watchdog_locked(self) -> None:
@@ -1596,6 +1646,58 @@ def _run_selftest() -> int:
           scid0 == 7 and port0 == 27183 + 7 and att0 == 1)
     check("S17 config default retries = 3",
           StreamConfig().port_conflict_retries == 3)
+
+    # ── S21 ΠΑΝ-91:失败退避指数升级 + 封顶(重试窗口不关闭) ──
+    check("S21 config default max backoff = 300s", StreamConfig().max_backoff_s == 300.0)
+    fake21 = FakeSpawner(fail=True)
+    hub21 = StreamHub(StreamConfig(enabled=True, first_frame_timeout_s=0.2,
+                                   start_cooldown_s=0.05, max_backoff_s=0.2,
+                                   watchdog_tick_s=0.05),
+                      fake21, mk_fake_decoder({"made": 0, "closed": 0}), decoder_name="fake")
+    check("S21 first grab fails", hub21.grab("d21") is None and fake21.opens == 1)
+    b1 = hub21._backoff_for("d21")
+    check("S21 first failure backs off base", abs(b1 - 0.05) < 1e-9)
+    # 模拟冷却过期后再失败:退避翻倍 → 再翻倍 → 封顶
+    for expect in (0.1, 0.2, 0.2, 0.2):
+        with hub21._lock:
+            hub21._cooldown["d21"] = 0.0  # 人工到期(避免真睡)
+        check("S21 next grab retries (window open)", hub21.grab("d21") is None
+              and fake21.opens >= 2)
+        b = hub21._backoff_for("d21")
+        check(f"S21 backoff escalates then caps ({expect}s)",
+              abs(b - expect) < 1e-9)
+    hub21.close()
+    # 成功出帧清零计数(退避回到基数): scripted spawner 两次失败后成功
+    class _FlakySpawner(FakeSpawner):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def open(self, serial):
+            self.calls += 1
+            if self.calls <= 2:
+                raise RuntimeError("stub flaky failure")
+            return super().open(serial)
+
+        __call__ = open
+
+    flaky = _FlakySpawner()
+    hub21b = StreamHub(StreamConfig(enabled=True, first_frame_timeout_s=2.0,
+                                    start_cooldown_s=0.05, max_backoff_s=300.0,
+                                    watchdog_tick_s=0.05),
+                       flaky, mk_fake_decoder({"made": 0, "closed": 0}), decoder_name="fake")
+    check("S21 flaky first grab fails", hub21b.grab("f1") is None)
+    check("S21 streak counted", hub21b._fail_streaks.get("f1") == 1)
+    rec21 = None
+    for _ in range(3):  # 两次失败后第三次成功(每次人工到期冷却窗口)
+        with hub21b._lock:
+            hub21b._cooldown["f1"] = 0.0  # 人工到期(避免真睡)
+        rec21 = hub21b.grab("f1")
+        if rec21 is not None:
+            break
+    check("S21 revival succeeds after cooldown window",
+          rec21 is not None and hub21b._fail_streaks.get("f1") is None)
+    hub21b.close()
 
     # ── S18 ΝΩ-52 控制消息编码器字节级手算(scrpy 官方单测向量对齐) ──
     check("S18 keycode vector",

@@ -16,8 +16,10 @@ import struct
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # ΑΩ-R32 同律:discover 以本目录为 top-level,注入 python_service/
 _SVC_ROOT = str(Path(__file__).resolve().parents[1])
@@ -26,6 +28,7 @@ if _SVC_ROOT not in sys.path:
 
 from PIL import Image  # noqa: E402
 
+from dsh_physical import scrcpyStream  # noqa: E402
 from dsh_physical.android import AndroidController  # noqa: E402
 from dsh_physical.config import AndroidConfig  # noqa: E402
 from dsh_physical.scrcpyStream import (  # noqa: E402
@@ -33,6 +36,7 @@ from dsh_physical.scrcpyStream import (  # noqa: E402
     ACTION_MOVE,
     ACTION_UP,
     POINTER_ID_GENERIC_FINGER,
+    AdbScrcpyServerSpawner,
     StreamConfig,
     StreamHub,
     ControlWriter,
@@ -607,6 +611,228 @@ class HubControlSurfaceTests(unittest.TestCase):
             self.assertIsNotNone(hub.grab("emu1"))
             self.assertIsNone(hub.control_writer("emu1"))           # 降级:无控制面
             self.assertEqual(hub.video_size("emu1"), (32, 48))
+        finally:
+            hub.close()
+
+
+class SpawnFailureRevokesForwardTests(unittest.TestCase):
+    """ΠΑΝ-91:spawn 失败路径撤销 adb forward(512 端口窗不再被持续失败耗尽)。"""
+
+    def _fake_subprocess(self, calls, proc):
+        """假 subprocess 模块:push/forward/--remove 记账;Popen 返回注入 proc。"""
+        def fake_run(argv, **_kw):
+            if "push" in argv:
+                calls["pushes"] += 1
+            elif "forward" in argv and "--remove" in argv:
+                calls["removed"].append(argv[-1])
+            elif "forward" in argv:
+                calls["forwards"].append(argv[-2])
+            return types.SimpleNamespace(returncode=0, stderr=b"")
+
+        fake_sub = types.SimpleNamespace(
+            run=fake_run, Popen=lambda *a, **k: proc,
+            DEVNULL=None, TimeoutExpired=Exception,
+        )
+        return mock.patch.object(scrcpyStream, "subprocess", fake_sub)
+
+    def _spawner(self):
+        # server_jar 显式给定(跳过 _locate_jar 的文件系统探测);retries=0 单掷
+        return AdbScrcpyServerSpawner(
+            AndroidConfig(),
+            StreamConfig(server_jar="X:/fake/scrcpy-server.jar",
+                         tunnel_port=27183, port_conflict_retries=0),
+            "2.7.1",
+        )
+
+    def test_server_exit_revokes_forward(self):
+        """版本不匹配形态:server 提前退出 ⇒ reap + forward 撤销(旧实现只 reap)。"""
+        calls = {"pushes": 0, "forwards": [], "removed": []}
+
+        class DeadProc:
+            returncode = 1
+            killed = 0
+
+            def poll(self):
+                return 1
+
+            def kill(self):
+                DeadProc.killed += 1
+
+            def wait(self, timeout=None):
+                return 1
+
+        proc = DeadProc()
+        with self._fake_subprocess(calls, proc):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._spawner().open("emu1")
+        self.assertIn("exited rc=1", str(ctx.exception))
+        self.assertEqual(len(calls["forwards"]), 1, "reroll 单掷立一条 forward")
+        self.assertEqual(calls["removed"], calls["forwards"],
+                         "ΠΑΝ-91:失败路径必须撤销已立的 forward(端口泄漏根因)")
+
+    def test_video_socket_never_accepted_revokes_forward(self):
+        """连接不上形态:5s 窗耗尽 ⇒ reap + forward 撤销 + 诚实报端口。"""
+        calls = {"pushes": 0, "forwards": [], "removed": []}
+
+        class AliveProc:
+            returncode = None
+            killed = 0
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                AliveProc.killed += 1
+
+            def wait(self, timeout=None):
+                return 0
+
+        fake_clock = types.SimpleNamespace(
+            monotonic=lambda: next(_FakeClock.gen), sleep=lambda s: None)
+
+        class _FakeClock:
+            gen = iter([0.0, 1.0, 11.0, 21.0, 31.0, 41.0])  # deadline 即刻超窗
+
+        with self._fake_subprocess(calls, AliveProc()):
+            with mock.patch.object(scrcpyStream, "time", fake_clock), \
+                    mock.patch.object(scrcpyStream.socket, "create_connection",
+                                      side_effect=OSError("refused")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self._spawner().open("emu1")
+        self.assertIn("video socket never accepted", str(ctx.exception))
+        self.assertEqual(calls["removed"], calls["forwards"],
+                         "ΠΑΝ-91:video 连不上 ⇒ 撤销 forward")
+        self.assertGreaterEqual(AliveProc.killed, 1, "进程已 reap")
+
+    def test_control_socket_failure_revokes_forward_and_closes_video_sock(self):
+        """控制通道连不上 ⇒ 视频 sock 关闭 + reap + forward 撤销(不留半残资源)。"""
+        calls = {"pushes": 0, "forwards": [], "removed": []}
+
+        class AliveProc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        video_sock = types.SimpleNamespace(
+            settimeout=lambda t: None,
+            closed=[0],
+            close=lambda: video_sock.closed.__setitem__(0, video_sock.closed[0] + 1),
+        )
+        seq = iter([video_sock])  # 第一次 connect 成功,其后抛错
+
+        def connect(*_a, **_kw):
+            try:
+                return next(seq)
+            except StopIteration:
+                raise OSError("control refused") from None
+
+        fake_clock = types.SimpleNamespace(
+            monotonic=lambda: next(_Clock2.gen), sleep=lambda s: None)
+
+        class _Clock2:
+            gen = iter([0.0, 1.0, 11.0, 21.0, 31.0, 41.0, 51.0, 61.0])
+
+        with self._fake_subprocess(calls, AliveProc()):
+            with mock.patch.object(scrcpyStream, "time", fake_clock), \
+                    mock.patch.object(scrcpyStream.socket, "create_connection",
+                                      side_effect=connect):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self._spawner().open("emu1")
+        self.assertIn("control socket never accepted", str(ctx.exception))
+        self.assertEqual(calls["removed"], calls["forwards"], "ΠΑΝ-91:控制失败 ⇒ 撤销 forward")
+        self.assertEqual(video_sock.closed[0], 1, "视频 socket 已关闭")
+
+
+class HubBackoffTests(unittest.TestCase):
+    """ΠΑΝ-91:连续失败指数退避封顶,重试窗口永不关闭;成功清零。"""
+
+    def _hub(self, base=1.0, cap=4.0):
+        class FailSpawner:
+            def __init__(self):
+                self.opens = 0
+
+            def open(self, serial):
+                self.opens += 1
+                raise RuntimeError("stub failure")
+
+            __call__ = open
+
+        self.spawner = FailSpawner()
+        return StreamHub(
+            StreamConfig(enabled=True, first_frame_timeout_s=0.1,
+                         start_cooldown_s=base, max_backoff_s=cap, watchdog_tick_s=0.05),
+            self.spawner, _fake_decoder(), decoder_name="fake",
+        )
+
+    def test_backoff_escalates_and_caps(self):
+        hub = self._hub(base=1.0, cap=4.0)
+        self.assertEqual(hub._backoff_for("d"), 0.0, "无失败 ⇒ 无退避")
+        for streak, expect in ((1, 1.0), (2, 2.0), (3, 4.0), (9, 4.0)):
+            hub._fail_streaks["d"] = streak
+            self.assertAlmostEqual(hub._backoff_for("d"), expect,
+                                   msg=f"streak={streak} ⇒ {expect}s(封顶后不永久退避)")
+
+    def test_retry_window_stays_open_after_failures(self):
+        hub = self._hub(base=0.05, cap=0.05)
+        self.assertIsNone(hub.grab("d"))
+        for _ in range(3):
+            with hub._lock:
+                hub._cooldown["d"] = 0.0  # 人工到期:验证「到期仍会重试」
+            self.assertIsNone(hub.grab("d"))
+        self.assertGreaterEqual(self.spawner.opens, 4,
+                                "退避到点 ⇒ 重试窗口开放(失败不演化为永久放弃)")
+        hub.close()
+
+    def test_success_resets_fail_streak(self):
+        # 两败一成:成功出帧 ⇒ streak 清零(下次失败从基数重计)
+        class FlakySpawner:
+            def __init__(self):
+                self.calls = 0
+                self.closes = 0
+
+            def open(self, serial):
+                self.calls += 1
+                if self.calls <= 2:
+                    raise RuntimeError("flaky failure")
+                src = _ControlCapableSource.__new__(_ControlCapableSource)
+                # 最小可用源:合成 v2x 首帧 + close 语义(与 _ControlCapableSpawner 同构)
+                src._q = _queue.Queue()
+                src.closed = threading.Event()
+                src._spawner = self
+                src.control = None
+                src._control_taken = False
+                payload = struct.pack(">IIQ", 32, 48, 7)
+                src.push(b"\x00" + b"h264" + struct.pack(">II", 32, 48)
+                         + struct.pack(">QI", (1 << 62) | 7, len(payload)) + payload)
+                return src
+
+            __call__ = open
+
+        flaky = FlakySpawner()
+        hub = StreamHub(
+            StreamConfig(enabled=True, first_frame_timeout_s=1.0,
+                         start_cooldown_s=0.05, max_backoff_s=300.0, watchdog_tick_s=0.05),
+            flaky, _fake_decoder(), decoder_name="fake",
+        )
+        try:
+            self.assertIsNone(hub.grab("d"))
+            self.assertEqual(hub._fail_streaks.get("d"), 1)
+            rec = None
+            for _ in range(3):  # 每轮人工到期冷却窗口(重试窗口开放)
+                with hub._lock:
+                    hub._cooldown["d"] = 0.0
+                rec = hub.grab("d")
+                if rec is not None:
+                    break
+            self.assertIsNotNone(rec, "两败后第三开成功出帧")
+            self.assertIsNone(hub._fail_streaks.get("d"), "成功 ⇒ 失败计数清零")
         finally:
             hub.close()
 

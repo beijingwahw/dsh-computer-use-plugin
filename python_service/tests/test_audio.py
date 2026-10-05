@@ -11,6 +11,7 @@ _SVC_ROOT = str(Path(__file__).resolve().parents[1])
 if _SVC_ROOT not in sys.path:
     sys.path.insert(0, _SVC_ROOT)
 
+import struct  # noqa: E402
 import unittest  # noqa: E402
 
 from dsh_physical.audio import (  # noqa: E402
@@ -21,10 +22,15 @@ from dsh_physical.audio import (  # noqa: E402
     AudioMonitor,
     AudioRingBuffer,
     MockRunner,
+    _WaveFormatEx,
+    _WaveFormatExtensible,
+    _decode_to_mono,
+    _wfx_total_size,
     audio_events_payload,
     classify_features,
     classify_window,
     extract_features,
+    parse_wave_format,
     synth_error_beep,
     synth_key_click,
     synth_notification_ding,
@@ -123,5 +129,143 @@ class MockMonitorEndToEndTests(unittest.TestCase):
         self.assertTrue(runner.describe()["exhausted"])
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ─── ΠΑΝ-83：WAVEFORMATEX/EXTENSIBLE 布局锚点 + 字节级夹具（堵死 selftest 盲区）───
+
+
+class WaveFormatAbiAnchorTests(unittest.TestCase):
+    """布局 ABI 锚点（mingw-w64 mmreg.h pack(1) 核对；对齐 dxgi_capture 的
+    「结构体尺寸钉死在 selftest」纪律 —— C2-4 H-1/H-2 两个病灶的根因都是
+    布局无锚：comtypes 引擎字段序错（wBitsPerSample@8 读到字节率低 16 位）、
+    EXTENSIBLE 真标签读 sizeof(20) 处（dwChannelMask 而非 SubFormat@24）。"""
+
+    def test_sizes_match_mmreg(self):
+        import ctypes
+
+        self.assertEqual(ctypes.sizeof(_WaveFormatEx), 18)
+        self.assertEqual(ctypes.sizeof(_WaveFormatExtensible), 40)
+
+    def test_field_offsets_match_mmreg(self):
+        # pack(1) 下逐字段偏移 = mmreg.h 声明序（无对齐填充）
+        offsets = {name: getattr(_WaveFormatEx, name).offset
+                   for name, _t in _WaveFormatEx._fields_}
+        self.assertEqual(offsets, {
+            "wFormatTag": 0, "nChannels": 2, "nSamplesPerSec": 4,
+            "nAvgBytesPerSec": 8, "nBlockAlign": 12, "wBitsPerSample": 14,
+            "cbSize": 16,
+        })
+        self.assertEqual(_WaveFormatExtensible.wValidBitsPerSample.offset, 18)
+        self.assertEqual(_WaveFormatExtensible.dwChannelMask.offset, 20)
+        self.assertEqual(_WaveFormatExtensible.SubFormat.offset, 24)
+
+
+class MixFormatByteFixtureTests(unittest.TestCase):
+    """手工构造字节流 → parse_wave_format 断言（ΠΑΝ-83 夹具 —— 单声道 /
+    5.1 / PCM16 / float32 各一例，另含非 EXTENSIBLE 与截断防御）。
+
+    夹具经 struct.pack 显式落字节（不经被测代码生成 —— 拒绝自证循环）；
+    每例注释标明旧病灶下的错读值，即回归哨。
+    """
+
+    @staticmethod
+    def _guid(data1: int) -> bytes:
+        # KSDATAFORMAT_SUBTYPE_*：Data1(LE) + Data2/Data3 + Data4 常量尾
+        return (struct.pack("<IHH", data1, 0x0000, 0x0010)
+                + bytes((0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71)))
+
+    @classmethod
+    def _ext(cls, ch: int, sr: int, bits: int, mask: int, data1: int,
+             valid_bits: int | None = None) -> bytes:
+        align = ch * bits // 8
+        return (struct.pack("<HHIIHHH", 0xFFFE, ch, sr, sr * align, align, bits, 22)
+                + struct.pack("<H", bits if valid_bits is None else valid_bits)
+                + struct.pack("<I", mask)
+                + cls._guid(data1))
+
+    @staticmethod
+    def _plain(tag: int, ch: int, sr: int, bits: int) -> bytes:
+        align = ch * bits // 8
+        return struct.pack("<HHIIHHH", tag, ch, sr, sr * align, align, bits, 0)
+
+    def test_mono_float32_extensible(self):
+        # 旧病灶哨：真标签误读 mask@20 ⇒ tag=4（未知）⇒ 全零假静默；
+        # comtypes 字段序错读 bits@8 ⇒ 192000 & 0xFFFF = 0xEE00。
+        d = parse_wave_format(self._ext(1, 48_000, 32, 0x4, 3))
+        self.assertEqual(d["tag"], 3)
+        self.assertEqual(d["bits"], 32)
+        self.assertEqual(d["channels"], 1)
+        self.assertEqual(d["sr"], 48_000)
+        self.assertTrue(d["extensible"])
+        self.assertEqual(d["valid_bits"], 32)
+        self.assertEqual(d["channel_mask"], 0x4)
+
+    def test_51_float32_extensible(self):
+        # 旧病灶哨：真标签误读 mask@20 ⇒ tag=63（未知）⇒ 全零假静默。
+        d = parse_wave_format(self._ext(6, 48_000, 32, 0x3F, 3))
+        self.assertEqual(d["tag"], 3)
+        self.assertEqual(d["channels"], 6)
+        self.assertEqual(d["bits"], 32)
+        self.assertEqual(d["block_align"], 24)
+        self.assertEqual(d["channel_mask"], 0x3F)
+
+    def test_stereo_pcm16_extensible(self):
+        # 旧病灶哨：真标签误读 mask@20 ⇒ tag=3 与 bits=16 不匹配 ⇒ 全零
+        # （真标签应为 PCM=1 —— 位深与标签必须同源，H-2 的实际伤害形态）。
+        d = parse_wave_format(self._ext(2, 44_100, 16, 0x3, 1))
+        self.assertEqual(d["tag"], 1)
+        self.assertEqual(d["bits"], 16)
+        self.assertEqual(d["block_align"], 4)
+        self.assertEqual(d["byterate"], 176_400)
+
+    def test_plain_pcm_and_float_waveformatex(self):
+        # 非 EXTENSIBLE 的 18B 纯 WAVEFORMATEX：tag 原样、无扩展字段
+        d = parse_wave_format(self._plain(1, 2, 44_100, 16))
+        self.assertEqual((d["tag"], d["bits"], d["channels"]), (1, 16, 2))
+        self.assertFalse(d["extensible"])
+        self.assertIsNone(d["valid_bits"])
+        self.assertIsNone(d["channel_mask"])
+        d2 = parse_wave_format(self._plain(3, 2, 48_000, 32))
+        self.assertEqual((d2["tag"], d2["bits"]), (3, 32))
+
+    def test_truncated_buffers_raise(self):
+        # 截断（cbSize=22 但缓冲 <40B）/ 短于 18B ⇒ ValueError —— 在线读与
+        # 离线夹具共用同一执法面（绝不让截断缓冲静默产出垃圾字段）。
+        with self.assertRaises(ValueError):
+            parse_wave_format(self._ext(2, 48_000, 32, 0x3, 3)[:30])
+        with self.assertRaises(ValueError):
+            parse_wave_format(b"\x01\x00\x02")
+
+    def test_total_size_helper(self):
+        # 两引擎的读长单源：EXTENSIBLE 头 ⇒ 18+cbSize；纯 WAVEFORMATEX ⇒ 18
+        self.assertEqual(_wfx_total_size(self._ext(2, 48_000, 32, 0x3, 3)[:18]), 40)
+        self.assertEqual(_wfx_total_size(self._plain(1, 2, 44_100, 16)), 18)
+        # 短头防御：按 18 起步（parse 阶段的 ValueError 兜底执法）
+        self.assertEqual(_wfx_total_size(b"\xff\xfe"), 18)
+
+    def test_decode_branches_driven_by_parsed_tag_bits(self):
+        # H-1 的实际伤害路径闭环：解析出的 (tag, bits) 必须命中 _decode_to_mono
+        # 分支（旧 bits 垃圾值 ⇒ 无分支命中 ⇒ [0.0]*frames 假静默）。
+        import ctypes
+
+        pcm16 = (ctypes.c_int16 * 4)(0, 16384, -16384, 8192)
+        mono = _decode_to_mono(ctypes.addressof(pcm16), 2, 2, 1, 16)
+        self.assertEqual(len(mono), 2)
+        self.assertAlmostEqual(mono[0], 0.25, places=9)
+        self.assertAlmostEqual(mono[1], -0.125, places=9)
+        flt = (ctypes.c_float * 2)(1.0, -1.0)
+        self.assertAlmostEqual(_decode_to_mono(ctypes.addressof(flt), 1, 2, 3, 32)[0],
+                               0.0, places=9)
+
+    def test_both_engines_share_single_layout_source(self):
+        # ΠΑΝ-83 双引擎布局一致性：comtypes 引擎不再自带 WAVEFORMATEX 定义
+        # （旧 H-1 病灶所在），两引擎同经 parse_wave_format —— 模块级锚点
+        # 结构体是唯一布局权威。_build_comtypes 仅返回接口三元组。
+        from dsh_physical import audio
+
+        self.assertIsInstance(audio._WaveFormatEx, type)  # 唯一锚点在场
+        built = audio.WasapiLoopbackRunner._build_comtypes()
+        if built is None:  # comtypes 缺席环境：诚实跳过（布局单源性不受影响）
+            self.skipTest("comtypes not installed")
+        self.assertEqual(len(built), 3)
+        # comtypes 建链路径（py<3.14 运行臂）无法离线实测真 COM —— 解析层
+        # 一致性由共享 parse_wave_format 构造性保证（诚实边界：真机
+        # py<3.14 冒烟待补，见修复报告 F3-1）。

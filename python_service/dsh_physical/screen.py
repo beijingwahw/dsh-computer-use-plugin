@@ -42,6 +42,15 @@ from .errors import ErrorKind, PhysicalError
 from .executors import DEVICE_POOL, SCREEN_POOL, get as get_pool  # ΑΩ-R25 专属池
 from .shm import ShmHandle, make_handle
 
+# ΠΑΝ-81: DPI 像素域契约 —— 诊断面随本模块 re-export（canonical 在 dpi.py）。
+from .dpi import ensure_process_dpi_awareness, pixel_domain_report  # noqa: F401
+
+# ΠΑΝ-81: 进程启动（server/routes 装配即导入本模块）显式申请 per-monitor-v2
+# —— 全链坐标域统一为物理像素（枚举 / ImageGrab / pyautogui.size / ui_tree
+# 归一化分母同域；125% 缩放屏上 L2 坐标不再放大 1.25×）。幂等、绝不抛；
+# 申请被宿主 manifest 拒绝时如实申报（pixel_domain_report）。详见 dpi.py。
+_DPI_AWARENESS_STATE = ensure_process_dpi_awareness()
+
 # W4-5 移动 Surface：外部帧源（android 设备）—— server 期注入；返回
 # (帧, 降级说明|None)。
 SurfaceFrameSource = Callable[[str], tuple[Image.Image, str | None]]
@@ -432,6 +441,11 @@ def _display_capture_rect(display: int) -> tuple[tuple[int, int, int, int], tupl
     DPI 缩放环境（真机执法战果）：EnumDisplayMonitors 可能报**逻辑**像素
     （1920x1080@125% 实测报 1536x864）而 ImageGrab 抓到**物理**像素 ——
     本函数同时返回包围盒，``_capture_image`` 按实际图像尺寸做比例映射对齐。
+
+    ΠΑΝ-81 后：进程启动即显式申请 per-monitor(-v2) 感知（dpi.py）⇒ 枚举
+    与抓图同域（unvirtualized 物理像素），上述逻辑/物理错配在契约下不再
+    出现；比例映射保留为防御层 —— 宿主进程被外部钉死 unaware/system 档
+    （申请被拒）时仍能对齐两域。当前域经 ``pixel_domain_report()`` 可观测。
     """
     monitors = _enum_monitors_win32()
     if display < 0 or display >= len(monitors):
@@ -909,6 +923,8 @@ class ScreenCapture:
             else:
                 # 枚举域 → 抓图像素域：包围盒比例映射（DPI 缩放下枚举报逻辑像素、
                 # ImageGrab 抓物理像素 —— 真机 1920x1080@125% 实测 1536x864 枚举值）。
+                # ΠΑΝ-81：进程感知契约下两域恒同 ⇒ sx=sy=1；映射保留为防御层
+                # （宿主感知被外部钉死 unaware/system 档时仍对齐）。
                 # 同 DPI 环境 sx=sy=1（整数直裁）；边界夹取防微溢出。
                 sx = (virtual.width / vw) if vw > 0 else 1.0
                 sy = (virtual.height / vh) if vh > 0 else 1.0
@@ -987,7 +1003,14 @@ class ScreenCapture:
         return img.crop(box)
 
     async def get_screen_size(self) -> dict:
-        """获取屏幕尺寸。"""
+        """获取屏幕尺寸（主屏物理像素）。
+
+        ΠΑΝ-81：进程感知契约下 ``pyautogui.size()`` 与 ImageGrab / 枚举
+        同为物理像素域 —— 本读数同时是 ui_tree L1/L2 归一化分母（经 routes
+        透传给 get_ui_tree），物理化后 L2「物理 bbox ÷ 分母」不再被逻辑
+        像素放大 1.25×（C2-5 H-1 的树域病灶即在此处收口）。当前域经
+        ``pixel_domain_report()`` 可观测。
+        """
         try:
             import pyautogui
 

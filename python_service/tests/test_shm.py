@@ -104,6 +104,93 @@ class ShmRegistryTests(unittest.TestCase):
         snap["mmap_bytes"] = -999  # 篡改快照不得影响内部账面
         self.assertNotEqual(shm.get_stats()["mmap_bytes"], -999)
 
+    # ─── ΤΕΛ-5 D-G26:releaseShm 服务端自校验(删除面必须落自家 mmap_dir)───
+
+    def test_tel5_release_refuses_foreign_registered_path(self):
+        """注册表被界外路径污染(假设上游 bug / 伪造)⇒ 拒删:界外文件原样存活。
+
+        服务端半边的自校验防线 —— Node 侧白名单根(ΠΑΝ-66)之外的纵深:
+        即使 name 命中注册表,删除面仍须过 _path_within(mmap_root)。
+        """
+        outside = FsPath(self._tmp.name).parent / "tel5_d26_outside_secret.bin"
+        outside.write_bytes(b"DO-NOT-DELETE")
+        try:
+            shm._active_handles[str(outside)] = {
+                "transport": "mmap-file",
+                "path": str(outside),
+                # 故意记录错误的 mmap_root(界内根)——路径不在根内 ⇒ 拒删
+                "mmap_root": str(FsPath(self._tmp.name).resolve()),
+                "mmap": None,
+                "expires_at": 1e18,
+                "size": 13,
+            }
+            before = shm.get_stats()["mmap_bytes"]
+            self.assertTrue(shm.release_by_name(str(outside)))  # 注册表命中 = True
+            self.assertTrue(outside.exists())  # 但文件拒绝被删(fail-closed)
+            self.assertEqual(
+                shm.get_stats()["mmap_bytes"], before
+            )  # 没删就不扣账面(ΑΩ-R26 同律:扣了就是撒谎)
+        finally:
+            shm._active_handles.pop(str(outside), None)
+            outside.unlink(missing_ok=True)
+
+    def test_tel5_release_refuses_symlink_escape(self):
+        """界内 symlink 指向界外真身 ⇒ realpath 解析出界 ⇒ 拒删。
+
+        Node 侧防线不覆盖 symlink 逃逸(ΠΑΝ-66 已知留白);服务端 realpath
+        解析是其配合面 —— 删除判据看真身而非链接文字面。手工注册表污染
+        模拟「注册后换链接」终态(活跃 mmap 未关时 Windows 不许换文件,故
+        直接构造该终态);symlink 创建需平台特权,不可用则如实跳过。
+        """
+        link = FsPath(self._tmp.name) / "tel5_d26_link.bin"
+        target = FsPath(self._tmp.name).parent / "tel5_d26_escape_target.bin"
+        target.write_bytes(b"ESCAPE-TARGET")
+        try:
+            os.symlink(str(target), str(link))
+        except (OSError, NotImplementedError):
+            target.unlink(missing_ok=True)
+            self.skipTest("symlink 创建不可用(需开发者模式/特权)——realpath 分支本平台不可达")
+        shm._active_handles[str(link)] = {
+            "transport": "mmap-file",
+            "path": str(link),
+            "mmap_root": str(FsPath(self._tmp.name).resolve()),
+            "mmap": None,
+            "expires_at": 1e18,
+            "size": 13,
+        }
+        try:
+            before = shm.get_stats()["mmap_bytes"]
+            self.assertTrue(shm.release_by_name(str(link)))  # 注册表命中
+            self.assertTrue(target.exists())  # 界外真身未被删(realpath 拒删)
+            self.assertTrue(os.path.lexists(str(link)))  # 链接本体也未被删
+            self.assertEqual(shm.get_stats()["mmap_bytes"], before)
+        finally:
+            shm._active_handles.pop(str(link), None)
+            if os.path.lexists(str(link)):
+                os.unlink(str(link))
+            target.unlink(missing_ok=True)
+
+    def test_tel5_legitimate_release_still_deletes(self):
+        """回归锚:合法界内 handle 的显式释放照常删文件(自校验不误伤)。"""
+        h = shm.write_image(b"l" * 32, 4, 4, format="PNG", config=self.cfg, ttl_seconds=3600)
+        before = shm.get_stats()["mmap_bytes"]
+        self.assertTrue(shm.release_by_name(h.name))
+        self.assertFalse(os.path.exists(h.name))
+        self.assertEqual(shm.get_stats()["mmap_bytes"], before - 32)
+
+    def test_tel5_path_within_prefix_and_case_guard(self):
+        """_path_within 纯函数律:前缀伪命中 / 大小写折叠 / 根等值 / 判不出。"""
+        root = str(FsPath(self._tmp.name).resolve())
+        evil = FsPath(self._tmp.name).parent / (FsPath(self._tmp.name).name + "-evil")
+        self.assertFalse(shm._path_within(str(evil), root))  # 前缀目录不是子目录
+        self.assertTrue(shm._path_within(str(FsPath(root) / "a.bin"), root))
+        self.assertTrue(shm._path_within(root, root))  # 根自身等值
+        if os.name == "nt":
+            upper = str(FsPath(root)).upper()
+            self.assertTrue(shm._path_within(upper, root))  # Windows 盘符大小写折叠
+        self.assertFalse(shm._path_within("", root))  # 空 child 判不出 ⇒ 不删
+        self.assertFalse(shm._path_within(str(FsPath(root) / "a.bin"), ""))  # 空 root ⇒ 拒
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,11 @@ def make_peercred_protocol():
         return None
 
     class PeerCredProtocol(H11Protocol):
-        _peer_pid: int | None = None
+        # ΠΑΝ-27: 注解式实例属性声明（无类属性默认值 —— 连接级状态不得以
+        # 类属性形式共享，旧 ``_peer_pid: int | None = None`` 是靠运行期
+        # 赋值掩盖的声明反模式；C2-5 低-2）。connection_made 首行即赋值，
+        # 无先读后赋路径。
+        _peer_pid: int | None
 
         def connection_made(self, transport):  # type: ignore[override]
             super().connection_made(transport)

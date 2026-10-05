@@ -839,5 +839,69 @@ class FunnelArbitrationPoolTests(unittest.TestCase):
         self.assertEqual(res.elements[0].name, "OK")
 
 
+# ─── ΠΑΝ-82：uiautomation 导入的 DPI 感知锁定次序执法 ───
+
+
+class DpiGuardOrderTests(unittest.TestCase):
+    """ΠΑΝ-82：``uiautomation`` 的 import 会 ``SetProcessDPIAware()`` 翻转
+    进程 DPI 感知（坐标域随「哪个端点先被调用」漂移的根因）—— 本组执法
+    「先锁感知、后导入」的次序（dpi.py 契约；感知立定后 OS 只能升不能降，
+    其内部调用失败无害）。假模块注入 sys.modules 零真 COM。"""
+
+    def test_ui_tree_snapshot_locks_awareness_before_uiautomation_import(self):
+        events: list[str] = []
+
+        fake = types.ModuleType("uiautomation")
+
+        def fake_root():
+            events.append("import-done")  # import 语句之后的第一个库调用
+            raise RuntimeError("stop: ordering already recorded")
+
+        fake.GetRootControl = fake_root
+        real = ui_tree.ensure_process_dpi_awareness
+
+        def spy():
+            events.append("dpi-locked")
+            return real()
+
+        with mock.patch.dict(sys.modules, {"uiautomation": fake}), \
+                mock.patch.object(ui_tree, "ensure_process_dpi_awareness",
+                                  side_effect=spy), \
+                mock.patch.object(ui_tree, "_uia_comtypes_snapshot",
+                                  side_effect=ImportError("no comtypes")):
+            try:
+                ui_tree._uia_uiautomation_snapshot(SCREEN)
+            except RuntimeError:
+                pass
+        self.assertEqual(events, ["dpi-locked", "import-done"])
+
+    def test_hit_test_locks_awareness_before_uiautomation_import(self):
+        from dsh_physical import hit_test
+
+        events: list[str] = []
+
+        fake = types.ModuleType("uiautomation")
+
+        def fake_cfp(_x, _y):
+            events.append("import-done")
+            return None
+
+        fake.ControlFromPoint = fake_cfp
+        real = hit_test.ensure_process_dpi_awareness
+
+        def spy():
+            events.append("dpi-locked")
+            return real()
+
+        with mock.patch.dict(sys.modules, {"uiautomation": fake}), \
+                mock.patch.object(hit_test, "ensure_process_dpi_awareness",
+                                  side_effect=spy):
+            result = hit_test.hit_test(96, 54)
+        # 假库 ControlFromPoint 返回 None ⇒ 诚实 unknown（既有信封方言不变）
+        self.assertTrue(result["available"])
+        self.assertEqual(result["classification"], "unknown")
+        self.assertEqual(events, ["dpi-locked", "import-done"])
+
+
 if __name__ == "__main__":
     unittest.main()

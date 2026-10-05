@@ -11,7 +11,8 @@
 设计：
   ``PhysicalError`` 是受控错误的载体（含分类法 kind）；
   ``safe_call`` 是异常诚实的外壳：把一切异常转 ``MicroResponse``；
-  ``unhandled_exception_middleware`` 是最后兜底（理论不可达，但纵深防御不靠自觉）。
+  ``unhandled_exception_middleware`` 是最后兜底（ΠΑΝ-95：不宣称「理论不可达」——
+  外部世界（adb/COM/第三方库）的未预期异常真实存在，纵深防御不靠自觉）。
 """
 from __future__ import annotations
 
@@ -40,7 +41,16 @@ class ErrorKind(str, Enum):
     ACTION_TIMEOUT = "action_timeout"
     WINDOW_UNAVAILABLE = "window_unavailable"
     UNAUTHORIZED = "unauthorized"
-    INTERNAL_ERROR = "internal_error"  # 兜底：理论不可达
+    # ΠΑΝ-95：设备级失败（adb 设备离线/未授权/USB 抖动等高频可预期失败）——
+    # TS 端可据此与 internal_error 区分做重试/重连策略。此前 `_shell` 一律铸
+    # INTERNAL_ERROR，错误分类学被污染。
+    DEVICE_UNREACHABLE = "device_unreachable"
+    # ΠΑΝ-93：池背压拒绝（队列深度达上界）——不是失败是"忙"，调用方按退避
+    # 重试处理（区别于 action_timeout：排队被拒时尚未开始执行，无部分副作用）。
+    BUSY = "busy"
+    # 兜底：最后防线（诊断栈附带）。ΠΑΝ-95 起「理论不可达」的自我声明删除——
+    # adb/COM/第三方库的未预期异常真实存在，分类学不得谎报可达性。
+    INTERNAL_ERROR = "internal_error"
 
 
 @dataclass
@@ -90,7 +100,8 @@ def safe_call(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R | dict
 
     - ``PhysicalError``：直接映射其 ``kind``；
     - ``asyncio.TimeoutError``：映射为 ``action_timeout``；
-    - 其余 ``Exception``：映射为 ``internal_error``（理论不可达的兜底）。
+    - 其余 ``Exception``：映射为 ``internal_error``（最后防线兜底 —— 见模块头注
+      ΠΑΝ-95 的可达性修正）。
 
     永不抛错 —— 运行层数据流神圣不可击穿（异常诚实第二条）。
     """

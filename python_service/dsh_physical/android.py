@@ -538,8 +538,14 @@ class AndroidController:
                 note = f"scrcpy grab failed ({e.detail}); degraded to adb screencap"
                 try:
                     return self._adb_screencap(serial), note
-                except PhysicalError:
-                    raise e from None  # scrcpy 的错误更接近根因（设备级）
+                except PhysicalError as adb_e:
+                    # ΠΑΝ-95:双降级全败 ⇒ 以**最后尝试的链**(adb)为主判决,
+                    # 另一链的失败并进 detail —— 不再凭「scrcpy 的错误更接近
+                    # 根因」的猜测丢掉 adb 报的真实设备级原因。
+                    raise PhysicalError(
+                        adb_e.kind,
+                        f"{adb_e.detail} (scrcpy chain also failed: {e.detail})",
+                    ) from None
         return self._adb_screencap(serial), (
             f"scrcpy unavailable ({detail}); degraded to adb exec-out screencap single frame"
         )
@@ -549,8 +555,11 @@ class AndroidController:
     def _shell(self, serial: str, *args: str) -> None:
         rc, _out, err = self._adb("-s", serial, "shell", "input", *args)
         if rc != 0:
+            # ΠΑΝ-95:例行 adb 失败(设备离线/未授权/USB 抖动)是设备级可预期
+            # 失败 —— 铸 DEVICE_UNREACHABLE(TS 端可区分重试),不再污染
+            # INTERNAL_ERROR(那是最后防线诊断位,不是设备状态位)。
             raise PhysicalError(
-                ErrorKind.INTERNAL_ERROR,
+                ErrorKind.DEVICE_UNREACHABLE,
                 self._detail(err, rc, f"adb shell input {' '.join(args)} on {serial}"),
             )
 
@@ -785,7 +794,8 @@ class AndroidController:
                 rc, _out, err = self._adb("-s", serial, "shell", "input", "keyevent", codes)
                 if rc != 0:
                     raise PhysicalError(
-                        ErrorKind.INTERNAL_ERROR,
+                        # ΠΑΝ-95:与 _shell 同律 —— 设备级失败归 DEVICE_UNREACHABLE
+                        ErrorKind.DEVICE_UNREACHABLE,
                         self._detail(err, rc, f"clear_first backspaces on {serial}"),
                     )
             if text:

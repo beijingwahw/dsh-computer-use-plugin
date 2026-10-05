@@ -256,6 +256,27 @@ def _gc_expired_handles() -> None:
         _release_handle(name)
 
 
+def _path_within(child: str, root: str) -> bool:
+    """ΤΕΛ-5 D-G26：child 是否仍落在 root 内（两侧均 realpath 解析）。
+
+    - realpath 把中途任何 symlink 换靶解析到真身 —— 注册时合法的界内路径在
+      删除时被换成指向界外的 symlink ⇒ 解析后出界 ⇒ 拒删（Node 侧白名单根
+      防线〔ΠΑΝ-66〕不覆盖 symlink 逃逸，此处是服务端半边的配合面）；
+    - 分隔符边界严格（防 ``C:\\dsh-evil`` 前缀伪命中 ``C:\\dsh``）；
+    - 大小写按平台折叠（Windows 盘符/路径不敏感）；
+    - 任何一侧解析失败 ⇒ False（判不出 = 不删，fail-closed —— 残留文件由
+      盘点按孤儿收，绝不删界外未知文件）。
+    """
+    try:
+        rp_child = os.path.realpath(child)
+        rp_root = os.path.realpath(root)
+        nc_child = os.path.normcase(rp_child)
+        nc_root = os.path.normcase(rp_root.rstrip("\\/") + os.sep)
+        return nc_child == os.path.normcase(rp_root) or nc_child.startswith(nc_root)
+    except OSError:
+        return False
+
+
 def _release_handle(name: str) -> None:
     """释放 shm 对象（munmap + shm_unlink 或删文件）。永不抛错。"""
     info = _active_handles.pop(name, None)
@@ -282,11 +303,25 @@ def _release_handle(name: str) -> None:
             pass  # 已被回收是正常路径
     elif transport == "mmap-file":
         path = info.get("path", "")
-        try:
-            os.unlink(path)
-            unlinked = True
-        except OSError:
-            pass
+        # ΤΕΛ-5 D-G26（服务端自校验）：删除面必须落自家 mmap_dir——注册时由
+        # write_image 落盘的 mmap_root（服务端自记，非客户端可影响）+ realpath
+        # 解析（防注册后文件被换成指向界外的 symlink）。界外/判不出 ⇒ 拒删
+        # （unlinked=False ⇒ 磁盘账面不扣——没删就不能扣；残留由盘点按孤儿收）。
+        root = info.get("mmap_root", "")
+        if root == "" or not _path_within(path, root):
+            import sys
+
+            print(
+                f"[dsh-physical] shm release refused: path escapes mmap_dir "
+                f"(realpath guard, ΤΕΛ-5 D-G26) — name={name}",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                os.unlink(path)
+                unlinked = True
+            except OSError:
+                pass
     # ΑΩ-R26：文件确认删除后才扣减磁盘账面（unlink 失败 —— 如 Windows 上
     # Node 仍持句柄 —— 磁盘并未真正释放，扣了就是撒谎；残留文件由盘点按孤儿收）。
     if transport == "mmap-file" and unlinked:
@@ -535,6 +570,9 @@ def _write_via_mmap_file(
     _active_handles[file_path] = {
         "transport": "mmap-file",
         "path": file_path,
+        # ΤΕΛ-5 D-G26：服务端自记的删除合法域（resolve 后的 mmap_dir —— 删除面
+        # 自校验 _path_within 的对照根；本值由 write_image 落盘，非客户端可影响）
+        "mmap_root": str(Path(config.mmap_dir).resolve()),
         "mmap": mm,
         "expires_at": expires_at,
         "size": size,

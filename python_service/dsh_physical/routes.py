@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from . import shm as shm_module
 from .android import AndroidController, parse_surface_id
 from .audio import audio_events_payload
-from .auth import ALL_CAPS
+from .auth import ALL_CAPS, attestation_mode, attest_pid_supported
 from .config import AppConfig
 from .errors import ErrorKind, PhysicalError, safe_call, success
 from . import executors as executors_module  # ΝΩ-36：/v1/stats 的池态诊断面
@@ -425,6 +425,38 @@ def _hardware_faces() -> dict:
     return faces
 
 
+# ─── ΤΕΛ-6（D-G28②）：DPI 像素域契约的 /health 申报（ΠΑΝ-81 诊断面接线）───
+# pixel_domain_report() 已由 dpi.py 导出（screen.py 再导出 canonical 面），本处
+# 是 DEBTS D-G28② 登记的 /health 接线义务的兑现。纪律：
+#   · 30s TTL 缓存（surfaces 清单缓存同先例 —— /health 是高频探活端点，ctypes
+#     探测链虽纯进程内零 IO，也不逐探活重跑；域漂移由 InputController 的
+#     domain_epoch 缓存键独立执法，此处申报面允许 30s 滞后）；
+#   · 绝不抛（health 铁律）：dpi 面故障 ⇒ 诚实 absent（{absent, reason}），
+#     绝不谎报已统一、也绝不击穿探活。
+
+
+_pixel_domain_cache: dict[str, Any] = {}
+_PIXEL_DOMAIN_TTL_S = 30.0
+
+
+def _pixel_domain_face() -> Any:
+    """DPI 像素域申报（30s TTL 缓存；任何异常 ⇒ 诚实 absent，绝不抛）。"""
+    now = time.monotonic()
+    cached_at = _pixel_domain_cache.get("at")
+    if isinstance(cached_at, (int, float)) and now - float(cached_at) < _PIXEL_DOMAIN_TTL_S:
+        return _pixel_domain_cache.get("report")
+    try:
+        from .dpi import pixel_domain_report  # canonical 路径（screen.py 仅再导出）
+
+        report: Any = pixel_domain_report()
+    except Exception as e:  # noqa: BLE001 —— health 绝不抛
+        report = {"absent": True, "reason": f"{type(e).__name__}: {e}"}
+    _pixel_domain_cache.clear()
+    _pixel_domain_cache["at"] = now
+    _pixel_domain_cache["report"] = report
+    return report
+
+
 # ─── /v1/health：探活（无需 Cap Token，由 auth.allow_no_token_endpoints 放行）───
 
 
@@ -478,6 +510,10 @@ async def health(nonce: str | None = None) -> dict:
         # W5-1（W4-6/W4-8 落盘）：L2 零 API 设备面 + 声学通道的能力申报 ——
         # 读缓存态（backend/frames/已探测事实），不触发任何设备打开或建链。
         "hardware": _hardware_faces(),
+        # ΤΕΛ-6（D-G28②）：DPI 像素域契约申报（additive 新键，30s TTL 缓存，
+        # 故障诚实 absent —— Node 端/运维可观测「物理像素契约是否成立」，
+        # 此前只能读源码自证）。
+        "pixel_domain": _pixel_domain_face(),
         # J 纪元修正：capabilities 语义撞名 —— 旧实现返回控制器名列表，
         # 与 auth.ALL_CAPS 的能力位图语义冲突，误导 Node 端 CapabilityCache。
         # 现在 capabilities = 能力位图；控制器清单另立 controllers 字段。
@@ -492,7 +528,12 @@ async def health(nonce: str | None = None) -> dict:
         },
         "screenshot_transport": config.screenshot.transport,
         "auth": {
-            "pid_attestation": config.auth.enable_pid_attestation and sys.platform == "linux",
+            # ΠΑΝ-128: 平台判定改走 attest_pid_supported()（linux/win32 —— F1-7
+            # ΠΑΝ-27 起 Windows 也具备真实内核信号，旧 ``sys.platform == "linux"``
+            # 把武装态误报为关）。attestation_mode 为 additive 新键：诚实形态
+            # 申报（proc_*/win_* = 真实信号；loopback_hmac_only = 降级）。
+            "pid_attestation": config.auth.enable_pid_attestation and attest_pid_supported(),
+            "attestation_mode": attestation_mode() if config.auth.enable_pid_attestation else "disabled",
             "capability_token": True,
         },
     }
@@ -693,6 +734,17 @@ async def get_ui_tree(req: UiTreeRequest) -> dict:
     若需要 L2/L3，先经 ``ScreenCapture.capture_png_bytes`` 截屏（J 纪元修正：
     旧实现内联独立截屏代码 —— 不享受测试合成图降级，异常还被 ``pass`` 静默
     吞掉，fault 只会谎报下游 "no image bytes for OCR"）。
+
+    ΠΑΝ-96（routes 侧可达部分）：``source`` 字段此前**收而不用**（声明
+    tree/ocr/vlm 语义却恒走 ceiling 缺省 —— 契约谎言）。现在 source 作为
+    ceiling 的**收紧**语义生效：tree→L1、ocr→L2、vlm→L3，与显式
+    ``funnel_ceiling`` 取**较浅者**（min 语义：两者都只能收紧视野，不能
+    互相放大 —— 客户端钉死 source="ocr" 的纯文本屏不再落到 L3 付费）。
+    ``source="auto"``（缺省）+ ``funnel_ceiling="L3"``（缺省）⇒ L3 —— 旧
+    客户端零回归。冲突计数的数学放宽（L2-only 不恒计冲突）与 arbitrate
+    消费 l1/l2 证据的改造在 ui_tree.py（A 半辖域）—— 对接点见修复报告
+    F3-2：``_align_elements`` 的 conflicts 计数与 ``L3VLMBackend.arbitrate``
+    的 prompt 构造。
     """
     import sys
 
@@ -701,9 +753,16 @@ async def get_ui_tree(req: UiTreeRequest) -> dict:
 
     region_dict = req.region.model_dump() if req.region else None
 
+    # ΠΑΝ-96：source → ceiling 收紧（min 语义，见 docstring）；auto = L3 不收紧
+    _SRC_CEILING = {"tree": 0, "ocr": 1, "vlm": 2, "auto": 2}
+    _CEILING_NAMES = ("L1", "L2", "L3")
+    ceiling = _CEILING_NAMES[
+        min(_SRC_CEILING[req.source], _CEILING_NAMES.index(req.funnel_ceiling))
+    ]
+
     # 若需要 L2/L3，先截屏（走 ScreenCapture 统一路径，含测试降级）
     screenshot_bytes: bytes | None = None
-    if req.funnel_ceiling in ("L2", "L3"):
+    if ceiling in ("L2", "L3"):
         try:
             screenshot_bytes, _, _ = await screen_ctrl.capture_png_bytes(region_dict)
         except PhysicalError as e:
@@ -723,7 +782,7 @@ async def get_ui_tree(req: UiTreeRequest) -> dict:
     result = await funnel_ctrl.extract(
         screenshot_bytes=screenshot_bytes,
         region=region_dict,
-        funnel_ceiling=req.funnel_ceiling,
+        funnel_ceiling=ceiling,
         screen_size=screen_size,
     )
     return result.to_dict()
@@ -735,6 +794,18 @@ async def switch_window(req: SwitchWindowRequest) -> dict:
     """按标题关键词切窗。"""
     window_ctrl: WindowManager = _get("window")
     return await window_ctrl.switch_by_title(req.keyword)
+
+
+@router.get("/active_window")
+@safe_call
+async def active_window() -> dict:
+    """读前台窗口标题（只读零副作用）—— R2-3 type_text 前置焦点校验的数据源。
+
+    backend 缺席 ⇒ WINDOW_UNAVAILABLE failure 信封（Node 侧按通道缺席降级，
+    绝不伪造标题）。
+    """
+    window_ctrl: WindowManager = _get("window")
+    return await window_ctrl.active_window()
 
 
 # ─── 感知辅助端点（D-1 工具层接线：无原生依赖的 Node 端所需）───
@@ -769,6 +840,11 @@ async def cursor() -> dict:
     loop = asyncio.get_running_loop()
     # ΑΩ-R25：pyautogui 读取 ⇒ input 池（快通道，不排在 adb/编码队尾）
     pos = await loop.run_in_executor(get_pool(INPUT_POOL), pyautogui.position)
+    if cfg.raw_input.enabled:
+        # ΠΑΝ-90：回退即回灌 —— 轮询读到的 ground-truth 播种回镜像（漂移
+        # 账/滑动窗口归零）。SetCursorPos 类程序性移动与弹道学近似漂移都
+        # 靠这个闭环收口：镜像最多错「一个漂移预算」的量，随即自愈。
+        rawinput_module.reseed(float(pos.x), float(pos.y))
     return {"x": float(pos.x), "y": float(pos.y), **out_extra}
 
 
@@ -799,8 +875,9 @@ async def input_events() -> dict:
     镜像开启时返回最近 ``event_window_s``（缺省 1s）内的事件（环容量
     ``ring_capacity`` 缺省 128；鼠标位移/按钮位图 + 键盘 vk—— 不含文本，
     审计所需的最小证据流）。镜像关闭/不可用 ⇒ ``available=False`` + 真实
-    原因（诚实降级，不谎报空事件）。鉴权与 /v1/stats 同方言：不在
-    ENDPOINT_CAPABILITY ⇒ 不要求特定位图（持有效 Cap Token 即可读）。
+    原因（诚实降级，不谎报空事件）。鉴权：``ENDPOINT_CAPABILITY`` 映射
+    ``observe`` 位（ΠΑΝ-25 —— 键盘 vk 审计流敏感度独立于截图位；旧注释
+    「不在映射 ⇒ 不要求特定位图」已随 ΠΑΝ-25 失效）。
     """
     cfg: AppConfig = _get("config")
     desc = rawinput_module.describe()
@@ -1085,10 +1162,10 @@ def _collect_stats() -> dict:
 async def stats() -> dict:
     """ΝΩ-36：诊断端点 —— 池/shm/常驻流/声学/帧环水位的只读聚合。
 
-    鉴权按 auth 现状最小实现（与 /v1/shutdown 同管理面方言）：不在
-    ``ENDPOINT_CAPABILITY`` ⇒ 不要求特定位图，X-Cap-Token + X-Request-Id
-    nonce 强制校验照走（密钥持有者即可读诊断 —— 不加新能力位，Node 端
-    capToken 的 Capability 闭集不动）。缺数据的面诚实 ``{"absent": true}``。
+    鉴权：``ENDPOINT_CAPABILITY`` 映射 ``observe`` 位（ΠΑΝ-25 —— stats 暴露
+    池/shm/流内部拓扑，归只读观测族；X-Cap-Token + X-Request-Id nonce 强制
+    校验照走。旧注释「不在映射 ⇒ 不要求特定位图」已随 ΠΑΝ-25 失效）。
+    缺数据的面诚实 ``{"absent": true}``。
     """
     return _collect_stats()
 
@@ -1120,16 +1197,18 @@ async def release_shm(name: str) -> dict:
 # Windows 上 SIGTERM 即硬杀（TerminateProcess），Node 端 serviceManager 的
 # 3s 优雅窗形同虚设。管理面改走 HTTP：``POST /v1/shutdown`` 收到即
 #   1. 置 draining 标志 —— server.py 的 drain 中间件对新请求（/v1/shutdown
-#      自身除外）回 503+failure 信封（先于 auth/logging，不浪费鉴权开销）；
+#      自身除外）回 503+failure 信封（先于 auth 执行、logging 之内 —— F1-7
+#      中间件层级重排后 logging 移到 drain 之外，503 与 401 同样留痕；
+#      旧注「先于 auth/logging」的 logging 半句已过时）；
 #   2. 等在飞请求完成（上限 SHUTDOWN_DRAIN_MAX_WAIT_S=3s —— 卡死的在飞
 #      动作不拖住下线，到点强制走退出）；
 #   3. 触发退出钩子 —— server.run() 注入的 uvicorn.Server 翻转器
 #      （should_exit / 超时 force_exit），lifespan finally 链（shm 清理、
 #      UVC/HID/执行器池收口）随之执行后进程自退。
-# 鉴权（按 auth.py 能力位图现状最小实现，不加新能力位）：/v1/shutdown 不在
-# allow_no_token_endpoints ⇒ 走既有管理面 = X-Cap-Token + X-Request-Id nonce
-# 强制校验；不在 ENDPOINT_CAPABILITY ⇒ 不要求特定位图（密钥持有者即可关停
-# —— 关停权与密钥信任根同源，Node 端 capToken.mintToken(ALL_CAPS) 即可）。
+# 鉴权（ΠΑΝ-25 管理面入位图）：/v1/shutdown 不在 allow_no_token_endpoints ⇒
+# 走既有管理面 = X-Cap-Token + X-Request-Id nonce 强制校验；ENDPOINT_CAPABILITY
+# 映射 ``admin`` 位（关停权独立成位，与一切读写动作位隔离 —— 单能力 token
+# 不可关停；旧注「不在映射 ⇒ 密钥持有者即可关停」已随 ΠΑΝ-25 失效）。
 
 SHUTDOWN_DRAIN_MAX_WAIT_S = 3.0
 SHUTDOWN_POLL_INTERVAL_S = 0.02

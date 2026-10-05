@@ -20,10 +20,18 @@ OS 的结构层直接给答案。
 
 异常诚实：库缺席/COM 失败/无显示 → ``available=False`` + 真实原因，
 永不抛错。
+
+ΠΑΝ-81/82 坐标域契约：``px/py`` 是**物理像素**（进程 per-monitor(-v2)
+感知契约，见 ``dpi.py``）；``uiautomation`` 的 import 会调用
+``SetProcessDPIAware()`` 翻转进程感知 —— 本模块在导入它**之前**先锁
+定我们的感知档位（OS「只能升不能降」封死其翻转），坐标域不再随
+「哪个端点先被调用」漂移。
 """
 from __future__ import annotations
 
 from typing import Any
+
+from .dpi import ensure_process_dpi_awareness  # ΠΑΝ-82: 第三方导入前的感知锁
 
 # ControlTypeName 带 'Control' 后缀（'ButtonControl'）—— 归一后匹配
 _INTERACTIVE: set[str] = {
@@ -57,7 +65,11 @@ def hit_test(px: int, py: int) -> dict:
 
     返回 ``{available, control_type, name, chain, classification}``；
     classification ∈ control|text|unknown|unavailable。
+    ``px/py`` 为物理像素（ΠΑΝ-81 契约 —— 与点击换算/截图/枚举同域）。
     """
+    # ΠΑΝ-82: uiautomation 的 import 即 ``SetProcessDPIAware()``（进程级）——
+    # 必须发生在我们的感知档位锁定之后，否则进程坐标域随本端点首次调用翻转。
+    ensure_process_dpi_awareness()
     try:
         import uiautomation as ua  # noqa: PLC0415 —— 懒加载：库缺席时服务仍可启动
     except Exception as e:  # noqa: BLE001

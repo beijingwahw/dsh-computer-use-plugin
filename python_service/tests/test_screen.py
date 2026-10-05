@@ -300,5 +300,214 @@ class CaptureHotPathSmokeTests(unittest.TestCase):
         self.assertIn("mean", stats[0])
 
 
+# ─── ΠΑΝ-81/82：进程级 DPI 域契约与执法（dpi.py + input 尺寸缓存）───
+
+
+class DpiDomainContractTests(unittest.TestCase):
+    """ΠΑΝ-81：单一像素域契约的立法（ensure）与可观测性（report）。
+
+    契约：进程显式申请 per-monitor-v2 ⇒ 全链（枚举 / ImageGrab /
+    pyautogui.size / ui_tree 归一化分母 / 点击换算 / 光标）物理像素同域。
+    宿主 manifest 已钉死感知时申请被拒 —— 契约要求如实申报，不谎报。
+    """
+
+    def test_pixel_domain_report_shape_and_never_raises(self):
+        from dsh_physical import dpi
+
+        rep = dpi.pixel_domain_report()
+        for key in ("platform", "contract", "requested", "achieved", "attempted",
+                    "awareness", "system_dpi", "pixel_domain", "endpoints"):
+            self.assertIn(key, rep)
+        self.assertEqual(rep["requested"], "per-monitor-v2")
+        self.assertIn(rep["awareness"], (
+            "unaware", "system", "per-monitor", "per-monitor-v2", "unknown", "non-windows"))
+        self.assertIn(rep["pixel_domain"], (
+            "physical", "physical(system-dpi)", "logical", "unknown", "non-windows"))
+        # 端点域申报：随感知漂移的五个端点 + 恒物理的抓图端点
+        self.assertEqual(sorted(rep["endpoints"]), sorted([
+            "pyautogui.size()", "EnumDisplayMonitors/GetMonitorInfoW",
+            "ui_tree L1/L2 normalization divisor", "input pixel conversion",
+            "cursor GetCursorPos/CURSORINFO", "pyautogui.screenshot()/ImageGrab"]))
+        self.assertEqual(rep["endpoints"]["pyautogui.screenshot()/ImageGrab"], "physical")
+        # 感知档位 ⇒ 域的映射一致性（契约申报不自相矛盾）
+        expected = {
+            "per-monitor": "physical", "per-monitor-v2": "physical",
+            "system": "physical(system-dpi)", "unaware": "logical",
+        }.get(rep["awareness"], rep["pixel_domain"])
+        self.assertEqual(rep["pixel_domain"], expected)
+
+    def test_ensure_idempotent_and_awareness_stable(self):
+        from dsh_physical import dpi
+
+        first = dpi.ensure_process_dpi_awareness()
+        second = dpi.ensure_process_dpi_awareness()  # 幂等：二次为记账 no-op
+        self.assertEqual(first, second)
+        self.assertEqual(dpi.current_dpi_awareness(), first)
+
+    def test_contract_holds_after_screen_module_import(self):
+        # screen 模块导入即立法（server/routes 装配路径）—— 事后状态必须
+        # 可查询且与本机探测一致（never raises / 形状稳定）。
+        import dsh_physical.screen  # noqa: F401  已导入则为幂等 no-op
+
+        from dsh_physical import dpi
+
+        self.assertTrue(dpi.pixel_domain_report()["attempted"])
+
+    @unittest.skipUnless(sys.platform == "win32", "win32-only DPI enforcement")
+    def test_legacy_dpi_flip_attempt_cannot_change_domain(self):
+        # ΠΑΝ-82 执法（不依赖 uiautomation 安装）：ensure 之后，第三方库
+        # import 期的 SetProcessDPIAware()（uiautomation / pyautogui 的
+        # _pyautogui_win.py 行为）不再能翻转进程感知 —— OS「只能升不能降」。
+        import ctypes
+
+        from dsh_physical import dpi
+
+        u = ctypes.windll.user32
+        if not hasattr(u, "SetProcessDpiAwarenessContext"):
+            self.skipTest("SetProcessDpiAwarenessContext unavailable (pre Win10 1703)")
+        dpi.ensure_process_dpi_awareness()
+        before = dpi.current_dpi_awareness()
+        before_epoch = dpi.domain_epoch()
+        try:
+            u.SetProcessDPIAware()  # 模拟第三方库导入副作用
+        except Exception:  # noqa: BLE001 —— 调用本身失败正是契约生效的形态
+            pass
+        self.assertEqual(dpi.current_dpi_awareness(), before)
+        self.assertEqual(dpi.domain_epoch(), before_epoch)
+
+    def test_uiautomation_import_keeps_awareness(self):
+        # ΠΑΝ-82 端到端执法：真 uiautomation 库的 import 不翻转感知
+        # （库缺席的环境诚实跳过 —— 上一用例以直接系统调用覆盖同一条律）。
+        import importlib.util
+
+        if importlib.util.find_spec("uiautomation") is None:
+            self.skipTest("uiautomation not installed on this host")
+        from dsh_physical import dpi
+
+        dpi.ensure_process_dpi_awareness()
+        before = dpi.current_dpi_awareness()
+        import uiautomation  # noqa: F401 —— 副作用导入正是被测对象
+
+        self.assertEqual(dpi.current_dpi_awareness(), before)
+
+
+class InputScreenSizeCacheTests(unittest.TestCase):
+    """ΠΑΝ-81：InputController 尺寸缓存 = TTL + DPI 域指纹双失效键。
+
+    C2-5 H-2 病灶：30s TTL 窗口内第三方库翻转感知 ⇒ 旧逻辑像素读数继续
+    换算新物理坐标（~25% 偏移）。域指纹（domain_epoch）变化 ⇒ 缓存立即失效。
+    """
+
+    @staticmethod
+    def _controller():
+        from dsh_physical.config import ActionConfig
+        from dsh_physical.input import InputController
+
+        return InputController(ActionConfig())
+
+    @staticmethod
+    def _fake_pa(width=1920, height=1080, counter=None):
+        import types
+
+        def size():
+            if counter is not None:
+                counter["n"] = counter.get("n", 0) + 1
+            return types.SimpleNamespace(width=width, height=height)
+
+        return types.SimpleNamespace(size=size)
+
+    def test_cache_hit_within_same_epoch(self):
+        import asyncio
+        from unittest import mock
+
+        from dsh_physical import dpi, input as input_mod
+
+        ctrl = self._controller()
+        counter: dict = {}
+        fake = self._fake_pa(counter=counter)
+        with mock.patch.object(input_mod, "_get_pyautogui", return_value=fake), \
+                mock.patch.object(dpi, "domain_epoch", return_value=("per-monitor", 96)):
+            a = asyncio.run(ctrl.get_screen_size())
+            b = asyncio.run(ctrl.get_screen_size())
+            c = asyncio.run(ctrl.get_screen_size())
+        # 同域 + TTL 内：一次真实查询，两次缓存命中
+        self.assertEqual((a, b, c), ((1920, 1080),) * 3)
+        self.assertEqual(counter["n"], 1)
+
+    def test_epoch_flip_invalidates_cache(self):
+        import asyncio
+        from unittest import mock
+
+        from dsh_physical import dpi, input as input_mod
+
+        ctrl = self._controller()
+        counter: dict = {}
+        fake = self._fake_pa(counter=counter)
+        epochs = iter([("unaware", 96), ("unaware", 96), ("per-monitor-v2", 96)])
+        with mock.patch.object(input_mod, "_get_pyautogui", return_value=fake), \
+                mock.patch.object(dpi, "domain_epoch", side_effect=lambda: next(epochs)):
+            asyncio.run(ctrl.get_screen_size())
+            asyncio.run(ctrl.get_screen_size())       # 同域 ⇒ 缓存
+            asyncio.run(ctrl.get_screen_size())       # 域翻转 ⇒ 重查
+        self.assertEqual(counter["n"], 2)
+
+    def test_ttl_expiry_still_invalidates(self):
+        import asyncio
+        import time
+        from unittest import mock
+
+        from dsh_physical import dpi, input as input_mod
+
+        ctrl = self._controller()
+        counter: dict = {}
+        fake = self._fake_pa(counter=counter)
+        with mock.patch.object(input_mod, "_get_pyautogui", return_value=fake), \
+                mock.patch.object(dpi, "domain_epoch", return_value=("per-monitor", 96)):
+            asyncio.run(ctrl.get_screen_size())
+            ctrl._screen_size_at = time.monotonic() - (ctrl.SCREEN_SIZE_TTL_S + 1)
+            size = asyncio.run(ctrl.get_screen_size())
+        self.assertEqual(size, (1920, 1080))
+        self.assertEqual(counter["n"], 2)  # TTL 到期 ⇒ 重查（J 纪元行为保持）
+
+    def test_pyautogui_import_gated_by_dpi_guard(self):
+        # ΠΑΝ-82：_get_pyautogui 在 import pyautogui 之前必须先锁感知
+        # （pyautogui 的 _pyautogui_win.py import 即 SetProcessDPIAware ——
+        # 与 uiautomation 同病的进程级副作用）。
+        import builtins
+        from unittest import mock
+
+        from dsh_physical import dpi, input as input_mod
+
+        events: list[str] = []
+        real_import = builtins.__import__
+
+        def spy_import(name, *args, **kwargs):
+            if name == "pyautogui":
+                events.append("import")
+            return real_import(name, *args, **kwargs)
+
+        real_ensure = dpi.ensure_process_dpi_awareness
+
+        def ensure_spy():
+            events.append("dpi-locked")
+            return real_ensure()
+
+        saved = input_mod._pyautogui
+        input_mod._pyautogui = None  # 强制走懒加载分支
+        try:
+            with mock.patch.object(builtins, "__import__", side_effect=spy_import), \
+                    mock.patch.object(dpi, "ensure_process_dpi_awareness",
+                                      side_effect=ensure_spy):
+                try:
+                    input_mod._get_pyautogui()
+                except Exception:  # noqa: BLE001 —— 无显示环境失败不判死刑：
+                    pass                            # 只执法「导入前的感知锁定」
+        finally:
+            input_mod._pyautogui = saved
+        self.assertIn("dpi-locked", events)
+        if "import" in events:  # 真发生了 pyautogui 导入 ⇒ 锁必须在前
+            self.assertEqual(events[:2], ["dpi-locked", "import"])
+
+
 if __name__ == "__main__":
     unittest.main()

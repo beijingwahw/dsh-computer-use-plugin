@@ -330,3 +330,83 @@ class WindowManager:
             "keyword": keyword,
             "next_step": "call /v1/press_hotkey with [cmd+tab] (macOS) or [alt+tab] (other) to cycle windows",
         }
+
+    # ─── R2-3（焦点保卫）：前台窗口只读探测 ───
+
+    def _active_title_win32(self) -> str | None:
+        """Windows：pygetwindow.getActiveWindow（同步快查询，run_in_executor 调用）。
+
+        R2-3 可测性：独立方法（unittest.mock.patch.object 可替换，零真实
+        GUI 依赖）。无前台窗口/枚举拒绝 ⇒ None —— 诚实缺席，不猜。
+        """
+        import pygetwindow as gw  # type: ignore[import-not-found]
+
+        w = gw.getActiveWindow()
+        if w is None:
+            return None
+        title = getattr(w, "title", None)
+        return title.strip() if isinstance(title, str) and title.strip() else None
+
+    async def active_window(self) -> dict:
+        """读前台窗口标题（只读、零副作用 —— R2-3 type_text 前置焦点校验的数据源）。
+
+        返回 ``{ method: 'native', title: str | None }``；backend 缺席
+        （hotkey-only / disabled / 原生栈不可用）⇒ raise PhysicalError
+        （WINDOW_UNAVAILABLE）—— 调用方（Node 侧）按通道缺席诚实降级。
+        """
+        if self._backend == "disabled":
+            raise PhysicalError(
+                ErrorKind.WINDOW_UNAVAILABLE,
+                "window backend disabled (set DSH_PHYSICAL_WINDOW_BACKEND!=disabled)",
+            )
+        if self._backend == "hotkey-only" or self._fallback_active():
+            # ΝΩ-9 latch 期内原生缺席 ⇒ 如实报不可用（hotkey 无法「读」焦点）
+            raise PhysicalError(
+                ErrorKind.WINDOW_UNAVAILABLE,
+                "active-window read requires a native backend (hotkey-only cannot read focus)",
+            )
+        if self._backend == "pygetwindow":
+            loop = asyncio.get_running_loop()
+            # ΑΩ-R25 同律：Win32 枚举是快主机 GUI 动作 ⇒ input 池
+            title = await loop.run_in_executor(get_pool(INPUT_POOL), self._active_title_win32)
+            return {"method": "native", "title": title}
+        if self._backend == "osascript":
+            if not shutil.which("osascript"):
+                raise PhysicalError(ErrorKind.WINDOW_UNAVAILABLE, "osascript not found")
+            script = (
+                'tell application "System Events" to get name of first application '
+                "process whose frontmost is true"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e", script,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise PhysicalError(
+                    ErrorKind.WINDOW_UNAVAILABLE,
+                    f"osascript failed: {stderr.decode().strip()}",
+                )
+            name = stdout.decode().strip()
+            return {"method": "native", "title": name or None}
+        if self._backend == "wmctrl":
+            if not shutil.which("xdotool"):
+                raise PhysicalError(
+                    ErrorKind.WINDOW_UNAVAILABLE,
+                    "neither wmctrl nor xdotool found (active-window read needs xdotool)",
+                )
+            proc = await asyncio.create_subprocess_exec(
+                "xdotool", "getactivewindow", "getwindowname",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            name = stdout.decode().strip()
+            if proc.returncode != 0 or not name:
+                return {"method": "native", "title": None}  # 无 X 焦点可读：诚实缺席
+            return {"method": "native", "title": name}
+        raise PhysicalError(
+            ErrorKind.WINDOW_UNAVAILABLE,
+            f"unknown window backend {self._backend!r}",
+        )

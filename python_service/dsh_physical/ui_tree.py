@@ -22,6 +22,10 @@
     （旧实现直接输出裁剪内像素，region 裁剪时坐标系整体漂移）
   - L3 VLM 的输出是**图内归一化** → 经 region 复合映射到全屏归一化
     （旧实现直接透传，被 Node 端再次 ÷ 屏幕尺寸 = 双重缩小）
+  - ΠΑΝ-81: 像素基准一律**物理像素** —— 进程 DPI 感知契约（dpi.py）下
+    ``screen_size`` 分母（经 routes 取自 ``screen_ctrl.get_screen_size()``）
+    与截图（ImageGrab 物理像素）同域；125% 缩放屏上 L2「物理 bbox ÷ 逻辑
+    分母」放大 1.25× 的错配（C2-5 H-1 树域病灶）自此收口。
 
 L3 实现分层：
   - ``local-llama``：本地 VLM（llama.cpp + Qwen-VL）
@@ -47,6 +51,7 @@ from typing import Literal
 from .config import FunnelConfig
 from .errors import ErrorKind, PhysicalError
 from .executors import TREE_POOL, get as get_pool, run_in  # ΑΩ-R25:重推理走 tree 专属池;ΑΩ-R37:run_in 阻塞遍历入池
+from .dpi import ensure_process_dpi_awareness  # ΠΑΝ-82: 第三方导入前的感知锁
 
 # ─── 类型定义（镜像 D-6 UIElement，避免跨进程契约漂移）───
 
@@ -408,7 +413,13 @@ def _uia_uiautomation_snapshot(screen_px: tuple[int, int] | None) -> tuple[list[
     """ΑΩ-R37: 遗留第三方 uiautomation 包装库兜底（未声明依赖 —— 装了就用）。
 
     与 comtypes 快照共用同一 ``_walk_ui_tree`` 核心，仅属性取值方言不同。
+
+    ΠΑΝ-82: ``uiautomation`` 的 import 会 ``SetProcessDPIAware()`` 翻转进程
+    感知（坐标域随 L1 兜底路径首调漂移的根因）—— 先锁我们的档位再导入；
+    档位立定后 OS「只能升不能降」令其内部调用失败无害，UIA 返回的 rect
+    亦随契约落在物理像素域（与 screen_size 分母同域）。
     """
+    ensure_process_dpi_awareness()  # ΠΑΝ-82: 感知锁定必须先于 uiautomation 导入
     import uiautomation as ua  # type: ignore[import-not-found]
 
     root = ua.GetRootControl()

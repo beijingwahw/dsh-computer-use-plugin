@@ -22,9 +22,20 @@ message-only 窗口线程里订阅全局鼠标/键盘事件，维护进程内状
 位置追踪：物理鼠标事件多为相对位移（lLastX/lLastY）—— 线程启动时用
 GetCursorPos 播种、每事件累加并 clamp 到虚拟屏幕矩形；绝对位移事件
 （MOUSE_MOVE_ABSOLUTE —— RDP/平板）按 0..65535 归一化映射回虚拟屏幕。
-``SetCursorPos`` 类程序性移动**不产生** Raw Input ⇒ ``updated_at`` 陈旧度
-门（缺省 2s，config-driven）超过即由调用方回退 Win32 轮询 —— 陈旧回退是
+``SetCursorPos`` 类程序性移动**不产生** Raw Input ⇒ ``updated_at`` 陈旧度门
+（缺省 2s，config-driven）超过即由调用方回退 Win32 轮询 —— 陈旧回退是
 诚实设计的一部分，不是缺陷。
+
+ΠΑΝ-90（指针弹道学）修正上述模型的两处失真：
+  1. **Windows 默认开启「提高指针精度」**：屏幕位移 = f(原始增量, 速度)，
+     非线性 —— 裸累加必单调漂移。镜像启动时读取系统弹道学参数
+     （SPI_GETMOUSE 三元组 + 注册表 MouseSensitivity），按阈值型近似曲线
+     放大相对增量（误差域诚实标注，见 ``apply_pointer_ballistics``）。
+  2. **持续移动下时间陈旧门永不触发**：事件恒新鲜但漂移恒累积 —— 时间
+     新鲜 ≠ 位置正确。真·滑动窗口（``_motion_window``）计量最近窗口内的
+     移动量，配合自播种起算的**漂移预算**（``drift_budget_px``）：超预算 ⇒
+     镜像自判不可信（ok=False + drift 原因），调用方回退 Win32 轮询并把
+     轮询结果回灌镜像（``reseed``）—— 近似误差有上界的闭环。
 """
 from __future__ import annotations
 
@@ -65,6 +76,8 @@ SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
+# ΠΑΝ-90：SystemParametersInfoW 动作码 —— SPI_GETMOUSE 取指针弹道学三元组
+SPI_GETMOUSE = 0x0003
 
 BUTTON_FLAG_NAMES: dict[int, str] = {
     RI_MOUSE_LEFT_BUTTON_DOWN: "left_down",
@@ -138,6 +151,93 @@ def parse_raw_input(blob: bytes) -> dict:
         return {"type": "invalid", "reason": f"{type(e).__name__}: {e}"}
 
 
+# ─── ΠΑΝ-90：系统指针弹道学（近似曲线；读取层 + 纯函数应用层）───
+
+
+def read_pointer_ballistics() -> dict:
+    """读系统指针弹道学参数（永不抛；失败 ⇒ 恒等曲线 + 诚实 error）。
+
+    数据源：
+      - ``SystemParametersInfoW(SPI_GETMOUSE)`` → ``(threshold1, threshold2,
+        accel)`` 三元组（accel：0=关 / 1=一档 / 2=两档，即注册表
+        ``MouseSpeed`` 的实义）；
+      - 注册表 ``HKCU\\Control Panel\\Mouse\\MouseSensitivity``（指针速度
+        滑杆 1-20，缺省 10 ⇒ ×1.0 —— 该缩放与加速度开关无关地生效）。
+
+    返回 ``{"accel", "threshold1", "threshold2", "sensitivity", "source",
+    "error"}``；accel=0 且 sensitivity=1.0 即恒等曲线（裸累加，旧行为）。
+    """
+    out: dict = {
+        "accel": 0, "threshold1": 0, "threshold2": 0,
+        "sensitivity": 1.0, "source": None, "error": None,
+    }
+    if sys.platform != "win32":
+        out["error"] = f"non-win32 platform ({sys.platform}) — identity curve"
+        return out
+    try:
+        vals = (ctypes.c_int * 3)()
+        if ctypes.windll.user32.SystemParametersInfoW(SPI_GETMOUSE, 0, vals, 0):  # type: ignore[attr-defined]
+            out["threshold1"], out["threshold2"], out["accel"] = (
+                int(vals[0]), int(vals[1]), int(vals[2]),
+            )
+            out["source"] = "SPI_GETMOUSE"
+        else:
+            out["error"] = "SystemParametersInfoW(SPI_GETMOUSE) returned 0"
+    except Exception as e:  # noqa: BLE001 —— 读取层绝不抛（运行层铁律）
+        out["error"] = f"SPI_GETMOUSE failed: {type(e).__name__}: {e}"
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Mouse") as k:
+            raw, _ = winreg.QueryValueEx(k, "MouseSensitivity")
+        sens = int(str(raw))
+        if 1 <= sens <= 20:
+            out["sensitivity"] = sens / 10.0
+            out["source"] = "+".join(x for x in (out["source"], "MouseSensitivity") if x)
+        # 越界值：保留 ×1.0（系统滑杆本就钳在 1-20，异常值多为注册表手改）
+    except Exception:  # noqa: BLE001 —— 注册表缺席/畸形 ⇒ 缺省 ×1.0（同系统缺省）
+        pass
+    return out
+
+
+def apply_pointer_ballistics(dx: int, dy: int, curve: dict | None) -> tuple[int, int]:
+    """RAWINPUT 相对增量 → 屏幕位移（阈值型近似；纯函数，离线可测）。
+
+    模型（XP 世代阈值型弹道学，与 Wine ``user32`` 的同名实现对齐）::
+
+        speed = |dx| + |dy|
+        scale = MouseSensitivity / 10            # 滑杆缩放（恒生效）
+        accel ≥ 1 且 speed ≥ threshold1 ⇒ ×2      # 第一档
+        accel = 2 且 speed ≥ threshold2 ⇒ 再 ×2   # 第二档（合计 ×4）
+        return round(dx·scale), round(dy·scale)
+
+    **诚实误差域**（ΠΑΝ-90 标注 —— 本函数是近似，不是复刻）：
+      - Vista+「提高指针精度」开启时系统实际走 ``SmoothMouseCurve`` 平滑
+        分段曲线（注册表 5 点表 + 逐包速度插值），本近似在中速段的放大
+        倍率与平滑曲线有偏差（量级：慢速/极速两端吻合，中速段误差可达
+        曲线增益的 ~25%），误差随累计移动距离单调累积；
+      - 厂商驱动级曲线（罗技 G Hub / R Synapse 的 onboard 缩放）与游戏
+        raw-input 直通模式不在本函数可达域内；
+      - 上述误差由 ``RawInputMirror`` 的**漂移预算门**收口：超预算即回退
+        Win32 真值并回灌（reseed）—— 近似误差有上界，不无限漂移。
+    """
+    if not curve:
+        return dx, dy
+    accel = int(curve.get("accel", 0) or 0)
+    scale = float(curve.get("sensitivity", 1.0) or 1.0)
+    if accel > 0:
+        speed = abs(dx) + abs(dy)
+        th1 = int(curve.get("threshold1", 0) or 0)
+        th2 = int(curve.get("threshold2", 0) or 0)
+        if speed >= th1:
+            scale *= 2.0
+        if accel >= 2 and speed >= th2:
+            scale *= 2.0
+    if scale == 1.0:
+        return dx, dy
+    return int(round(dx * scale)), int(round(dy * scale))
+
+
 # ─── 状态镜像（Lock 保护；读写两侧均为短临界区）───
 
 
@@ -150,7 +250,8 @@ class RawInputMirror:
     agent 注入区分的原始证据流；本任务只做镜像 + 计数）。
     """
 
-    def __init__(self, ring_capacity: int = 128) -> None:
+    def __init__(self, ring_capacity: int = 128, motion_window_s: float = 2.0,
+                 drift_budget_px: int = 0) -> None:
         self._lock = threading.Lock()
         self._ring: deque[dict] = deque(maxlen=max(1, int(ring_capacity)))
         self._state: dict[str, Any] = {
@@ -165,6 +266,15 @@ class RawInputMirror:
         self._vx0, self._vy0 = 0, 0
         self._vw, self._vh = 65535, 65535
         self._counts = {"mouse_move": 0, "mouse_button": 0, "key": 0}
+        # ΠΑΝ-90：指针弹道学近似曲线（None = 恒等：裸累加，旧行为 —— 离线
+        # 直构镜像的零回归缺省；真线程启动时 read_pointer_ballistics() 播种）
+        self._ballistics: dict | None = None
+        # ΠΑΝ-90：真·滑动窗口（(t, px) 采样）+ 自播种起算的漂移预算。
+        # drift_budget_px ≤ 0 = 关闭漂移门（只余时间陈旧门 —— 兼容缺省）。
+        self._motion_window_s = max(0.05, float(motion_window_s))
+        self._drift_budget_px = max(0, int(drift_budget_px))
+        self._motion: deque[tuple[float, int]] = deque()
+        self._dist_since_seed = 0
 
     # ── 写侧（hook 线程 / 测试）──
 
@@ -172,29 +282,54 @@ class RawInputMirror:
         with self._lock:
             self._vx0, self._vy0, self._vw, self._vh = int(x0), int(y0), max(1, int(w)), max(1, int(h))
 
+    def set_ballistics(self, curve: dict | None) -> None:
+        """ΠΑΝ-90：安装/清除弹道学曲线（测试注入口；None = 恒等曲线）。"""
+        with self._lock:
+            self._ballistics = dict(curve) if curve else None
+
     def seed_position(self, x: int, y: int, now: float | None = None) -> None:
         t = time.time() if now is None else now
         with self._lock:
             self._state["x"], self._state["y"] = int(x), int(y)
             self._state["updated_at"] = t
             self._state["last_event_at"] = t
+            # ΠΑΝ-90：播种 = ground-truth 校准点 —— 漂移账与滑动窗口归零
+            self._dist_since_seed = 0
+            self._motion.clear()
 
     def apply_mouse(self, ev: dict, now: float | None = None) -> None:
-        """RAWINPUT mouse 事件入镜像（相对位移累加 / 绝对位移映射 + clamp）。"""
+        """RAWINPUT mouse 事件入镜像（弹道学放大 / 绝对位移映射 + clamp）。"""
         t = time.time() if now is None else now
         with self._lock:
-            x, y = self._state["x"], self._state["y"]
+            ox, oy = self._state["x"], self._state["y"]
             if ev.get("absolute"):
-                # MOUSE_MOVE_ABSOLUTE：lLastX/Y 为 0..65535 全屏归一化坐标
+                # MOUSE_MOVE_ABSOLUTE：lLastX/Y 为 0..65535 全屏归一化坐标。
+                # 绝对事件是权威位置（RDP/平板端算好的落点）⇒ 视同校准点：
+                # 漂移账/滑动窗口归零（ΠΑΝ-90 —— 它不是近似累加的产物）。
                 x = self._vx0 + int(ev.get("dx", 0)) * self._vw // 65535
                 y = self._vy0 + int(ev.get("dy", 0)) * self._vh // 65535
+                self._dist_since_seed = 0
+                self._motion.clear()
+                step = 0
             else:
-                x += int(ev.get("dx", 0))
-                y += int(ev.get("dy", 0))
+                # ΠΑΝ-90：相对位移先过弹道学近似曲线（裸累加忽略「提高指针
+                # 精度」—— 镜像必单调漂移的根因）；曲线缺席 = 恒等（旧行为）
+                dx, dy = apply_pointer_ballistics(
+                    int(ev.get("dx", 0)), int(ev.get("dy", 0)), self._ballistics,
+                )
+                x, y = ox + dx, oy + dy
+                # 滑动窗口与漂移账只记相对位移（近似误差的唯一来源）
+                step = max(abs(x - ox), abs(y - oy))
             # clamp 到虚拟屏幕（相对位移越界是常态 —— 屏幕边缘继续推动）
             x = min(max(x, self._vx0), self._vx0 + self._vw - 1)
             y = min(max(y, self._vy0), self._vy0 + self._vh - 1)
-            moved = (x, y) != (self._state["x"], self._state["y"])
+            if step > 0:
+                self._dist_since_seed += step
+                self._motion.append((t, step))
+                cutoff = t - self._motion_window_s
+                while self._motion and self._motion[0][0] < cutoff:
+                    self._motion.popleft()
+            moved = (x, y) != (ox, oy)
             self._state["x"], self._state["y"] = x, y
             self._state["updated_at"] = t
             self._state["last_event_at"] = t
@@ -230,9 +365,16 @@ class RawInputMirror:
             return s
 
     def read_position(self, max_stale_s: float = 2.0) -> dict:
-        """位置读取 + 陈旧度门：``{ok, x, y, age_s, stale, reason?}``。
+        """位置读取 + 陈旧度门 + 漂移预算门：``{ok, x, y, age_s, stale, reason?}``。
 
-        ok=False 的三种诚实形态：未播种（updated_at=0）/ 陈旧 / max_stale_s<=0。
+        ok=False 的诚实形态（ΠΑΝ-90 起三种）：
+          - 未播种（updated_at=0）；
+          - **时间陈旧**（age > max_stale_s —— SetCursorPos 类程序性移动
+            不产生事件）；
+          - **漂移超预算**（自播种累计移动 > drift_budget_px —— 事件恒新鲜
+            但弹道学近似的误差恒累积；时间门挡不住它，漂移门是第二道）。
+            两种门都放行才是可用镜像；漂移门命中后由调用方回退真值并
+            ``reseed`` 回灌（有界误差闭环）。
         """
         try:
             s = self.snapshot()
@@ -242,6 +384,16 @@ class RawInputMirror:
                 return {
                     "ok": False, "stale": True, "x": s["x"], "y": s["y"],
                     "age_s": s["age_s"], "reason": f"mirror stale ({s['age_s']:.2f}s > {max_stale_s}s)",
+                }
+            if self._drift_budget_px > 0 and self._dist_since_seed > self._drift_budget_px:
+                return {
+                    "ok": False, "stale": False, "drifted": True,
+                    "x": s["x"], "y": s["y"], "age_s": s["age_s"],
+                    "reason": (
+                        f"mirror drift budget exceeded ({self._dist_since_seed}px moved "
+                        f"> {self._drift_budget_px}px since seed — pointer ballistics "
+                        f"approximation resync required)"
+                    ),
                 }
             return {"ok": True, "stale": False, "x": s["x"], "y": s["y"], "age_s": s["age_s"]}
         except Exception as e:  # noqa: BLE001 —— 读侧永不抛
@@ -263,6 +415,11 @@ class RawInputMirror:
                 "ring_len": len(self._ring),
                 "ring_capacity": self._ring.maxlen,
                 "last_event_age_s": max(0.0, time.time() - self._state["last_event_at"]),
+                # ΠΑΝ-90：弹道学与漂移账的可观测面（/v1/input_events 申报）
+                "ballistics": dict(self._ballistics) if self._ballistics else {"accel": 0},
+                "dist_since_seed_px": self._dist_since_seed,
+                "drift_budget_px": self._drift_budget_px,
+                "motion_window_px": sum(px for _t, px in self._motion),
             }
 
 
@@ -339,6 +496,27 @@ def stats() -> dict:
     return m.stats() if m is not None else {"absent": True, "reason": "mirror not started"}
 
 
+def reseed(x: float, y: float) -> bool:
+    """ΠΑΝ-90：把 ground-truth 位置回灌镜像（best-effort，永不抛）。
+
+    调用方（routes./v1/cursor 的 Win32 轮询回退路径）在回退时顺带修复镜像：
+    播种即校准点 —— 漂移账/滑动窗口归零，弹道学近似误差重新从零累积。
+    返回是否真灌入（未 running 的镜像不灌 —— 关闭态回写是无效副作用）。
+    """
+    try:
+        m = _mirror
+        if m is None:
+            return False
+        with _lifecycle_lock:
+            running = _STATUS["state"] == "running"
+        if not running:
+            return False
+        m.seed_position(int(x), int(y))
+        return True
+    except Exception:  # noqa: BLE001 —— 回灌路径绝不抛
+        return False
+
+
 def ensure_started(cfg: Any) -> dict:
     """按配置启动镜像线程（幂等、永不抛）。返回 describe() 快照。
 
@@ -362,7 +540,11 @@ def ensure_started(cfg: Any) -> dict:
             _STATUS["state"] = "unavailable"
             _STATUS["reason"] = f"raw input requires Windows (platform={sys.platform})"
             return describe()
-        _mirror = RawInputMirror(ring_capacity=ring_cap)
+        _mirror = RawInputMirror(
+            ring_capacity=ring_cap,
+            motion_window_s=_stale_after_s,  # ΠΑΝ-90：滑动窗口与时间门同宽（同一新鲜度刻度）
+            drift_budget_px=int(getattr(cfg, "drift_budget_px", 0) or 0),
+        )
         _ready.clear()
         _STATUS["state"], _STATUS["reason"] = "starting", None
         _thread = threading.Thread(
@@ -533,6 +715,10 @@ def _thread_main() -> None:
         if mirror is not None:
             mirror.set_virtual_bounds(vx, vy, max(1, vw), max(1, vh))
             mirror.seed_position(pt.x, pt.y)
+            # ΠΑΝ-90：镜像前读取系统指针弹道学（「提高指针精度」开启时
+            # RAWINPUT 增量 ≠ 屏幕位移 —— 裸累加必单调漂移；近似曲线 + 漂移
+            # 预算门收口误差，误差域见 apply_pointer_ballistics 注）
+            mirror.set_ballistics(read_pointer_ballistics())
 
         # 线程 id 就绪门：窗口已建（消息队列必在）⇒ PostThreadMessage 可达
         global _tid

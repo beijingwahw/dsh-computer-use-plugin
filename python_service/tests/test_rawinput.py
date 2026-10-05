@@ -258,6 +258,143 @@ class ConcurrencyStressTests(unittest.TestCase):
                          "计数守恒：无丢事件")
 
 
+class PointerBallisticsTests(unittest.TestCase):
+    """ΠΑΝ-90：阈值型弹道学近似（纯函数，手算对照）。"""
+
+    IDENTITY = {"accel": 0, "threshold1": 6, "threshold2": 10, "sensitivity": 1.0}
+
+    def test_accel_off_is_identity(self):
+        curve = dict(self.IDENTITY)
+        self.assertEqual(rawinput.apply_pointer_ballistics(37, -11, curve), (37, -11))
+        self.assertEqual(rawinput.apply_pointer_ballistics(37, -11, None), (37, -11),
+                         "曲线缺席 = 恒等（离线直构镜像的零回归缺省）")
+
+    def test_accel1_doubles_above_threshold1(self):
+        # speed = 3+4 = 7 ≥ th1=6（< th2 无关，accel=1）⇒ ×2
+        curve = {"accel": 1, "threshold1": 6, "threshold2": 10, "sensitivity": 1.0}
+        self.assertEqual(rawinput.apply_pointer_ballistics(3, 4, curve), (6, 8))
+        # speed = 2+3 = 5 < th1 ⇒ 不放大
+        self.assertEqual(rawinput.apply_pointer_ballistics(2, 3, curve), (2, 3))
+
+    def test_accel2_quadruples_above_both(self):
+        # speed = 12 ≥ th2=10 且 accel=2 ⇒ ×4（两档都触发）
+        curve = {"accel": 2, "threshold1": 6, "threshold2": 10, "sensitivity": 1.0}
+        self.assertEqual(rawinput.apply_pointer_ballistics(12, 0, curve), (48, 0))
+        # speed = 5+4 = 9 ∈ [6,10)：只第一档 ⇒ ×2
+        self.assertEqual(rawinput.apply_pointer_ballistics(5, 4, curve), (10, 8))
+
+    def test_sensitivity_scales_regardless_of_accel(self):
+        # 滑杆缩放与加速度开关无关地生效（滑杆 15/20 ⇒ ×1.5）
+        curve = {"accel": 0, "threshold1": 6, "threshold2": 10, "sensitivity": 1.5}
+        self.assertEqual(rawinput.apply_pointer_ballistics(10, -10, curve), (15, -15))
+
+    def test_rounding_and_zero(self):
+        curve = {"accel": 1, "threshold1": 1, "threshold2": 100, "sensitivity": 1.0}
+        self.assertEqual(rawinput.apply_pointer_ballistics(1, 1, curve), (2, 2))
+        self.assertEqual(rawinput.apply_pointer_ballistics(0, 0, curve), (0, 0))
+        mixed = {"accel": 0, "threshold1": 0, "threshold2": 0, "sensitivity": 1.3}
+        self.assertEqual(rawinput.apply_pointer_ballistics(1, 2, mixed), (1, 3))  # round
+
+    def test_mirror_applies_installed_curve(self):
+        m = rawinput.RawInputMirror()
+        m.set_virtual_bounds(0, 0, 100_000, 100_000)
+        m.seed_position(500, 500)
+        m.set_ballistics({"accel": 1, "threshold1": 6, "threshold2": 10, "sensitivity": 1.0})
+        m.apply_mouse({"absolute": False, "dx": 10, "dy": 0, "button_flags": 0})
+        s = m.snapshot()
+        self.assertEqual((s["x"], s["y"]), (520, 500),
+                         "弹道学曲线在场 ⇒ 相对增量按近似曲线放大（speed=10 ≥ th1 ⇒ ×2）")
+
+    def test_read_pointer_ballistics_never_raises(self):
+        curve = rawinput.read_pointer_ballistics()
+        self.assertIsInstance(curve, dict)
+        for k in ("accel", "threshold1", "threshold2", "sensitivity", "error"):
+            self.assertIn(k, curve)
+        self.assertIn(curve["accel"], (0, 1, 2), "accel 是 SPI_GETMOUSE 三档位")
+        if sys.platform == "win32":
+            self.assertIsNone(curve["error"], "win32 读取路径应成功（或如实 error）")
+        self.assertIsInstance(rawinput.apply_pointer_ballistics(5, 5, curve), tuple)
+
+
+class DriftBudgetGateTests(unittest.TestCase):
+    """ΠΑΝ-90：漂移预算门 —— 持续移动不再能单靠刷 updated_at 让时间门失效。"""
+
+    def _mirror(self, budget: int) -> rawinput.RawInputMirror:
+        m = rawinput.RawInputMirror(drift_budget_px=budget)
+        m.set_virtual_bounds(0, 0, 1_000_000, 1_000_000)
+        m.seed_position(100, 100)
+        return m
+
+    def test_within_budget_ok(self):
+        m = self._mirror(1000)
+        m.apply_mouse({"absolute": False, "dx": 300, "dy": 0, "button_flags": 0})
+        shot = m.read_position(2.0)
+        self.assertTrue(shot["ok"])
+        self.assertEqual(m.stats()["dist_since_seed_px"], 300)
+
+    def test_budget_exceeded_rejects_with_drift_reason(self):
+        m = self._mirror(500)
+        m.apply_mouse({"absolute": False, "dx": 600, "dy": 0, "button_flags": 0})
+        shot = m.read_position(2.0)
+        self.assertFalse(shot["ok"], "漂移超预算 ⇒ 镜像自判不可信（时间门挡不住的漂移门）")
+        self.assertFalse(shot["stale"], "这不是时间陈旧 —— 是漂移（两种门的诚实区分）")
+        self.assertTrue(shot.get("drifted"))
+        self.assertIn("drift", shot["reason"])
+
+    def test_continuous_motion_cannot_keep_gate_open(self):
+        # 批判 H-4 的复现：事件持续到达（updated_at 恒新鲜），旧时间门永不触发
+        m = self._mirror(400)
+        now = time.time()
+        for i in range(10):  # 10 × 50px = 500px > 400px 预算
+            m.apply_mouse({"absolute": False, "dx": 50, "dy": 0, "button_flags": 0},
+                          now=now + i * 0.01)
+        shot = m.read_position(2.0)
+        self.assertFalse(shot["ok"], "持续移动 + 超预算 ⇒ 必须拒绝（滑动窗口真实现）")
+        self.assertLess(shot["age_s"], 2.0, "时间维度仍然新鲜 —— 拒绝来自漂移门")
+
+    def test_reseed_resets_drift_accounting(self):
+        m = self._mirror(500)
+        m.apply_mouse({"absolute": False, "dx": 600, "dy": 0, "button_flags": 0})
+        self.assertFalse(m.read_position(2.0)["ok"])
+        m.seed_position(400, 100)  # 回退路径的 ground-truth 回灌（ΠΑΝ-90 闭环）
+        st = m.stats()
+        self.assertEqual(st["dist_since_seed_px"], 0)
+        self.assertEqual(st["motion_window_px"], 0)
+        self.assertTrue(m.read_position(2.0)["ok"], "回灌后镜像恢复可用")
+
+    def test_zero_budget_disables_gate(self):
+        m = self._mirror(0)  # 兼容缺省：漂移门关闭
+        m.apply_mouse({"absolute": False, "dx": 999_999, "dy": 0, "button_flags": 0})
+        self.assertTrue(m.read_position(2.0)["ok"])
+
+    def test_motion_sliding_window_prunes(self):
+        m = self._mirror(0)
+        m.set_virtual_bounds(0, 0, 1_000_000, 1_000_000)
+        m.seed_position(0, 0)
+        now = time.time()
+        m.apply_mouse({"absolute": False, "dx": 10, "dy": 0, "button_flags": 0}, now=now - 5)
+        m.apply_mouse({"absolute": False, "dx": 20, "dy": 0, "button_flags": 0}, now=now)
+        st = m.stats()
+        self.assertEqual(st["motion_window_px"], 20,
+                         "窗口 2s：5s 前的移动滑出，只余最近窗口内移动量")
+        self.assertEqual(st["dist_since_seed_px"], 30, "漂移账不自窗口滑出而归零（跨窗口累积）")
+
+    def test_stats_declares_ballistics_face(self):
+        m = rawinput.RawInputMirror()
+        self.assertIn("ballistics", m.stats())
+        self.assertEqual(m.stats()["ballistics"], {"accel": 0}, "未装曲线 ⇒ 如实申报恒等")
+        m.set_ballistics({"accel": 1, "threshold1": 6, "threshold2": 10, "sensitivity": 1.0})
+        self.assertEqual(m.stats()["ballistics"]["accel"], 1)
+
+
+class ReseedModuleTests(unittest.TestCase):
+    """ΠΑΝ-90：模块级 reseed（routes 回退路径的回灌入口）。"""
+
+    def test_reseed_without_mirror_is_false(self):
+        rawinput.ensure_started(RawInputConfig())  # disabled ⇒ 无镜像线程
+        self.assertFalse(rawinput.reseed(1.0, 2.0), "镜像未 running ⇒ 不灌（无效副作用）")
+
+
 class LifecycleOfflineTests(unittest.TestCase):
     """离线生命周期：enabled=False ⇒ no-op；read_position 诚实形态。"""
 

@@ -4,6 +4,11 @@
   - 加载层（``configure``/``__init__``）throw 合法（异常诚实第一条）
   - 运行层绝不抛错（异常诚实第二条）
   - 魔法数字一律不落代码常量（config-driven 铁律，对齐 D-6 PipelineConfig 哲学）
+  - ΠΑΝ-94 统一方言：数值域违反一律 **raise 拒绝**，全文件不再有静默 clamp
+    （旧实现「注释宣称拒绝 / 代码实际 clamp / 注释宣称拒绝 / 代码实际放行」
+    三种失真并存 —— 配置面不许撒谎：clamp 会把用户的 typo 静默变成另一个
+    能用的值，拒绝才可诊断）。例外：scrcpyStream/uvc 的自治 env 加载器
+    维持其自声明（且自测钉死）的 clamp 方言，不在本文件辖内。
 """
 from __future__ import annotations
 
@@ -120,7 +125,7 @@ class AndroidConfig:
 
 @dataclass(frozen=True)
 class ExecutorConfig:
-    """ΑΩ-R25 专属执行器隔离 —— 按控制器分池的有界 ThreadPoolExecutor 容量。
+    """ΑΩ-R25 专属执行器隔离 —— 按控制器分池的有界 worker 池容量与队列上界。
 
     取值论证（完整版见 executors.py 模块头注）：
       - ``input_workers=2``：物理动作被 ``_io_lock`` 串行化，第 2 worker 只为
@@ -131,12 +136,21 @@ class ExecutorConfig:
         阻塞线程不占 CPU —— 容忍多路同时挂起互不排队。
       - ``tree_workers=2``：OCR/VLM 重 CPU+内存，>2 并发互相拖慢（引擎内锁
         串行化），2 即饱和。
+
+    ΠΑΝ-93 队列上界（``*_queue``）：worker 有界而队列无界时，队头阻塞只是
+    搬家（无限排队后逐一超时，客户端看到超时信封而非背压）。上界取「正常
+    峰值排队深度的宽裕倍数」—— 正常流量深度 ~0，队满只在该池被拖死时发生，
+    届时拒绝为结构化 busy 信封（背压可见）。env 域校验 ≥1（ΠΑΝ-94 拒绝方言）。
     """
 
     input_workers: int = 2
     screen_workers: int = 4
     device_workers: int = 6
     tree_workers: int = 2
+    input_queue: int = 128
+    screen_queue: int = 64
+    device_queue: int = 128
+    tree_queue: int = 64
 
 
 @dataclass(frozen=True)
@@ -147,15 +161,21 @@ class RawInputConfig:
       rawinput 模块对 cursor/routes 完全透明（回退既有 Win32 轮询路径）。
     - ``stale_after_s``：镜像陈旧度门 —— ``updated_at`` 距今超过即判陈旧，
       调用方回退 Win32 调用并诚实注记（SetCursorPos 类程序性移动不产生
-      Raw Input 事件，陈旧门是诚实设计的一部分）。
+      Raw Input 事件，陈旧门是诚实设计的一部分）。必须 > 0（负门会让镜像
+      永判陈旧 —— ΠΑΝ-94：拒绝而非放行）。
     - ``ring_capacity``：输入事件环容量（/v1/input_events 审计面）。
     - ``event_window_s``：/v1/input_events 只读回看窗口（最近 N 秒）。
+    - ``drift_budget_px``：ΠΑΝ-90 指针弹道学近似带来的累计漂移预算（像素，
+      自上次 ground-truth 播种起算的累计移动距离上界）。超过 ⇒ 镜像判
+      不可信（ok=False + drift 原因），调用方回退 Win32 轮询并把轮询结果
+      回灌镜像（reseed）—— 有界误差的闭环。0 = 关闭该门（只余时间陈旧门）。
     """
 
     enabled: bool = False
     stale_after_s: float = 2.0
     ring_capacity: int = 128
     event_window_s: float = 1.0
+    drift_budget_px: int = 2000
 
 
 @dataclass(frozen=True)
@@ -196,6 +216,31 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"env {name} must be int, got {raw!r}") from e
 
 
+def _env_int_in(name: str, default: int, lo: int, hi: int | None = None) -> int:
+    """ΠΑΝ-94：int + 域校验（越界 raise 拒绝 —— 静默 clamp 是配置面撒谎）。"""
+    v = _env_int(name, default)
+    if v < lo or (hi is not None and v > hi):
+        bound = f"[{lo}, {hi}]" if hi is not None else f">= {lo}"
+        raise ValueError(f"env {name} out of domain {bound}: {v} (rejected, not clamped)")
+    return v
+
+
+def _env_float_in(name: str, default: float, lo: float, hi: float | None = None) -> float:
+    """ΠΑΝ-94：float + 域校验（同上拒绝方言）。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        v = default
+    else:
+        try:
+            v = float(raw)
+        except ValueError as e:
+            raise ValueError(f"env {name} must be float, got {raw!r}") from e
+    if v < lo or (hi is not None and v > hi):
+        bound = f"[{lo}, {hi}]" if hi is not None else f">= {lo}"
+        raise ValueError(f"env {name} out of domain {bound}: {v} (rejected, not clamped)")
+    return v
+
+
 def _is_loopback_host(host: str) -> bool:
     """host 是否回环（localhost / ::1 / 127.0.0.0/8）。"""
     h = host.strip().strip("[]").lower()
@@ -216,7 +261,8 @@ def load_config_from_env() -> AppConfig:
         transport=transport_raw,  # type: ignore[arg-type]
         uds_path=_env("DSH_PHYSICAL_UDS_PATH", "/var/run/dsh-physical.sock"),
         tcp_host=_env("DSH_PHYSICAL_TCP_HOST", "127.0.0.1"),
-        tcp_port=_env_int("DSH_PHYSICAL_TCP_PORT", 8421),
+        # ΠΑΝ-94：端口域校验（0/负/65536+ 此前静默放行给 uvicorn 运行期炸）
+        tcp_port=_env_int_in("DSH_PHYSICAL_TCP_PORT", 8421, 1, 65535),
         allow_external=_env_bool("DSH_PHYSICAL_ALLOW_EXTERNAL", False),
     )
     if server.allow_external and server.transport == "tcp":
@@ -239,7 +285,8 @@ def load_config_from_env() -> AppConfig:
     # ── auth ──
     auth = AuthConfig(
         enable_pid_attestation=_env_bool("DSH_PHYSICAL_PID_ATTESTATION", sys.platform == "linux"),
-        token_ttl_seconds=_env_int("DSH_PHYSICAL_TOKEN_TTL", 60),
+        # ΠΑΝ-94：TTL ≥ 1s（0/负值 = token 永不过期或铸出即死，静默放行是撒谎）
+        token_ttl_seconds=_env_int_in("DSH_PHYSICAL_TOKEN_TTL", 60, 1),
         key_path=_env("DSH_PHYSICAL_KEY_PATH", str(Path.home() / ".dsh" / "physical.key")),
     )
 
@@ -255,19 +302,22 @@ def load_config_from_env() -> AppConfig:
         transport=shot_transport_raw,  # type: ignore[arg-type]
         shm_prefix=_env("DSH_PHYSICAL_SHM_PREFIX", "dsh-shot-"),
         mmap_dir=_env("DSH_PHYSICAL_MMAP_DIR", str(Path.home() / ".dsh" / "shots")),
-        jpeg_quality=max(0, min(100, _env_int("DSH_PHYSICAL_JPEG_QUALITY", 85))),
-        # ΑΩ-R26：负值在此拒绝（clamp 到 0 会静默关掉配额 —— 配置面不许撒谎）
-        mmap_quota_mb=_env_int("DSH_PHYSICAL_MMAP_QUOTA_MB", 512),
-        # ΝΩ-51：backend 显式开启才走 DXGI DDA；负超时拒绝（clamp 会撒谎）
+        # ΠΑΝ-94：越界拒绝（旧实现静默 clamp —— 注释宣称的行为终于为真）
+        jpeg_quality=_env_int_in("DSH_PHYSICAL_JPEG_QUALITY", 85, 0, 100),
+        # ΑΩ-R26：负值在此拒绝（clamp 到 0 会静默关掉配额 —— 配置面不许撒谎）。
+        # ΠΑΝ-94：旧注释就宣称拒绝而代码放行 —— 现在注释与代码终于一致（0 = 关闭配额）。
+        mmap_quota_mb=_env_int_in("DSH_PHYSICAL_MMAP_QUOTA_MB", 512, 0),
+        # ΝΩ-51：backend 显式开启才走 DXGI DDA；负超时拒绝（clamp 会撒谎）。
+        # ΠΑΝ-94：旧代码是 max(0, ·) 恰是 clamp —— 与注释相反，改为真拒绝。
         backend=shot_backend_raw,  # type: ignore[arg-type]
-        dxgi_acquire_timeout_ms=max(0, _env_int("DSH_PHYSICAL_DXGI_TIMEOUT_MS", 0)),
+        dxgi_acquire_timeout_ms=_env_int_in("DSH_PHYSICAL_DXGI_TIMEOUT_MS", 0, 0),
     )
 
     # ── actions ──
     actions = ActionConfig(
-        step_timeout_ms=_env_int("DSH_PHYSICAL_STEP_TIMEOUT_MS", 10_000),
-        mouse_move_duration_ms=_env_int("DSH_PHYSICAL_MOUSE_MOVE_MS", 300),
-        pause_after_action_ms=_env_int("DSH_PHYSICAL_PAUSE_AFTER_MS", 50),
+        step_timeout_ms=_env_int_in("DSH_PHYSICAL_STEP_TIMEOUT_MS", 10_000, 1),
+        mouse_move_duration_ms=_env_int_in("DSH_PHYSICAL_MOUSE_MOVE_MS", 300, 0),
+        pause_after_action_ms=_env_int_in("DSH_PHYSICAL_PAUSE_AFTER_MS", 50, 0),
     )
 
     # ── funnel ──
@@ -301,44 +351,46 @@ def load_config_from_env() -> AppConfig:
     )
 
     # ── android（W4-5 移动 Surface）──
-    def _env_float(name: str, default: float) -> float:
-        raw = os.environ.get(name)
-        if raw is None:
-            return default
-        try:
-            return float(raw)
-        except ValueError as e:
-            raise ValueError(f"env {name} must be float, got {raw!r}") from e
-
+    # （ΠΑΝ-94：float 加载并入模块级 _env_float_in，原局部 _env_float 删除）
     android = AndroidConfig(
         enabled=_env_bool("DSH_PHYSICAL_ANDROID_ENABLED", True),
         adb_path=_env("DSH_PHYSICAL_ANDROID_ADB_PATH", "adb"),
         scrcpy_path=_env("DSH_PHYSICAL_ANDROID_SCRCPY_PATH", "scrcpy"),
-        command_timeout_ms=_env_int("DSH_PHYSICAL_ANDROID_CMD_TIMEOUT_MS", 15_000),
+        # ΠΑΝ-94：以下全部旧实现为静默 clamp（max(64,·)/max(1,·)/max(0,·)）——
+        # 与本文件宣称的「加载层 throw」铁律相悖，统一改拒绝（越界值通常是
+        # 部署笔误，静默改值让用户在运行期才发现行为不符预期）。
+        command_timeout_ms=_env_int_in("DSH_PHYSICAL_ANDROID_CMD_TIMEOUT_MS", 15_000, 1),
         scrcpy_min_version=_env("DSH_PHYSICAL_ANDROID_SCRCPY_MIN_VERSION", "2.0.0"),
-        scrcpy_max_frame_size=max(64, _env_int("DSH_PHYSICAL_ANDROID_SCRCPY_MAX_SIZE", 1280)),
-        long_press_threshold_ms=_env_int("DSH_PHYSICAL_ANDROID_LONG_PRESS_MS", 600),
-        long_press_min_px=max(0, _env_int("DSH_PHYSICAL_ANDROID_LONG_PRESS_MIN_PX", 8)),
-        swipe_duration_ms=_env_int("DSH_PHYSICAL_ANDROID_SWIPE_MS", 300),
-        scroll_px_per_tick=max(1, _env_int("DSH_PHYSICAL_ANDROID_SCROLL_PX_PER_TICK", 120)),
-        clear_first_backspaces=max(0, _env_int("DSH_PHYSICAL_ANDROID_CLEAR_BACKSPACES", 64)),
-        resolution_cache_s=_env_float("DSH_PHYSICAL_ANDROID_RESOLUTION_TTL_S", 30.0),
+        scrcpy_max_frame_size=_env_int_in("DSH_PHYSICAL_ANDROID_SCRCPY_MAX_SIZE", 1280, 64),
+        long_press_threshold_ms=_env_int_in("DSH_PHYSICAL_ANDROID_LONG_PRESS_MS", 600, 0),
+        long_press_min_px=_env_int_in("DSH_PHYSICAL_ANDROID_LONG_PRESS_MIN_PX", 8, 0),
+        swipe_duration_ms=_env_int_in("DSH_PHYSICAL_ANDROID_SWIPE_MS", 300, 0),
+        scroll_px_per_tick=_env_int_in("DSH_PHYSICAL_ANDROID_SCROLL_PX_PER_TICK", 120, 1),
+        clear_first_backspaces=_env_int_in("DSH_PHYSICAL_ANDROID_CLEAR_BACKSPACES", 64, 0),
+        resolution_cache_s=_env_float_in("DSH_PHYSICAL_ANDROID_RESOLUTION_TTL_S", 30.0, 0.0),
     )
 
-    # ── executors（ΑΩ-R25 专属执行器隔离：四池容量，max(1,·) 防零/负值）──
+    # ── executors（ΑΩ-R25 专属执行器隔离：四池容量 + ΠΑΝ-93 队列上界）──
+    # ΠΑΝ-94：容量/队列 < 1 拒绝（旧 max(1,·) 静默 clamp）。
     executors_cfg = ExecutorConfig(
-        input_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_INPUT_WORKERS", 2)),
-        screen_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_SCREEN_WORKERS", 4)),
-        device_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_DEVICE_WORKERS", 6)),
-        tree_workers=max(1, _env_int("DSH_PHYSICAL_EXEC_TREE_WORKERS", 2)),
+        input_workers=_env_int_in("DSH_PHYSICAL_EXEC_INPUT_WORKERS", 2, 1),
+        screen_workers=_env_int_in("DSH_PHYSICAL_EXEC_SCREEN_WORKERS", 4, 1),
+        device_workers=_env_int_in("DSH_PHYSICAL_EXEC_DEVICE_WORKERS", 6, 1),
+        tree_workers=_env_int_in("DSH_PHYSICAL_EXEC_TREE_WORKERS", 2, 1),
+        input_queue=_env_int_in("DSH_PHYSICAL_EXEC_INPUT_QUEUE", 128, 1),
+        screen_queue=_env_int_in("DSH_PHYSICAL_EXEC_SCREEN_QUEUE", 64, 1),
+        device_queue=_env_int_in("DSH_PHYSICAL_EXEC_DEVICE_QUEUE", 128, 1),
+        tree_queue=_env_int_in("DSH_PHYSICAL_EXEC_TREE_QUEUE", 64, 1),
     )
 
-    # ── raw input（ΝΩ-53：事件驱动输入镜像，默认关闭零回归；环容量 max(1,·)）──
+    # ── raw input（ΝΩ-53：事件驱动输入镜像，默认关闭零回归；环容量 ΠΑΝ-94 拒绝方言）──
     raw_input_cfg = RawInputConfig(
         enabled=_env_bool("DSH_PHYSICAL_RAW_INPUT", False),
-        stale_after_s=_env_float("DSH_PHYSICAL_RAW_INPUT_STALE_S", 2.0),
-        ring_capacity=max(1, _env_int("DSH_PHYSICAL_RAW_INPUT_RING_CAPACITY", 128)),
-        event_window_s=_env_float("DSH_PHYSICAL_RAW_INPUT_EVENT_WINDOW_S", 1.0),
+        # ΠΑΝ-94：负陈旧门会让镜像永判陈旧（L-24）—— 拒绝；窗口/预算同理。
+        stale_after_s=_env_float_in("DSH_PHYSICAL_RAW_INPUT_STALE_S", 2.0, 1e-6),
+        ring_capacity=_env_int_in("DSH_PHYSICAL_RAW_INPUT_RING_CAPACITY", 128, 1),
+        event_window_s=_env_float_in("DSH_PHYSICAL_RAW_INPUT_EVENT_WINDOW_S", 1.0, 0.0),
+        drift_budget_px=_env_int_in("DSH_PHYSICAL_RAW_INPUT_DRIFT_BUDGET_PX", 2000, 0),
     )
 
     return AppConfig(

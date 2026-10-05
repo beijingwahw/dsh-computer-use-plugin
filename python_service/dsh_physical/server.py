@@ -12,8 +12,14 @@
   1. ``unhandled_exception_middleware``：兜底（最后注册 = 最外层，
      连 auth/logging 自身的异常也能转 200+failure —— J 纪元修正：
      旧注册序把它放在最内层，中间件自己的异常会漏成真 500）
-  2. ``auth_middleware``：三层纵深认证（UDS+PID+Cap Token）
-  3. ``request_logging_middleware``：请求/响应日志（telemetry 喂料）
+  2. ``request_logging_middleware``：请求/响应日志（telemetry 喂料）。
+     ΠΑΝ-26: 从最内层挪到 unhandled 之内第二层 —— 旧执行序
+     （unhandled → drain → auth → logging）使 auth 的 401 与 drain 的
+     503 不经过 logging ⇒ 暴力探测/nonce 重放拒绝在 JSON-lines 日志
+     零痕迹（C2-5 M-2）。新序下**每个**到达请求（含 401/503 拒绝）都
+     落一行请求日志 —— 审计留痕。
+  3. ``auth_middleware``：三层纵深认证（UDS+PID+Cap Token）
+  4. 路由（含 safe_call 的业务信封）
 """
 from __future__ import annotations
 
@@ -31,8 +37,9 @@ from fastapi.responses import JSONResponse
 
 from . import routes, shm as shm_module
 from .auth import (
-    ALL_CAPS, ENDPOINT_CAPABILITY, attest_pid, check_and_consume_nonce,
-    chmod_uds_file, ensure_key, init_uds_file, parse_token,
+    ALL_CAPS, ENDPOINT_CAPABILITY, attest_pid, attest_pid_supported,
+    attestation_mode, check_and_consume_nonce, chmod_uds_file, ensure_key,
+    init_uds_file, parse_token,
 )
 from .config import AppConfig, load_config_from_env
 from .errors import ErrorKind, failure, success, unhandled_exception_middleware
@@ -218,21 +225,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
 
     # ─── 中间件注册（Starlette：后注册者最外层）───
-    # 注册序 = logging → auth → unhandled ⇒ 执行序（外→内）= unhandled → auth → logging。
-
-    # ─── 中间件：请求日志（telemetry 喂料；最内层）───
-    @app.middleware("http")
-    async def logging_middleware(request: Request, call_next):
-        started = time.perf_counter()
-        response = await call_next(request)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        # ΝΩ-36：print → JSON-lines 结构化日志（ts/service/http.method/
-        # http.route/http.status/duration_ms/request.id 回显）
-        log_json(request_log_record(
-            request.method, request.url.path, response.status_code, elapsed_ms,
-            request.headers.get("X-Request-Id", ""),
-        ))
-        return response
+    # 注册序 = auth → drain → logging → unhandled ⇒ 执行序（外→内）=
+    # unhandled → logging → drain → auth。
+    # ΠΑΝ-26: logging 从最内层挪到 drain 之外 —— 401（auth）/503（drain）
+    # 同样落一行 JSON-lines 请求日志（C2-5 M-2：旧序下暴力探测零痕迹）。
+    # unhandled 仍居最外层（J 纪元保证不回退：连 logging 自身的异常也兜）。
 
     # ─── 中间件：认证（三层纵深）───
     # W6-R-A3 错误码修正：认证失败是传输/安全层判决（非业务层），返回
@@ -240,9 +237,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # 业务失败仍走 HTTP 200 + failure 信封（errors.py 的既有契约，不动）。
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        # 健康检查 / openapi 不需认证
+        # 免认证面 = allow_no_token_endpoints **显式配置**（缺省仅 /v1/health）。
+        # ΠΑΝ-26: /docs*、/openapi.json、/favicon.ico 不再硬编码免认证
+        # （C2-5 M-1：旧实现在非 allow_external 模式下默认放行完整 OpenAPI
+        # schema —— 本机任何进程可免 token 枚举攻击面）。docs 家族现在走
+        # 完整三层校验，能力位归 observe（见 _match_capability）。
         path = request.url.path
-        if path in config.auth.allow_no_token_endpoints or path.startswith("/docs") or path in ("/openapi.json", "/favicon.ico"):
+        if path in config.auth.allow_no_token_endpoints:
             return await call_next(request)
 
         # Layer 1: 传输绑定（TCP 只听 127.0.0.1 / UDS 0600，见 config + run()）
@@ -313,8 +314,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
 
         # 端点能力校验
+        # ΠΑΝ-25: fail-closed —— 旧实现对无映射端点返回 None ⇒ 跳过能力校验
+        # 直接放行（C2-5 H-3：shutdown/stats/input_events/devices 等管理面与
+        # 一切未知路径整体游离于能力位图外，单能力 token 亦可关停服务）。
+        # 现管理端点已入 ENDPOINT_CAPABILITY（shutdown→admin、观测族→observe），
+        # 无映射路径默认 403 拒绝（结构化信封）。kind 沿用 unauthorized ——
+        # errors.py 的 ErrorKind 闭集归他人文件管，不私加 FORBIDDEN 位。
         capability = _match_capability(path, request.method)
-        if capability and capability not in auth_result.caps:
+        if capability is None:
+            return JSONResponse(
+                status_code=403,
+                content=failure(
+                    ErrorKind.UNAUTHORIZED,
+                    f"endpoint {path!r} ({request.method}) has no capability mapping; "
+                    "fail-closed default deny (ΠΑΝ-25)",
+                    latency_ms=0,
+                ),
+            )
+        if capability not in auth_result.caps:
             return JSONResponse(
                 status_code=401,
                 content=failure(
@@ -324,10 +341,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 ),
             )
 
-        # PID Attestation（Linux，二次校验）
+        # PID Attestation（Linux /proc；ΠΑΝ-27: Windows 可得内核信号同门）
+        # 旧硬条件 ``sys.platform == "linux"`` 使 Windows 即便显式
+        # DSH_PHYSICAL_PID_ATTESTATION=true 也恒跳过（C2-4 M-4：主平台
+        # 三层纵深退化为「同用户全信」）。现按平台支持度判决
+        # （attest_pid_supported：linux/win32）；attest_pid 内部按平台取真实
+        # 信号（存在性/可执行路径/创建时间），信号不可得则诚实降级为
+        # 「仅回环+HMAC」（拒绝信封携带 attestation_mode 标注）。
         if (
             config.auth.enable_pid_attestation
-            and sys.platform == "linux"
+            and attest_pid_supported()
             and auth_result.pid
             and not attest_pid(auth_result.pid)
         ):
@@ -335,7 +358,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 status_code=401,
                 content=failure(
                     ErrorKind.UNAUTHORIZED,
-                    f"pid {auth_result.pid} binary not in whitelist",
+                    f"pid {auth_result.pid} failed attestation "
+                    f"(mode={attestation_mode()})",
                     latency_ms=0,
                 ),
             )
@@ -343,9 +367,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return await call_next(request)
 
     # ─── 中间件：drain 拒新（ΝΩ-27 优雅关停）───
-    # 注册序在 auth 之后 ⇒ 执行序比 auth 更外（unhandled → drain → auth →
-    # logging）：draining 期的新请求在鉴权之前即被 503+failure 信封拒绝
-    # （不消耗 nonce、不进日志中间件、不占在飞）。/v1/shutdown 自身放行
+    # 注册序在 auth 之后 ⇒ 执行序比 auth 更外（unhandled → logging → drain
+    # → auth）：draining 期的新请求在鉴权之前即被 503+failure 信封拒绝
+    # （不消耗 nonce、不占在飞）。ΠΑΝ-26: logging 已在 drain 之外 ⇒ 503
+    # 同样落请求日志（draining 期扰动可审计）。/v1/shutdown 自身放行
     # （幂等）。在飞计数（enter/leave）供 drain_and_exit 排空等待。
     @app.middleware("http")
     async def drain_middleware(request: Request, call_next):
@@ -366,6 +391,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         finally:
             routes.drain_leave()
 
+    # ─── 中间件：请求日志（telemetry 喂料；ΠΑΝ-26: drain 之外 —— 401/503
+    # 同样留痕）───
+    @app.middleware("http")
+    async def logging_middleware(request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        # ΝΩ-36：print → JSON-lines 结构化日志（ts/service/http.method/
+        # http.route/http.status/duration_ms/request.id 回显）。
+        # ΠΑΝ-26: auth 的 401 / drain 的 503 也走这里 —— 暴力探测（token
+        # 枚举、nonce 重放）对审计可见，事后可查。
+        log_json(request_log_record(
+            request.method, request.url.path, response.status_code, elapsed_ms,
+            request.headers.get("X-Request-Id", ""),
+        ))
+        return response
+
     # ─── 中间件：兜底（最后注册 = 最外层；连 auth/logging 的异常也兜住）───
     @app.middleware("http")
     async def _unhandled(request: Request, call_next):
@@ -378,13 +420,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
 
 def _match_capability(path: str, method: str) -> str | None:
-    """根据请求路径与方法匹配所需 capability。"""
+    """根据请求路径与方法匹配所需 capability。
+
+    ΠΑΝ-25: 返回 ``None`` = 无映射 —— 调用方（auth 中间件）**fail-closed
+    默认拒绝**（403 结构化信封），不再跳过校验放行。管理端点映射见
+    ``auth.ENDPOINT_CAPABILITY``（shutdown→admin；stats/input_events/
+    devices→observe）。
+    ΠΑΝ-26: docs 家族（/docs*、/openapi.json、/favicon.ico）不再硬编码
+    免认证，归 observe 位 —— 与管理观测面同方言（非 allow_external 模式
+    下 FastAPI 默认挂载这些路由）。
+    """
     # 精确匹配
     if path in ENDPOINT_CAPABILITY:
         return ENDPOINT_CAPABILITY[path]
     # 模糊匹配（如 /v1/shm/{name}）
     if path.startswith("/v1/shm/") and method == "DELETE":
         return "shm_delete"
+    # ΠΑΝ-26: docs 家族（其余未映射路径 ⇒ None ⇒ 中间件 403 fail-closed）
+    if path.startswith("/docs") or path in ("/openapi.json", "/favicon.ico"):
+        return "observe"
     return None
 
 
@@ -401,23 +455,27 @@ def run() -> None:
 
     import uvicorn
 
-    # W6-R-B8（集成校验补）：Layer 2 状态启动期诚实标注 —— TS 端 serviceManager
-    # 已不再强制 DSH_PHYSICAL_PID_ATTESTATION=false，开关回到本端按平台决定；
-    # 实际形态（武装 / 平台性降级）须在服务日志可见，而非静默缺席。
-    # Windows/macOS 无 /proc 与 SO_PEERCRED ⇒ 降级标注（Layer 1+3 承担认证），
-    # 绝不报错 —— 这是平台事实，不是故障。
-    if config.auth.enable_pid_attestation and sys.platform == "linux":
+    # W6-R-B8（集成校验补）+ ΠΑΝ-27：Layer 2 状态启动期诚实标注 —— TS 端
+    # serviceManager 已不再强制 DSH_PHYSICAL_PID_ATTESTATION=false，开关回到
+    # 本端按平台决定；实际形态（武装 / 平台性降级）须在服务日志可见，而非
+    # 静默缺席。ΠΑΝ-27: Windows 不再一律报降级 —— 内核信号（进程存在性/
+    # 可执行路径/创建时间）武装即报 armed；单次信号不可得的诚实降级
+    # （loopback+HMAC only）由 auth.attestation_mode 按最近事实申报。
+    if config.auth.enable_pid_attestation and attest_pid_supported():
         print(
-            "[dsh-physical] PID attestation: armed (linux /proc whitelist; "
-            "UDS transport additionally captures SO_PEERCRED peer pid)",
+            f"[dsh-physical] PID attestation: armed (platform={sys.platform}, "
+            f"mode={attestation_mode()}); windows = 进程存在性/可执行路径/创建"
+            "时间信号（信号不可得时按请求诚实降级为 loopback+HMAC）；linux/UDS "
+            "additionally captures SO_PEERCRED peer pid",
             file=sys.stderr,
         )
     else:
         print(
             f"[dsh-physical] PID attestation: degraded (platform={sys.platform}, "
             f"enable_pid_attestation={config.auth.enable_pid_attestation}) — "
-            "no /proc attestation layer on this platform; Layer 1 (transport binding) "
-            "+ Layer 3 (HMAC Cap Token + nonce) carry authentication",
+            "no real PID signals on this platform; Layer 1 (transport binding) "
+            "+ Layer 3 (HMAC Cap Token + nonce) carry authentication "
+            "(loopback+HMAC only)",
             file=sys.stderr,
         )
 

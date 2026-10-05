@@ -23,6 +23,7 @@ from typing import Literal
 
 from .config import ActionConfig
 from .errors import ErrorKind, PhysicalError
+from . import dpi as _dpi  # ΠΑΝ-81/82: DPI 像素域契约（见 dpi.py）
 
 # pyautogui 懒加载：服务能在无 pyautogui / 无 X 环境下启动；
 # 仅在真正执行物理动作时才 import，并捕获 ImportError 转为 PhysicalError。
@@ -37,6 +38,11 @@ def _get_pyautogui():
     global _pyautogui
     if _pyautogui is not None:
         return _pyautogui
+    # ΠΑΝ-82: 先锁进程 DPI 感知，再允许 pyautogui 入场 —— pyautogui 的
+    # _pyautogui_win.py 在 import 时调用 SetProcessDPIAware()（进程级副作用，
+    # 与 uiautomation 同病）。我们的 per-monitor-v2 档位先立，OS「只能升不能
+    # 降」即封死其翻转 ⇒ pyautogui.size() 恒物理像素，不再随导入时序漂移。
+    _dpi.ensure_process_dpi_awareness()
     try:
         import pyautogui as _pa  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
@@ -62,11 +68,17 @@ _BUTTON_MAP: dict[str, str] = {
 }
 
 # 键位白名单（对齐 D-5 system.ts keyMap，避免 import 跨语言）
+# R2-2: 文档级镜像收口 —— TS 侧白名单（pressHotkey.HOTKEY_WHITELIST_KEYS /
+# system._getKey fallbackMap）已补全字母表与导航键（根因：缺 s 致 ctrl+s 被
+# 协议层拒，R1-8 冒烟遗留①）；_KEY_MAP 本就含全字母表+导航，此处仅同步声明。
 Key = Literal[
     "ctrl", "cmd", "alt", "shift",
     "enter", "tab", "space", "backspace", "delete", "esc",
+    "home", "end", "pageup", "pagedown",
+    "up", "down", "left", "right",
     "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
-    "a", "c", "v", "z",
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
 ]
 
 # ``keyMap`` 与 D-5 system.ts 严格一致 —— 任何扩展必须双向同步
@@ -142,24 +154,77 @@ if sys.platform == "win32":
     _INPUT_KEYBOARD = 1
     _KEYEVENTF_UNICODE = 0x0004
     _KEYEVENTF_KEYUP = 0x0002
+    _VK_RETURN = 0x0D
 
-    def _type_unicode(text: str) -> int:
-        """UTF-16 码元逐个直注（ surrogate pair 各自成事件 —— SendInput 语义）。"""
-        units = text.encode("utf-16-le")
+    # R5-2（D5 修复）：换行注入计划 —— ("enter", 0) = 真回车键事件；
+    # ("uni", scan) = KEYEVENTF_UNICODE 直注码元。
+    def _newline_plan(text: str) -> list[tuple[str, int]]:
+        """R5-2（D5 根因修复）：多行文本的换行语义归一。
+
+        批1 seed-report 实战（R4-2 §2.1/§4 D5）：KEYEVENTF_UNICODE 以
+        wScan=0x000A 注入 '\\n' 时，系统合成 VK_PACKET → WM_CHAR 0x0A ——
+        而 Windows 编辑控件（记事本/EDIT/RichEdit 家族）只认 '\\r'(0x0D)
+        为换行，0x0A 被静默丢弃 ⇒ 多行文本塌缩成单行（两轮全废、9 浪费步，
+        模型被迫自行诊断改「逐行+enter」绕行）。
+
+        修法：\\r\\n / \\r / \\n 三种形态归一为**真 VK_RETURN down/up 键事件**
+        （WM_KEYDOWN(VK_RETURN) + TranslateMessage → WM_CHAR '\\r' —— 与用户
+        手按 Enter 字节等价），其余码元仍走 UNICODE 直注。非 BMP 字符拆
+        代理对（两码元各自成事件，SendInput 语义），保持旧路径逐字节不变。
+        """
+        plan: list[tuple[str, int]] = []
+        i, n = 0, len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "\r":
+                plan.append(("enter", 0))
+                if i + 1 < n and text[i + 1] == "\n":
+                    i += 1  # CRLF 记一次回车
+            elif ch == "\n":
+                plan.append(("enter", 0))
+            else:
+                cp = ord(ch)
+                if cp > 0xFFFF:
+                    # 代理对：高/低半区各自一个 VK_PACKET 事件
+                    cp -= 0x10000
+                    plan.append(("uni", 0xD800 + (cp >> 10)))
+                    plan.append(("uni", 0xDC00 + (cp & 0x3FF)))
+                else:
+                    plan.append(("uni", cp))
+            i += 1
+        return plan
+
+    def _type_unicode(text: str, _sender=None) -> int:
+        """UTF-16 码元逐个直注（ surrogate pair 各自成事件 —— SendInput 语义）。
+
+        R5-2（D5）：换行不再走 UNICODE 直注（0x0A 会被编辑控件吞掉），
+        改发真 VK_RETURN 键事件 —— 见 ``_newline_plan`` 战果注记。
+        ``_sender``：注入函数的可注入缝（测试拦截 SendInput 系统调用边界，
+        全路径单测不占 GUI）；缺省 = ctypes.windll.user32.SendInput。
+        """
+        send = _sender if _sender is not None else ctypes.windll.user32.SendInput
         inputs = []
-        for i in range(0, len(units), 2):
-            scan = units[i] | (units[i + 1] << 8)
-            for flag in (0, _KEYEVENTF_KEYUP):
-                inp = _INPUT(type=_INPUT_KEYBOARD)
-                inp.u.ki = _KEYBDINPUT(
-                    wVk=0, wScan=scan,
-                    dwFlags=_KEYEVENTF_UNICODE | flag, time=0, dwExtraInfo=None,
-                )
-                inputs.append(inp)
+        for kind, scan in _newline_plan(text):
+            if kind == "enter":
+                for flag in (0, _KEYEVENTF_KEYUP):
+                    inp = _INPUT(type=_INPUT_KEYBOARD)
+                    inp.u.ki = _KEYBDINPUT(
+                        wVk=_VK_RETURN, wScan=0,
+                        dwFlags=flag, time=0, dwExtraInfo=None,
+                    )
+                    inputs.append(inp)
+            else:
+                for flag in (0, _KEYEVENTF_KEYUP):
+                    inp = _INPUT(type=_INPUT_KEYBOARD)
+                    inp.u.ki = _KEYBDINPUT(
+                        wVk=0, wScan=scan,
+                        dwFlags=_KEYEVENTF_UNICODE | flag, time=0, dwExtraInfo=None,
+                    )
+                    inputs.append(inp)
         if not inputs:
             return 0
         arr = (_INPUT * len(inputs))(*inputs)
-        return int(ctypes.windll.user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT)))
+        return int(send(len(inputs), arr, ctypes.sizeof(_INPUT)))
 
 
 # ─── 串行队列：所有物理动作经此排队（ioMutex 同源）───
@@ -234,19 +299,33 @@ class InputController:
         self._dry_run = False
         self._screen_size: tuple[int, int] | None = None
         self._screen_size_at: float = 0.0
+        # ΠΑΝ-81: 缓存键含 DPI 域指纹（domain_epoch = 感知档位 + 系统 DPI）
+        self._screen_size_epoch: tuple | None = None
 
     def set_dry_run(self, dry: bool) -> None:
         self._dry_run = dry
 
     async def get_screen_size(self) -> tuple[int, int]:
-        """获取屏幕尺寸（TTL 缓存，防系统调用抖动也防分辨率漂移）。"""
+        """获取屏幕尺寸（TTL 缓存 + DPI 域感知失效）。
+
+        ΠΑΝ-81：读数域 = 进程 DPI 感知档位（契约下恒物理像素，见 dpi.py）。
+        缓存键含域指纹 —— 第三方库中途翻转进程感知（C2-5 H-2 的 30s 窗口
+        内旧逻辑读数换算新物理坐标病灶）、或显示器 DPI 档变化时，缓存立即
+        失效重查，绝不用旧域读数换算新域像素。
+        """
         now = time.monotonic()
-        if self._screen_size is None or now - self._screen_size_at > self.SCREEN_SIZE_TTL_S:
+        epoch = _dpi.domain_epoch()
+        if (
+            self._screen_size is None
+            or now - self._screen_size_at > self.SCREEN_SIZE_TTL_S
+            or self._screen_size_epoch != epoch  # ΠΑΝ-81: 域翻转 ⇒ 立即失效
+        ):
             try:
                 pa = _get_pyautogui()
                 size = await _run_in_executor(lambda: pa.size())
                 self._screen_size = (int(size.width), int(size.height))
                 self._screen_size_at = now
+                self._screen_size_epoch = epoch
             except PhysicalError:
                 # 受控失败：保留旧缓存（若有）—— 比崩溃诚实，比误算保守
                 if self._screen_size is None:
@@ -331,8 +410,9 @@ class InputController:
                 await _run_in_executor(pa.press, "backspace")
             if sys.platform == "win32" and text:
                 # IME-proof：SendInput UNICODE 直注（见模块顶部战果注记）。
-                # 失败对账：SendInput 返回成功注入的事件数 —— 不足即 PhysicalError。
-                expected = len(text.encode("utf-16-le")) // 2 * 2  # 每码元 down+up
+                # R5-2（D5）：换行按 _newline_plan 归一为真回车键事件 —— 事件数
+                # 对账以同一计划为尺（每原子 down+up = 2 事件；\r\n 记 1 原子）。
+                expected = len(_newline_plan(text)) * 2
                 sent = await _run_in_executor(_type_unicode, text)
                 if sent < expected:
                     raise PhysicalError(

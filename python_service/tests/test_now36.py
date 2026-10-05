@@ -13,11 +13,13 @@ import asyncio
 import io
 import json
 import math
+import os
 import sys
 import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SVC_ROOT = str(Path(__file__).resolve().parents[1])
 if _SVC_ROOT not in sys.path:
@@ -164,10 +166,11 @@ class StatsEndpointTests(unittest.TestCase):
         # 不依赖控制器的面照常在场
         self.assertIn("pools", stats["executors"])
 
-    def test_stats_is_management_plane_not_capability_gated(self):
-        # 按 auth 现状最小实现：不在 ENDPOINT_CAPABILITY ⇒ 不要求特定位图
-        #（token+nonce 强制校验由中间件统一执行，与 /v1/shutdown 同方言）
-        self.assertNotIn("/v1/stats", ENDPOINT_CAPABILITY)
+    def test_stats_is_management_plane_observe_gated(self):
+        # ΠΑΝ-25: 管理端点入能力位图 —— /v1/stats → observe（旧「不在
+        # ENDPOINT_CAPABILITY ⇒ 免能力校验」方言已被 fail-closed 取代；
+        # 中间件级判决测试见 test_auth.py AuthMiddlewareTests）
+        self.assertEqual(ENDPOINT_CAPABILITY.get("/v1/stats"), "observe")
 
     def test_collect_stats_never_raises_on_broken_face(self):
         routes._controllers["screen"] = types.SimpleNamespace(
@@ -612,6 +615,273 @@ class AndroidTempdirChurnTests(unittest.TestCase):
                          "192.168.1.5_5555")
         self.assertEqual(AndroidController._safe_dir_token("emu-1_2.3"),
                          "emu-1_2.3")
+
+
+class UvcReaderBackoffTests(unittest.TestCase):
+    """ΠΑΝ-92：热拔插后读线程指数退避 + 设备重枚举（不再单核空转）。"""
+
+    def test_disconnected_cap_backs_off_and_reenumerates(self):
+        from dsh_physical.uvc import Cv2FrameSource
+
+        class DeadCap:
+            """热拔插形态：read() 立即返 (False, None)。"""
+
+            def __init__(self):
+                self.calls = 0
+                self.released = 0
+
+            def isOpened(self):
+                return True
+
+            def set(self, *_a):
+                return None
+
+            def read(self):
+                self.calls += 1
+                return False, None
+
+            def release(self):
+                self.released += 1
+
+        cap = DeadCap()
+        constructions = {"n": 0}
+
+        def factory(*_a, **_k):
+            constructions["n"] += 1  # 重开 = DirectShow 重新枚举设备
+            return cap
+
+        _install_fake_cv2(self, factory)
+        src = Cv2FrameSource(0, read_timeout_s=0.2, backoff_cap_s=0.05, reopen_every=4)
+        src.open()
+        try:
+            # 读线程是惰性的（首次消费才起）：先触发一次 read 把它带起来，
+            # 之后无消费期正是旧实现单核空转的现场。
+            with self.assertRaises(PhysicalError):
+                src.read()
+            time.sleep(0.4)  # 旧实现 0.4s 内百万次级忙转；退避后个位~十位次
+        finally:
+            src.close()
+        self.assertLess(cap.calls, 60, "指数退避生效：读调用速率有界（非单核空转）")
+        self.assertGreaterEqual(constructions["n"], 2,
+                                "连续失败 ⇒ 设备重枚举（release + reopen，重插自愈面）")
+        self.assertGreaterEqual(src.reopens, 1, "重枚举计数申报（可观测面）")
+        desc = src.describe()
+        self.assertIn("read_failures", desc)
+        self.assertIn("reopens", desc)
+
+    def test_reader_recovers_when_signal_returns(self):
+        import numpy as np
+
+        from dsh_physical.uvc import Cv2FrameSource
+
+        class FlakyCap:
+            def __init__(self):
+                self.fail = True
+
+            def isOpened(self):
+                return True
+
+            def set(self, *_a):
+                return None
+
+            def read(self):
+                if self.fail:
+                    return False, None
+                arr = np.zeros((4, 6, 3), dtype=np.uint8)
+                arr[:, :, 2] = 180
+                return True, arr
+
+            def release(self):
+                return None
+
+        cap = FlakyCap()
+        _install_fake_cv2(self, lambda *_a, **_k: cap)
+        src = Cv2FrameSource(0, read_timeout_s=0.3, backoff_cap_s=0.02, reopen_every=1000)
+        src.open()
+        try:
+            with self.assertRaises(PhysicalError):
+                src.read()  # 失联期：诚实超时信封（排队中的失败项）
+            cap.fail = False  # 信号恢复
+            img = None
+            for _ in range(5):  # 队列可能持有一条旧失败项：重试到新帧
+                try:
+                    img = src.read()
+                    break
+                except PhysicalError:
+                    time.sleep(0.05)
+            self.assertIsNotNone(img, "信号恢复 ⇒ 自然续流（退避不误杀恢复）")
+            self.assertEqual(src.read_failures, 0, "成功帧 ⇒ 连续失败计数归零")
+        finally:
+            src.close()
+
+
+# ─── 8. ΠΑΝ-94：配置面诚实（数值域违反一律 raise，不静默 clamp/放行） ───
+
+
+class ConfigHonestyTests(unittest.TestCase):
+    """ΠΑΝ-94：注释与代码对齐 —— 三处失真（宣称拒绝/实放行、宣称拒绝/实 clamp、
+    静默 clamp）统一为拒绝方言（加载层 throw 是本模块自立的铁律）。"""
+
+    def _load_raises(self, env: dict) -> ValueError:
+        from dsh_physical.config import load_config_from_env
+
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("DSH_PHYSICAL_")}
+        clean.update(env)
+        with mock.patch.dict(os.environ, clean, clear=True):
+            try:
+                load_config_from_env()
+            except ValueError as e:
+                return e
+        raise AssertionError(f"expected ValueError for {env}")
+
+    def test_mmap_quota_negative_rejected(self):
+        """旧实现：注释宣称拒绝、代码放行（本工单点名的失真 #1）。"""
+        e = self._load_raises({"DSH_PHYSICAL_MMAP_QUOTA_MB": "-5"})
+        self.assertIn("DSH_PHYSICAL_MMAP_QUOTA_MB", str(e))
+
+    def test_dxgi_timeout_negative_rejected(self):
+        """旧实现：注释宣称拒绝、代码 max(0,·) 恰是 clamp（失真 #2）。"""
+        e = self._load_raises({"DSH_PHYSICAL_DXGI_TIMEOUT_MS": "-1"})
+        self.assertIn("DSH_PHYSICAL_DXGI_TIMEOUT_MS", str(e))
+
+    def test_jpeg_quality_out_of_range_rejected(self):
+        e = self._load_raises({"DSH_PHYSICAL_JPEG_QUALITY": "150"})
+        self.assertIn("domain", str(e))
+
+    def test_tcp_port_domain_rejected(self):
+        self._load_raises({"DSH_PHYSICAL_TCP_PORT": "70000"})
+
+    def test_executor_queue_limit_rejected(self):
+        e = self._load_raises({"DSH_PHYSICAL_EXEC_DEVICE_QUEUE": "0"})
+        self.assertIn("DSH_PHYSICAL_EXEC_DEVICE_QUEUE", str(e))
+
+    def test_raw_input_negative_stale_gate_rejected(self):
+        """负陈旧门会让镜像永判陈旧（L-24）—— 拒绝而非放行。"""
+        self._load_raises({"DSH_PHYSICAL_RAW_INPUT_STALE_S": "-2"})
+
+    def test_valid_extremes_still_load(self):
+        from dsh_physical.config import load_config_from_env
+
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("DSH_PHYSICAL_")}
+        clean.update({
+            "DSH_PHYSICAL_MMAP_QUOTA_MB": "0",     # 0 = 配额关（合法）
+            "DSH_PHYSICAL_JPEG_QUALITY": "100",
+            "DSH_PHYSICAL_DXGI_TIMEOUT_MS": "0",
+            "DSH_PHYSICAL_RAW_INPUT_DRIFT_BUDGET_PX": "0",  # 0 = 漂移门关（合法）
+        })
+        with mock.patch.dict(os.environ, clean, clear=True):
+            cfg = load_config_from_env()
+        self.assertEqual(cfg.screenshot.mmap_quota_mb, 0)
+        self.assertEqual(cfg.raw_input.drift_budget_px, 0)
+
+
+# ─── 9. ΠΑΝ-95：adb 失败分类（device_unreachable —— TS 端可区分重试） ───
+
+
+class AdbErrorClassificationTests(unittest.TestCase):
+    """ΠΑΝ-95：例行 adb 失败不再铸 internal_error（那是最后防线诊断位）。"""
+
+    def test_shell_input_failure_maps_device_unreachable(self):
+        def runner(argv, timeout_s=15.0, cwd=None):
+            if "--version" in argv:
+                return 0, b"scrcpy 2.7.1\n", b""
+            if "wm" in argv:
+                return 0, b"Physical size: 1080x1920\n", b""
+            if "input" in argv:
+                return 1, b"", b"error: device offline"
+            return 0, b"", b""
+
+        ctrl = AndroidController(AndroidConfig(), runner=runner)
+        try:
+            with self.assertRaises(PhysicalError) as ctx:
+                ctrl.tap("emu1", 0.5, 0.5)
+            self.assertIs(ctx.exception.kind, ErrorKind.DEVICE_UNREACHABLE)
+            self.assertIn("device offline", ctx.exception.detail,
+                          "adb 真实 stderr 进入信封（分类的证据面）")
+        finally:
+            ctrl.close()
+
+    def test_grab_double_failure_reports_adb_root_cause(self):
+        def runner(argv, timeout_s=15.0, cwd=None):
+            if "--version" in argv:
+                return 0, b"scrcpy 2.7.1\n", b""
+            if "--screenshot" in argv:
+                return 1, b"", b"scrcpy boom"
+            if "screencap" in argv:
+                return 1, b"", b"error: device unauthorized"
+            return 0, b"", b""
+
+        ctrl = AndroidController(AndroidConfig(), runner=runner)
+        try:
+            with self.assertRaises(PhysicalError) as ctx:
+                ctrl.grab_frame("emu1")
+            # 旧实现 `raise e from None` 只报 scrcpy 的错并丢弃 adb 的设备级根因
+            self.assertIn("device unauthorized", ctx.exception.detail,
+                          "最后尝试的链（adb）是主判决")
+            self.assertIn("scrcpy chain also failed", ctx.exception.detail,
+                          "另一链的失败并进 detail（不凭猜测丢证据）")
+        finally:
+            ctrl.close()
+
+
+# ─── 10. ΠΑΝ-96（routes 侧）：source 字段生效为 ceiling 收紧 ───
+
+
+class UiTreeSourceFieldTests(unittest.TestCase):
+    """ΠΑΝ-96：``source`` 此前收而不用（契约谎言）—— 现按 min 语义收紧 ceiling。"""
+
+    def setUp(self):
+        self._saved = dict(routes._controllers)
+        seen = {"ceiling": None}
+
+        class FakeFunnel:
+            async def extract(self, screenshot_bytes, region, funnel_ceiling, screen_size):
+                seen["ceiling"] = funnel_ceiling
+                return types.SimpleNamespace(to_dict=lambda: {"elements": [], "depth": seen["ceiling"]})
+
+        class FakeScreen:
+            async def capture_png_bytes(self, region=None):
+                return b"png", {}, None
+
+            async def get_screen_size(self):
+                return {"width": 1920, "height": 1080}
+
+        self.seen = seen
+        routes._controllers.clear()
+        routes._controllers.update({
+            "funnel": FakeFunnel(),
+            "screen": FakeScreen(),
+            "config": AppConfig(),
+        })
+
+    def tearDown(self):
+        routes._controllers.clear()
+        routes._controllers.update(self._saved)
+
+    def _call(self, **kwargs):
+        from dsh_physical.routes import UiTreeRequest
+
+        return asyncio.run(routes.get_ui_tree(UiTreeRequest(**kwargs)))
+
+    def test_source_ocr_caps_ceiling_at_l2(self):
+        resp = self._call(source="ocr")
+        self.assertEqual(resp["status"], "success")
+        self.assertEqual(self.seen["ceiling"], "L2",
+                         "纯文本屏钉 source=ocr ⇒ 不落 L3（免 VLM 付费的客户端杠杆）")
+
+    def test_source_tree_caps_ceiling_at_l1(self):
+        self._call(source="tree")
+        self.assertEqual(self.seen["ceiling"], "L1")
+
+    def test_source_vlm_with_explicit_ceiling_takes_shallower(self):
+        self._call(source="vlm", funnel_ceiling="L2")
+        self.assertEqual(self.seen["ceiling"], "L2",
+                         "显式 ceiling 与 source 取较浅者（都只能收紧视野）")
+
+    def test_default_auto_l3_zero_regression(self):
+        self._call()
+        self.assertEqual(self.seen["ceiling"], "L3",
+                         "auto + 缺省 ceiling=L3 ⇒ L3（旧客户端零回归）")
 
 
 if __name__ == "__main__":
