@@ -3,7 +3,7 @@
 > 本文件由 `scripts/gen_config_docs.mjs` 从 `src/config.ts` 的 Config Schema 自动生成，请勿手改（重跑即重铸）。
 > 生成命令：`node --import ./test/register.mjs scripts/gen_config_docs.mjs`
 
-共 155 个配置字段。
+共 158 个配置字段。
 
 | 键 | 类型 | 缺省 | 描述 |
 | --- | --- | --- | --- |
@@ -30,8 +30,10 @@
 | adaptiveSettle | boolean | true | Poll until screen settles before verifying effects |
 | regionVerifyRadius | number | 0.15 | Region-verify radius as screen fraction; 0 = off |
 | focusMaxAgeMs | number | 30000 | Focus validity window for region verification |
-| enableOcr | boolean | false | Enable local OCR (read_text/find_text + semantic verification) |
+| enableOcr | boolean | true | Enable local OCR (read_text/find_text + semantic verification). Default ON since ANB-4: pure local capability, zero API cost — the old default-off made read_text/find_text unreachable on day one with zero warning; set false to opt out |
 | ocrLang | string | "eng" | OCR language, e.g. eng / chi_sim+eng |
+| typeFocusGuard | boolean | true | R2-3 type_text pre-focus guard: before typing, read the foreground window title; if it matches the host-window markers, auto refocus the last switched target window, and fail honestly (never type) when refocus is impossible — prevents typing into the agent host chat box (next-turn prompt pollution) |
+| hostWindowMarkersCsv | string | "dsh,deepseek harness" | R2-3 host-window markers (CSV, case-insensitive substring against the foreground title); empty = built-in defaults. Override when the host build renames its window |
 | enableInteractivityProbe | boolean | true | Hover-probe OCR hits (cursor shape + hover repaint) so conversation text is never mistaken for a clickable entry |
 | probeDwellMs | number | 350 | Probe hover dwell in ms |
 | probeRegionRadius | number | 0.06 | Probe region-hash radius as screen fraction |
@@ -89,7 +91,7 @@
 | vlmModel | string | "glm-5.3-flash" | GLM vision model name |
 | vlmAssistOcr | boolean | false | Allow the VLM cloud cortex to read the screen as a third path when BOTH local OCR paths (server L2 + legacy tesseract) fail (semanticConfirm fallback) |
 | vlmProvider | string | "" | Vision-model platform id (openai/anthropic/gemini/qwen/moonshot/doubao/xai/siliconflow/openrouter/ollama/lmstudio/vllm/custom; unknown ids are treated as OpenAI-compatible custom endpoints); empty = auto-detect from env (GLM envs first, then each platform envKeys) |
-| vlmFallbackProviders | string | "" | CSV fallback platform chain (e.g. "anthropic,gemini") minted into a failover pool behind the primary; empty = no pool |
+| vlmFallbackProviders | string | "" | R3-2: CSV fallback platform chain (e.g. "anthropic,gemini") minted into a failover pool behind the primary; each segment may carry a per-brain model override as "id=model" (e.g. "glm=glm-4v-flash" - explicit model beats the registry preset default; keys still resolve via each platform env); empty = no pool |
 | vlmAutoAdoptLocal | boolean | true | When NO vision brain is configured at all (no config, no env), auto-adopt a local zero-key vision service (Ollama/LM Studio/vLLM loopback probe, 1.5s budget each); off = skip straight to the wizard |
 | vlmOnboardingEnabled | boolean | true | When NO vision model is resolvable at all (no archive, no local service, no env), pop up the local connection wizard page (loopback HTTP server + default browser); off = stay dark until manual configuration |
 | vlmOnboardingPort | number | 18432 | Default port for the connection wizard server (falls back +1 up to +8 when occupied) |
@@ -162,3 +164,4 @@
 | enableStepAuction | boolean | false | W4-7 G5: step-auction market for sub-agents — per-agent maxSteps becomes a shared pool re-auctioned every K charged steps (convergence evidence aggregated from experience crystals by birth-scene fingerprint); false (default) = per-agent maxSteps budgets, byte-identical |
 | stepAuctionBudget | number | 0 | W4-7 G5: explicit total step-pool budget for the auction market; 0 (default) = derived from the roster (sum of maxSteps — total budget equivalent to the status quo) |
 | enableSandboxStack | boolean | — | Sandbox stack (rehearse -> consolidate -> replay dojo: 4 tools + 3 event wirings + sandboxLog ledger persistence) root-assembly switch. Tri-state by design (no schema default — unset stays undefined): unset = follow the legacy autonomyEnabled gate (byte-identical compatibility; F2-3 interim gate retired per D-G16-1); explicit true = light up independently of the autonomous loop; explicit false = off regardless of autonomyEnabled (explicit setting wins). Default deployment stays OFF (zero regression) |
+| benchDiscipline | boolean | false | ANAB-7 (decision D9 upgraded): benchmark discipline — opt-in fail-closed PRE-hoc interception via the host ctx.tools.guard() channel: only plugin tools (50-name closed set, single-sourced with bench/anti-cheat.mjs PLUGIN_TOOL_NAMES) plus host session/meta control-plane tools (host-meta/host-job, e.g. ask_user_question / job_*) may run in this session; host shell / file / run-code and UNKNOWN tools are denied outright (fail-closed: outside the allowlist = blocked). Absent host guard channel degrades honestly (one log line, never throws; enforcement falls back to prompt discipline + post-hoc anti-cheat). Default false = ZERO behavior change. Enabling CHANGES host-session behavior — run the joint-review checklist (C:\2\.survey\practice\ANAB-7-review.md) first. |

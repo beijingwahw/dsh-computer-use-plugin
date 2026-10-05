@@ -236,7 +236,10 @@ test('Ξ-C⑦: 接线三处在场 —— 入册后存档复载+编排器铸造 /
   assert.match(barrelSrc, /export \* from '\.\/conductor';/, '桶导出 conductor');
   const configSrc = readFileSync(new URL('../src/config.ts', import.meta.url), 'utf8');
   assert.equal((configSrc.match(/kernelStatePath/g) ?? []).length, 2, 'config interface+Schema 各一处 kernelStatePath');
-  assert.equal((configSrc.match(/kernelEvolutionEnabled/g) ?? []).length, 2, 'config interface+Schema 各一处 kernelEvolutionEnabled');
+  // ΑΝΒ-4 行为更新（D5 缺席披露）：CONFIG_GATED_TOOLS 册以谓词/键串合法引用
+  // kernelEvolutionEnabled（federation_sync 复合门）—— 计数锚定改为声明位
+  //（`kernelEvolutionEnabled:`），册引用不再误伤接线三处在场断言。
+  assert.equal((configSrc.match(/kernelEvolutionEnabled:/g) ?? []).length, 2, 'config interface+Schema 各一处 kernelEvolutionEnabled（声明位）');
 
   // (5) 缺省 config 零行为锚：入口消费的内核桶可导入且导出面齐（apply 的全部
   //     新依赖经此一汇）；入口 apply 导出形状在源码在场（src/index.ts 的目录

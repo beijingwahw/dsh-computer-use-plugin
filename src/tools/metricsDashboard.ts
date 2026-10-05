@@ -38,6 +38,7 @@ import { vlmMeter } from '../vlm/metering';
 import { isGlmConfigured } from '../vlm/glmClient';
 import { kernelRegistry } from '../kernel/registry';
 import { Config as ConfigSchema } from '../config'; // ΑΩ-R36：值面 —— Config({}) 物化 D-B 立法缺省
+import { getToolFaceDisclosure } from '../config'; // ΑΝΒ-4：工具面缺席披露账（组合根记，只读消费）
 import { getProviderPool, getVlmCascade } from '../vlm/index'; // ΑΩ-R36：运行时单例只读探测面
 import type { Config } from '../config';
 
@@ -148,6 +149,17 @@ export function resetAutonomyLedger(): void {
 /** 工具区：每工具 调用/成功率/p50/p95（top 10 按调用量降序）+ 全局延迟尾（若在） */
 function renderToolsPane(): string[] {
   const lines = [rule('工具区（telemetry · 按调用量 top 10）')];
+  // ΑΝΒ-4（D5 缺席披露 · 轻接）：工具面挂载/缺席一行（未记账 = 不出行 ——
+  // 裸测试语境零输出面变化；「全挂载」也如实报数，缺席不是病、静默才是）。
+  const face = getToolFaceDisclosure();
+  if (face) {
+    lines.push(
+      `工具面: mounted ${face.mounted} │ absent ${face.absentTools.length}` +
+      (face.absentGates.length > 0
+        ? ` │ 缺席键: ${face.absentGates.map(g => `${g.key}(${g.tools.join('/')})`).join(', ')}`
+        : ' │ 全挂载'),
+    );
+  }
   const snap = telemetry.snapshot();
   if (snap.tools.length === 0) {
     lines.push('（暂无数据 —— 尚无工具调用被观测）');
