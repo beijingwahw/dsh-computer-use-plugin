@@ -11,3 +11,5 @@ with-interrupt
 # Python 构建/缓存产物
 __pycache__/
 *.egg-info/
+# ἈΓΩΝ 实战期实验工件（探针脚本/调试截图/一次性日志），不入库
+tmp/
