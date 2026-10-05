@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "gitHead": "0338836",
+  "gitHead": "a47e24b",
   "node": "24.19.0",
-  "moduleCount": 300,
+  "moduleCount": 301,
   "files": [
     {
       "path": "_legacyDeps.js",
@@ -281,8 +281,8 @@
     },
     {
       "path": "config.js",
-      "sha256": "5ea380f55fc31dd6cf2b5af7441586f90db198513c31510a84db9220b3bc1e6a",
-      "bytes": 34746
+      "sha256": "2c525727876e8e3c167e4dde8c25cc8571dc0b776a7082c97ca3576d08ea26cc",
+      "bytes": 41426
     },
     {
       "path": "contextManager.js",
@@ -356,8 +356,8 @@
     },
     {
       "path": "doctorRules.core.js",
-      "sha256": "c38070bbd0956fd79afe592ea83e2dc71e04bddcd8101c17d9a33e51772490ed",
-      "bytes": 17801
+      "sha256": "3fd40a2b3d8af11e9011e353894d7b0d24f3b7d1738b60cc2208f7e96bc05cce",
+      "bytes": 21618
     },
     {
       "path": "doctorRules.exemptions.js",
@@ -436,8 +436,8 @@
     },
     {
       "path": "focusTracker.js",
-      "sha256": "ae31e7593ec6169d1817a6d757302b604d3f74dff4d24eb03110b05666f0d2a1",
-      "bytes": 4550
+      "sha256": "76e6b08322ce1093fe72847d4ebf47e50ce7dce42fd2fa09cc8b8139ee9a62a6",
+      "bytes": 12652
     },
     {
       "path": "fuzzy.js",
@@ -473,6 +473,11 @@
       "path": "guards/hooks.js",
       "sha256": "39ec11c4c9f72a5fe089d696a17b195e836fe8ec26e776607560f48f17bc79a2",
       "bytes": 7879
+    },
+    {
+      "path": "guards/hostToolPolicy.js",
+      "sha256": "80f19edcbaa38a908476d54a72b08a2e02bc59c6352f3ba74f9593ea9e7c8ce3",
+      "bytes": 14553
     },
     {
       "path": "guards/index.js",
@@ -521,8 +526,8 @@
     },
     {
       "path": "index.js",
-      "sha256": "4c2507a38e55c1e614d718e30e7e9771124480294ba2ff4fce846776987148a0",
-      "bytes": 130020
+      "sha256": "4f6e87611b2c168a40364d40d30ffa157538467599e860a1f7c322704ccc3ca6",
+      "bytes": 134456
     },
     {
       "path": "intent.js",
@@ -616,8 +621,8 @@
     },
     {
       "path": "knowledge/knowledgeBase.core.js",
-      "sha256": "8adbbf7b03781247815392da31db469eaad4a0d5d409560e8791619d6f01bf43",
-      "bytes": 10245
+      "sha256": "e499cb6e18d91cad7cfa2194b9e73e7e9fb8c1325cc5d9fcdafa976ba340a52f",
+      "bytes": 11167
     },
     {
       "path": "knowledge/knowledgeBase.js",
@@ -1196,13 +1201,13 @@
     },
     {
       "path": "tools/metricsDashboard.js",
-      "sha256": "f12bc65cc1a951e601dcab86f790985768e7bebc55827e8fd0c7146ef22f6535",
-      "bytes": 27879
+      "sha256": "7f9315bc9dd6c221d2deb231cf1685e9b7ca7ac8bd9e0d55e00e8debb46b2a72",
+      "bytes": 28576
     },
     {
       "path": "tools/observabilityTools.js",
-      "sha256": "3c28215ae9806e6ce08187c3baf7c752025dd6ae344258e5ef8b336ea59ccccb",
-      "bytes": 25787
+      "sha256": "867b79a2866a1dda6c8b4b35b1bd90f98a674ccde766b1faaf8fa28348b9eb80",
+      "bytes": 26675
     },
     {
       "path": "tools/openUrl.js",
@@ -1211,8 +1216,8 @@
     },
     {
       "path": "tools/pressHotkey.js",
-      "sha256": "612f7b134d0abe71e1c2f842457b450e27a4f93fc1f14ca284ee8f4b86d1a9d3",
-      "bytes": 16246
+      "sha256": "f3908134d0c938b2f5781225cdfecc7f08670d84eb546b284db51f60cd4da9c3",
+      "bytes": 25894
     },
     {
       "path": "tools/probeInteractivity.js",
@@ -1276,8 +1281,8 @@
     },
     {
       "path": "tools/typeText.js",
-      "sha256": "299993387a7ab1913c411ee2a43ead77cbdcc9e3ce12fe12125ab32002641950",
-      "bytes": 21168
+      "sha256": "e5caeb25d8bce9ddd17bad5669a261ad1510c25ec9179bd3765bd97585222939",
+      "bytes": 25689
     },
     {
       "path": "tools/uiMemoryTools.js",
@@ -1506,8 +1511,8 @@
     }
   ],
   "summary": {
-    "totalBytes": 5234226,
-    "count": 300
+    "totalBytes": 5288490,
+    "count": 301
   },
-  "contentDigest": "9ff61b8615ac4895666637802b8699e6e764bb0c720a975aaad4f1aaaf3df3cf"
+  "contentDigest": "87b8c55bbe5460be803daeb9f11315d35651d7f20bee68dcce139c932020f301"
 }

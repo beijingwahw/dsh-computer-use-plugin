@@ -5,6 +5,9 @@ import { dirname, join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Config } from './config';
+// ΑΝΒ-4（D5 缺席披露 · 立法面单源消费）：配置门控工具册 + 观察/记账函数
+//（src/config.ts 尾部立法；本文件只消费，不复制清单 —— 册与披露计算单源）。
+import { CONFIG_GATED_TOOLS, observeToolFaceAbsence, recordToolFaceDisclosure } from './config';
 import { system } from './system';
 import { contextManager } from './contextManager';
 import { uiMemory } from './uiMemory';
@@ -50,6 +53,7 @@ import { quantum, UiExtractorWhitebox } from './quantumSense';
 // 单文件工具（askScreen —— 测试装载器已验证干净）保持静态引入。
 import { createAskScreenTool } from './tools/askScreen';
 import { registerAllGuards, updatePopupState, onLlmPreRequest } from './guards/index';
+import { applyBenchDiscipline } from './guards/hostToolPolicy'; // ΑΝΒ-7: 考核模式 opt-in 接线（缺省关零回归）
 // ΠΑΝ-28a：守卫域生命周期间隔缝（模块注释明言「插件卸载 / 测试隔离」却从未被
 // 组合根调用 —— rootCauseGuard/canaryGuard 的观察环与预算账、popupGuard 的
 // 会话键账本随会话边界归零）。
@@ -1279,6 +1283,7 @@ export async function apply(ctx: Context, config: Config) {
   // hotkeyBlacklistCsv 透传既有黑名单（ΠΑΝ-42 步级扫描与不可逆判定消费）；
   // enableHostReplayExecution **不透传**（根 Config 无此开关）—— 宿主真派发保持
   // 开发者预览语义（五门全过仍诚实 failed "no host executor wired"）。
+  let sandboxStackLive = false; // ΑΝΒ-4：缺席披露的沙箱装配观察面（catch 降级 = 工具缺席照样点名）
   if (config.enableSandboxStack ?? config.autonomyEnabled) { // ΤΕΛ-8a（D-G16①）：沙箱专属开关三态门控——未设(undefined)回退 autonomyEnabled 旧门控（兼容律），显式 true/false 优先
     try {
       applySandboxStack(ctx, {
@@ -1288,10 +1293,56 @@ export async function apply(ctx: Context, config: Config) {
         } : {}),
         hotkeyBlacklistCsv: config.hotkeyBlacklist,
       });
+      sandboxStackLive = true; // ΑΝΒ-4：披露观察面 —— 四件演武工具确已装配（缺席披露的对账输入）
     } catch (e: unknown) {
       console.warn(`[Sandbox] Stack assembly failed (${e instanceof Error ? e.message : String(e)}) — organ stays unwired (honest degradation).`);
     }
   }
+
+  // ── ΑΝΒ-4（D5 缺席披露制度 · 升维核心）：工具面缺席的三通道披露 ──
+  //
+  // 病灶（DECISIONS.md §D5 / R5-1 王炸③）：read_text/find_text 曾因 enableOcr
+  // 缺省关「部署首日即不可达」且零告警（T4 靠回声洞假过判据）。D5 裁决 C+B：
+  // enableOcr 已翻缺省 true（config.ts），autonomyEnabled/enableElementIdMode
+  // 保持 opt-in（安全/资源姿态）—— 但**任何配置组合下的工具面缺席都必须可被
+  // 机器看见**。本块在工具装配完成后（桶 + 沙箱栈）以「真实挂载名集 × 配置门
+  // 控工具册（CONFIG_GATED_TOOLS 单源）」对账，走三通道披露：
+  //   a) doctor 规则 config.silent-tool-absence（doctorRules.core.ts —— 预测面）；
+  //   b) 启动日志结构化一行（下方 tools.mounted/absent/keys —— 本块）；
+  //   c) 观测面 get_metrics.tool_face / metrics_dashboard 工具区行
+  //     （recordToolFaceDisclosure 记账，tools/observabilityTools.ts 消费）。
+  // 观察用真实挂载集（而非谓词）：门开而装配失败（如沙箱栈 catch 分支）同样
+  // 被点名 —— gateOn 字段保留分诊线索。披露是旁路义务：整块 try/catch，
+  // 任何故障绝不炸 apply（绝不抛铁律）。
+  try {
+    const mountedToolNames = new Set<string>(tools.map(t => String(t?.name ?? '')));
+    mountedToolNames.delete(''); // 防御式：无名工具不入观察面
+    // 桶外装配面：沙箱栈四件演武工具（applySandboxStack 装配，不在 buildAllTools
+    // 结果内——成功旗标即对账输入；册上工具名从 CONFIG_GATED_TOOLS 单源取）。
+    if (sandboxStackLive) {
+      for (const n of CONFIG_GATED_TOOLS.find(g => g.key === 'enableSandboxStack??autonomyEnabled')?.tools ?? []) {
+        mountedToolNames.add(n);
+      }
+    }
+    let vlmLive = false;
+    try { vlmLive = Boolean(config.vlmApiKey) || isGlmConfigured(); } catch { vlmLive = Boolean(config.vlmApiKey); }
+    const absentGates = observeToolFaceAbsence(mountedToolNames, config, { vlmLive });
+    const absentTools = absentGates.flatMap(g => g.tools);
+    // 通道 c：观测面记账（get_metrics tool_face / dashboard 工具区行消费）
+    recordToolFaceDisclosure({ mounted: mountedToolNames.size, absentTools, absentGates });
+    // 通道 b：启动日志结构化一行（keys 映射：缺席工具 → 开启键；无缺席也要报
+    // mounted 数 —— 「全挂载」是可断言的状态，不是默认的沉默）。
+    const keysMap: Record<string, string> = {};
+    for (const g of absentGates) for (const t of g.tools) keysMap[t] = g.key;
+    console.log(
+      `[Vision Plugin] ΑΝΒ-4 tool-face disclosure: tools.mounted=${mountedToolNames.size}, ` +
+      `absent=${absentTools.length > 0 ? `[${absentTools.join(',')}]` : '[]'}, ` +
+      `keys=${absentTools.length > 0 ? JSON.stringify(keysMap) : '{}'} ` +
+      (absentGates.length > 0
+        ? `(absence is visible by design — enabling keys: ${absentGates.map(g => g.key).join(', ')})`
+        : '(full gated tool face mounted — nothing hidden)'),
+    );
+  } catch { /* ΑΝΒ-4：披露是旁路义务 —— 对账故障绝不炸装载（沉默可恕，说谎不可） */ }
 
   // 4. 元工具：start_complex_task —— 一次调用展开为整个 Planner-Actor 子会话
   ctx.tools.register(defineTool({
@@ -1456,6 +1507,9 @@ export async function apply(ctx: Context, config: Config) {
 
   // 5. 挂载守卫（边界 / 熔断 / 审计 / 弹窗联动）
   registerAllGuards(ctx, config);
+  // ΑΝΒ-7/ΑΝΒ-10: 考核模式接线——benchDiscipline=true 时宿主工具面 fail-closed
+  // 白名单（只放行插件工具+session 类只读），通道缺席诚实降级一行日志。
+  applyBenchDiscipline(ctx, config);
   console.log('[Vision Plugin] Security Guards activated.');
 
   // W3-0（W2-2 S3 接线）：fail-closed 审计链 + 新鲜度探针武装 —— 默认端口

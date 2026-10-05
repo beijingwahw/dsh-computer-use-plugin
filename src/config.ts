@@ -99,7 +99,11 @@ export interface Config {
   /** 焦点有效期(ms)：点击后多久内 type_text 可复用其坐标做区域验证 */
   focusMaxAgeMs: number;
   // ─── 第四轮创新 ───
-  /** 启用本地 OCR（tesseract.js）：read_text / find_text 工具 + 语义核对。语言包首次使用需联网下载 */
+  /** 启用本地 OCR（tesseract.js）：read_text / find_text 工具 + 语义核对。语言包首次使用需联网下载。
+   *  ΑΝΒ-4（D5-C 案能力腿）：缺省翻 true —— OCR 是纯能力面（本地推理零 API 成本、
+   *  RapidOCR/tesseract 双路径已验），缺省关曾致 read_text/find_text「部署首日即不可达」
+   *  且零告警（R5-1 L4 六轮 retry 实证）。另两键（autonomyEnabled/enableElementIdMode）
+   *  保持 opt-in —— 安全/资源姿态不变（D5-C 边界，缺席披露制度补齐可见性）。 */
   enableOcr: boolean;
   /** OCR 语言，如 'eng'、'chi_sim+eng' */
   ocrLang: string;
@@ -448,6 +452,22 @@ export interface Config {
    * 求值 false ⇒ 沙箱零挂线、零事件接线、零磁盘写，与接线前逐字节等价。
    */
   enableSandboxStack?: boolean;
+  // ─── ΑΝΒ-7（考核纪律 · 决策 D9 升维）：宿主工具面 fail-closed 事前拦截 ───
+  /**
+   * 【风险开关，缺省 false】考核纪律接线：true 时经宿主 `ctx.tools.guard()` 通道
+   * 注册全局工具守卫（R3-4 §3c 实证通道）—— 只放行本插件全部工具（50 件闭集，
+   * 与 bench/anti-cheat.mjs PLUGIN_TOOL_NAMES 单源同锁）+ 宿主会话/元类只读控制面
+   * （host-meta / host-job：ask_user_question、job_* 等「session 类」）；宿主 shell /
+   * 文件读写 / 代码执行（run_code）及未知工具**一律事前拒**（fail-closed —— 只挡
+   * 白名单外，不挡内，D9 选项 C 语义）。通道缺席（宿主无 guard 面）⇒ 诚实降级 log
+   * 一行，绝不抛；执法回落到提示词纪律 + anti-cheat 事后检测。
+   *
+   * **启用即改变宿主会话行为**（该会话内宿主原生工具面被禁用）—— 启用前过
+   * 联席评审检查单（回归面/安全评审/主人背书）：
+   * C:\2\.survey\practice\ANAB-7-review.md（D8-B 宿主侧自动应答器同框架合并评审）。
+   * 缺省 false = 零行为变化（本字段接线成品见 src/guards/hostToolPolicy.ts）。
+   */
+  benchDiscipline: boolean;
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -475,7 +495,9 @@ export const Config: Schema<Config> = Schema.object({
   adaptiveSettle: Schema.boolean().default(true).description('Poll until screen settles before verifying effects'),
   regionVerifyRadius: bNum(0, 0.5).default(0.15).description('Region-verify radius as screen fraction; 0 = off'),
   focusMaxAgeMs: bNum(0, 3_600_000).default(30000).description('Focus validity window for region verification'),
-  enableOcr: Schema.boolean().default(false).description('Enable local OCR (read_text/find_text + semantic verification)'),
+  // ΑΝΒ-4（D5-C 能力腿）：缺省 true —— read_text/find_text 部署首日即在场（部署陷阱
+  // 根除；本地推理零 API 成本；缺席披露制度见文件尾 CONFIG_GATED_TOOLS 册）
+  enableOcr: Schema.boolean().default(true).description('Enable local OCR (read_text/find_text + semantic verification). Default ON since ANB-4: pure local capability, zero API cost — the old default-off made read_text/find_text unreachable on day one with zero warning; set false to opt out'),
   ocrLang: Schema.string().default('eng').description('OCR language, e.g. eng / chi_sim+eng'),
   typeFocusGuard: Schema.boolean().default(true).description('R2-3 type_text pre-focus guard: before typing, read the foreground window title; if it matches the host-window markers, auto refocus the last switched target window, and fail honestly (never type) when refocus is impossible — prevents typing into the agent host chat box (next-turn prompt pollution)'),
   hostWindowMarkersCsv: Schema.string().default('dsh,deepseek harness').description('R2-3 host-window markers (CSV, case-insensitive substring against the foreground title); empty = built-in defaults. Override when the host build renames its window'),
@@ -648,4 +670,153 @@ export const Config: Schema<Config> = Schema.object({
   // `config.enableSandboxStack ?? config.autonomyEnabled` —— 未设跟随旧门控回退
   //（兼容律），显式 true/false 优先。三态语义全述见 interface 注释。
   enableSandboxStack: Schema.boolean().description('Sandbox stack (rehearse -> consolidate -> replay dojo: 4 tools + 3 event wirings + sandboxLog ledger persistence) root-assembly switch. Tri-state by design (no schema default — unset stays undefined): unset = follow the legacy autonomyEnabled gate (byte-identical compatibility; F2-3 interim gate retired per D-G16-1); explicit true = light up independently of the autonomous loop; explicit false = off regardless of autonomyEnabled (explicit setting wins). Default deployment stays OFF (zero regression)'),
+  // ─── ΑΝΒ-7（考核纪律 · 决策 D9 升维）───
+  benchDiscipline: Schema.boolean().default(false).description('ANAB-7 (decision D9 upgraded): benchmark discipline — opt-in fail-closed PRE-hoc interception via the host ctx.tools.guard() channel: only plugin tools (50-name closed set, single-sourced with bench/anti-cheat.mjs PLUGIN_TOOL_NAMES) plus host session/meta control-plane tools (host-meta/host-job, e.g. ask_user_question / job_*) may run in this session; host shell / file / run-code and UNKNOWN tools are denied outright (fail-closed: outside the allowlist = blocked). Absent host guard channel degrades honestly (one log line, never throws; enforcement falls back to prompt discipline + post-hoc anti-cheat). Default false = ZERO behavior change. Enabling CHANGES host-session behavior — run the joint-review checklist (C:\\2\\.survey\\practice\\ANAB-7-review.md) first.'),
 });
+
+// ─── ΑΝΒ-4（D5 缺席披露制度）：配置门控工具册 + 三通道披露的立法面 ───
+//
+// 病灶（DECISIONS.md §D5 / R5-1 王炸③）：工具面缺席是**静默**的 —— read_text/
+// find_text 曾因 enableOcr 缺省关「部署首日即不可达」（六轮 retry 中工具根本不
+// 存在），T4 靠 prompt 回声洞假过判据，且**无任何告警**，新部署者不自知。本役
+// 裁决 C+B：enableOcr 翻缺省 true（纯能力腿，见上），autonomyEnabled/
+// enableElementIdMode 保持 opt-in（安全/资源腿）—— 但无论缺省开或关，「因配置
+// 缺席未挂载的工具」必须可被机器看见。本块就是那双眼睛的立法面：
+//
+//   · CONFIG_GATED_TOOLS：配置门控工具册（单源）—— 每个挂载门 = 键名 + 工具名
+//     清单 + 纯 config 视角的挂载谓词。谓词与 src/tools/index.ts 的 if(config.X)
+//     挂载点**逐门镜像**（真值语义一致）；新增门控工具时两处同步（执法测试
+//     anab4.disclosure 以装配面反哺对账 —— 册上缺席的工具必须在缺席清单里）。
+//   · 两个观察函数：predictConfigToolAbsence（医生视角 —— 只有 config 无装配
+//     观察，按谓词预测）；observeToolFaceAbsence（组合根视角 —— 拿真实挂载名
+//     集对账，连「门开但装配失败」的缺席也能看见）。
+//   · 会话披露状态（record/getToolFaceDisclosure）：组合根装配完成时记账，
+//     get_metrics / metrics_dashboard 观测面消费（披露通道 c）。
+//
+// 依赖方向铁律（vlm/index.ts 同款）：config.ts 绝不 import vlm —— env 敏感门
+//（ask_screen/vlm_platforms 可被环境变量点亮，config 字面关 ≠ 真缺席）的
+// envView 由**调用方**注入（index.ts / doctorRules.core.ts 各自探测）。
+export interface ConfigToolGate {
+  /** 开启键名（复合门用组合表达式字面量；披露面给部署者看的行动面） */
+  readonly key: string;
+  /** 该门独占挂载的工具名清单（与 src/tools/index.ts 装配点一一对应） */
+  readonly tools: readonly string[];
+  /** 纯 config 视角的挂载谓词 —— 与桶内 if(config.X) 真值镜像（绝不 import vlm） */
+  readonly mounted: (config: Config) => boolean;
+  /** env 敏感门：环境变量/连接单例可点亮（config 字面关 ≠ 真缺席 —— envView 由调用方注入） */
+  readonly envSensitive?: boolean;
+  /** 缺席披露的定位注记（opt-in 理由 / 缺省姿态） */
+  readonly note?: string;
+}
+
+/** ΑΝΒ-4：配置门控工具册（单源立法）。谓词逐门镜像 buildAllTools 的挂载 if。 */
+export const CONFIG_GATED_TOOLS: readonly ConfigToolGate[] = [
+  { key: 'enableOcr', tools: ['read_text', 'find_text'], mounted: c => Boolean(c.enableOcr),
+    note: 'ΑΝΒ-4 起缺省 true（纯能力面：本地推理零 API 成本）—— 显式 false 才缺席' },
+  { key: 'enableElementIdMode', tools: ['click_element'], mounted: c => Boolean(c.enableElementIdMode),
+    note: 'opt-in（D5-C）：UIA 无障碍树通道的资源占用姿态' },
+  { key: 'localVisionApi', tools: ['extract_ui_vision'], mounted: c => Boolean(c.localVisionApi),
+    note: '端点类门：空串 = 关' },
+  { key: 'enableUIMemory', tools: ['remember_ui', 'recall_ui'], mounted: c => Boolean(c.enableUIMemory) },
+  { key: 'enableJournal', tools: ['replay_actions', 'what_if'], mounted: c => Boolean(c.enableJournal) },
+  { key: 'vlmApiKey(+env)', tools: ['ask_screen', 'vlm_platforms'],
+    mounted: c => Boolean(c.vlmApiKey), envSensitive: true,
+    note: 'env 敏感门：vlmApiKey 或云脑 env（GLM_API_KEY 等）/连接存档在场即挂载' },
+  { key: 'autonomyEnabled', tools: ['autonomous_run', 'autonomy_resume', 'steer_choice', 'steer_answer'],
+    mounted: c => Boolean(c.autonomyEnabled),
+    note: 'opt-in（D5-C）：自主环缺省不放行 —— 安全姿态由主人显式背书' },
+  { key: 'enableInteractivityProbe', tools: ['probe_interactivity'], mounted: c => Boolean(c.enableInteractivityProbe) },
+  { key: 'enableOpenUrl', tools: ['open_url'], mounted: c => Boolean(c.enableOpenUrl) },
+  { key: 'enableSkillLibrary', tools: ['save_skill', 'match_skill', 'run_skill'], mounted: c => Boolean(c.enableSkillLibrary) },
+  { key: 'enableQualityDoctor', tools: ['quality_checkup'], mounted: c => Boolean(c.enableQualityDoctor) },
+  { key: 'enableSubAgents', tools: ['swarm_dispatch'], mounted: c => Boolean(c.enableSubAgents) },
+  { key: 'enableEnvironmentShaper', tools: ['shape_environment'], mounted: c => Boolean(c.enableEnvironmentShaper) },
+  { key: 'enableApprovalGate', tools: ['request_approval', 'grant_approval', 'adjudicate_approval_queue'],
+    mounted: c => Boolean(c.enableApprovalGate) },
+  { key: 'enableTelemetry', tools: ['get_metrics', 'verify_journal', 'self_diagnose'], mounted: c => Boolean(c.enableTelemetry) },
+  { key: 'checkpointPath', tools: ['save_checkpoint'], mounted: c => Boolean(c.checkpointPath),
+    note: '端点类门：空串 = 关（快照无处可落）' },
+  { key: 'kernelEvolutionEnabled||federationEndpoint', tools: ['federation_sync'],
+    mounted: c => Boolean(c.kernelEvolutionEnabled) || c.federationEndpoint !== '',
+    note: '复合门：进化语境或显式联邦 opt-in 任一即挂载' },
+  { key: 'enableSandboxStack??autonomyEnabled', tools: ['rehearse_chain', 'recall_muscle', 'replay_on_host', 'verify_sandbox_log'],
+    mounted: c => Boolean(c.enableSandboxStack ?? c.autonomyEnabled),
+    note: '三态门（ΤΕΛ-8a）：未设跟随 autonomyEnabled 旧门控；工具经 applySandboxStack 装配（非桶）' },
+];
+
+/** ΑΝΒ-4：一条缺席披露（门 + 实际缺席的工具 + 开键行动面） */
+export interface ToolAbsenceEntry {
+  /** 开启键名（行动面：把它设 true / 非空即点亮） */
+  readonly key: string;
+  /** 该门下缺席的工具名（观察面 = 实测未挂载者；预测面 = 册上全集） */
+  readonly tools: readonly string[];
+  /** 披露时该门的当前开合（开而缺席 = 装配故障线索；关而缺席 = 配置 opt-in） */
+  readonly gateOn: boolean;
+  /** 定位注记（opt-in 理由等；册上 note 直通） */
+  readonly note?: string;
+}
+
+/** ΑΝΒ-4：env 敏感门的外部探测面（config.ts 不 import vlm —— 调用方注入） */
+export interface ToolAbsenceEnvView {
+  /** 云脑连接在场（vlmApiKey/环境变量/连接存档任一）—— 缺省 false（只看 config 字面） */
+  readonly vlmLive?: boolean;
+}
+
+/** ΑΝΒ-4：预测面缺席（医生视角）—— 纯 config 谓词求值，无装配观察。
+ *  env 敏感门在 envView.vlmLive 为真时视为开（config 字面关 + env 在场 = 已挂载）。 */
+export function predictConfigToolAbsence(
+  config: Config, envView: ToolAbsenceEnvView = {},
+): readonly ToolAbsenceEntry[] {
+  const out: ToolAbsenceEntry[] = [];
+  for (const gate of CONFIG_GATED_TOOLS) {
+    const on = gate.envSensitive
+      ? gate.mounted(config) || envView.vlmLive === true
+      : gate.mounted(config);
+    if (!on) out.push({ key: gate.key, tools: gate.tools, gateOn: false, ...(gate.note ? { note: gate.note } : {}) });
+  }
+  return out;
+}
+
+/** ΑΝΒ-4：观察面缺席（组合根视角）—— 拿真实挂载名集对账：册上工具凡不在
+ *  mountedNames 即缺席（连「门开但装配失败」也如实可见，gateOn 供分诊）。
+ *  extraMounted = 桶外装配面（如 applySandboxStack 的四件演武工具）的挂载名。 */
+export function observeToolFaceAbsence(
+  mountedNames: ReadonlySet<string> | readonly string[],
+  config: Config, envView: ToolAbsenceEnvView = {},
+): readonly ToolAbsenceEntry[] {
+  const seen = mountedNames instanceof Set ? mountedNames : new Set(mountedNames);
+  const out: ToolAbsenceEntry[] = [];
+  for (const gate of CONFIG_GATED_TOOLS) {
+    const absent = gate.tools.filter(t => !seen.has(t));
+    if (absent.length === 0) continue;
+    const on = gate.envSensitive
+      ? gate.mounted(config) || envView.vlmLive === true
+      : gate.mounted(config);
+    out.push({ key: gate.key, tools: absent, gateOn: on, ...(gate.note ? { note: gate.note } : {}) });
+  }
+  return out;
+}
+
+/** ΑΝΒ-4：会话工具面披露快照（组合根装配完成时记账；观测面只读消费） */
+export interface ToolFaceDisclosure {
+  /** 挂载工具总数（组合根观察面） */
+  readonly mounted: number;
+  /** 缺席工具名全集（缺席清单拍平） */
+  readonly absentTools: readonly string[];
+  /** 按门分组的缺席清单（键名 + 工具 + 门当前态） */
+  readonly absentGates: readonly ToolAbsenceEntry[];
+}
+
+/** ΑΝΒ-4：会话披露状态（单睡单账 —— 每次 apply 装配完成时整账重写；披露是
+ *  观察不是资源，无需入卸载清单，下次 apply 覆写即无跨会话残留语义）。 */
+let toolFaceDisclosure: ToolFaceDisclosure | null = null;
+
+/** ΑΝΒ-4：组合根记账（index.ts 装配完成后调用；防御式绝不抛） */
+export function recordToolFaceDisclosure(d: ToolFaceDisclosure): void {
+  try { toolFaceDisclosure = d; } catch { /* 披露是旁路义务 */ }
+}
+
+/** ΑΝΒ-4：观测面读取（get_metrics / metrics_dashboard 消费；未记账 = null 诚实缺席） */
+export function getToolFaceDisclosure(): ToolFaceDisclosure | null {
+  return toolFaceDisclosure;
+}

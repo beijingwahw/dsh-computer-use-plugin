@@ -59,9 +59,19 @@ export const HALF_LIFE_CAP_MS = 365 * 24 * 60 * 60 * 1000;
 export const ANTIGEN_SEMANTIC_COSINE = 0.8;
 /** 遗忘曲线（纯函数）：c × 0.5^(age/半衰期)。age=0 ⇒ 原值；越老越冷。
  *  E-1 间隔重复：半衰期逐条目化 —— 条目自带 halfLifeMs（复证增长），
- *  缺席回退 30 天基线（旧档/未复证自然降级，零迁移成本）；封顶 365 天。 */
+ *  缺席回退 30 天基线（旧档/未复证自然降级，零迁移成本）；封顶 365 天。
+ *  ΑΝΒ-11（亚秒年龄量化）：age 向下取整到整秒 —— 时钟粒度 = 秒。
+ *  ΠΑΝ-45 把有效置信度推到 query 出口后，压制判据（assessSuppression 的
+ *  `eff ≥ 阈值`，校准锚点 = 种子 0.55 对阈值 0.55，A4 世界「≥ 含等号」语义）
+ *  消费连续衰减值：30 天半衰期下哪怕 1ms 流逝也把 0.55 变成 0.54999…，
+ *  边界等号永不可达 ⇒ E1b 锚点「种子 0.55 必须触发压制」被浮点噪声翻转
+ *  （calibration/jointCalibration/paramAblation 三册 8 红的公共根因之一）。
+ *  遗忘曲线的时间常数是天级半衰期 —— 亚秒流逝不是记忆信号，是 FP 噪声；
+ *  量化后同一秒内的证据 = 铸造原值（等号语义恢复），≥1s 照常衰减
+ *  （C1-8 H4 的陈年知识让位语义不受影响 —— 那里的年龄是月/年级）。 */
 export function decay(confidence, updatedAt, now, halfLifeMs) {
-    const age = Math.max(0, now - updatedAt);
+    const ageMs = Math.max(0, now - updatedAt);
+    const age = ageMs - (ageMs % 1000);
     const hl = Math.min(typeof halfLifeMs === 'number' && Number.isFinite(halfLifeMs) && halfLifeMs > 0
         ? halfLifeMs : CONFIDENCE_HALF_LIFE_MS, HALF_LIFE_CAP_MS);
     return confidence * Math.pow(0.5, age / hl);

@@ -1,8 +1,13 @@
 import { EMPTY_CATCH_FIX, finding, lines, MARKER_TOOLS } from './doctorRules.helpers.js';
-// ΠΑΝ-116（F2-1 移交项⑤）：escrow WAL 篡改观测面的检视消费方 —— 只读
+// ΠΑΝ-116（F2-1 移交项⑤ 收口）：escrow WAL 篡改观测面的检视消费方 —— 只读
 // reversalEscrow.stats()（模块无环：其依赖图 = node 内建 + perceptualHash，
 // 不回指 doctor 族；CLI 语境下模块态全新 ⇒ 计数恒零 ⇒ 规则静默，无误报）。
 import { reversalEscrow } from './reversalEscrow.js';
+// ΑΝΒ-4（D5 缺席披露 · 通道 a）：缺席披露的立法面（配置门控工具册 + 预测函数，
+// src/config.ts 单源）。glmClient 为 env 敏感门（ask_screen/vlm_platforms）的
+// 只读探测面 —— 依赖图 vlm 内部零回指 doctor 族，无环。
+import { predictConfigToolAbsence } from './config.js';
+import { isGlmConfigured } from './vlm/glmClient.js';
 // ─── 规则注册表（数据驱动静态配置 —— 进化记忆绝不反向修改） ───
 export const DOCTOR_RULES_CORE = [
     {
@@ -278,9 +283,57 @@ export const DOCTOR_RULES_CORE = [
                 return out; // stats 面故障 = 观测缺席（绝不炸诊断主流程）
             }
             if (!ctx.chain.chainIntact) {
-                out.push(finding(this, 'structural', 'journal', 0, 'chainIntact=false', 'journal action-chain verification reports a broken link — entries may have been tampered with or corrupted', 'RED ACTION: cross-check the journal JSONL on disk against the in-memory chain; treat post-break entries as unverified evidence and investigate the write path.'));
+                out.push(finding(this, 'structural', 'journal', 0, 'chainIntact=false', 'journal action-chain verification reports a broken link — entries may be tampered with or corrupted', 'RED ACTION: cross-check the journal JSONL on disk against the in-memory chain; treat post-break entries as unverified evidence and investigate the write path.'));
             }
             return out;
+        },
+    },
+    {
+        // ── ΑΝΒ-4（D5 缺席披露 · 披露通道 a）：config.silent-tool-absence ──
+        //
+        // 病灶（R5-1 王炸③ / T4 回声洞）：工具面缺席是静默的 —— read_text/find_text
+        // 曾因 enableOcr 缺省关「部署首日即不可达」，六轮 retry 中工具根本不存在且
+        // 零告警。本规则把「因配置缺席未挂载的工具清单 + 开启键名」接进诊断报告
+        //（info 级 —— 不扣 genesis 判决、不进手术提案；新部署跑一次体检即一眼
+        // 看见自己缺哪些工具、开哪些键）。缺席 ≠ 违规：opt-in 是安全/资源姿态
+        //（D5-C：autonomyEnabled/enableElementIdMode 保持缺省关），**静默**才是病灶
+        //—— 本规则的义务是让缺席永远有名字。
+        //
+        // 预测面（predictConfigToolAbsence）：医生只有 config 无装配观察，按册上
+        // 谓词预测。env 敏感门（ask_screen/vlm_platforms）经 isGlmConfigured() 只读
+        // 探测（config 字面关 + env 在场 = 已挂载，不误报）。CLI 未绑定插件配置
+        //（pluginConfig=null ⇒ ctx.config = {} 空对象 cast）⇒ 键集为空 = 无从观察
+        // ⇒ 诚实返回 []（绝不拿全空 config 伪造「全缺席」洪水）。
+        id: 'config.silent-tool-absence', category: 'genesis', severity: 'info',
+        laws: ['honest-degradation', 'config-driven'],
+        baseWeight: 0.5, tags: ['config'], description: '工具面缺席披露：因配置未挂载的工具清单 + 开启键名（缺席不是病，静默才是 —— D5/ΑΝΒ-4）',
+        async scan(ctx) {
+            try {
+                const cfg = ctx.config;
+                if (!cfg || typeof cfg !== 'object' || Object.keys(cfg).length === 0)
+                    return [];
+                let vlmLive = false;
+                try {
+                    vlmLive = isGlmConfigured();
+                }
+                catch {
+                    vlmLive = false;
+                }
+                const absence = predictConfigToolAbsence(cfg, { vlmLive });
+                if (absence.length === 0)
+                    return [];
+                const byGate = absence
+                    .map(g => `${g.key}: ${g.tools.join(', ')}${g.note ? ` (${g.note})` : ''}`)
+                    .join('; ');
+                const tools = absence.flatMap(g => g.tools);
+                return [finding(this, 'structural', 'config (effective view)', 0, `absent=[${tools.join(',')}]`, `${tools.length} gated tool(s) NOT mounted under the current config — ${byGate}. ` +
+                        'Tools absent by config are invisible to the model (calls fail with "unknown tool"), yet prompts and task criteria may still reference them (the R5-1 read_text/find_text day-one trap)', 'Not a violation by itself (opt-in is a deliberate posture — D5-C keeps autonomyEnabled/enableElementIdMode default-off). ' +
+                        `To light the absent tools up, set the enabling key(s): ${absence.map(g => g.key).join(', ')}. ` +
+                        'Verify with the startup disclosure line (tools.mounted/absent) or get_metrics tool_face after reload.')];
+            }
+            catch {
+                return []; // 披露是旁路义务：规则契约 —— 失败返回 []，绝不炸诊断主流程
+            }
         },
     },
 ];

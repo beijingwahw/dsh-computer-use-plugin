@@ -39,7 +39,9 @@ export const Config = Schema.object({
     adaptiveSettle: Schema.boolean().default(true).description('Poll until screen settles before verifying effects'),
     regionVerifyRadius: bNum(0, 0.5).default(0.15).description('Region-verify radius as screen fraction; 0 = off'),
     focusMaxAgeMs: bNum(0, 3_600_000).default(30000).description('Focus validity window for region verification'),
-    enableOcr: Schema.boolean().default(false).description('Enable local OCR (read_text/find_text + semantic verification)'),
+    // ΑΝΒ-4（D5-C 能力腿）：缺省 true —— read_text/find_text 部署首日即在场（部署陷阱
+    // 根除；本地推理零 API 成本；缺席披露制度见文件尾 CONFIG_GATED_TOOLS 册）
+    enableOcr: Schema.boolean().default(true).description('Enable local OCR (read_text/find_text + semantic verification). Default ON since ANB-4: pure local capability, zero API cost — the old default-off made read_text/find_text unreachable on day one with zero warning; set false to opt out'),
     ocrLang: Schema.string().default('eng').description('OCR language, e.g. eng / chi_sim+eng'),
     typeFocusGuard: Schema.boolean().default(true).description('R2-3 type_text pre-focus guard: before typing, read the foreground window title; if it matches the host-window markers, auto refocus the last switched target window, and fail honestly (never type) when refocus is impossible — prevents typing into the agent host chat box (next-turn prompt pollution)'),
     hostWindowMarkersCsv: Schema.string().default('dsh,deepseek harness').description('R2-3 host-window markers (CSV, case-insensitive substring against the foreground title); empty = built-in defaults. Override when the host build renames its window'),
@@ -212,4 +214,84 @@ export const Config = Schema.object({
     // `config.enableSandboxStack ?? config.autonomyEnabled` —— 未设跟随旧门控回退
     //（兼容律），显式 true/false 优先。三态语义全述见 interface 注释。
     enableSandboxStack: Schema.boolean().description('Sandbox stack (rehearse -> consolidate -> replay dojo: 4 tools + 3 event wirings + sandboxLog ledger persistence) root-assembly switch. Tri-state by design (no schema default — unset stays undefined): unset = follow the legacy autonomyEnabled gate (byte-identical compatibility; F2-3 interim gate retired per D-G16-1); explicit true = light up independently of the autonomous loop; explicit false = off regardless of autonomyEnabled (explicit setting wins). Default deployment stays OFF (zero regression)'),
+    // ─── ΑΝΒ-7（考核纪律 · 决策 D9 升维）───
+    benchDiscipline: Schema.boolean().default(false).description('ANAB-7 (decision D9 upgraded): benchmark discipline — opt-in fail-closed PRE-hoc interception via the host ctx.tools.guard() channel: only plugin tools (50-name closed set, single-sourced with bench/anti-cheat.mjs PLUGIN_TOOL_NAMES) plus host session/meta control-plane tools (host-meta/host-job, e.g. ask_user_question / job_*) may run in this session; host shell / file / run-code and UNKNOWN tools are denied outright (fail-closed: outside the allowlist = blocked). Absent host guard channel degrades honestly (one log line, never throws; enforcement falls back to prompt discipline + post-hoc anti-cheat). Default false = ZERO behavior change. Enabling CHANGES host-session behavior — run the joint-review checklist (C:\\2\\.survey\\practice\\ANAB-7-review.md) first.'),
 });
+/** ΑΝΒ-4：配置门控工具册（单源立法）。谓词逐门镜像 buildAllTools 的挂载 if。 */
+export const CONFIG_GATED_TOOLS = [
+    { key: 'enableOcr', tools: ['read_text', 'find_text'], mounted: c => Boolean(c.enableOcr),
+        note: 'ΑΝΒ-4 起缺省 true（纯能力面：本地推理零 API 成本）—— 显式 false 才缺席' },
+    { key: 'enableElementIdMode', tools: ['click_element'], mounted: c => Boolean(c.enableElementIdMode),
+        note: 'opt-in（D5-C）：UIA 无障碍树通道的资源占用姿态' },
+    { key: 'localVisionApi', tools: ['extract_ui_vision'], mounted: c => Boolean(c.localVisionApi),
+        note: '端点类门：空串 = 关' },
+    { key: 'enableUIMemory', tools: ['remember_ui', 'recall_ui'], mounted: c => Boolean(c.enableUIMemory) },
+    { key: 'enableJournal', tools: ['replay_actions', 'what_if'], mounted: c => Boolean(c.enableJournal) },
+    { key: 'vlmApiKey(+env)', tools: ['ask_screen', 'vlm_platforms'],
+        mounted: c => Boolean(c.vlmApiKey), envSensitive: true,
+        note: 'env 敏感门：vlmApiKey 或云脑 env（GLM_API_KEY 等）/连接存档在场即挂载' },
+    { key: 'autonomyEnabled', tools: ['autonomous_run', 'autonomy_resume', 'steer_choice', 'steer_answer'],
+        mounted: c => Boolean(c.autonomyEnabled),
+        note: 'opt-in（D5-C）：自主环缺省不放行 —— 安全姿态由主人显式背书' },
+    { key: 'enableInteractivityProbe', tools: ['probe_interactivity'], mounted: c => Boolean(c.enableInteractivityProbe) },
+    { key: 'enableOpenUrl', tools: ['open_url'], mounted: c => Boolean(c.enableOpenUrl) },
+    { key: 'enableSkillLibrary', tools: ['save_skill', 'match_skill', 'run_skill'], mounted: c => Boolean(c.enableSkillLibrary) },
+    { key: 'enableQualityDoctor', tools: ['quality_checkup'], mounted: c => Boolean(c.enableQualityDoctor) },
+    { key: 'enableSubAgents', tools: ['swarm_dispatch'], mounted: c => Boolean(c.enableSubAgents) },
+    { key: 'enableEnvironmentShaper', tools: ['shape_environment'], mounted: c => Boolean(c.enableEnvironmentShaper) },
+    { key: 'enableApprovalGate', tools: ['request_approval', 'grant_approval', 'adjudicate_approval_queue'],
+        mounted: c => Boolean(c.enableApprovalGate) },
+    { key: 'enableTelemetry', tools: ['get_metrics', 'verify_journal', 'self_diagnose'], mounted: c => Boolean(c.enableTelemetry) },
+    { key: 'checkpointPath', tools: ['save_checkpoint'], mounted: c => Boolean(c.checkpointPath),
+        note: '端点类门：空串 = 关（快照无处可落）' },
+    { key: 'kernelEvolutionEnabled||federationEndpoint', tools: ['federation_sync'],
+        mounted: c => Boolean(c.kernelEvolutionEnabled) || c.federationEndpoint !== '',
+        note: '复合门：进化语境或显式联邦 opt-in 任一即挂载' },
+    { key: 'enableSandboxStack??autonomyEnabled', tools: ['rehearse_chain', 'recall_muscle', 'replay_on_host', 'verify_sandbox_log'],
+        mounted: c => Boolean(c.enableSandboxStack ?? c.autonomyEnabled),
+        note: '三态门（ΤΕΛ-8a）：未设跟随 autonomyEnabled 旧门控；工具经 applySandboxStack 装配（非桶）' },
+];
+/** ΑΝΒ-4：预测面缺席（医生视角）—— 纯 config 谓词求值，无装配观察。
+ *  env 敏感门在 envView.vlmLive 为真时视为开（config 字面关 + env 在场 = 已挂载）。 */
+export function predictConfigToolAbsence(config, envView = {}) {
+    const out = [];
+    for (const gate of CONFIG_GATED_TOOLS) {
+        const on = gate.envSensitive
+            ? gate.mounted(config) || envView.vlmLive === true
+            : gate.mounted(config);
+        if (!on)
+            out.push({ key: gate.key, tools: gate.tools, gateOn: false, ...(gate.note ? { note: gate.note } : {}) });
+    }
+    return out;
+}
+/** ΑΝΒ-4：观察面缺席（组合根视角）—— 拿真实挂载名集对账：册上工具凡不在
+ *  mountedNames 即缺席（连「门开但装配失败」也如实可见，gateOn 供分诊）。
+ *  extraMounted = 桶外装配面（如 applySandboxStack 的四件演武工具）的挂载名。 */
+export function observeToolFaceAbsence(mountedNames, config, envView = {}) {
+    const seen = mountedNames instanceof Set ? mountedNames : new Set(mountedNames);
+    const out = [];
+    for (const gate of CONFIG_GATED_TOOLS) {
+        const absent = gate.tools.filter(t => !seen.has(t));
+        if (absent.length === 0)
+            continue;
+        const on = gate.envSensitive
+            ? gate.mounted(config) || envView.vlmLive === true
+            : gate.mounted(config);
+        out.push({ key: gate.key, tools: absent, gateOn: on, ...(gate.note ? { note: gate.note } : {}) });
+    }
+    return out;
+}
+/** ΑΝΒ-4：会话披露状态（单睡单账 —— 每次 apply 装配完成时整账重写；披露是
+ *  观察不是资源，无需入卸载清单，下次 apply 覆写即无跨会话残留语义）。 */
+let toolFaceDisclosure = null;
+/** ΑΝΒ-4：组合根记账（index.ts 装配完成后调用；防御式绝不抛） */
+export function recordToolFaceDisclosure(d) {
+    try {
+        toolFaceDisclosure = d;
+    }
+    catch { /* 披露是旁路义务 */ }
+}
+/** ΑΝΒ-4：观测面读取（get_metrics / metrics_dashboard 消费；未记账 = null 诚实缺席） */
+export function getToolFaceDisclosure() {
+    return toolFaceDisclosure;
+}

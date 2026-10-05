@@ -24,6 +24,17 @@ import { isIoTimeoutError } from '../ioMutex';
 import { toolOk, toolErr } from '../toolResult';
 import { assertActionAllowed } from './actionGate';
 import { consumeApprovalWithHint } from './clickMouse';
+// ΑΝΒ-2（W-07/W-08 · D2）：选族效果验证面 —— 派发前后同区域 dHash 差分，
+// 伪锚/点击锚定区域，结论经 focusTracker 选区账本贯通给 type_text。
+import { captureBefore, settleAndVerify } from '../actionVerifier';
+import type { BeforeState } from '../actionVerifier';
+import {
+  resolveCaretAnchor,
+  refreshCaretPseudoAnchorAfterNavKey,
+  recordSelectionVerification,
+  invalidateSelectionVerification,
+  type CaretAnchor,
+} from '../focusTracker';
 
 /**
  * ΝΩ-31（人体工学）：白名单键集 —— system 层 `_getKey` fallbackMap 的键名镜像
@@ -72,6 +83,38 @@ export function isSelectionChord(keys: unknown): boolean {
   if (!Array.isArray(keys) || keys.length < 2) return false;
   const lower = keys.map((k) => (typeof k === 'string' ? k.toLowerCase() : ''));
   return lower.includes('shift') && lower.some((k) => SELECTION_NAV_KEYS.has(k));
+}
+
+// ─── ΑΝΒ-2（W-08 · D2-d）：选族区域 dHash 效果验证的立法常量与话术 ───
+
+/**
+ * ΑΝΒ-2（W-08）：选区可见性判定阈（区域相似度百分比上界，低于此 = 区域差分
+ * 超阈 = 选区蓝条/反色可见）。立法理由：比 noopSimilarityThreshold 缺省 0.97
+ * 更严 —— 假 VERIFIED 会把 type_text 变成盲插入（T8 危害方向：三段拼接），
+ * 而假 UNVERIFIED 只是多保留一句防盲打话术（安全方向）；R5-2 §4.3 离线实证
+ * 选区蓝条的区域 sim≈0.80（r=0.15），对 95 阈余量充足，对全屏 2 bit 余量
+ * （0.9688）的问题免疫（全屏通道根本不参与本判定）。
+ */
+export const SELECTION_VERIFY_REGION_SIM_MAX_PCT = 95 as const;
+
+/** ΑΝΒ-2（W-08）：R5-2 选族盲态回执（字节级原样保留 —— 无验证面时的降级文案，
+ *  也是 r52 T8-C1 回归钉的锁定文本）。 */
+const SELECTION_BLIND_RECEIPT =
+  'SELECTION UNVERIFIED: this receipt CANNOT see whether a text selection was actually made — the ' +
+  'selection highlight (blue/reversed strip) is the ONLY ground truth that the intended range is ' +
+  'selected. Verify it FIRST (take_screenshot + ask_screen asking specifically about the highlight, ' +
+  'or zoom_inspect for small text) BEFORE typing over the selection: typing with NO active selection ' +
+  'INSERTS at the caret instead of replacing — a duplicate-text hazard.';
+
+/** ΑΝΒ-2（W-08）：验证锚的诚实标签（回执申报 —— 伪锚绝不冒充实测位）。 */
+const anchorLabel = (kind: CaretAnchor['kind']): string => kind === 'click-tracked'
+  ? 'click-tracked focus'
+  : 'window-center PSEUDO anchor (NOT the real caret — the verified region is centered on the target window center)';
+
+/** ΑΝΒ-2（W-07）：keys 是否含导航键（含 shift 组合 —— 选族与裸导航都是光标移动）。 */
+function hasNavigationKey(keys: unknown): boolean {
+  if (!Array.isArray(keys)) return false;
+  return keys.some((k) => typeof k === 'string' && SELECTION_NAV_KEYS.has(k.toLowerCase()));
 }
 
 /**
@@ -179,9 +222,95 @@ export function createPressHotkeyTool(config?: Config) {
         }, null, 2);
       }
 
+      // ── ΑΝΒ-2（W-08）：选族效果验证前置 —— 派发前定锚 + 区域快照 ──
+      // 锚定阶梯（R5-2 §4.3 结论「选区蓝块 dHash 看得见——但前提是区域锚在光标处」
+      // 的接线）：点击记账焦点（实测位，光标最可能仍在其邻域）＞ 窗口中心伪锚
+      //（W-07：目标窗记账物化 —— 消灭 T8 的「锚在任务栏鼠标位 ⇒ 恒 100%」假 noop）。
+      // 验证是旁路证据车道：定锚/快照失败 ⇒ 诚实降级 blind（R5-2 盲态回执原样），
+      // 绝不阻断热键派发本身。
+      const selectionChord = isSelectionChord(keys);
+      // 验证面资格：config 在场 + verifyActions 开 + 非 dry-run + 区域半径 > 0
+      //（vcfg 非空 = 全部就绪 —— TS 收窄用；缺任一 ⇒ blind 降级，绝不阻断派发）
+      const vcfg = config
+        && config.verifyActions === true
+        && config.dryRun !== true
+        && config.regionVerifyRadius > 0
+        ? config
+        : null;
+      let verifyAnchor: CaretAnchor | null = null;
+      let beforeSnap: BeforeState | null = null;
+      if (selectionChord && vcfg) {
+        verifyAnchor = resolveCaretAnchor(vcfg.focusMaxAgeMs);
+        if (verifyAnchor) {
+          try {
+            beforeSnap = await captureBefore(
+              { x: verifyAnchor.x, y: verifyAnchor.y },
+              vcfg.regionVerifyRadius,
+            );
+            // 区域指纹缺席（服务端未返回 region_dhash）⇒ 无区域比对面 ⇒ blind
+            if (!beforeSnap.region) beforeSnap = null;
+          } catch { beforeSnap = null; } // 防御式：快照失败 = 验证缺席，不毒化派发
+        }
+      }
+
       try {
         // 白名单外的键名会被 system 层拒绝 —— 模型无法注入白名单之外的任何键
         await system.pressHotkey(keys);
+
+        // ── ΑΝΒ-2（W-07）：导航键派发成功 ⇒ 伪锚记账/保鲜 + 选区账本维护 ──
+        // 键击落在当时前台窗（= 目标窗记账的窗）⇒ 光标仍在其内 ⇒ 伪锚在场/保鲜。
+        // 选区账本失效律：非选族派发（裸导航折叠选区 / 其他键可能消费选区）⇒ 清账
+        //（保守方向：假 UNVERIFIED 只是多一句防盲打话术，假 VERIFIED 是盲插入）。
+        if (hasNavigationKey(keys)) {
+          refreshCaretPseudoAnchorAfterNavKey(config?.focusMaxAgeMs);
+        }
+        if (!selectionChord) {
+          invalidateSelectionVerification();
+        }
+
+        // ── ΑΝΒ-2（W-08）：选族效果验证 —— 派发后同区域快照差分（纯本地 dHash，
+        // 零 VLM 调用）── 选区蓝条/反色 ⇒ 区域相似度陡降（R5-2 §4.3 实测 ≈0.80）
+        // ⇒ VERIFIED；未达阈 ⇒ UNVERIFIED 但附实测值（比盲态多一个证据维度）。
+        let selectionCheck: {
+          verified: boolean;
+          region_similarity_pct: number;
+          anchor: CaretAnchor['kind'];
+        } | null = null;
+        if (selectionChord && vcfg && beforeSnap && verifyAnchor) {
+          try {
+            const effect = await settleAndVerify(beforeSnap, {
+              adaptive: vcfg.adaptiveSettle,
+              settleMs: vcfg.actionSettleMs,
+              threshold: vcfg.noopSimilarityThreshold,
+              regionRadius: vcfg.regionVerifyRadius,
+            });
+            // 判据（Δ-7 同律）：只有**非退化**的区域测量才有判决资格 ——
+            // effect_detected=null（指纹退化）⇒ 证据不可用，诚实 blind；
+            // 有效测量 ⇒ 必附实测值（verified 与否都比盲态多一个证据维度）。
+            const region = effect.region;
+            if (region && region.effect_detected !== null) {
+              const rpct = region.similarity_pct;
+              const verified = region.effect_detected === true
+                && rpct < SELECTION_VERIFY_REGION_SIM_MAX_PCT;
+              selectionCheck = { verified, region_similarity_pct: rpct, anchor: verifyAnchor.kind };
+              recordSelectionVerification({
+                verdict: verified ? 'verified' : 'unverified',
+                region_similarity_pct: rpct,
+                keys,
+                anchor: verifyAnchor.kind,
+              });
+            }
+          } catch { /* 验证车道故障 ⇒ 诚实 blind（下方记账），绝不抛 */ }
+        }
+        if (selectionChord && !selectionCheck) {
+          // 无验证面（无 config/verify 关/无锚/快照或比对失败）⇒ R5-2 盲态，
+          // 账本如实记 blind —— type_text 侧维持防盲打话术
+          recordSelectionVerification({
+            verdict: 'blind', region_similarity_pct: null, keys,
+            anchor: verifyAnchor ? verifyAnchor.kind : null,
+          });
+        }
+
         // ΠΑΝ-12：一次性令牌律 —— 危险语义放行后随派发消费（热键无效果验证面，
         // 不适用验收式消费；统一落点 + targetHint 接线预留：作用面描述入提示）
         if (gate.dangerous && approval_token) {
@@ -194,24 +323,47 @@ export function createPressHotkeyTool(config?: Config) {
             note: 'keys are whitelist-enforced at the system layer',
             // ΠΑΝ-12：审批域透明化（危险上下文 + 令牌已随派发消费）
             ...(gate.dangerous ? { approval_gate: { described: true, token_consumed_on_dispatch: true } } : {}),
+            // ΑΝΒ-2（W-08）：选族验证证据（加法式键 —— 无验证面时缺席，锚点形状与
+            // 旧路逐字节一致）。verified=区域差分超阈；诚实申报验证锚种类。
+            ...(selectionCheck
+              ? {
+                  selection_check: {
+                    verified: selectionCheck.verified,
+                    region_similarity_pct: selectionCheck.region_similarity_pct,
+                    verification_anchor: selectionCheck.anchor,
+                  },
+                }
+              : {}),
           },
           // R5-2（T8 深因·选区回执）：选族和弦（shift+home/end/方向键/pageup/
-          // pagedown）会改变文本选区，但本回执**看不见选区状态**——效果验证面
-          // 未接线（接线需光标锚定的区域 dHash，见 R5-2 报告 §T8-2）。T8 双败
-          // 链的插件侧主因之一：agent 连发 shift+end 后只能靠 take_screenshot+
-          // ask_screen（2-4 VLM 步/次，且 VLM 答案自相矛盾——seq204 判未选中/
-          // seq214 判选中）才能核实选区。离线 dHash 实验（R5-2）：选区蓝条在
-          // 光标锚定区域强烈可见（sim≈0.80）、全屏 9x8 边际可见（0.9688，2 bit
-          // 余量）——但验证区域锚在鼠标兜底位置时恒 100%（T8 实况）。执法（本
-          // 批最低风险项）：选族和弦的回执明示「选区未经证实」+ 视觉核验前置 +
-          // 无选区盲打的重复插入危害。非选族和弦回执逐字节不变。
-          isSelectionChord(keys)
-            ? 'SELECTION UNVERIFIED: this receipt CANNOT see whether a text selection was actually made — the ' +
-              'selection highlight (blue/reversed strip) is the ONLY ground truth that the intended range is ' +
-              'selected. Verify it FIRST (take_screenshot + ask_screen asking specifically about the highlight, ' +
-              'or zoom_inspect for small text) BEFORE typing over the selection: typing with NO active selection ' +
-              'INSERTS at the caret instead of replacing — a duplicate-text hazard.'
-            : "Call 'take_screenshot' to verify the shortcut took effect.",
+          // pagedown）会改变文本选区。R5-2 时点回执看不见选区（SELECTION
+          // UNVERIFIED 盲态）；ΑΝΒ-2（W-08）升级为区域 dHash 效果验证：
+          //   · 差分超阈 ⇒ SELECTION VERIFIED（附实测值与锚标签）；
+          //   · 已测量未达阈 ⇒ SELECTION UNVERIFIED + 区域差分实测值；
+          //   · 无验证面 ⇒ 盲态回执逐字节原样（R5-2 话术，r52 T8-C1 钉）。
+          // 非选族和弦回执逐字节不变。
+          !selectionChord
+            ? "Call 'take_screenshot' to verify the shortcut took effect."
+            : selectionCheck === null
+              ? SELECTION_BLIND_RECEIPT
+              : selectionCheck.verified
+                ? 'SELECTION VERIFIED: the regional dHash check detected a visible change consistent ' +
+                  'with a selection being made — region around the ' + anchorLabel(selectionCheck.anchor) +
+                  ` measured ${selectionCheck.region_similarity_pct}% similarity before vs after the chord ` +
+                  `(visibility threshold: below ${SELECTION_VERIFY_REGION_SIM_MAX_PCT}%). It is now safe to ` +
+                  'type over the selection: type_text will REPLACE the verified selected range (not insert at ' +
+                  'the caret). Honesty note: the check proves a visible regional change, not WHICH text got ' +
+                  'selected — if the exact range matters, one take_screenshot still beats assumption.'
+                : 'SELECTION UNVERIFIED: the regional visual check found NO selection highlight — the region ' +
+                  'around the ' + anchorLabel(selectionCheck.anchor) +
+                  ` measured ${selectionCheck.region_similarity_pct}% similarity before vs after the chord ` +
+                  `(visibility threshold: below ${SELECTION_VERIFY_REGION_SIM_MAX_PCT}%), i.e. the change a ` +
+                  'selection bar would cause was NOT detected inside the verified region. The selection may ' +
+                  'still exist OUTSIDE the verified region; the selection highlight (blue/reversed strip) is ' +
+                  'the ONLY ground truth that the intended range is selected. Verify it FIRST (take_screenshot + ' +
+                  'ask_screen asking specifically about the highlight, or zoom_inspect for small text) BEFORE ' +
+                  'typing over the selection: typing with NO active selection INSERTS at the caret instead of ' +
+                  'replacing — a duplicate-text hazard.',
         );
       } catch (error: any) {
         // P1-3：黑名单拦截 ⇒ 明说被什么拦住 + 常规途径出口（逃逸动作没有合法通道）

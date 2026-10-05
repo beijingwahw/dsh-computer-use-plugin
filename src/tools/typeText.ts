@@ -19,7 +19,13 @@ import type { Config } from '../config';
 import { system } from '../system';
 import { captureBefore, settleAndVerify } from '../actionVerifier';
 import { quantum } from '../quantumSense';
-import { focusTracker } from '../focusTracker';
+// ΑΝΒ-2（W-07/W-08 · D2）：光标锚阶梯（点击 ＞ 窗口中心伪锚 ＞ 鼠标兜底）+
+// 选区验证账本消费（上一 press_hotkey 选族和弦的 VERIFIED/UNVERIFIED 状态）。
+import {
+  resolveCaretAnchor,
+  peekSelectionVerification,
+  consumeSelectionVerification,
+} from '../focusTracker';
 import { semanticConfirm, type SemanticConfirm } from '../textReader';
 import { matchesRiskPatterns } from '../riskGate';
 import { toolOk } from '../toolResult';
@@ -153,15 +159,20 @@ export function createTypeTextTool(config: Config) {
         // 效果验证（焦点区域放大）：输入的变化几乎总发生在「最近点击的位置」——
         // 焦点追踪器把上次点击坐标隐式传给本工具，文字出现这类局部变化
         // 在全屏指纹里撑不动距离，但在焦点区域指纹里是巨变。
-        // 无跟踪焦点时（如 win+r 打开的运行框、启动即聚焦的编辑器）退化为
-        // 全屏指纹 —— 小文本在全屏 9x8 下采样中不可见，误报「无焦点」。
-        // 兜底：以当前鼠标位置为区域中心（最近交互的强先验），保留区域放大器。
+        // ΑΝΒ-2（W-07 · D2-c）：锚定阶梯升级 —— 点击记账焦点 ＞ 窗口中心伪锚
+        //（目标窗记账物化：switch_window 成功 + 键盘导航场景下「光标在目标窗内」
+        // 的诚实代理）＞ 鼠标兜底位。根治 R5-2 §4.2-2 直建成因：T8 实况锚在
+        // 任务栏鼠标位 ⇒ 区域恒 100% 相似 ⇒ WARNING 诱导盲重打 ⇒ 三段拼接。
+        // 诚实性：伪锚≠真光标 —— 回执 focus_source='window-center-pseudo' +
+        // effect.verification_anchor='pseudo-window-center' 如实申报。
         const verify = config.verifyActions && !config.dryRun;
-        let focus = focusTracker.get(config.focusMaxAgeMs);
-        let focusSource: 'click-tracked' | 'mouse-position' | 'none' = 'none';
-        if (focus) {
-          focusSource = 'click-tracked';
-        } else if (verify) {
+        const caretAnchor = resolveCaretAnchor(config.focusMaxAgeMs);
+        let focus: { x: number; y: number } | null = caretAnchor
+          ? { x: caretAnchor.x, y: caretAnchor.y }
+          : null;
+        let focusSource: 'click-tracked' | 'window-center-pseudo' | 'mouse-position' | 'none'
+          = caretAnchor ? caretAnchor.kind : 'none';
+        if (!focus && verify) {
           try {
             const [cursor, size] = await Promise.all([system.getMousePosition(), system.getScreenSize()]);
             if (cursor.x >= 0 && cursor.y >= 0) {
@@ -172,7 +183,14 @@ export function createTypeTextTool(config: Config) {
         }
         const before = verify ? await captureBefore(focus, config.regionVerifyRadius) : null;
 
+        // ΑΝΒ-2（W-08 回执贯通）：消费上一 press_hotkey 选族和弦的选区验证状态
+        //（共享微状态经 focusTracker 选区账本 —— 工具间无对话、有上下文）。
+        // 派发成功后一次性清账（consume 打字即覆盖/消费选区，VERIFIED 语义
+        // 不得跨打字存活）；点击/非选族热键已在各自写点清账（保守失效律）。
+        const selectionRec = peekSelectionVerification(config.focusMaxAgeMs);
+
         await system.typeText(text, clearFirst);
+        if (selectionRec) consumeSelectionVerification(config.focusMaxAgeMs);
 
         let effect = null;
         if (before) {
@@ -224,6 +242,18 @@ export function createTypeTextTool(config: Config) {
         // focus, retype」诱导盲重打 ⇒ 三段拼接畸形行。执法：兜底场景的 WARNING
         // 附代理降级披露 + 禁止盲重打（重打即重复插入）。
         const mouseProxyBlind = focusSource === 'mouse-position' && noopUnconfirmed;
+        // ΑΝΒ-2（W-07）：伪锚路径的同族披露 —— 验证区域已落在目标窗内（不再锚
+        // 任务栏），但伪锚≠真光标：光标可能在窗内别处 ⇒ 区域未变 ≠ 无焦点。
+        // 与 R5-2 鼠标代理披露同律（防盲重打），话术按伪锚语义改写（新增路径，
+        // 鼠标代理原文字节不变）。
+        const pseudoAnchorBlind = focusSource === 'window-center-pseudo' && noopUnconfirmed;
+        const ANTI_BLIND_RETYPE =
+          ' If the field was reached by keyboard navigation (no recent click), the first text may ALREADY be there: ' +
+          "verify with take_screenshot BEFORE retyping — blind retyping duplicates the inserted text (prefer backspace/undo over retype).";
+        // ΑΝΒ-2（W-08 回执贯通）：VERIFIED 选区在场 ⇒ 覆盖语义（打字替换选区，
+        // 而非光标处插入）；UNVERIFIED/blind ⇒ 维持 R5-2 防盲打话术（input_state
+        // 仍是 Appended —— 不宣称替换）。clearFirst 优先（工具自带全选清空语义）。
+        const replacingVerifiedSelection = !clearFirst && selectionRec?.verdict === 'verified';
         return toolOk(
           noopUnconfirmed
             ? 'WARNING: keystrokes dispatched but NO screen/focus-region change was verified — the text may have gone ' +
@@ -232,7 +262,11 @@ export function createTypeTextTool(config: Config) {
                 ? ' CAVEAT: the verified region was centered on the CURRENT MOUSE POSITION (no click-tracked focus) — ' +
                   'if the target field is keyboard-focused elsewhere (switch_window + arrow-key navigation), the text ' +
                   'may have landed correctly but OUTSIDE the verified region; verify visually BEFORE retyping.'
-                : '')
+                : pseudoAnchorBlind
+                  ? ' CAVEAT: the verified region was centered on the WINDOW-CENTER PSEUDO anchor (no click-tracked ' +
+                    'focus, real caret position unknown) — the caret may sit elsewhere inside the target window, so ' +
+                    'the text may have landed correctly but OUTSIDE the verified region; verify visually BEFORE retyping.'
+                  : '')
             : 'Text typed successfully (SUCCESS = keystrokes dispatched, not that the intended field received them).',
           {
             // 回显也做 Token 预算：截断到 50 字符。
@@ -244,7 +278,7 @@ export function createTypeTextTool(config: Config) {
               : text.substring(0, 50) + (text.length > 50 ? '...' : ''),
             char_count: text.length,
             // R5-2（D5）：多行换行回执 —— 模型可从回执直接确证换行已按真回车
-            // 键事件注入（勿再退回「逐行+enter」绕行）。单行文本键缺席（锚点
+            // 键注入（勿再退回「逐行+enter」绕行）。单行文本键缺席（锚点
             // 形状与旧路逐字节一致）。
             ...(newlineCount > 0
               ? {
@@ -253,7 +287,27 @@ export function createTypeTextTool(config: Config) {
                 }
               : {}),
             cleared_existing: clearFirst,
-            input_state: clearFirst ? 'Replaced all previous content' : 'Appended to existing content',
+            input_state: clearFirst
+              ? 'Replaced all previous content'
+              : replacingVerifiedSelection
+                ? 'Replacing the last VERIFIED selection — typed text overwrites the selected range (not an insert at the caret)'
+                : 'Appended to existing content',
+            // ΑΝΒ-2（W-08 回执贯通）：上一 press_hotkey 选族和弦的选区验证状态
+            //（加法式键 —— 无选族前驱时缺席）。selection=verified/unverified/
+            // blind 三态如实；unverified 附区域差分实测值（比盲态多一个证据维度）。
+            ...(selectionRec
+              ? {
+                  selection_replacement: {
+                    selection: selectionRec.verdict,
+                    ...(selectionRec.region_similarity_pct !== null
+                      ? { region_similarity_pct: selectionRec.region_similarity_pct }
+                      : {}),
+                    ...(selectionRec.anchor
+                      ? { verification_anchor: selectionRec.anchor === 'click-tracked' ? 'click-tracked' : 'pseudo-window-center' }
+                      : {}),
+                  },
+                }
+              : {}),
             // W5-0（C 接线）：可逆性分道注记（compensable 快照；未分道缺席）
             reversibility_lane: laneAnchorOf(laneGate),
             // R2-3（焦点保卫）：前置校验注记 —— ok/refocused/unchecked（开关关
@@ -268,6 +322,9 @@ export function createTypeTextTool(config: Config) {
               region_similarity_pct: effect.region ? effect.region.similarity_pct : undefined,
               verified_around_focus: effect.region ? true : false,
               focus_source: focusSource,
+              // ΑΝΒ-2（W-07）：伪锚诚实申报 —— 验证区域是窗口中心代理位，非真
+              // 光标（加法式键，仅伪锚路径在场）
+              ...(focusSource === 'window-center-pseudo' ? { verification_anchor: 'pseudo-window-center' } : {}),
             } : 'verification-off',
             expected_change: expected_change || undefined,
             typed_semantic: typedConfirmed
@@ -288,11 +345,9 @@ export function createTypeTextTool(config: Config) {
           (noopSuspected && !semanticLanded)
             ? 'WARNING: Neither the screen nor the focus region changed — the input may have NO focus. Click the input field first, then retype.' +
               // R5-2（T8）：兜底代理下禁盲重打 —— 键盘导航到达的字段里首打已落
-              // 屏，盲重打 = 重复插入（T8 三段拼接的直建成因）。
-              (mouseProxyBlind
-                ? ' If the field was reached by keyboard navigation (no recent click), the first text may ALREADY be there: ' +
-                  "verify with take_screenshot BEFORE retyping — blind retyping duplicates the inserted text (prefer backspace/undo over retype)."
-                : '')
+              // 屏，盲重打 = 重复插入（T8 三段拼接的直建成因）。ΑΝΒ-2：伪锚路径
+              // 同律适用（话术共享 —— 鼠标代理场景字节不变，伪锚场景为新增路径）。
+              ((mouseProxyBlind || pseudoAnchorBlind) ? ANTI_BLIND_RETYPE : '')
             : (typedConfirmed && typedConfirmed !== 'ocr-unavailable' && !typedConfirmed.confirmed
               ? 'SEMANTIC MISMATCH: the typed text was NOT found in the focus region — it may have gone to the WRONG field or been swallowed by an IME. Verify with take_screenshot and retype if needed.'
               : "MANDATORY: Call 'take_screenshot' immediately to verify that the text appears correctly in the input field." +

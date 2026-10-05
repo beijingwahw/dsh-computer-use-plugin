@@ -6,6 +6,9 @@
 //   save_checkpoint —— 手动快照全部认知态（里程碑保护；卸载时另有自动档）
 // 设计原则：观测是旁路义务 —— 任何检查失败都返回结构化报告，绝不抛异常中断任务。
 import { defineTool } from '@deepseek-ai/dsh-tools';
+// ΑΝΒ-4（D5 缺席披露 · 通道 c）：组合根装配完成时记的工具面披露账
+//（mounted/absent 计数 + 缺席键名清单 —— metricsDashboard 值面导入 config 同律）。
+import { getToolFaceDisclosure } from '../config.js';
 import { telemetry } from '../telemetry.js';
 import { journal } from '../journal.js';
 import { uiMemory } from '../uiMemory.js';
@@ -210,9 +213,19 @@ export function createGetMetricsTool() {
             // + 总格子数 + 总证据量 ——「知道自己不擅长什么」正是本纪元的立意。
             // introspect 禁用时返回 null ⇒ 字段整体缺席（既有字段与结构零变化）。
             const smView = selfModel.introspect(3);
+            // ΑΝΒ-4（D5 缺席披露 · 通道 c）：工具面挂载/缺席计数 + 缺席键名
+            //（组合根未记账 —— 如裸测试语境 —— ⇒ 字段整体缺席，不伪造观察）。
+            const toolFace = getToolFaceDisclosure();
             return JSON.stringify({
                 status: 'SUCCESS',
                 metrics: telemetry.snapshot(),
+                ...(toolFace ? {
+                    tool_face: {
+                        mounted_tools: toolFace.mounted,
+                        absent_tools: toolFace.absentTools.length,
+                        absent_gates: toolFace.absentGates.map(g => ({ key: g.key, tools: g.tools, gate_on: g.gateOn })),
+                    },
+                } : {}),
                 ...(tail ? { latency_tail: tail } : {}),
                 behavioral_complexity: behav,
                 ...(regimeShifts.length > 0 ? { regime_shifts: regimeShifts } : {}),
