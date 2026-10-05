@@ -5,7 +5,7 @@
   "description": "Vision-only desktop automation plugin for DeepSeek Harness (fusion refactor)",
   "main": "dist/index.js",
   "engines": {
-    "node": ">=20"
+    "node": ">=20 <24"
   },
   "exports": {
     ".": "./dist/index.js"
@@ -13,6 +13,8 @@
   "files": [
     "dist",
     "python_service",
+    "!python_service/**/__pycache__",
+    "!python_service/**/*.pyc",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
@@ -29,7 +31,10 @@
     "test": "node --test --import ./test/register.mjs \"test/*.test.ts\"",
     "smoke": "node --import ./test/register.mjs scripts/smoke_imports.mjs",
     "smoke:dist": "node scripts/smoke_dist.mjs",
-    "verify": "python scripts/verify_fatal_fixes.py && python scripts/bug_class_lint.py --strict",
+    "verify": "python scripts/verify_fatal_fixes.py && python scripts/bug_class_lint.py --strict && npm run lint:cycle && npm run wiring:census && npm run audit:genesis",
+    "lint:cycle": "node scripts/cycle_lint.mjs",
+    "wiring:census": "node scripts/wiring_census.mjs --check",
+    "audit:genesis": "node scripts/genesis_audit.mjs --check",
     "test:coverage": "node --test --experimental-test-coverage \"test/*.test.ts\" --import ./test/register.mjs",
     "manifest": "node scripts/build_manifest.mjs",
     "doctor": "node --disable-warning=ExperimentalWarning --import ./test/register.mjs src/doctorCli.ts",

@@ -16,6 +16,22 @@
 # npm test —— Linux 专属段按各测试文件既有 skip 逻辑自然让位）。CI 卫生：
 # 同 ref 取消旧跑 + 30 分钟硬超时 + npm/pip 双缓存 + 失败工件（TAP 与服务
 # 日志）+ 生产依赖 npm audit（high 及以上判红；2026-10 本地核账：0 高危）。
+#
+# ΠΑΝ-100/103（C2-8 §3.3/§3.5 · 会红的闸接进执行链）：「立法在抽屉」收口 ——
+#   · verify 链扩为五闸串联（fatal-fixes + bug-class + cycle-lint +
+#     wiring-census + genesis-audit，见 package.json "verify"），双臂同执法；
+#     此前 genesis 审计仅在 ubuntu 臂单独一步，现经 verify 升级为双 OS；
+#   · doctor（质量医生）以 --strict 入 CI 双臂 —— genesisVerdict=violated ⇒
+#     exit 1（qualityDoctor.ts:599 的铁律语义），不再只是手动件；
+#   · cycle_lint / wiring:census 经 verify 双臂执法（cycle_lint 当前树上有
+#     5 个 value 环在案 = DEBTS D-F5，接闸即红属如实执法，不是闸坏）；
+#   · Node 版本口径统一 engines ">=20 <24"（ΠΑΝ-102）：24 上界排除 = DEBTS
+#     D-E3（node v24/Windows libuv 退出竞态确定性红）；test 作业钉 22（区间
+#     内），floor 作业在 node 20 执法下界 —— dist 产物（纯 JS）在 engines
+#     下界逐模块导入 + 纯 node 闸（cycle/wiring）在 20 上可跑的实证。node 20
+#     无原生 TS type-stripping（22.18+ 才有）⇒ node --test *.ts 管线类步骤
+#     （npm test / smoke / genesis / doctor / bench）只在 22 臂跑，floor 臂
+#     不虚称测过测试面（诚实边界）。
 name: ci
 on:
   push:
@@ -40,6 +56,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
+          # ΠΑΝ-102：钉 22 —— engines ">=20 <24" 区间内的推荐线；24 被上界
+          # 排除（D-E3：v24 Windows libuv 退出竞态确定性红）。下界 20 由下方
+          # floor 作业执法。
           node-version: 22
           cache: npm
       - uses: actions/setup-python@v5
@@ -68,8 +87,25 @@ jobs:
         run: pip install -e python_service
       - name: Typecheck
         run: npm run typecheck
-      - name: Verify gates (bug class lint + fatal fixes)
-        run: npm run verify
+      # ΠΑΝ-100：verify = 五闸串联（package.json "verify"）—— fatal-fixes（python）
+      # + bug-class lint --strict（python）+ cycle-lint + wiring-census --check +
+      # genesis-audit --check（ΝΩ-37 (d) 原独立步骤自此并入：双臂同执法，避免
+      # Linux 臂重复跑第二遍；审计抽样分钟级）。当前树上两闸在案红（如实执法）：
+      # bug_class_lint 2 处 BC-5 函数体克隆、cycle_lint 5 个 value 环（D-F5）。
+      - name: Verify gates (fatal-fixes + bug-class + cycle + wiring + genesis)
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run verify 2>&1 | tee verify.log
+      # ΠΑΝ-100：质量医生入 CI（C2-8 §3.3 点名「doctor 不在 CI」）—— --strict
+      # 下 genesisVerdict=violated ⇒ exit 1（src/qualityDoctor.ts runDoctorCli）。
+      # 双臂同跑（纯 node + src 直载，Windows 本机实测 exit 0）。副作用报告
+      # 文件（doctor-report/memory.json）写进 CI 临时工作区，不入库。
+      - name: Quality doctor (strict, W7-1)
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run doctor -- --strict 2>&1 | tee doctor.log
       - name: Python service compile gate
         if: runner.os == 'Linux'
         run: python -m compileall python_service/dsh_physical
@@ -160,14 +196,7 @@ jobs:
         run: |
           set -o pipefail
           node scripts/bench_gate.mjs --check 2>&1 | tee bench-gate.log
-      # ΝΩ-37 (d)：W7-2 创世审计严格模式 —— GENESIS/DEBTS 账实一致机器执法
-      # （虚报 / 实跑异常 / 0-fail 声明破产 ⇒ exit 1；抽样审计，分钟内）。
-      - name: Genesis/DEBTS ledger audit (W7-2 strict)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -o pipefail
-          node scripts/genesis_audit.mjs --check 2>&1 | tee genesis-audit.log
+      # ΝΩ-37 (d)：W7-2 创世审计 —— 已并入上方 verify 步骤（ΠΑΝ-100，双 OS）。
       - name: Build (compile artifacts only)
         if: runner.os == 'Linux'
         run: npm run build
@@ -189,7 +218,8 @@ jobs:
           cat /tmp/dsh-physical-ci.log || true
           cp /tmp/dsh-physical-ci.log ./dsh-physical-ci.log 2>/dev/null || true
       # ΝΩ-37：失败工件 —— 全量套件与 python 单测的 TAP 留档 + bench 门 /
-      # 审计日志 + 预起服务日志（缺席文件静默忽略，不因无服务日志而工件步红）。
+      # verify/doctor 日志（ΠΑΝ-100 起 genesis-audit.log 并入 verify.log）+
+      # 预起服务日志（缺席文件静默忽略，不因无服务日志而工件步红）。
       - name: Upload failure artifacts (TAP + service logs)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -199,6 +229,41 @@ jobs:
             npm-test.log
             python-unittest.log
             bench-gate.log
-            genesis-audit.log
+            verify.log
+            doctor.log
             dsh-physical-ci.log
           if-no-files-found: ignore
+
+  # ── ΠΑΝ-102/103：engines 下界执法臂 ─────────────────────────────────────────
+  # package.json engines ">=20 <24" 的 20 端必须有人真跑过，否则区间声明是
+  # 账面话术（C2-8 §3.5 的镜像病：CI 钉 22 + engines 放行 24——上端已由
+  # engines <24 封口，下端由本作业实证）。执法面 = 在 node 20 上真实可跑的
+  # 子集：纯 node 闸（cycle_lint / wiring_census —— 已核两脚本零 22+ 专属
+  # API）+ 工具链（typecheck / build=tsc+fix-imports+manifest）+ 发布产物
+  # 可载性（smoke:dist —— dist 为纯 JS ES2022，287 模块在 engines 下界逐一
+  # 导入 + manifest sha256 对账）。不跑：node --test *.ts 管线类（TS 原生
+  # type-stripping 需 22.18+，node 20 无此能力——不是闸红，是平台不可达）。
+  floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install JS deps
+        run: npm ci
+      - name: Dependency-cycle lint on engines floor (node 20)
+        run: npm run lint:cycle
+      - name: Wiring census on engines floor (node 20)
+        run: npm run wiring:census
+      - name: Typecheck on engines floor (node 20)
+        run: npm run typecheck
+      - name: Build on engines floor (tsc + fix-imports + manifest, node 20)
+        run: npm run build
+      # 发布产物在 engines 下界的可载性执法：dist/*.js（纯 JS）逐模块导入 +
+      # manifest sha256 对账 —— 若 src 混入 node 22+ 专属 API 且编译面不可见，
+      # 此步在 node 20 上第一手炸出。
+      - name: Smoke dist on engines floor (node 20 artifact loadability)
+        run: npm run smoke:dist

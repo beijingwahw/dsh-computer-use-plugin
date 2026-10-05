@@ -58,8 +58,9 @@
         # ─── 认知升维（C-1~C-5）：直觉 / 想象力 / 自我意识 / 群体智慧 ───
         intentVerify: true           # C-1 意图感知验证：动作携带 expected_effect 时物理规则裁决（无期望零回归）
         physicsRules: ''             # C-1 物理规则启用清单；空 = 全部（toggle_on/menu_expand/scroll_content_up/...）
-        enableSemanticMatch: true    # C-2 语义技能匹配：零依赖嵌入零样本泛化
         enableRecombination: true    # C-2 DNA 重组：无命中技能时基因拼接合成新技能
+        # ΤΕΛ-8d：原示例含 enableSemanticMatch —— Config Schema 从无此键（幽灵配置示例，装载期被
+        # schemastery 剥离静默失效），已删除防误导；语义匹配能力由技能库既有路径提供，无此开关。
         salienceFocus: true          # C-4 认知焦点：显著度驱逐 + 任务目标钉扎（关 = 纯 FIFO）
         pinBudget: 1                 # C-4 钉扎名额上限（防全钉扎击穿双预算）
         subconsciousCapacity: 32     # C-4 潜意识池容量；0 禁用灵光一闪
@@ -67,3 +68,8 @@
         swarmEndpoint: ''            # C-5 群体智能中心；空 = 零网络（本地经验晶体依然生效）
         swarmSyncIntervalMs: 300000  # C-5 同步间隔（ms，非阻塞 fire-and-forget）
         crystalCapacity: 500         # C-5 经验晶体容量
+        # ─── ΤΕΛ-8a：沙箱栈专属开关（D-G16① 收口示例；后续纪元字段同样均有代码默认值，可按部署裁剪）───
+        # 三态语义：未设（注释掉本行）= 跟随 autonomyEnabled 旧门控回退（兼容律）；
+        # 显式 true = 独立点亮沙箱演武场（rehearse_chain/recall_muscle/replay_on_host/verify_sandbox_log）；
+        # 显式 false（下方示例）= 独立关闭 —— 与 autonomyEnabled 无关，显式设置优先。
+        enableSandboxStack: false    # 缺省关零回归；沙箱装配/事件接线/账本落盘全不发生

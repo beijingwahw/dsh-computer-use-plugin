@@ -1,0 +1,44 @@
+# .gitattributes —— ΠΑΝ-101（C2-8 §1.5）：行尾硬化，保 manifest sha256 对账。
+#
+# 病灶：仓库此前无 .gitattributes；Windows 缺省 core.autocrlf=true 的全新 clone
+# 把 dist/*.js 以 CRLF 检出 ⇒ scripts/smoke_dist.mjs 按磁盘字节重算 sha256 与
+# dist/.manifest.json 逐文件对不上 —— 287 文件全量 DIST-SMOKE-DRIFT，
+# README 宣传的 dist SBOM 完整性闸在 Windows 检出形态下自我击穿。
+#
+# 立法（三段）：
+#   1. 全库文本统一 LF：text=auto（git 自动识别文本/二进制）+ eol=lf（检出时
+#      工作区强制 LF，覆盖 autocrlf 的平台缺省）；
+#   2. 二进制显式例外：识别确定性不押在启发式上 —— 命中即完全不做行尾/编码转换
+#      （入库二进制现状：eng.traineddata、python_service/real_probe_dA1_frame.jpg；
+#      其余条目为 prophylactic，防未来 fixture/产物误入转换）；
+#   3. dist 产物显式 LF 重申：构建产物字节形态 = 清单哈希形态，任何行尾转换
+#      即全量漂移（`*` 规则已覆盖，此处显式化是给读者的契约声明）。
+#
+# 存量 clone 治理：本文件入库后，已检出的 CRLF 工作区需一次性
+# `git add --renormalize .` + commit 才对齐（是否/何时执行是主人的决定，本工单
+# 不代作）。此后 Windows 全新 clone 的 smoke:dist 对账按 LF 字节进行，闸恢复执法。
+
+* text=auto eol=lf
+
+# ── 二进制例外（binary = 不 diff、不转换、不 merge 文本语义）──
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.bmp binary
+*.traineddata binary
+*.dll binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.node binary
+*.bin binary
+*.dat binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.gz binary
+
+# ── dist 产物：LF 是 sha256 对账的命门 ──
+dist/** text eol=lf
