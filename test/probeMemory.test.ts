@@ -5,6 +5,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { probeMemory, isDecisive } from '../src/probeMemory.ts';
+import { gateTextClick, TEXT_CLICK_REFUSE_FLOOR } from '../src/interactivityProbe.ts';
 import type { ProbeResult } from '../src/interactivityProbe.ts';
 
 const CFG = {
@@ -53,7 +54,8 @@ test('Z-1d-a: 判决性结论入册，同场景邻近点召回（via=memory + �
   assert.ok(hit);
   assert.equal(hit.verdict, 'control');
   assert.equal(hit.evidence.via, 'memory');
-  assert.equal(hit.confidence, 0.9);                     // 降级律 -0.03 后再封顶 0.9（先减后夹）
+  assert.equal(hit.confidence, 0.89);                    // ΠΑΝ-131 降级律 -0.03 后封顶 0.89（先减后夹；
+                                                          // 旧封顶 0.9 使 UIA text 0.93 召回恰落地板 0.90）
   assert.ok(hit.note?.includes('hits=2'));               // 召回即续期计数
 });
 
@@ -118,4 +120,51 @@ test('Z-1d-h: dump/restore 往返保真（checkpoint 存活）', () => {
   assert.ok(hit);
   assert.equal(hit.verdict, 'text');
   assert.ok(hit.evidence.hit_test);                       // hover 通道的 text 判决保留证据面
+});
+
+// ─── ΠΑΝ-131：召回封顶 0.89 —— 诚实召回不再被点击拦截地板执法 ───
+//
+// 病灶（F3-11 复核件移交）：旧封顶 min(0.9, conf−0.03) 下，UIA text 0.93
+// 存档召回恰为 0.90 == TEXT_CLICK_REFUSE_FLOOR(0.9)（0.93−0.03 浮点恰等于
+// 0.9，实测锁定），gateTextClick 的「verdict=text 且 conf ≥ 地板 ⇒ 拦」在
+// 等值边界照拦 ⇒ −0.03 降级对该通道是装饰性的（陈旧记忆拦住合法点击）。
+// 修法：封顶 0.89（低于地板）—— 记忆只标注、不执法；新鲜判决不经封顶，
+// 地板语义方向零变化。
+
+test('ΠΑΝ-131-a: UIA text 0.93 存档召回 0.89 < 地板 —— 点击闸门放行（0.90 边界误拦消除）', () => {
+  probeMemory.store(FP_A, result(0.5, 0.5, 'text'), CFG);   // UIA text 0.93（Text 控件）
+  const hit = probeMemory.recall(FP_A, { x: 0.5, y:0.5 }, CFG);
+  assert.ok(hit);
+  assert.equal(hit.evidence.via, 'memory');
+  // 0.93−0.03 === 0.9（浮点恰等），min(0.89, 0.9) = 0.89 —— 召回恒低于地板
+  assert.equal(hit.confidence, 0.89);
+  assert.ok(hit.confidence < TEXT_CLICK_REFUSE_FLOOR);
+  // 端到端：召回判决喂给点击闸门不再拦截（记忆是先验，只标注不执法）
+  const gate = gateTextClick(hit);
+  assert.equal(gate.blocked, false);
+});
+
+test('ΠΑΝ-131-b: 地板语义方向不变 —— 新鲜决定性 text 0.91 仍拦、恰 0.90 等值仍拦', () => {
+  // 0.91 的新鲜 UIA text 判决：地板照拦（封顶只作用于召回路径，不软化闸门）
+  const fresh91 = result(0.5, 0.5, 'text');
+  fresh91.confidence = 0.91;
+  assert.deepEqual(gateTextClick(fresh91).blocked, true);
+  // 恰 0.90 的等值边界：闸门自身语义零变化（≥ 地板即拦 —— 等值属于拦截侧）
+  const fresh90 = result(0.5, 0.5, 'text');
+  fresh90.confidence = 0.90;
+  assert.deepEqual(gateTextClick(fresh90).blocked, true);
+  // 对照：0.89（< 地板）放行 —— 单调性锚
+  const fresh89 = result(0.5, 0.5, 'text');
+  fresh89.confidence = 0.89;
+  assert.deepEqual(gateTextClick(fresh89).blocked, false);
+});
+
+test('ΠΑΝ-131-c: ibeam 0.92 通道召回 0.89 不拦（降级有效性保持，零回归）', () => {
+  const ibeam = result(0.5, 0.5, 'text', 'hover');          // ibeam 0.92
+  ibeam.confidence = 0.92;
+  probeMemory.store(FP_A, ibeam, CFG);
+  const hit = probeMemory.recall(FP_A, { x: 0.5, y: 0.5 }, CFG);
+  assert.ok(hit);
+  assert.equal(hit.confidence, 0.89);                       // min(0.89, 0.92−0.03) = 0.89
+  assert.equal(gateTextClick(hit).blocked, false);          // 旧行为已不拦，新行为一致
 });

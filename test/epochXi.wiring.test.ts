@@ -257,12 +257,12 @@ test('Ξ-D③: set(popup.offThreshold,0.8) 越序 ⇒ specs 夹回 0.5；消费�
 
 // ─── Ξ-D④：册容量与零漂移 ───
 
-test('Ξ-D④: registerProductionKernels ⇒ 58 键在册（Θ 18 + Ξ-D 37 + ΝΩ-10 三键）且 drift() 空', () => {
+test('Ξ-D④: registerProductionKernels ⇒ 60 键在册（Θ 18 + Ξ-D 37 + ΝΩ-10 三键 + R3-3 预算双键）且 drift() 空', () => {
   resetKernelRuntime();
   try {
     registerProductionKernels();
     const all = kernelRegistry.list();
-    assert.equal(all.length, 58, `入册键数 = 18+37+3（ΝΩ-10 policy 权重三键，实测 ${all.length}）`);
+    assert.equal(all.length, 62, `入册键数 = 18+37+3+2+2（R3-3 GAP-2 双键 + R5-4 语义缓存双键，实测 ${all.length}）`);
 
     // Ξ-D 新键抽查：六族代表全在册
     const xiKeys = [
@@ -309,13 +309,13 @@ test('Ξ-D⑤: registerProductionKernels 幂等 —— 两次入册长度 / 快�
   try {
     registerProductionKernels();
     const snap1 = kernelRegistry.snapshot();
-    assert.equal(Object.keys(snap1).length, 58);
+    assert.equal(Object.keys(snap1).length, 62);
 
     // 人为漂移一枚：重入册须保持现值（register 幂等契约：只刷规格不动值）
     kernelRegistry.set('osc.fuzzTol', 9);
     registerProductionKernels();
     const snap2 = kernelRegistry.snapshot();
-    assert.equal(kernelRegistry.list().length, 58, '两次入册长度不变（幂等）');
+    assert.equal(kernelRegistry.list().length, 62, '两次入册长度不变（幂等）');
     assert.equal(snap2['osc.fuzzTol'], 9, '重入册保持 set 后的现值');
     snap2['osc.fuzzTol'] = snap1['osc.fuzzTol']!;
     assert.deepEqual(snap2, snap1, '除人为漂移外快照逐字节相同');

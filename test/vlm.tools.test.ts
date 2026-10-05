@@ -224,6 +224,7 @@ test('Λ-3⑤: vlm_wizard —— opener 收 127.0.0.1 地址；二次调用复�
       port: wizPort,
       url: wizUrl,
       closed: false,
+      nonce: '0'.repeat(64), // ΠΑΝ-20：OnboardingHandle 契约新增 nonce —— 假件同形
       close: async () => { fakeHandle.closed = true; },
     };
     const server = async (): Promise<OnboardingHandle> => { serverCalls++; return fakeHandle; };
@@ -259,6 +260,7 @@ test('Λ-3⑥: vlm_wizard opener 返回 dry-run ⇒ note 注明 dryRun（守卫�
       port: dryPort,
       url: `http://127.0.0.1:${dryPort}/wizard`,
       closed: false,
+      nonce: '0'.repeat(64), // ΠΑΝ-20：OnboardingHandle 契约新增 nonce —— 假件同形
       close: async () => { /* 假 handle：无事可关 */ },
     });
     const opener = async (_url: string) => ({ method: 'dry-run' });

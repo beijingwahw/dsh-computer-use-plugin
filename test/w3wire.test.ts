@@ -42,6 +42,7 @@ import {
   CASCADE_TRIAGE_WEIGHTS, CASCADE_DANGER_MAX,
   attachCascadeFace, GlmClient,
   cascadeRequestFactors, resetCascadeTriageFamiliarity,
+  cascadeSceneFingerprint, rememberCascadeScene, attachCascadeSceneHashPort,
   classifyCascadeRequest, cascadeSemanticValidators, wireCascadeConsultFace,
   attachVlmRateLimiter, getGlmClient, resetGlmClient,
 } from '../src/vlm/index.ts';
@@ -235,7 +236,9 @@ test('W3-B①: adjudicate_approval_queue 挂载门 —— enableApprovalGate 同
 
 test('W3-A③: 睡眠晨报待批清单源 —— runSleepCycle deps 注入 approvalQueue（源级断言）', () => {
   const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-  const m = src.match(/runSleepCycle\(([\s\S]{0,2400}?)sleepTracePath/s);
+  // ΠΑΝ-29 注记：deps 体内新增 disposeSignal 接线注记 —— 匹配窗 2400 → 2700
+  //（锚的执法语义不变：deps 必须注入 approvalQueue 晨报清单源）。
+  const m = src.match(/runSleepCycle\(([\s\S]{0,2700}?)sleepTracePath/s);
   assert.ok(m, '应找到 runSleepCycle 调用体（至 sleepTracePath 配置段）');
   assert.match(m[1], /approvalQueue,/, 'deps 必须注入 approvalQueue（W2-1 H4 晨报待批清单源）');
 });
@@ -352,39 +355,55 @@ function wireR2Cascade(pool: CascadePoolFace): VlmCascade {
   });
 }
 
-test('ΑΩ-R2①: 低风险+配置便宜档 ⇒ 同 prompt 复现命中便宜臂（danger 0.2 < 0.35）', async () => {
+test('ΑΩ-R2①: 低风险+配置便宜档 ⇒ 同屏（dhash 指纹）复现命中便宜臂（danger 0.2 < 0.35）', async () => {
   resetCascadeTriageFamiliarity();
+  // ΠΑΝ-24：场景熟悉度改用 dhash 指纹（假端口：内容寻址 —— 离线确定性）
+  attachCascadeSceneHashPort(async b64 => ({ 'shot-1': 'fp-shot-1' })[b64] ?? null);
   const { pool, cheapCalls, primaryCalls } = fakeCascadePool('{"from":"cheap"}');
   const cascade = wireR2Cascade(pool);
+  // 桥按 wireCascadeConsultFace 同律（ΠΑΝ-24：指纹先取、因子纯读、裁决后记账）
   attachCascadeFace({
-    consultJson: req => cascade.runJson(req, { factors: cascadeRequestFactors(req) }),
+    consultJson: async req => {
+      const fp = await cascadeSceneFingerprint(req);
+      const out = await cascade.runJson(req, { factors: cascadeRequestFactors(req, { sceneFingerprint: fp }) });
+      rememberCascadeScene(fp);
+      return out;
+    },
   });
   const { fetchImpl, calls: fetchCalls } = fakeCascadeFetch();
   const client = new GlmClient({ apiKey: 'k', model: 'm', fetchImpl });
   const PROMPT = '识别图中所有可见文字。只输出严格 JSON。';
+  const SHOT = [{ base64: 'shot-1' }];
   try {
-    // 首见：低危但新场景 ⇒ danger = 0.4×0.5 + 0.2×1 = 0.4 > 0.35 ⇒ 弃权走主路径
-    const r1 = await client.chatJson<{ from?: string }>({ images: [], prompt: PROMPT, maxRetries: 0 });
+    // 首问（新场景）：低危但新场景 ⇒ danger = 0.4×0.5 + 0.2×1 = 0.4 > 0.35 ⇒ 弃权走主路径
+    const r1 = await client.chatJson<{ from?: string }>({ images: SHOT as never, prompt: PROMPT, maxRetries: 0 });
     assert.equal(r1.ok, true);
     assert.equal(r1.value?.from, 'singleton', '首见弃权 ⇒ 单例主路径应答（无证据不便宜）');
     assert.equal(fetchCalls(), 1, '弃权 ⇒ 单例拨号恰一次');
     assert.equal(cheapCalls(), 0, '便宜脑零调用');
-    // 因子直测：低危分类 + 复现后熟悉 + 置信诚实中性
-    const f = cascadeRequestFactors({ prompt: PROMPT });
+    // 因子直测：低危分类 + 同屏复现后熟悉 + 置信诚实中性
+    const fp = await cascadeSceneFingerprint({ prompt: PROMPT, images: SHOT });
+    assert.equal(fp, 'fp-shot-1', '指纹经端口取得（dhash 判据）');
+    const f = cascadeRequestFactors({ prompt: PROMPT }, { sceneFingerprint: fp });
     assert.equal(f.risk, 'low', '只读观察语义且无危险词 ⇒ low');
-    assert.equal(f.sceneFamiliar, true, '同 prompt 复现 ⇒ 场景熟悉（重复度代理）');
+    assert.equal(f.sceneFamiliar, true, '同屏（指纹命中记忆）⇒ 场景熟悉');
     assert.equal(f.confidence, 0.5, '置信不可得 ⇒ 中性 0.5（诚实）');
     assert.ok(triageDanger(f) < CASCADE_DANGER_MAX, `低危+熟悉 ⇒ danger ${triageDanger(f)} < 0.35`);
-    // 复现：danger = 0.4×0.5 = 0.2 ≤ 0.35 ⇒ 便宜臂点亮（结构校验过检直采）
-    const r2 = await client.chatJson<{ from?: string }>({ images: [], prompt: PROMPT, maxRetries: 0 });
+    // 复问同屏：danger = 0.4×0.5 = 0.2 ≤ 0.35 ⇒ 便宜臂点亮（结构校验过检直采）
+    const r2 = await client.chatJson<{ from?: string }>({ images: SHOT as never, prompt: PROMPT, maxRetries: 0 });
     assert.equal(r2.ok, true);
-    assert.equal(r2.value?.from, 'cheap', '复现 ⇒ 便宜臂过检直采（暗功能点亮）');
+    assert.equal(r2.value?.from, 'cheap', '同屏复现 ⇒ 便宜臂过检直采（暗功能点亮）');
     assert.equal(fetchCalls(), 1, '承接后单例零新拨号');
     assert.equal(cheapCalls(), 1, '便宜脑恰一调');
     assert.equal(primaryCalls(), 0, '主力零调用（省钱事件）');
     assert.equal(cascade.stats.cheapHit, 1, 'cheap-hit 记账');
+    // ΠΑΝ-24 回归钉：同句 prompt 换新屏（指纹不同）⇒ 再度新场景 ⇒ 弃权
+    const r3 = await client.chatJson<{ from?: string }>({ images: [{ base64: 'shot-2' }] as never, prompt: PROMPT, maxRetries: 0 });
+    assert.equal(r3.value?.from, 'singleton', '同句换新屏 ⇒ 弃权（prompt 原文不再冒充场景证据）');
+    assert.equal(cheapCalls(), 1, '便宜脑零新调用');
   } finally {
     attachCascadeFace(null);
+    attachCascadeSceneHashPort(undefined); // 复位缺省 dhash 端口
     resetCascadeTriageFamiliarity();
   }
 });
@@ -395,25 +414,26 @@ test('ΑΩ-R2②: 危险词 ⇒ 恒主力（场景复现/置信拉满也压不�
   const cascade = wireR2Cascade(pool);
   const DANGER_PROMPT = '把回收站里的旧邮件全部删除，然后发送确认回执';
   try {
-    // 因子直测：危险词（删除/发送）⇒ high；与熟悉度正交（复现仍 high）
-    const f1 = cascadeRequestFactors({ prompt: DANGER_PROMPT });
+    // 因子直测：危险词（删除/发送）⇒ high；与熟悉度正交（同屏复现仍 high）
+    const f1 = cascadeRequestFactors({ prompt: DANGER_PROMPT }, { sceneFingerprint: 'fp-d1' });
     assert.equal(f1.risk, 'high', '危险词 ⇒ high');
     assert.equal(f1.sceneFamiliar, false, '首见 ⇒ 新场景');
-    const f2 = cascadeRequestFactors({ prompt: DANGER_PROMPT });
+    rememberCascadeScene('fp-d1'); // 观察记账（显式 —— 因子求值不自记，ΠΑΝ-24 去副作用）
+    const f2 = cascadeRequestFactors({ prompt: DANGER_PROMPT }, { sceneFingerprint: 'fp-d1' });
     assert.equal(f2.risk, 'high', '复现仍 high（词法分级与熟悉度正交）');
-    assert.equal(f2.sceneFamiliar, true, '复现 ⇒ 熟悉（但压不过 high）');
+    assert.equal(f2.sceneFamiliar, true, '同屏复现 ⇒ 熟悉（但压不过 high）');
     assert.ok(triageDanger(f2) > CASCADE_DANGER_MAX, `危险词因子 danger ${triageDanger(f2)} > 0.35`);
     // 数学执法：high 在最好余因子（熟悉+置信拉满）下 danger = 0.4 恒 > 0.35
     assert.ok(
       triageDanger({ risk: 'high', sceneFamiliar: true, confidence: 1 }) > CASCADE_DANGER_MAX,
       'high 上界情形仍 > 0.35 ⇒ 恒主力',
     );
-    // 行为执法：三次同 prompt 咨询全部弃权（primaryDirect 记账），便宜脑零调用
+    // 行为执法：三次同屏高危咨询全部弃权（primaryDirect 记账），便宜脑零调用
     const before = cascade.stats.primaryDirect;
     for (let i = 0; i < 3; i++) {
       const r = await cascade.runJson(
         { images: [], prompt: DANGER_PROMPT },
-        { factors: cascadeRequestFactors({ prompt: DANGER_PROMPT }) },
+        { factors: cascadeRequestFactors({ prompt: DANGER_PROMPT }, { sceneFingerprint: 'fp-d1' }) },
       );
       assert.equal(r, null, `第 ${i + 1} 次咨询 ⇒ 弃权（恒主力）`);
     }
@@ -441,14 +461,22 @@ test('ΑΩ-R2③: factors 缺席 ⇒ 旧行为（保守静态源 danger 0.6 ⇒ 
   configureVlm({}); // 摘除（幂等）—— 不留模块级状态给后续测试
 });
 
-test('ΑΩ-R2④: 组合根源级断言 —— 咨询桥接请求级动态因子 + 实例静态保守源保持', () => {
+test('ΑΩ-R2④: 组合根源级断言 —— 咨询桥接请求级动态因子 + 实例静态保守源保持 + ΠΑΝ-24 去副作用序', () => {
   const src = readFileSync(new URL('../src/vlm/index.ts', import.meta.url), 'utf8');
-  assert.match(src, /factors:\s*cascadeRequestFactors\(req\)/, 'consultJson 桥必须供请求级动态因子（perCall 优先律）');
+  assert.match(
+    src,
+    /factors:\s*cascadeRequestFactors\(req,\s*\{\s*sceneFingerprint:\s*fingerprint\s*\}\)/,
+    'consultJson 桥必须供请求级动态因子（perCall 优先律；ΠΑΝ-24 指纹注入式）',
+  );
   assert.match(
     src,
     /factors:\s*\(\)\s*=>\s*\(\{\s*risk:\s*'medium'/,
     '实例因子源保持 W3-0 静态保守值（直接 runJson 旧行为逐字节保持）',
   );
+  // ΠΑΝ-24：观察记账必须排在 runJson 裁决之后（因子求值纯读 —— 去副作用执法）
+  const runJsonAt = src.indexOf('await cascade.runJson(req, {');
+  const rememberAt = src.indexOf('rememberCascadeScene(fingerprint);');
+  assert.ok(runJsonAt >= 0 && rememberAt > runJsonAt, 'rememberCascadeScene 必须在级联裁决之后执行');
 });
 
 // ─── ΝΩ-18（桥面语义谓词）：按请求类型注册的便宜臂法定校验 ───
@@ -551,9 +579,12 @@ function semanticFakePool(cheapTexts: string[]): {
 
 test('ΝΩ-18③: wireCascadeConsultFace 端到端 —— 语义不过 ⇒ 升级主力；好载荷 ⇒ 便宜直采；generic 不加谓词', async () => {
   resetCascadeTriageFamiliarity();
+  // ΠΑΝ-24：熟悉度改 dhash 指纹 —— 假端口 + 真图像物料（同屏复现才点亮便宜臂）
+  attachCascadeSceneHashPort(async b64 => ({ 'shot-sem': 'fp-sem' })[b64] ?? null);
+  const SEM_SHOT = [{ base64: 'shot-sem' }];
   try {
-    // ΑΩ-R2 同律：首见 prompt ⇒ 新场景 ⇒ danger 0.4 ⇒ 弃权走单例（ priming 调用），
-    // 复现 ⇒ danger 0.2 ⇒ 便宜臂点亮 —— 语义谓词在便宜臂采信前执法。
+    // ΑΩ-R2 同律：首见屏 ⇒ 新场景 ⇒ danger 0.4 ⇒ 弃权走单例（priming 调用），
+    // 同屏复现 ⇒ danger 0.2 ⇒ 便宜臂点亮 —— 语义谓词在便宜臂采信前执法。
     const mkCascade = (pool: CascadePoolFace): VlmCascade => new VlmCascade(pool, {
       factors: () => ({ risk: 'medium' as const, sceneFamiliar: false, confidence: 0.5 }),
       validators: [{
@@ -568,7 +599,7 @@ test('ΝΩ-18③: wireCascadeConsultFace 端到端 —— 语义不过 ⇒ 升�
     const { fetchImpl, calls: fetchCalls } = fakeCascadeFetch();
     const client = new GlmClient({ apiKey: 'k', model: 'm', fetchImpl });
     const groundingCall = () => client.chatJson<{ elements?: Array<{ label?: string }> }>({
-      images: [], prompt: GROUNDING_REQ.prompt, system: GROUNDING_REQ.system, maxRetries: 0,
+      images: SEM_SHOT as never, prompt: GROUNDING_REQ.prompt, system: GROUNDING_REQ.system, maxRetries: 0,
     });
     await groundingCall(); // priming：首见弃权走单例
     const r1 = await groundingCall(); // 复现：便宜臂点亮
@@ -584,7 +615,7 @@ test('ΝΩ-18③: wireCascadeConsultFace 端到端 —— 语义不过 ⇒ 升�
     })]);
     wireCascadeConsultFace(mkCascade(good.pool));
     const r2 = await client.chatJson<{ elements?: Array<{ label?: string }> }>({
-      images: [], prompt: GROUNDING_REQ.prompt, system: GROUNDING_REQ.system, maxRetries: 0,
+      images: SEM_SHOT as never, prompt: GROUNDING_REQ.prompt, system: GROUNDING_REQ.system, maxRetries: 0,
     });
     assert.equal(r2.value?.elements?.[0]?.label, '设置', '好载荷过语义谓词 ⇒ 便宜直采');
     assert.equal(good.primaryCalls(), 0, '主力零调用（省钱事件）');
@@ -594,7 +625,7 @@ test('ΝΩ-18③: wireCascadeConsultFace 端到端 —— 语义不过 ⇒ 升�
     const generic = semanticFakePool(['{"anything":"结构完整即可"}']);
     wireCascadeConsultFace(mkCascade(generic.pool));
     const genericCall = () => client.chatJson<{ anything?: string }>({
-      images: [], prompt: GENERIC_REQ.prompt, maxRetries: 0,
+      images: SEM_SHOT as never, prompt: GENERIC_REQ.prompt, maxRetries: 0,
     });
     await genericCall(); // priming
     const r3 = await genericCall();
@@ -602,13 +633,16 @@ test('ΝΩ-18③: wireCascadeConsultFace 端到端 —— 语义不过 ⇒ 升�
     assert.equal(generic.primaryCalls(), 0);
   } finally {
     attachCascadeFace(null);
+    attachCascadeSceneHashPort(undefined); // ΠΑΝ-24：复位缺省 dhash 端口
     resetCascadeTriageFamiliarity();
   }
 });
 
 test('ΝΩ-18④: 组合根源级断言 —— configureVlm 的限流注入与桥面语义谓词字面接线', () => {
   const src = readFileSync(new URL('../src/vlm/index.ts', import.meta.url), 'utf8');
-  assert.match(src, /attachVlmRateLimiter\(new VlmRateLimiter\(/, 'configureVlm 必须铸 VlmRateLimiter 注入限流闸（vlm.maxPerMinute > 0）');
+  // ΠΑΝ-23：铸闸形态改为 sessionRateGate 局部变量（同一实例随后共享给合议庭/法院）
+  assert.match(src, /sessionRateGate = new VlmRateLimiter\(/, 'configureVlm 必须铸 VlmRateLimiter（vlm.maxPerMinute > 0）');
+  assert.match(src, /attachVlmRateLimiter\(sessionRateGate\)/, '铸出的闸必须注入单例前置位');
   assert.match(src, /kernelRegistry\.getOrDefault\('vlm\.maxPerMinute', 0\)/, '限流参数读内核注册表（Ξ-D 同律）');
   assert.match(src, /wireCascadeConsultFace\(cascadeSingleton\)/, 'configureVlm 铸级联后必须经 wireCascadeConsultFace 装配语义谓词桥');
 });

@@ -744,7 +744,13 @@ test('ΝΩ-28 M5 闭环：run-end 收割库存×仪表盘 → insert 臂记账�
 
     const report2 = await o.run({ id: 'i-m5b', description: 'open settings' });
     assert.equal(report2.verdict, 'completed');
-    assert.equal(evidenceLedger.stats('memory.op.system-quirk.insert').n, 2, '第二个 run-end 再收割 ⇒ beta 臂计数持续变化');
+    // ΠΑΝ-44（同证据单次计数）：种子条目 updatedAt 冻结（query 不改 updatedAt）
+    // ⇒ 第二个 run-end 不再重复收割 —— 旧断言 n=2 是重复计数的病基本身
+    //（C1-8 H3：窗口内每个 run-end 都把同一批条目重新记为独立伯努利试验，
+    //  Beta 后验 n 被系统性膨胀）。水涨的臂只能来自**新证据状态**（复证刷新
+    // updatedAt 的条目 / 新铸条目）。
+    assert.equal(evidenceLedger.stats('memory.op.system-quirk.insert').n, 1,
+      '同证据只计一次 —— run-end 次数不再膨胀 beta 臂计数');
     assert.ok(o.dispose().ok);
   } finally {
     resetKernelRuntime();

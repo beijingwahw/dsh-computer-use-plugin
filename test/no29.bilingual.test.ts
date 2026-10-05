@@ -10,7 +10,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BILINGUAL_PAIRS, LOOKUP, toEnglish } from '../src/dialects/bilingual.ts';
-import { tokenize } from '../src/uiMemory.ts';
+// ΠΑΝ-46（分词单源化）：embed 的分词已收口到 dialects.tokenizeText（signature
+// 签名系方言）—— 零回归执法基准随之换用同一单源（执法目标不变：**无桥命中
+// 输入**的前后输出逐字节相同 —— 桥不改变非桥路径）。
+import { tokenizeText } from '../src/dialects/tokenizer.ts';
 import { embed, cosine } from '../src/semanticHash.ts';
 
 // ─── 1. 数据完整性执法 ─────────────────────────────────────────────────
@@ -94,7 +97,9 @@ test('ΝΩ-29 语义邻居不越狱：无关跨语系对仍为 0（盲区修复�
 
 // ─── 3. 同语系零回归（旧 embed 逐字节复刻对照）────────────────────────
 
-/** 旧实现复刻：ΝΩ-29 接桥前的 embed（tokenize → n-gram，无桥）—— 执法基准 */
+/** 旧实现复刻：ΝΩ-29 接桥前的 embed（tokenize → n-gram，无桥）—— 执法基准。
+ *  ΠΑΝ-46 起分词换用 dialects.tokenizeText 单源（signature 签名系方言 ——
+ *  与 src/semanticHash.ts 的现行管线同口径）。 */
 function legacyEmbed(text: string): { dims: Array<[number, number]>; norm: number } {
   function fnv1a(s: string): number {
     let h = 0x811c9dc5;
@@ -108,7 +113,7 @@ function legacyEmbed(text: string): { dims: Array<[number, number]>; norm: numbe
     return out;
   }
   const buckets = new Map<number, number>();
-  for (const token of tokenize(text)) {
+  for (const token of tokenizeText(text, { signature: true })) {
     const tb = fnv1a(token);
     buckets.set(tb, (buckets.get(tb) ?? 0) + 1.0);
     for (const g of ngrams(token)) {
@@ -137,7 +142,7 @@ test('ΝΩ-29 同语系零回归：无桥命中输入的 embed 输出与旧实�
     '',
   ];
   for (const s of corpus) {
-    const tk = tokenize(s);
+    const tk = tokenizeText(s, { signature: true });
     assert.deepEqual(toEnglish(tk), tk, `语料含桥命中，零回归前提被破坏: ${s}`);
     assert.equal(JSON.stringify(embed(s)), JSON.stringify(legacyEmbed(s)),
       `逐字节漂移: ${JSON.stringify(s)}`);
@@ -155,8 +160,8 @@ test('ΝΩ-29 toEnglish：命中替换、多词值拆分、未命中原样透传
   assert.deepEqual(toEnglish(['统', '一', '步', '统一', '一步']), ['统', '一', '步', '统一', '一步']);
   // 多词值按空格拆分（与英文原生分词粒度对齐）；三字键优先于其二字前缀键
   assert.deepEqual(toEnglish(['地址', '址栏']), ['address', 'bar']);
-  // embed 全管线：中文句桥后包含英文 token
-  const bridged = toEnglish(tokenize('点击保存按钮'));
+  // embed 全管线：中文句桥后包含英文 token（ΠΑΝ-46：单源分词口径）
+  const bridged = toEnglish(tokenizeText('点击保存按钮', { signature: true }));
   for (const w of ['click', 'save', 'button']) assert.ok(bridged.includes(w), `缺 ${w}`);
   assert.ok(!bridged.includes('保存'));
 });

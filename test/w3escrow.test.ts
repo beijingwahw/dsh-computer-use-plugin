@@ -217,14 +217,18 @@ test('S1-1b 预案先行落盘：铸造返回时 WAL 文件已在场且含预案
   assert.equal(mint.ok, true);
   if (!mint.ok) return;
   // ΝΩ-22 行式档：头行魔数 + 单 mint 事件行（预案自包含在 payload.plan）
+  // ΠΑΝ-35：v3 = 带链行式（事件行携带 prev/hash 的 SHA-256 链）
   const header = walHeader(wal);
   assert.equal(header.wal, 'dsh-escrow-wal');
-  assert.equal(header.version, 2);
+  assert.equal(header.version, 3);
   const mints = walEvents(wal).filter(e => e.event === 'mint');
   assert.equal(mints.length, 1);
   assert.equal(mints[0].planId, mint.plan.planId);
   assert.equal(mints[0].payload.plan.planId, mint.plan.planId);
   assert.equal(mints[0].payload.plan.compensation.length, 2);
+  // ΠΑΝ-35：行携带链指纹（首事件行 prev = GENESIS 创世锚；hash = sha256(prev+canonical(内容域)))
+  assert.equal(mints[0].prev, 'GENESIS');
+  assert.match(mints[0].hash ?? '', /^[0-9a-f]{64}$/);
 });
 
 // ─── S1-2 策略表命中与缺失 ───
@@ -739,8 +743,9 @@ test('ΝΩ-22-b 旧档迁移：旧整档只读迁移为行式，账册与在途�
   assert.deepEqual(ledger.find(x => x.planId === 'ESC-OLDLEDGER')?.executedSteps,
     ['restore from recycle bin'], '旧账册内容迁移保全');
   // 迁移后档 = 行式：头行魔数 + 旧账(compensate) + 恢复账(close)
+  // ΠΑΝ-35：迁移面全量重写 ⇒ 档升格 v3 带链（链随重写重铸）
   assert.equal(walHeader(wal).wal, 'dsh-escrow-wal');
-  assert.equal(walHeader(wal).version, 2);
+  assert.equal(walHeader(wal).version, 3);
   const evs = walEvents(wal);
   assert.deepEqual(evs.map(e => e.event).sort(), ['close', 'compensate'], '迁移 = 在途/账册各成一行');
   const st = walState(wal);

@@ -4,6 +4,11 @@
 // 不变 / 自动机 vs 旧 includes 引擎在中英文混合长文本上的对照（除拉丁短词
 // 边界收窄外全一致，且收窄单侧 —— 绝不新增命中）/ 自定义词表热重建 /
 // 铁律（脏输入绝不抛）/ 归一化零回归钉（位置映射改造不动文本面）。
+// ΠΑΝ-9（H-1 补全）：不可见字符绕过执法 —— 软连字符 U+00AD/词连接符 U+2060/
+//   函数应用族 U+2061-2064（Cf）、组合附加记号（Mn）、变体选择符 VS16/
+//   VS17-256 注入必须命中；NFKC 前置（兼容分解形折叠）；同形字路径在 NFKC
+//   之后零回归（西里尔/希腊）；边界律与剥除协同（邻接判定回到原文）；
+//   混合攻击栈纵深穿透；纯不可见输入绝不抛。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -329,5 +334,88 @@ test('ΝΩ-23 §7: normalizeForRisk 输出逐字节不变（含整串小写语�
   for (const [input, expected] of pins) {
     assert.equal(normalizeForRisk(input), expected, `归一化零回归: ${JSON.stringify(input)}`);
   }
-  assert.deepEqual([...normalizeForRisk('İ')].map(c => 'U+' + c.codePointAt(0)!.toString(16)), ['U+6c', 'U+307'], 'İ 展开码点各归其位');
+  // ΠΑΝ-9 立法更新：İ 整串小写展开 i+U+0307（组合上点，Mn 类）—— 扩展剥除集
+  // 之后 U+0307 剥除、'i' 经 CONFUSABLES 折 'l' ⇒ 输出单码点 'l'（旧钉的
+  // 双码点形状是 ΠΑΝ-9 之前的行为；位置映射律本身不变：输出码点来源正确）。
+  assert.deepEqual([...normalizeForRisk('İ')].map(c => 'U+' + c.codePointAt(0)!.toString(16)), ['U+6c'], 'İ → i+U+0307，Mn 组合点被 ΠΑΝ-9 剥除');
+});
+
+// ─── ΠΑΝ-9：不可见字符绕过执法（H-1 补全：Cf/Mn/变体选择符剥除 + NFKC 前置）───
+
+test('ΠΑΝ-9 §8: 软连字符 U+00AD / 词连接符 U+2060 / 函数应用族 U+2061-2064（Cf）注入全部命中', () => {
+  assert.equal(matchesRiskPatterns('pass\u00ADword', ''), true, '软连字符拼 password（H-1 正例）');
+  assert.equal(matchesRiskPatterns('密\u00AD码', ''), true, '中文风险词中插软连字符');
+  assert.equal(matchesRiskPatterns('p\u2060in', ''), true, '词连接符拼 pin');
+  assert.equal(matchesRiskPatterns('口\u2060令', ''), true, '词连接符拼口令');
+  assert.equal(matchesDangerPatterns('发\u2060送', ''), true, '词连接符拼发送（不可逆词）');
+  assert.equal(matchesDangerPatterns('de\u2061lete', ''), true, 'U+2061 函数应用（Cf）拼 delete');
+  assert.equal(matchesRiskPatterns('t\u2062oken', ''), true, 'U+2062 不可见乘（Cf）拼 token');
+  assert.equal(matchesRiskPatterns('se\u2063cret', ''), true, 'U+2063 不可见分隔（Cf）拼 secret');
+  assert.equal(matchesRiskPatterns('2\u2064fa', ''), true, 'U+2064 不可见加（Cf）拼 2fa');
+});
+
+test('ΠΑΝ-9 §8: 组合附加记号（Mn，如 U+0301/U+0307）注入命中', () => {
+  assert.equal(matchesRiskPatterns('pa\u0301ssword', ''), true, '分解形 á（a+U+0301）拼 password');
+  assert.equal(matchesRiskPatterns('tok\u0301en', ''), true, 'token 中插组合尖音符');
+  assert.equal(matchesRiskPatterns('验证\u0301码', ''), true, '中文验证码中插组合记号');
+  assert.equal(matchesRiskPatterns('pin\u0307', ''), true, '组合上点（İ 展开的同族记号）尾随 pin');
+});
+
+test('ΠΑΝ-9 §8: 变体选择符 VS16（U+FE0F）与 VS17-256（U+E0100-E01EF，星面 Mn）注入命中', () => {
+  assert.equal(matchesDangerPatterns('se\uFE0Fnd', ''), true, 'VS16 拼 send');
+  assert.equal(matchesRiskPatterns('pass\uFE0Fword', ''), true, 'VS16 拼 password');
+  assert.equal(matchesDangerPatterns('de\u{E0100}lete', ''), true, 'VS17 拼 delete');
+  assert.equal(matchesRiskPatterns('2\u{E01EF}fa', ''), true, 'VS256（区间末码点）拼 2fa');
+});
+
+test('ΠΑΝ-9 §8: NFKC 前置 —— 兼容分解形（全角/带圈/罗马数字/连字/上标）折叠后命中', () => {
+  assert.equal(matchesRiskPatterns('２ｆａ', ''), true, '全角数字 NFKC→2fa');
+  assert.equal(matchesRiskPatterns('Ⓟⓐⓢⓢⓦⓞⓡⓓ', ''), true, '带圈字母 NFKC→password');
+  assert.equal(matchesDangerPatterns('ⓢⓔⓝⓓ 订单', ''), true, '带圈字母 NFKC→send 分写命中');
+  // 粘词形态（ⅴⅠ 折 v+l 前缀）同受硬边界律 —— 与 §2 applepay 同律，NFKC 不豁免粘词
+  assert.equal(matchesDangerPatterns('ⅴⅠⓢⓔⓝⓓ', ''), false, '罗马数字+带圈粘词 = 粘合前缀，边界律照常执法');
+  assert.equal(normalizeForRisk('ﬁle'), 'flle', '连字 ﬁ NFKC→f+i，i 经 CONFUSABLES 折 l（同律链）');
+  assert.equal(normalizeForRisk('№'), 'no', '兼容字 № NFKC→no');
+});
+
+test('ΠΑΝ-9 §8: 同形字折叠在 NFKC 之后仍工作（西里尔/希腊路径零回归）', () => {
+  assert.equal(normalizeForRisk('а'), 'a', '西里尔 а → a（NFKC 不分解西里尔 —— 策展/生成表路径原样工作）');
+  assert.equal(normalizeForRisk('ѕ'), 's', '西里尔 ѕ → s');
+  assert.equal(matchesRiskPatterns('pаssword', ''), true, 'p+西里尔а+ssword → password');
+  assert.equal(matchesRiskPatterns('ѕecret', ''), true, '西里尔 ѕecret → secret');
+  assert.equal(matchesRiskPatterns('ρin', ''), true, '希腊 ρin → pin（既有钉复确认）');
+  assert.equal(normalizeForRisk('Σ'), 'o', 'σ→o 混淆折叠（不对称乃表意）');
+  assert.equal(normalizeForRisk('ΑΣ'), 'aς', 'Final_Sigma 语境规则不被 NFKC 破坏');
+});
+
+test('ΠΑΝ-9 §8: 边界律协同 —— 不可见剥除后拼接不产生新逃逸，邻接判定回到原文', () => {
+  // 不可见字符是透明分隔：词表词内部插入（pass­word）剥除后必须命中 —— 这正是目的
+  assert.equal(matchesRiskPatterns('pass\u00ADword', ''), true);
+  // 硬边界词的邻接判定读原文真实邻接字符（位置映射穿透剥除）：
+  assert.equal(matchesRiskPatterns('pin\u00ADcode', ''), true, 'pin+软连字符+code：软连字符折叠为空 = 非词内字符 ⇒ 边界干净');
+  assert.equal(matchesRiskPatterns('xp\u00ADin', ''), false, 'x 前缀粘词不得因软连字符洗白');
+  assert.equal(matchesRiskPatterns('typ\u00ADing', ''), false, 'typing 中插软连字符不得命中 pin');
+  assert.equal(matchesDangerPatterns('co\u00ADnfirm order', ''), true, 'confirm 内插软连字符 + 空格分写');
+  assert.equal(matchesDangerPatterns('preset', ''), false, '对照：无不可见字符的既有收窄不回摆');
+});
+
+test('ΠΑΝ-9 §8: 混合攻击栈（同形字+软连字符+leet+全角）纵深穿透', () => {
+  assert.equal(matchesRiskPatterns('pаss\u00ADw0rd', ''), true, '西里尔 а + 软连字符 + leet 0');
+  assert.equal(matchesRiskPatterns('ｓｅｃ\uFE0Fｒｅｔ', ''), true, '全角 + VS16 拼 secret');
+  assert.equal(matchesDangerPatterns('ｓｅ\u2060ｎｄ 订单', ''), true, '全角 + 词连接符拼 send');
+});
+
+test('ΠΑΝ-9 §8: 纯不可见/极端不可见输入绝不抛（布尔收敛）', () => {
+  const hostile = [
+    '\u00AD'.repeat(300), '\u2060\u2061\u2062\u2063\u2064'.repeat(60),
+    '\u{E0100}'.repeat(80), '\uFE0F'.repeat(500), 'pa\u0301ss'.repeat(200),
+    'pass\u00ADword'.repeat(150), '\uFEFF\u200B\u200C\u200D'.repeat(100),
+  ];
+  for (const t of hostile) {
+    for (const csv of ['', 'pin,token,密码', 'send,删除']) {
+      assert.equal(typeof matchesRiskPatterns(t, csv), 'boolean', `绝不抛: ${JSON.stringify(t.slice(0, 12))} @ ${csv}`);
+      assert.equal(typeof matchesDangerPatterns(t, csv), 'boolean');
+    }
+  }
+  assert.equal(matchesRiskPatterns('\u00AD'.repeat(50), ''), false, '纯不可见归一为空 ⇒ 不命中');
 });

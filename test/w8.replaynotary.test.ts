@@ -68,6 +68,15 @@ async function seedJournal(n: number): Promise<void> {
   }
 }
 
+/** 首字符必然翻转（修复潮 F3-7 / N-6·N-7 概率性红自纠）：hex 摘要首字符
+ *  1/16 概率本就是 'f' —— 旧篡改写死 'f' + rest 会让「改一字节 ⇒ hash 变」
+ *  断言在那种情况下空转（值未变 ⇒ notEqual 失败，约 6% 概率偶发红）。
+ *  本助手保证换出的首字符与原值**必然不同**，哈希域覆盖断言恒有效。 */
+function flipFirstHexChar(hex: string): string {
+  const orig = hex[0] ?? '0';
+  return (orig === 'f' ? '0' : 'f') + hex.slice(1);
+}
+
 // ─── N-1 便捷面三态 ───
 
 test('N-1: 假 notary 锚捕获摘要内容（anchored 事实字段）；未装配/失败/崩溃/缺席 ⇒ 诚实 degraded', async () => {
@@ -406,10 +415,10 @@ test('N-6: 旁链快照与见证同锚共存（哈希域覆盖）；JSONL 往返
     assert.deepEqual(anchor!.auxChains, [{ chainName: 'sandboxLog', seq: 1, chainTip: sandboxLog.tip }],
       '三元组忠实映射（学习史链尖）');
 
-    // 哈希域覆盖：改旁链三元组一字节（tip 首字符）⇒ 锚 hash 失配
+    // 哈希域覆盖：改旁链三元组一字节（tip 首字符必然翻转 ⇒ 锚 hash 失配）
     const tampered = {
       ...anchor!,
-      auxChains: [{ ...anchor!.auxChains![0], chainTip: 'f' + anchor!.auxChains![0].chainTip.slice(1) }],
+      auxChains: [{ ...anchor!.auxChains![0], chainTip: flipFirstHexChar(anchor!.auxChains![0].chainTip) }],
     };
     const tDomain = { ...tampered } as Partial<AnchorRecord>;
     delete tDomain.hash;
@@ -462,10 +471,10 @@ test('N-7: journalDisk 与见证同锚共存（哈希域覆盖）；JSONL 往返
       [{ chainName: 'journalDisk', seq: 2, chainTip: expectedTip }],
       '三元组 = (journalDisk, 完整行数, 行字节整体 sha256)');
 
-    // 哈希域覆盖：改旁链三元组一字节（chainTip 首字符）⇒ 锚 hash 失配
+    // 哈希域覆盖：改旁链三元组一字节（chainTip 首字符必然翻转 ⇒ 锚 hash 失配）
     const tampered = {
       ...anchor!,
-      auxChains: [{ ...anchor!.auxChains![0], chainTip: 'f' + anchor!.auxChains![0].chainTip.slice(1) }],
+      auxChains: [{ ...anchor!.auxChains![0], chainTip: flipFirstHexChar(anchor!.auxChains![0].chainTip) }],
     };
     const tDomain = { ...tampered } as Partial<AnchorRecord>;
     delete tDomain.hash;

@@ -147,23 +147,38 @@ test('Θ-5: 显式晋升 —— kernelRegistry.promoteFrom(gym.lab.registry) 后
 
   const gym = new AutonomyGym({ seed: SEED });
   await gym.train(2);
-  // 给实验室一个醒目的演示值（晋升应原样搬运实验室现值）
+  // 给实验室一个醒目的演示值（ΠΑΝ-50：晋升通道带步长护栏 —— 演示值经多步走近，
+  // 不再一次跳跃搬运；这正是 C1-9 M2 判废的「全库约束最弱写径」的修法）
   gym.lab?.registry.set('world.hammingTolerance', 5);
 
   const labSnap = gym.lab?.registry.snapshot() ?? {};
   const promoted = kernelRegistry.promoteFrom(gym.lab!.registry);
   assert.ok(promoted.length >= 1, `晋升清单非空（实测 ${JSON.stringify(promoted)}）`);
 
-  const after = kernelRegistry.snapshot();
-  // 生产侧逐键拿到实验室现值（首批四键全量对照）
-  for (const [key, value] of Object.entries(labSnap)) {
+  // ΠΑΝ-50 重锚：单步 ≤ maxStepPct(0.1) × 生产区间宽 —— 逐键验证截断公式
+  //（to = from ± limit 或直达 lab 值[差距本就在限内]，方向朝 lab 现值）
+  for (const ch of promoted) {
+    const spec = kernelRegistry.list().find(p => p.key === ch.key)!;
+    const limit = 0.1 * (spec.max - spec.min);
+    const labValue = labSnap[ch.key];
+    const expectTo =
+      labValue > ch.from
+        ? Math.min(labValue, ch.from + limit)
+        : labValue < ch.from
+          ? Math.max(labValue, ch.from - limit)
+          : ch.from;
     assert.equal(
-      after[key],
-      value,
-      `晋升后生产侧 ${key} 应为实验室值 ${value}（实测 ${after[key]}）`,
+      ch.to, expectTo,
+      `${ch.key} 单步不越护栏（from ${ch.from} → to ${ch.to}，lab ${labValue}，limit ${limit}）`,
     );
   }
-  assert.equal(kernelRegistry.get('world.hammingTolerance'), 5, '演示值 5 经显式晋升进生产');
+  // 演示值 5 的多步走近（手算）：3 →(+0.7000000000000001)→ 3.7 →(+)→ 4.4 →(差距
+  // 0.6 < 限内直达)→ 5 —— 两次后续晋升后生产侧精确拿到实验室值。
+  assert.equal(kernelRegistry.get('world.hammingTolerance'), 3.7, '首步：3 + 0.1×(8−1) = 3.7（step-capped，ΠΑΝ-50）');
+  kernelRegistry.promoteFrom(gym.lab!.registry);
+  assert.equal(kernelRegistry.get('world.hammingTolerance'), 4.4, '第二步继续走近（同护栏）');
+  kernelRegistry.promoteFrom(gym.lab!.registry);
+  assert.equal(kernelRegistry.get('world.hammingTolerance'), 5, '差距落入单步限内 ⇒ 精确到达实验室值');
 
   // 还原生产单例（演示不留痕：清册后回放演示前快照 ⇒ 回到 pristine）
   kernelRegistry.reset();

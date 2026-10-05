@@ -26,17 +26,26 @@ const pyRoot = join(repoRoot, 'python_service');
 // ─── ① Python 侧：py_compile + 三自测 ───
 
 test('W5-1①a: python -m py_compile 全过（注册改动无语法错误）', (t) => {
-  const r = spawnSync('python', [
-    '-m', 'py_compile',
-    'dsh_physical/routes.py', 'dsh_physical/server.py',
-    'dsh_physical/auth.py', 'dsh_physical/config.py',
-    'dsh_physical/__init__.py',
-  ], { cwd: pyRoot, timeout: 60_000 });
-  if (r.error) {
-    t.skip(`python not available (${r.error.message}) — environment signal, not a code signal`);
+  // ΤΕΛ-14: 全量并发跑时多个 python 子进程竞争写同一 __pycache__/*.pyc
+  // （Windows 原子 rename 的共享冲突 ⇒ 瞬态 WinError 5）——语法判定不需要共享缓存，
+  // 给本次编译独立的 PYTHONPYCACHEPREFIX 隔离写入面，语义零变化。
+  const cacheDir = mkdtempSync(join(tmpdir(), 'w5pyreg-pycache-'));
+  let r: ReturnType<typeof spawnSync>;
+  try {
+    r = spawnSync('python', [
+      '-m', 'py_compile',
+      'dsh_physical/routes.py', 'dsh_physical/server.py',
+      'dsh_physical/auth.py', 'dsh_physical/config.py',
+      'dsh_physical/__init__.py',
+    ], { cwd: pyRoot, timeout: 60_000, env: { ...process.env, PYTHONPYCACHEPREFIX: cacheDir } });
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+  if (r!.error) {
+    t.skip(`python not available (${r!.error.message}) — environment signal, not a code signal`);
     return;
   }
-  assert.equal(r.status, 0, `py_compile 失败：${r.stderr?.toString().trim() ?? '(no stderr)'}`);
+  assert.equal(r!.status, 0, `py_compile 失败：${r!.stderr?.toString().trim() ?? '(no stderr)'}`);
 });
 
 test('W5-1①b: uvc/hid/audio 三 --selftest 仍 exit 0（行为零回归）', (t) => {

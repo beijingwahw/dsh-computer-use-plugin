@@ -250,7 +250,7 @@ test('W6R 注册表：新增安全不变量规则入册（20 条），全部 sec
     assert.equal(rule.category, 'security');
     assert.ok(rule.severity === 'critical' || rule.severity === 'major');
   }
-  assert.equal(DOCTOR_RULES.length, 20, '13 条既有 + 7 条 W6R 安全不变量');
+  assert.equal(DOCTOR_RULES.length, 21, '13 条既有 + 7 条 W6R 安全不变量 + ΠΑΝ-116 chain.wal-tampered（F2-1 移交项⑤）');
   // 豁免语法域立法（W7-1 先例）：critical/major 规则绝不可被 over-engineering 豁免降级
   for (const id of ids) assert.notEqual(R(id).id, 'smell.over-engineering');
 });

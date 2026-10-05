@@ -475,12 +475,13 @@ test('W7-E2E①成功路径：宣布→感知→宏技能(排练过)→验证→
   // 门控足迹搭车律：pendingGateNote 落在「门控裁决后首个落账步」—— wait 值守
   // 语义下即随后那步（宏步）的 journal，而非 wait 步自身（wait 先于任何门控裁决落账）。
   assert.ok(macroStep!.note?.includes('免看门控'), '免看门控值守足迹搭车在门控裁决后首个落账步（宏步）注记');
-  // ΝΩ-11（no-impact 闸）：recall_skill 按 W1-3 classifyExpectedVisualEffect 归
-  // 「无影响」档 ⇒ ⑥′ 不铸预言（自环转移不得回灌污染 predict 首名）—— 宏步
-  // journal 不再有 prophecy 注记，账本全程零铸造零结算（wait 先于 ⑥′、declare
-  // 亦无影响 ⇒ 本 run 无一动作铸预言）。
-  assert.ok(!(macroStep!.note ?? '').includes('prophecy:'), '无影响动作不铸预言 ⇒ 宏步 journal 零 prophecy 注记（ΝΩ-11）');
-  assert.equal(prophecy.stats().settled, 0, '账本零结算（wait/recall_skill/declare 全程无一铸造）');
+  // ΠΑΝ-56（macro-impact 档）：recall_skill 经宏执行器落地为真实键鼠序列 ⇒
+  // W1-3 classifyExpectedVisualEffect 归「宏冲击」档 —— ⑥′ **开始铸预言**（宏的
+  // (屏型, 动作键) 转移是世界模型的真实证据，ΝΩ-11 旧律「recall_skill 不铸」
+  // 随本档废止）；宏步 journal 带预言结算注记、账本结算数 ≥1（wait 先于 ⑥′、
+  // declare 无影响不铸 —— 本 run 恰只有宏步铸预言）。
+  assert.ok((macroStep!.note ?? '').includes('prophecy:'), 'macro-impact 动作铸预言 ⇒ 宏步 journal 带 prophecy 注记（ΠΑΝ-56）');
+  assert.ok(prophecy.stats().settled >= 1, '账本结算宏步预言（ΠΑΝ-56：宏的转移入世界模型账）');
   assert.equal(macroStep!.effectiveRiskTier, 'benign', '宪法判决分层盖章');
 
   // ── 宏执行器足迹（排练门禁真实执法） ──
@@ -522,10 +523,16 @@ test('W7-E2E①成功路径：宣布→感知→宏技能(排练过)→验证→
 
   // ── 睡眠六幕 + 晨报 ──
   const kb = new InMemoryKnowledgeBase();
-  // 免疫幕簇原料：三次经历措辞微异而同主题 —— learnFromOutcome 的同题复证律
-  //（learnTopicKey 全同 ⇒ 只升滴度不开新条目）；语义相近异文才积成 ≥3 簇
-  //（MIN_CLUSTER_SIZE=3，知识库睡眠整合的真实执法前提）。
-  for (const flavor of ['之一', '之二', '之三']) kb.learnFromOutcome(kbFailedOutcome(`w7 搁置订单陷阱 ${flavor}`));
+  // 免疫幕簇原料：三次经历措辞相异而同主题。ΠΑΝ-46 抗原门语义下的取材纪律：
+  //   · 指纹全同（learnTopicKey 相等）⇒ 复证强化只升滴度，不开新条目；
+  //   · 语义营救门（cosine ≥ ANTIGEN_SEMANTIC_COSINE=0.8，如仅换「之一/之二」
+  //     尾词的近同文）⇒ 同样并入既有抗体 —— 一条滴度渐高的 error-pattern；
+  //   · 真正能积成 ≥3 独立情景（MIN_CLUSTER_SIZE）的是**中带异文**：抗原门
+  //     （<0.8）之下、聚类引力（CLUSTER_SIMILARITY=0.45）之上 —— 三条各铸
+  //     各的 error-pattern，睡眠时聚成一簇蒸馏（实测成对 cosine ≈0.65）。
+  for (const flavor of ['w7 搁置订单陷阱', 'w7 拦截订单陷阱', 'w7 挂起订单陷阱']) {
+    kb.learnFromOutcome(kbFailedOutcome(flavor));
+  }
   const ownRegistry = new KernelRegistry();
   const ownLedger = new EvidenceLedger();
   const ownEvolution = new EvolutionEngine({ seed: 7 });

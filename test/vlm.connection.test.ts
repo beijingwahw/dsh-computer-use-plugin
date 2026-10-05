@@ -460,7 +460,7 @@ test('Λ-1k: adoptLocalVision —— ollama 首候选命中即返：视觉词挑
   const { fetchImpl, calls } = fakeFetch({
     [OLLAMA_URL]: { body: { data: [{ id: 'llama3.1:8b' }, { id: 'llava:13b' }, { id: 'nomic-embed-text' }] } },
   });
-  const r = await adoptLocalVision({ fetchImpl });
+  const r = await adoptLocalVision({ fetchImpl, ownershipProbe: () => 'same-user' });
   assert.notEqual(r, null);
   assert.equal(r!.platform, 'ollama');
   assert.equal(r!.baseUrl, 'http://127.0.0.1:11434/v1');
@@ -483,7 +483,7 @@ test('Λ-1l: adoptLocalVision —— 首候选 404 让位、lmstudio 次中接�
     [OLLAMA_URL]: { status: 404, body: { error: 'not found' } },
     [LMSTUDIO_URL]: { body: { data: [{ id: 'qwen2-vl-7b-instruct' }, { id: 'phi-3-mini' }] } },
   });
-  const r = await adoptLocalVision({ fetchImpl });
+  const r = await adoptLocalVision({ fetchImpl, ownershipProbe: () => 'same-user' });
   assert.notEqual(r, null);
   assert.equal(r!.platform, 'lmstudio');
   assert.equal(r!.model, 'qwen2-vl-7b-instruct');
@@ -514,7 +514,7 @@ test('Λ-1n: adoptLocalVision —— 挂起候选超时止损让位、次候选�
     [LMSTUDIO_URL]: { body: { data: [{ id: 'moondream2' }] } },
   });
   const startedAt = Date.now();
-  const r = await adoptLocalVision({ fetchImpl, timeoutMs: 120 });
+  const r = await adoptLocalVision({ fetchImpl, timeoutMs: 120, ownershipProbe: () => 'same-user' });
   assert.notEqual(r, null, '首候选超时后次候选接管');
   assert.equal(r!.platform, 'lmstudio');
   assert.equal(r!.model, 'moondream2');
@@ -540,6 +540,7 @@ test('Λ-1o: adoptLocalVision —— 空模型表 ⇒ 全探后 null；candidate
   const r = await adoptLocalVision({
     fetchImpl: custom.fetchImpl,
     candidates: [{ platform: 'custom-local', baseUrl: 'http://127.0.0.1:9999/v1/' }],
+    ownershipProbe: () => 'same-user', // ΠΑΝ-20：归属取证假件（封闭式）
   });
   assert.notEqual(r, null);
   assert.equal(r!.platform, 'custom-local');

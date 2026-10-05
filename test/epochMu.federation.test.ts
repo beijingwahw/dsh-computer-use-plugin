@@ -100,7 +100,7 @@ import {
   PRIVACY_BUDGET_EPSILON_TOTAL,
   RDP_ORDER,
 } from '../src/federation/digest.ts';
-import { APPLY_TS_SCATTER_MS } from '../src/federation/apply.ts';
+import { APPLY_TS_SCATTER_MS, FEDERATION_DIGEST_TTL_MS } from '../src/federation/apply.ts';
 
 // ─── 假件工坊（全注入、零网络、确定性） ───
 
@@ -407,7 +407,11 @@ test('Μ-3: 本地 n=10 × share 0.5 ⇒ 掺入 ≤5；零证据 key 零掺入+�
 
 test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发出、响应摘要被应用；失败 ⇒ 消毒降级；挂载门源码取证', async () => {
   resetFederationRuntime();
+  resetPrivacyBudgetRuntime(); // ΠΑΝ-71：主体#键记账跨测试隔离
+  const savedDpEnv4 = process.env.DSH_FED_DP_KEY;
   try {
+    // ΠΑΝ-70：(e) 工具面无 dpKey 注入口 —— 生产缺省读 DSH_FED_DP_KEY
+    process.env.DSH_FED_DP_KEY = 'k-fed-m4';
     // (a) endpoint='' ⇒ 零网络（spy 必须零调用 —— 连 fetch 引用都不取）
     let calls = 0;
     const spy = (() => {
@@ -416,7 +420,7 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
     }) as unknown as FederationFetch;
     const local = new EvidenceLedger();
     for (let i = 0; i < 5; i++) local.record({ key: 'fed.net', success: true, margin: 0.2, ts: i });
-    const res0 = federationSync({ endpoint: '', fetchImpl: spy, ledger: local, now: () => 42 });
+    const res0 = federationSync({ endpoint: '', fetchImpl: spy, ledger: local, dpKey: 'k-fed-m4', now: () => 42 }); // ΠΑΝ-70：注入 DP 种子密钥
     assert.equal(calls, 0, 'endpoint 空 ⇒ fetch 零调用');
     assert.equal(res0.network, 'off', 'network=off');
     assert.equal(res0.ok, true, '本地摘要铸造成功');
@@ -435,7 +439,7 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
       captured.value = { url, method: init.method, headers: init.headers, body: init.body };
       return { json: async () => ({ digest: resp }) };
     }) as unknown as FederationFetch;
-    const res1 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: target, maxRemoteShare: 0.5, now: () => 42 });
+    const res1 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: target, maxRemoteShare: 0.5, dpKey: 'k-fed-m4', now: () => 42 }); // ΠΑΝ-70
     assert.equal(res1.network, 'fired', 'network=fired');
     await res1.settled;
     assert.ok(captured.value, 'POST 已发出');
@@ -450,7 +454,7 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
 
     // (c) 响应垃圾 JSON ⇒ 只上传不掺入，不炸
     const fakeGarbage = (async () => ({ json: async () => ({ hello: 1 }) })) as unknown as FederationFetch;
-    const res2 = federationSync({ endpoint: EP, fetchImpl: fakeGarbage, ledger: new EvidenceLedger(), now: () => 43 });
+    const res2 = federationSync({ endpoint: EP, fetchImpl: fakeGarbage, ledger: new EvidenceLedger(), dpKey: 'k-fed-m4', now: () => 43 }); // ΠΑΝ-70
     await res2.settled;
     assert.equal(res2.ok, true, '本地铸造不受响应影响');
     assert.equal(res2.applied, null, '无可用合并摘要 ⇒ 未掺入');
@@ -460,7 +464,7 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
     for (let i = 0; i < 10; i++) t3.record({ key: 'fed.net', success: true, margin: 0.3, ts: i });
     const boom = new Error(`connect failed at ${EP} upstream\nsecond line should vanish`);
     const fakeFail = (() => Promise.reject(boom)) as unknown as FederationFetch;
-    const res3 = federationSync({ endpoint: EP, fetchImpl: fakeFail, ledger: t3, now: () => 44 });
+    const res3 = federationSync({ endpoint: EP, fetchImpl: fakeFail, ledger: t3, dpKey: 'k-fed-m4', now: () => 44 }); // ΠΑΝ-70
     await res3.settled; // settled 永不 reject
     assert.equal(res3.ok, true, '网络失败不减损本地荣誉（摘要已铸）');
     assert.equal(res3.network, 'failed', 'network=failed');
@@ -495,6 +499,8 @@ test('Μ-4: endpoint 空 ⇒ fetch 零调用；endpoint+假 fetch ⇒ POST 发�
     assert.ok(cpIdx >= 0 && cpIdx < dashIdx, '既有 checkpoint → dashboard 顺序未动');
     assert.ok(dashIdx >= 0 && dashIdx < fedIdx, '联邦块在既有 dashboard 块之后另起');
   } finally {
+    if (savedDpEnv4 === undefined) delete process.env.DSH_FED_DP_KEY;
+    else process.env.DSH_FED_DP_KEY = savedDpEnv4;
     resetFederationRuntime();
     resetKernelRuntime();
   }
@@ -565,8 +571,13 @@ function federationReportHas(sourceId: string): boolean {
 test('Μ-6: 工具 sync 缺省 robust（中位数聚合+检疫票折端点信任）；显式 robust:false 回退 Μ 旧行为', async () => {
   resetFederationRuntime();
   resetKernelRuntime();
+  resetPrivacyBudgetRuntime(); // ΠΑΝ-71：主体#键记账跨测试隔离
   const savedFetch = globalThis.fetch;
+  const savedDpEnv = process.env.DSH_FED_DP_KEY;
   try {
+    // ΠΑΝ-70：工具面无 dpKey 注入口 —— 生产缺省读 DSH_FED_DP_KEY（隐私面
+    // fail-closed：密钥缺席 ⇒ 拒绝铸造零网络，绝不以公开可推种子出境）
+    process.env.DSH_FED_DP_KEY = 'k-fed-m6-tool';
     const EP = 'https://agg.example/fed';
     const K = 'fed.tool';
     // 全局账本播种 10 条（工具面用生产单例 evidenceLedger 铸摘要 + 掺入；闸① 需本地有证据）
@@ -574,8 +585,10 @@ test('Μ-6: 工具 sync 缺省 robust（中位数聚合+检疫票折端点信任
       evidenceLedger.record({ key: K, success: i % 2 === 0, margin: 0.1 * i - 0.5, ts: i });
     }
     // 假 fetch（替换全局 fetch —— vlm.integration 同法）：回毒源+诚实源+诚实源
-    const poison = { v: 1 as const, mintedAt: 10, epsilon: 1, keys: [{ key: K, n: 1000, bins: bigBins(1000) }] };
-    const honest = (): typeof poison => ({ v: 1, mintedAt: 20, epsilon: 1, keys: [{ key: K, n: 50, bins: bigBins(50) }] });
+    //（ΠΑΝ-74：远端摘要 mintedAt 用真实时钟邻近的鲜活值 —— TTL 新鲜度闸执法中）
+    const NOW = Date.now();
+    const poison = { v: 1 as const, mintedAt: NOW, epsilon: 1, keys: [{ key: K, n: 1000, bins: bigBins(1000) }] };
+    const honest = (): typeof poison => ({ v: 1, mintedAt: NOW + 10, epsilon: 1, keys: [{ key: K, n: 50, bins: bigBins(50) }] });
     const captured: { body: string } = { body: '' };
     globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
       captured.body = init.body;
@@ -602,7 +615,7 @@ test('Μ-6: 工具 sync 缺省 robust（中位数聚合+检疫票折端点信任
     const EP2 = 'https://legacy.example/fed';
     const K2 = 'fed.tool.legacy';
     for (let i = 0; i < 10; i++) evidenceLedger.record({ key: K2, success: true, margin: 0.2, ts: i });
-    const legacyDigest = { v: 1 as const, mintedAt: 5, epsilon: 1, keys: [{ key: K2, n: 500, bins: bigBins(50) }] };
+    const legacyDigest = { v: 1 as const, mintedAt: NOW + 20, epsilon: 1, keys: [{ key: K2, n: 500, bins: bigBins(50) }] }; // ΠΑΝ-74：鲜活 mintedAt
     globalThis.fetch = (async () => ({ json: async () => ({ digest: legacyDigest }) })) as unknown as typeof fetch;
     const tool2 = createFederationSyncTool(fedConfig({ kernelEvolutionEnabled: true, federationEndpoint: EP2 }));
     const out2 = await runTool(tool2, { action: 'sync', robust: false });
@@ -616,6 +629,8 @@ test('Μ-6: 工具 sync 缺省 robust（中位数聚合+检疫票折端点信任
     assert.match(src, /maxRemoteShare: config\.federationMaxRemoteShare,\s*robust,/, 'federationSync 调用实传 robust');
   } finally {
     globalThis.fetch = savedFetch;
+    if (savedDpEnv === undefined) delete process.env.DSH_FED_DP_KEY;
+    else process.env.DSH_FED_DP_KEY = savedDpEnv;
     resetFederationRuntime();
     resetKernelRuntime();
   }
@@ -691,7 +706,7 @@ test('Μ-8: env 缺省零签名头；DSH_FEDERATION_TOKEN 在场自动附双头�
 
     // (a) env 缺省 ⇒ 零签名头（open 客户端不惊扰 open 服务端 —— 零配置语义）
     delete process.env[FEDERATION_AUTH_ENV];
-    const r0 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), now: () => 1 });
+    const r0 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), dpKey: 'k-fed-m8', now: () => 1 }); // ΠΑΝ-70
     await r0.settled;
     assert.equal(capturedHeaders![FEDERATION_AUTH_TIMESTAMP_HEADER], undefined, 'env 缺省 ⇒ 无时间戳头');
     assert.equal(capturedHeaders![FEDERATION_AUTH_SIGNATURE_HEADER], undefined, 'env 缺省 ⇒ 无签名头');
@@ -699,7 +714,7 @@ test('Μ-8: env 缺省零签名头；DSH_FEDERATION_TOKEN 在场自动附双头�
 
     // (b) env 设置 ⇒ 自动读 env 附双头（与权威实现 federationAuthHeaders 逐字段一致）
     process.env[FEDERATION_AUTH_ENV] = 'env-secret';
-    const r1 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), now: () => 2 });
+    const r1 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), dpKey: 'k-fed-m8', now: () => 2 }); // ΠΑΝ-70
     await r1.settled;
     assert.deepEqual(
       capturedHeaders,
@@ -708,7 +723,7 @@ test('Μ-8: env 缺省零签名头；DSH_FEDERATION_TOKEN 在场自动附双头�
     );
 
     // (c) authToken 显式注入 ⇒ 优先于 env
-    const r2 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), authToken: 'injected-secret', now: () => 3 });
+    const r2 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), authToken: 'injected-secret', dpKey: 'k-fed-m8', now: () => 3 }); // ΠΑΝ-70
     await r2.settled;
     assert.equal(capturedHeaders![FEDERATION_AUTH_TIMESTAMP_HEADER], '3', '注入面：ts = 3');
     assert.equal(
@@ -718,7 +733,7 @@ test('Μ-8: env 缺省零签名头；DSH_FEDERATION_TOKEN 在场自动附双头�
     );
 
     // (d) authToken:null ⇒ 显式禁用（env 在场也不签 —— 测试/诊断缝）
-    const r3 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), authToken: null, now: () => 4 });
+    const r3 = federationSync({ endpoint: EP, fetchImpl: fake, ledger: new EvidenceLedger(), authToken: null, dpKey: 'k-fed-m8', now: () => 4 }); // ΠΑΝ-70
     await r3.settled;
     assert.equal(capturedHeaders![FEDERATION_AUTH_SIGNATURE_HEADER], undefined, 'null ⇒ 显式不签');
     assert.equal(capturedHeaders!['content-type'], 'application/json', 'JSON 头仍常');
@@ -891,13 +906,14 @@ test('Μ-10: 掺入逐条打 origin:federation 可与本地分离；本地缺省
     assert.equal(des[3].origin, 'local', '显式 local 照常入账并保持');
     assert.equal(defensive.stats(K).n, 4, 'stats 不因垃圾 origin 炸');
 
-    // (f) 摘要铸造对混合账本照常（digest 只读 success/margin —— origin 零区分）
+    // (f) 摘要铸造对混合账本：ΠΑΝ-73 回声环闭合 —— 联邦掺入记录不进摘要
+    //（digest 只消费本地真实观察：掺入的远端证据不再被重新铸成摘要重新上传）
     const d = mintEvidenceDigest(ledger, { seed: 7, epsilon: 1, now: () => 9 })!;
     const entry = d.keys.find(k => k.key === K)!;
     assert.ok(entry, '混合账本摘要照常铸造（新字段不炸 dump/序列化面）');
     assert.ok(
-      Number.isInteger(entry.n) && entry.n >= 0 && Math.abs(entry.n - 15) <= 12,
-      `n 计两类且加噪（ΝΩ-20 (c)：真值 15 的 DP 估计，实测 ${entry.n} —— 未来若要按来源加权，账已就绪）`,
+      Number.isInteger(entry.n) && entry.n >= 0 && Math.abs(entry.n - 10) <= 12,
+      `n 只计本地 10 条并加噪（ΠΑΝ-73：联邦 5 条被过滤，实测 ${entry.n} —— 回声环在铸造侧切断）`,
     );
   } finally {
     resetFederationRuntime();
@@ -935,21 +951,23 @@ test('ΝΩ-20a: rdpEpsilon 公式律；预算耗尽拒绝（不抛、如实申�
     assert.equal(subsampleAmplifiedEpsilon(1, 0), 0, 'γ=0 ⇒ 0（机制看不见任何个体）');
     assert.equal(subsampleAmplifiedEpsilon(Number.NaN, 0.5), 0, 'ε NaN ⇒ 0');
 
-    // (c) 预算耗尽拒绝：同窗口 ε=1 × 10 次放行；第 11 次拒绝（null，不抛）且如实申报
+    // (c) 预算耗尽拒绝：同主体同键 ε=1 × 10 次放行；第 11 次拒绝（null，不抛）且如实申报
+    //     （ΠΑΝ-71：账户键 = 主体#键 —— 缺省主体 'local'）
     const ledger = new EvidenceLedger();
     for (let i = 0; i < 20; i++) ledger.record({ key: 'fed.budget', success: i % 3 !== 0, margin: -0.9 + (i % 8) * 0.25, ts: i });
     for (let k = 1; k <= PRIVACY_BUDGET_EPSILON_TOTAL; k++) {
       const d = mintEvidenceDigest(ledger, { seed: k, now: () => 1000 + k });
       assert.ok(d !== null, `第 ${k}/${PRIVACY_BUDGET_EPSILON_TOTAL} 次 release 在预算内`);
     }
-    assert.equal(privacyBudgetReport().length, 1, '同窗口内容 ⇒ 同指纹 ⇒ 单账户');
+    assert.equal(privacyBudgetReport().length, 1, '同主体同键 ⇒ 同账户（s:local|k:fed.budget）');
     let acc = privacyBudgetReport()[0]!;
+    assert.equal(acc.fingerprint, 's:local|k:fed.budget', 'ΠΑΝ-71：账户键 = 主体 # 键（不再是窗口指纹）');
     assert.equal(acc.releases.length, PRIVACY_BUDGET_EPSILON_TOTAL, '10 行账（每次 release 记 (ts, ε)）');
     assert.ok(acc.releases.every((r, idx) => r.ts === 1001 + idx && r.epsilon === 1), '账目行带铸造时刻 ts 与 ε');
     assert.ok(Math.abs(acc.totalEpsilon - 10) < 1e-9, 'Σε = 10（朴素组合执法口径 —— 纯 DP 不引入 δ）');
     assert.ok(acc.totalRdpEpsilon < 10, `RDP 审计口径更省（Σ D_α = ${acc.totalRdpEpsilon.toFixed(3)} < Σε —— 前沿 Rényi 组合）`);
     assert.equal(acc.exhausted, true, '预算已耗尽');
-    assert.equal(privacyBudgetOf('w00000000'), null, '未知指纹 ⇒ null（诚实面不臆造）');
+    assert.equal(privacyBudgetOf('s:local|k:absent'), null, '未知账户 ⇒ null（诚实面不臆造）');
     assert.equal(mintEvidenceDigest(ledger, { seed: 99, now: () => 2000 }), null, '第 11 次 ⇒ 拒绝返回 null（绝不抛）');
     acc = privacyBudgetReport()[0]!;
     assert.equal(acc.releases.length, 10, '拒绝不记账（账面不因拒绝增长）');
@@ -957,10 +975,21 @@ test('ΝΩ-20a: rdpEpsilon 公式律；预算耗尽拒绝（不抛、如实申�
     assert.equal(acc.lastRejection!.totalEpsilon, 10, '拒绝时刻的累计如实在案');
     assert.equal(acc.lastRejection!.epsilon, 1, '被拒的本次 ε 如实在案');
 
-    // (d) 换窗口（内容变）⇒ 新指纹新预算 —— 滑窗生命期的预算换账
+    // (d) ΠΑΝ-71 执法：滑窗内容变化**不再换账** —— 相邻窗口共享 19/20 条记录的
+    //     重叠释放按朴素序列组合累计（旧律「窗口指纹换账」把 Σε≤10 记成了每窗
+    //     各 10 的无界窟窿）。窗口滑动 ⇒ 同账户 ⇒ 耗尽后 mint 仍拒绝。
     ledger.record({ key: 'fed.budget', success: true, margin: 0.5, ts: 99 });
-    assert.ok(mintEvidenceDigest(ledger, { seed: 7, now: () => 3000 }) !== null, '窗口内容滑动 ⇒ 新指纹 ⇒ mint 恢复');
-    assert.equal(privacyBudgetReport().length, 2, '新窗口开新账户');
+    assert.equal(mintEvidenceDigest(ledger, { seed: 7, now: () => 3000 }), null, '窗口内容滑动 ⇒ 同主体同键 ⇒ mint 仍拒绝（滑窗损失组合）');
+    assert.equal(privacyBudgetReport().length, 1, '滑窗不开新账户（回声侧的预算洗白通道关闭）');
+    // 换**键**才开新账（键族间并行组合 —— 不同 key 是 disjoint 个体）
+    const ledgerB = new EvidenceLedger();
+    for (let i = 0; i < 20; i++) ledgerB.record({ key: 'fed.budget2', success: true, margin: 0.2, ts: i });
+    assert.ok(mintEvidenceDigest(ledgerB, { seed: 8, now: () => 3100 }) !== null, '新键族 ⇒ 新账户 ⇒ mint 恢复（并行组合不叠加）');
+    assert.equal(privacyBudgetReport().length, 2, '新键新账');
+    // 换**主体**也开新账（subject 段隔离 —— federationSync 喂 endpoint）
+    const ledgerC = new EvidenceLedger();
+    for (let i = 0; i < 20; i++) ledgerC.record({ key: 'fed.budget', success: true, margin: 0.2, ts: i });
+    assert.ok(mintEvidenceDigest(ledgerC, { seed: 9, subject: 'https://other.example/fed', now: () => 3200 }) !== null, '新主体 ⇒ 新账户（主体段隔离）');
 
     // (e) 旧行为对照：首次 release 不受预算影响（预算未超 ⇒ 行为不变的零回归实证）
     resetPrivacyBudgetRuntime();
@@ -976,13 +1005,13 @@ test('ΝΩ-20a: rdpEpsilon 公式律；预算耗尽拒绝（不抛、如实申�
     assert.equal(privacyBudgetReport()[0]!.exhausted, false, '远未耗尽');
     assert.equal(privacyBudgetReport()[0]!.lastRejection, undefined, '从未被拒 ⇒ 拒绝面缺席');
 
-    // (f) n 加噪：整数非负、有界、跨窗口无偏近真值、跨 seed 生效（每 seed 独立窗口
-    //     —— 预算账本按内容指纹换账，噪声普查不吃同一窗的预算）
+    // (f) n 加噪：整数非负、有界、跨主体无偏近真值、跨 seed 生效（ΠΑΝ-71：每 seed
+    //     独立主体 —— 噪声普查不吃同一主体#键的预算）
     const ns: number[] = [];
     for (let s = 1; s <= 60; s++) {
       const l = new EvidenceLedger();
       for (let i = 0; i < 40; i++) l.record({ key: 'fed.noisyN', success: true, margin: 0.1 + s * 1e-7, ts: i });
-      ns.push(mintEvidenceDigest(l, { seed: s, now: () => 50_000 })!.keys.find(k => k.key === 'fed.noisyN')!.n);
+      ns.push(mintEvidenceDigest(l, { seed: s, subject: `survey-${s}`, now: () => 50_000 })!.keys.find(k => k.key === 'fed.noisyN')!.n);
     }
     assert.ok(ns.every(v => Number.isInteger(v) && v >= 0), 'n 加噪取整非负');
     assert.ok(ns.every(v => Math.abs(v - 40) <= 12), `逐窗 |n̂−40| ≤ 12 护栏（实测极差 ${Math.min(...ns)}~${Math.max(...ns)}）`);
@@ -996,16 +1025,18 @@ test('ΝΩ-20a: rdpEpsilon 公式律；预算耗尽拒绝（不抛、如实申�
     const sub1 = mintEvidenceDigest(subLed, { seed: 11, sampleGamma: 0.5, now: () => 60 })!;
     const mass1 = sub1.keys[0]!.bins.reduce((s, c) => s + c[0] + c[1], 0);
     assert.ok(mass1 >= 25 && mass1 <= 75, `γ=0.5 ⇒ 入样质量 ≈ 半（Binomial(100,.5)±噪声，实测 ${mass1}）`);
+    const subAcc = privacyBudgetReport().find(a => a.fingerprint === 's:local|k:fed.sub')!;
+    assert.ok(subAcc, '子采样账户在册（主体#键）');
     assert.ok(
-      Math.abs(privacyBudgetReport()[0]!.totalEpsilon - subsampleAmplifiedEpsilon(1, 0.5)) < 1e-12,
+      Math.abs(subAcc.totalEpsilon - subsampleAmplifiedEpsilon(1, 0.5)) < 1e-12,
       `预算记 ε_eff ≈ ${subsampleAmplifiedEpsilon(1, 0.5).toFixed(4)}（< ε=1）`,
     );
     // 对照臂：不采样（缺省）⇒ 记原 ε 且行为与旧实现一致
     const plainLed = new EvidenceLedger();
     for (let i = 0; i < 100; i++) plainLed.record({ key: 'fed.plain', success: true, margin: 0.3, ts: i });
     assert.ok(mintEvidenceDigest(plainLed, { seed: 3, now: () => 61 }) !== null, '缺省不采样照常铸造');
-    const plainAcc = privacyBudgetReport().find(a => a.totalEpsilon === 1)!;
-    assert.ok(plainAcc && plainAcc.releases.length === 1, '不采样 ⇒ 记原 ε=1（不白拿放大红利）');
+    const plainAcc = privacyBudgetReport().find(a => a.fingerprint === 's:local|k:fed.plain')!;
+    assert.ok(plainAcc && plainAcc.releases.length === 1 && plainAcc.totalEpsilon === 1, '不采样 ⇒ 记原 ε=1（不白拿放大红利）');
 
     // (h) 空窗零记账：输出与任何个体无关（纯噪声）⇒ 0-DP 成本
     resetPrivacyBudgetRuntime();
@@ -1020,7 +1051,7 @@ test('ΝΩ-20a: rdpEpsilon 公式律；预算耗尽拒绝（不抛、如实申�
 
 // ─── ΝΩ-20b：掺入统计修正（坨内抖动 + ts 散布 + 确定性） ───
 
-test('ΝΩ-20b: 掺入 margin 坨宽内均匀抖动（不恒等/近全宽/四分位近均匀）；ts 按 mintedAt 邻域散布；种子确定性；mintedAt 非法降级', () => {
+test('ΝΩ-20b: 掺入 margin 坨宽内均匀抖动（不恒等/近全宽/四分位近均匀）；ts 按 mintedAt 邻域散布；种子确定性；ΠΑΝ-74 过期/无锚拒绝', () => {
   // 大配额单坨：本地 n=200 × share 1 × trust 1 ⇒ quota=200 全落 bin3 success 列
   const K = 'fed.jitter';
   const seedLocal = (): EvidenceLedger => {
@@ -1069,18 +1100,28 @@ test('ΝΩ-20b: 掺入 margin 坨宽内均匀抖动（不恒等/近全宽/四分
   applyFederatedEvidence(twin, merged, { maxRemoteShare: 1, trust: 1, now: () => 1_000_000 });
   assert.deepStrictEqual(twin.entries(K).slice(-200), tail, '孪生账本重放逐字段一致（时钟不同 ⇒ 抖动相同）');
 
-  // (g) mintedAt 非法 ⇒ ts 邻域回落注入时钟（旧律 ts=now 只作降级臂）
+  // (g) ΠΑΝ-74：mintedAt 非法 ⇒ 拒绝掺入（新鲜度不可判 = 没有掺入资格，fail-closed
+  //     —— 旧律「ts 回落注入时钟」的降级臂废除：无时间锚的摘要不可保鲜度审计）
   const led3 = new EvidenceLedger();
   for (let i = 0; i < 10; i++) led3.record({ key: K, success: true, margin: 0.2, ts: i });
   const badMinted = { v: 1 as const, mintedAt: Number.NaN, epsilon: 1, keys: [{ key: K, n: 20, bins: bins3 }] };
   const rep3 = applyFederatedEvidence(led3, badMinted, { maxRemoteShare: 0.5, trust: 1, now: () => 555_555 });
-  assert.equal(rep3.applied, 5, '降级臂配额照常（quota = floor(0.5×10) = 5）');
-  const tail3 = led3.entries(K).slice(-5);
-  assert.ok(
-    tail3.every(e => e.ts >= 555_555 - APPLY_TS_SCATTER_MS && e.ts <= 555_555 + APPLY_TS_SCATTER_MS),
-    'mintedAt 非法 ⇒ ts 回落注入时钟邻域',
-  );
-  assert.ok(tail3.every(e => e.origin === 'federation'), '降级臂 provenance 标不丢');
+  assert.equal(rep3.ok, false, 'mintedAt 非法 ⇒ 整份拒绝（fail-closed）');
+  assert.equal(rep3.applied, 0, '零掺入');
+  assert.ok(rep3.notes.some(n => n.includes('mintedAt')), `拒绝原因在案（${rep3.notes[0]}）`);
+  assert.equal(led3.entries(K).length, 10, '账本零污染');
+  // 过期摘要（合法 mintedAt 但超 TTL）⇒ 同拒（旧签名摘要的重放通道关闭 —— ΠΑΝ-74）
+  const NOWB = 10_000_000; // 基准钟抬到 TTL 量级之上（mintedAt 恒非负）
+  const stale = { v: 1 as const, mintedAt: NOWB - FEDERATION_DIGEST_TTL_MS - 1, epsilon: 1, keys: [{ key: K, n: 20, bins: bins3 }] };
+  const rep4 = applyFederatedEvidence(led3, stale, { maxRemoteShare: 0.5, trust: 1, now: () => NOWB });
+  assert.equal(rep4.ok, false, '摘要过期（> TTL）⇒ 拒绝掺入');
+  assert.ok(rep4.notes.some(n => n.includes('过期')), `过期注记在案（${rep4.notes[0]}）`);
+  // 对照：TTL 内的鲜活摘要照常掺入（quota = floor(0.5×10) = 5）
+  const fresh = { v: 1 as const, mintedAt: NOWB, epsilon: 1, keys: [{ key: K, n: 20, bins: bins3 }] };
+  const rep5 = applyFederatedEvidence(led3, fresh, { maxRemoteShare: 0.5, trust: 1, now: () => NOWB });
+  assert.equal(rep5.applied, 5, '鲜活摘要配额照常（quota = floor(0.5×10) = 5）');
+  const tail5 = led3.entries(K).slice(-5);
+  assert.ok(tail5.every(e => e.origin === 'federation'), 'provenance 标不丢');
 });
 
 // ─── 附：KernelRegistry/EvidenceLedger 增量导出的既有语义零回归（纯增量立法的旁证） ───

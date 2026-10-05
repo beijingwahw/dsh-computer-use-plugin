@@ -346,7 +346,7 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
       captured.body = init.body;
       return { json: async () => ({ digests: [poisonRemote, honestRemote(), honestRemote()] }) };
     }) as unknown as FederationFetch;
-    const res = federationSync({ endpoint: EP, fetchImpl: fake, ledger: target, maxRemoteShare: 0.5, robust: true, now: () => 42 });
+    const res = federationSync({ endpoint: EP, fetchImpl: fake, ledger: target, maxRemoteShare: 0.5, robust: true, dpKey: 'k-fed-m25', now: () => 42 }); // ΠΑΝ-70
     assert.equal(res.network, 'fired', '网络臂已发');
     await res.settled;
     assert.equal(captured.url, EP, 'POST 目标 = endpoint');
@@ -381,7 +381,7 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
     const target2 = seedLedger(K2, 10);
     const legacyDigest = digestOf(K2, uniformBins(50), 500, 5);
     const fakeLegacy = (async () => ({ json: async () => ({ digest: legacyDigest }) })) as unknown as FederationFetch;
-    const res2 = federationSync({ endpoint: EP2, fetchImpl: fakeLegacy, ledger: target2, maxRemoteShare: 0.5, now: () => 43 });
+    const res2 = federationSync({ endpoint: EP2, fetchImpl: fakeLegacy, ledger: target2, maxRemoteShare: 0.5, dpKey: 'k-fed-m25', now: () => 43 }); // ΠΑΝ-70
     await res2.settled;
     assert.equal(res2.applied!.applied, 1, 'legacy：新端点试用期 ⇒ floor(5 × 0.35) = 1（ΑΩ-R6 对两臂同律）');
     assert.equal(target2.stats(K2).n, 11, 'legacy：账本 10 → 11');
@@ -391,7 +391,7 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
     // (c) legacy 臂不聚合 digests 数组（多源响应在旧路径 = 不可用载荷）
     const target3 = seedLedger(K2, 10);
     const fakeMulti = (async () => ({ json: async () => ({ digests: [legacyDigest] }) })) as unknown as FederationFetch;
-    const res3 = federationSync({ endpoint: EP2, fetchImpl: fakeMulti, ledger: target3, now: () => 44 });
+    const res3 = federationSync({ endpoint: EP2, fetchImpl: fakeMulti, ledger: target3, dpKey: 'k-fed-m25', now: () => 44 }); // ΠΑΝ-70
     await res3.settled;
     assert.equal(res3.applied, null, 'legacy 不认多源载荷 ⇒ 未掺入');
     assert.equal(target3.stats(K2).n, 10, '账本零污染');
@@ -399,7 +399,7 @@ test('Μ2-5: robust:true 走鲁棒合并+先检疫后掺入；缺省 false = Μ 
 
     // (d) robust:true 响应无多源 ⇒ 只上传未掺入（不炸）
     const fakeGarbage = (async () => ({ json: async () => ({ hello: 1 }) })) as unknown as FederationFetch;
-    const res4 = federationSync({ endpoint: EP, fetchImpl: fakeGarbage, ledger: seedLedger(K, 10), robust: true, now: () => 45 });
+    const res4 = federationSync({ endpoint: EP, fetchImpl: fakeGarbage, ledger: seedLedger(K, 10), robust: true, dpKey: 'k-fed-m25', now: () => 45 }); // ΠΑΝ-70
     await res4.settled;
     assert.equal(res4.ok, true, '本地铸造不受响应影响');
     assert.equal(res4.applied, null, '无多源 ⇒ 未掺入');
@@ -649,6 +649,7 @@ test('Μ2-7: token 模式强制验签（无签/坏签/过期/篡改体 ⇒ 401 �
         maxRemoteShare: 0.5,
         robust: true,
         authToken: SECRET,
+        dpKey: 'k-fed-m27', // ΠΑΝ-70
       });
       assert.equal(res.network, 'fired', '签名请求已发');
       await res.settled;
@@ -776,7 +777,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
       bodyNoKey = init.body;
       return { json: async () => ({ digests: [honest(20)] }) };
     }) as unknown as FederationFetch;
-    const resNoKey = federationSync({ endpoint: EPB, fetchImpl: fakeNoKey, ledger: seedLedger(K, 10), robust: true, now: () => 50, signingKey: null });
+    const resNoKey = federationSync({ endpoint: EPB, fetchImpl: fakeNoKey, ledger: seedLedger(K, 10), robust: true, now: () => 50, signingKey: null, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     await resNoKey.settled;
     assert.equal(bodyNoKey, JSON.stringify(resNoKey.digest), '无密钥 ⇒ 上行载荷逐字节 = 本地摘要（零回归律）');
     assert.equal(verifyEvidenceDigestSignature(JSON.parse(bodyNoKey)).ok, false, '未签件验签不成立（无身份源）');
@@ -786,7 +787,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
       bodySigned = init.body;
       return { json: async () => ({ digests: [honest(20)] }) }; // 无签远端 ⇒ 全剔除（见 (e) 同律）
     }) as unknown as FederationFetch;
-    const resSigned = federationSync({ endpoint: EPB, fetchImpl: fakeSigned, ledger: seedLedger(K, 10), robust: true, now: () => 51, signingKey: self.material });
+    const resSigned = federationSync({ endpoint: EPB, fetchImpl: fakeSigned, ledger: seedLedger(K, 10), robust: true, now: () => 51, signingKey: self.material, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     await resSigned.settled;
     const uplink = JSON.parse(bodySigned) as { pubkey?: string; sig?: string };
     assert.equal(uplink.pubkey, self.publicKeyB64, '上行附公钥');
@@ -810,7 +811,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
       }),
     })) as unknown as FederationFetch;
     const targetC = seedLedger(K, 10);
-    const resC = federationSync({ endpoint: EPC, fetchImpl: fakeMix, ledger: targetC, robust: true, now: () => 52, signingKey: self.material, maxRemoteShare: 0.5 });
+    const resC = federationSync({ endpoint: EPC, fetchImpl: fakeMix, ledger: targetC, robust: true, now: () => 52, signingKey: self.material, maxRemoteShare: 0.5, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     await resC.settled;
     assert.equal(resC.robust!.unverifiableSources, 5, '5 份无签假源剔除并计数');
     assert.equal(resC.robust!.mergedFrom, 3, '本地 + 2 签名源 = 3 源');
@@ -834,7 +835,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
     assert.equal(acctP, `${EPD}#${peerP.fingerprint}`, '账键 = endpoint#指纹');
     const round = (resp: unknown[], nowT: number, ledger: EvidenceLedger) => {
       const fake = (async () => ({ json: async () => ({ digests: resp }) })) as unknown as FederationFetch;
-      return federationSync({ endpoint: EPD, fetchImpl: fake, ledger, robust: true, now: () => nowT, signingKey: self.material, maxRemoteShare: 0.5 });
+      return federationSync({ endpoint: EPD, fetchImpl: fake, ledger, robust: true, now: () => nowT, signingKey: self.material, maxRemoteShare: 0.5, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     };
     const ledgerD = seedLedger(K, 10);
     await round([peerP.sign(poison(21)), peerH.sign(honest(22))], 70, ledgerD).settled; // 轮 1：毒+诚实
@@ -846,9 +847,11 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
     assert.equal(recP.cleanMerges, 0, '带票轮不计干净（R6 同律）');
     assert.equal(recH.regressed, 0, '诚实指纹零票');
     assert.equal(recH.cleanMerges, 1, '诚实指纹干净轮 +1（毕业通道平移到指纹主体）');
-    const recEP = federationTrustReport().find(r => r.sourceId === EPD)!;
-    assert.equal(recEP.regressed, 0, '端点账不吃指纹票（ΑΩ-R6 平移到正确主体粒度）');
-    assert.ok(Math.abs(federationTrustOf(EPD) - 0.35) < 1e-12, '端点账停在掺入侧试用期（未被毒源连坐）');
+    // ΠΑΝ-72（检疫账对齐）：签名路径的掺入只记指纹账 —— 裸 endpoint 账不再被
+    // 签名轮的 applied 记账（端点不为指纹源的合并背书），配额闸查指纹账的最弱链。
+    const recEP = federationTrustReport().find(r => r.sourceId === EPD);
+    assert.equal(recEP, undefined, '端点裸账不再被签名路径开立（票与配额都在 endpoint#指纹账）');
+    assert.ok(Math.abs(federationTrustOf(EPD) - 0.35) < 1e-12, '端点信任仍按初见试用期口径（未立账 ⇒ 初见封顶，未被毒源连坐）');
     await round([peerH.sign(honest(23)), self.sign(honest(24))], 71, ledgerD).settled; // 轮 2：3 源（本地+2 签名）
     await round([peerH.sign(honest(25)), self.sign(honest(26))], 72, ledgerD).settled; // 轮 3
     assert.equal(federationTrustOf(acctH), 1, '诚实指纹 3 干净轮 ⇒ 毕业（trust=1，ΑΩ-R6 毕业永久）');
@@ -858,7 +861,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
     const EPE = 'https://agg-e.example/fed';
     const fakeUnsigned = (async () => ({ json: async () => ({ digests: [honest(31), honest(32)] }) })) as unknown as FederationFetch;
     const targetE = seedLedger(K, 10);
-    const resE = federationSync({ endpoint: EPE, fetchImpl: fakeUnsigned, ledger: targetE, robust: true, now: () => 60, signingKey: self.material });
+    const resE = federationSync({ endpoint: EPE, fetchImpl: fakeUnsigned, ledger: targetE, robust: true, now: () => 60, signingKey: self.material, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     await resE.settled;
     assert.equal(resE.applied, null, '全剔除 ⇒ 不掺入（恶意端点不得经本地回环掺入赚干净轮）');
     assert.equal(targetE.stats(K).n, 10, '账本零污染');
@@ -878,7 +881,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
         ],
       }),
     })) as unknown as FederationFetch;
-    const resF = federationSync({ endpoint: EPF, fetchImpl: fakeBatch, ledger: seedLedger(K, 10), robust: true, now: () => 61, signingKey: self.material });
+    const resF = federationSync({ endpoint: EPF, fetchImpl: fakeBatch, ledger: seedLedger(K, 10), robust: true, now: () => 61, signingKey: self.material, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     await resF.settled;
     assert.equal(resF.robust!.batchedSources, 2, '同毫秒两源整组剔除');
     assert.equal(resF.robust!.unverifiableSources, 0, '验签全过（剔除发生在护栏层）');
@@ -892,7 +895,7 @@ test('Μ2-9: 假源验签剔除（中位数不被污染）；指纹试用期独�
     const fakeFlood = (async () => ({
       json: async () => ({ digests: flood.map((p, i) => p.sign(honest(100 + i))) }), // mintedAt 互异（避开批量护栏）
     })) as unknown as FederationFetch;
-    const resG = federationSync({ endpoint: EPG, fetchImpl: fakeFlood, ledger: seedLedger(K, 10), robust: true, now: () => 62, signingKey: self.material });
+    const resG = federationSync({ endpoint: EPG, fetchImpl: fakeFlood, ledger: seedLedger(K, 10), robust: true, now: () => 62, signingKey: self.material, dpKey: 'k-fed-m29' }); // ΠΑΝ-70
     await resG.settled;
     assert.equal(resG.robust!.unverifiableSources, 0, '验签全过');
     assert.equal(resG.robust!.excessiveSources, 2, '8 源 > 6 ⇒ 超额 2 拒绝');
@@ -958,6 +961,7 @@ test('Μ2-10: 带签摘要原样入环回传（pubkey/sig 不被剥）；回传�
         robust: true,
         signingKey: client.material,
         maxRemoteShare: 0.5,
+        dpKey: 'k-fed-m210', // ΠΑΝ-70
       });
       assert.equal(res.network, 'fired', '带签请求已发');
       await res.settled;

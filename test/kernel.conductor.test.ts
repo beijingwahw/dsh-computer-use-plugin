@@ -218,9 +218,11 @@ test('Ξ-C⑦: 接线三处在场 —— 入册后存档复载+编排器铸造 /
   const tickIdx = entrySrc.indexOf('conductor.maybeTick()');
   assert.ok(hookIdx >= 0 && tickIdx > hookIdx, '节流 tick 位于 session/event 钩子注册之后（闭包持有）');
 
-  // (3) 卸载段：checkpoint 保存后、先于一切 reset 的存档落盘（try/catch 吞异常）
-  //     —— 卸载锚用完整 try 语句（钩子里的同款 save 调用须排除在 indexOf 之外）
-  const unloadSave = 'try { kernelStore?.save(kernelRegistry, evidenceLedger); } catch';
+  // (3) 卸载段：checkpoint 保存后、先于一切 reset 的存档落盘（异常吞）
+  //     —— 卸载锚用完整语句（钩子里的同款 save 调用须排除在 indexOf 之外）。
+  //     ΠΑΝ-28b 注记：卸载链重构为 runUnloadAction 登记制（异常吞由登记簿统一
+  //     提供），锚跟随新结构 —— 执法语义（checkpoint 后、reset 前落盘）不变。
+  const unloadSave = "runUnloadAction('kernelStore.save', () => { kernelStore?.save(kernelRegistry, evidenceLedger); });";
   assert.ok(entrySrc.includes(unloadSave), '接线③：卸载段存档落盘（异常吞）');
   const cpIdx = entrySrc.indexOf('saveCheckpoint(config.checkpointPath)');
   const unloadSaveIdx = entrySrc.indexOf(unloadSave);

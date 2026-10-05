@@ -567,8 +567,10 @@ test('Ε-5: 永不抛 —— 假 worldModel 全抛 ⇒ 环照常完成、账本�
   assert.equal(boomEngine.records()[0].outcome, 'no-model', '账本零污染');
 
   // 环面 B：端口自身全抛（mint/settle 都 throw）⇒ PilotResult 与关闭面逐字段全等
+  // ΠΑΝ-54：ProphecyPort.mint 自此返回预言号（number | null）—— 桩的 throw 路径
+  // 返回面改写为 null 形态（抛出先于 return，运行时行为不变）。
   const brokenPort: ProphecyPort = {
-    mint: (): void => { throw new Error('mint boom'); },
+    mint: (): null => { throw new Error('mint boom'); },
     settle: (): ProphecyRecord | null => { throw new Error('settle boom'); },
   };
   const withBrokenPort = await runLoop(brokenPort);

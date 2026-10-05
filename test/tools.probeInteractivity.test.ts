@@ -101,12 +101,13 @@ function hoverAdapter(cursorKind: string) {
 
 test('probe_interactivity: 坐标越界 —— 诚实错误（x=1.5）', async () => {
   const out = await exec(probeTool)({ x: 1.5, y: 0.5 });
-  assert.equal(out, '[Error]: Coordinates must be in 0.0-1.0 (normalized).');
+  // ΠΑΝ-111（NaN 卫兵）：域检查文案升级 —— 非有限值与域外值同判（F4-4 终验同步期望）
+  assert.equal(out, '[Error]: Coordinates must be finite numbers in 0.0-1.0 (normalized).');
 });
 
 test('probe_interactivity: 坐标越界 —— 负 y 同拒', async () => {
   const out = await exec(probeTool)({ x: 0.5, y: -0.01 });
-  assert.equal(out, '[Error]: Coordinates must be in 0.0-1.0 (normalized).');
+  assert.equal(out, '[Error]: Coordinates must be finite numbers in 0.0-1.0 (normalized).');
 });
 
 test('probe_interactivity: 非数坐标在协议层被拒（ToolArgsError）', async () => {

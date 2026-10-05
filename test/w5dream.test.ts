@@ -722,7 +722,12 @@ test('D10d（ΝΩ-34）: 小预算 + 梦在场 —— 维护四幕先吃预算�
         },
         log: () => {},
       },
-      { sleepTracePath: trace, now: tickClock().now, budgetMs: 60 },
+    // 立法前（梦寄居第①幕）：小预算被梦吃满 ⇒ calibrate/audit 恒 timeout 饿死；
+    // 立法后：维护四幕先吃预算 —— 校准/审计真实演出。ΠΑΝ-113（单幕预算上限）
+    // 为每幕增加耗时记账（幕前后各一次时钟读 —— 真实时钟零成本，+10 假钟每读
+    // 前进 10ms）：本测试预算从 60ms 调至 140ms 容纳记账读数（仍是小预算量级
+    // —— 缺省 2000ms 的 7%；立法意图不变：四幕实跑、梦饿死、晨报幕 timeout）。
+      { sleepTracePath: trace, now: tickClock().now, budgetMs: 140 },
     );
     const byName = Object.fromEntries(r.acts.map(a => [a.name, a]));
     // 立法前（梦寄居第①幕）：60ms 预算被梦吃满 ⇒ calibrate/audit 恒 timeout 饿死；

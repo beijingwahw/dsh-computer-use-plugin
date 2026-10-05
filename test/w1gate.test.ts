@@ -268,9 +268,12 @@ test('W1-3-0: classifyExpectedVisualEffect —— 种类×风险档×参数有�
   assert.equal(classifyExpectedVisualEffect(world({ kind: 'hotkey', payload: { keys: ['  '] } })), 'no-impact');
   assert.equal(classifyExpectedVisualEffect(world({ kind: 'hotkey' })), 'no-impact');
   // 观察性动作：只看不改世界 ⇒ 无影响
-  for (const kind of ['inspect', 'declare', 'ask_vlm', 'recall_skill'] as const) {
+  for (const kind of ['inspect', 'declare', 'ask_vlm'] as const) {
     assert.equal(classifyExpectedVisualEffect(world({ kind })), 'no-impact', `${kind} 应为无影响`);
   }
+  // ΠΑΝ-56（macro-impact 档）：recall_skill 经宏执行器落地为逐步键鼠 ⇒ 宏冲击
+  // 档 —— 免看门控不可跳过（宏后必须效果探测）、prophecy 开始铸造（ΝΩ-11 旧律废止）
+  assert.equal(classifyExpectedVisualEffect(world({ kind: 'recall_skill' })), 'macro-impact', 'recall_skill 应为宏冲击（ΠΑΝ-56）');
   // wait：等待的语义就是预期变化（值守轮询覆盖）
   assert.equal(classifyExpectedVisualEffect(world({ kind: 'wait' })), 'may-change');
   // escalate / 未知种类 / 垃圾输入：不确定 ⇒ 必看

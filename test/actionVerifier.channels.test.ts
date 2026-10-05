@@ -11,15 +11,15 @@
 //      闭下限恰 0.25 命中、0.2499 不达阈（overlap 照报最优值）、4 位小数舍入、
 //      多区域取最优（max；不相交/退化区域贡献 0）、hint 内部净化（越界夹取后仍可
 //      判 / 非法 hint ⇒ no-hint）、三分支缺席方言（absent/no-hint/no-change-regions）；
-//   ④ 再导出接线：actionVerifier.ts 分发的 judgeRemoteChange 与 channels 模块
-//      同一函数引用（拆分零漂移）；
+//   ④ 公开面接线：actionVerifier.ts 的 judgeRemoteChange 包装与 channels 纯核心
+//      逐案同判（包装注入恰为立法常量 —— ΠΑΝ-127 拆分零漂移）；
 //   ⑤ sanitizeAudioEvent：五类事件透传、confidence 夹取 [0,1]、缺席值缺省
 //      （confidence→0、ts→Date.now()）、未知事件类/非对象 ⇒ null、多余字段不漏。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  judgeRemoteChange,
+  judgeRemoteChange as judgeRemoteChangeCore,
   sanitizeRemoteRegion,
   sanitizeRemoteChange,
   sanitizeAudioEvent,
@@ -31,6 +31,13 @@ import {
   type RemoteChange,
   type RemoteRegion,
 } from '../src/actionVerifier.ts';
+
+// ΠΑΝ-127（D-F5 拆环）：channels 判决核心改收阈值参数（端口注入 —— 桶
+// actionVerifier.ts 的公开二参包装注入立法常量；常量受 w5cross ⑩「立法在源」
+// 源级锁定不可搬家）。测试本地以同一立法常量回填二参方言 —— 下方全部调用
+// 点零改动，纯核心的受测阈值与修法前逐字相同。
+const judgeRemoteChange = (hint: RemoteRegion | null, change: RemoteChange | null) =>
+  judgeRemoteChangeCore(hint, change, REMOTE_EVIDENCE_OVERLAP_MIN);
 
 // ═══ ① sanitizeRemoteRegion ═══
 
@@ -168,11 +175,25 @@ test('W6R-ch③g: 判决内部净化 hint —— 越界 hint 夹取后仍可判�
   assert.deepEqual(r, { verdict: 'corroborated', overlap: 0.5 });
 });
 
-// ═══ ④ 再导出接线（拆分零漂移）═══
+// ═══ ④ 公开面接线（拆分零漂移）═══
 
-test('W6R-ch④: actionVerifier 分发的 judgeRemoteChange 与 channels 模块同一函数引用', () => {
-  assert.equal(judgeViaMain === judgeRemoteChange, true,
-    'W6-2 拆分以再导出保持导入面不变 —— 消费方两个入口必须同源');
+test('W6R-ch④: actionVerifier 公开二参面与 channels 纯核心零漂移（包装注入恰为立法常量）', () => {
+  // ΠΑΝ-127（D-F5 拆环）：主面由「再导出同一引用」改为「桶包装 + 立法常量
+  // 注入」—— 零漂移断言随之升级为语义等价：公开面输出 ≡ 核心(立法阈值)
+  // 输出，含闭下限 0.25 边界与缺席分支（包装不得偷换阈值或语义）。
+  const HINT4: RemoteRegion = { x0: 0, y0: 0, x1: 1, y1: 0.25 };
+  const inputs: Array<[RemoteRegion | null, RemoteChange | null]> = [
+    [HINT4, { screen: '', region: null, regions: [{ x0: 0, y0: 0, x1: 1, y1: 0.0625 }] }], // 恰 0.25 闭下限
+    [HINT4, { screen: '', region: null, regions: [{ x0: 0, y0: 0, x1: 1, y1: 0.125 }] }],  // 0.5 命中
+    [HINT4, { screen: '', region: null, regions: [{ x0: 0, y0: 0, x1: 1, y1: 0.06 }] }],   // 不达阈
+    [HINT4, null],                                                                        // absent
+    [null, { screen: '', region: null, regions: [HINT4] }],                               // no-hint
+  ];
+  for (const [hint, change] of inputs) {
+    assert.deepEqual(judgeViaMain(hint, change), judgeRemoteChangeCore(hint, change, REMOTE_EVIDENCE_OVERLAP_MIN),
+      '公开面与纯核心逐案同判（阈值注入零漂移）');
+  }
+  assert.equal(REMOTE_EVIDENCE_OVERLAP_MIN, 0.25, '包装注入的立法常量读数不变（立法在源）');
 });
 
 // ═══ ⑤ sanitizeAudioEvent（W4-8 声学事件净化面）═══

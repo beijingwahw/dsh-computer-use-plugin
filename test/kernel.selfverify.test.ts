@@ -19,7 +19,7 @@
 //   Ξ-B② 门控关：kernelEvolutionEnabled 缺省 / false ⇒ settle 神谕调用计数 = 0、
 //          无 world.hammingTolerance 记录（性能铁律：零额外等待）
 //   Ξ-B③ 门控开 + 注入假 settleOracle：真值与即时一致 ⇒ success:true、不一致 ⇒
-//          false、margin = dhash 距离 − 内核容差（数值断言）
+//          false、margin = 原始 dhash 距离（ΠΑΝ-52 去内生气口径 —— 数值断言）
 //   Ξ-B④ 主流程零影响：恶意 kernelEvidence / settleOracle 桩抛错 ⇒ 跑环照常出
 //          PilotResult（观察式旁路绝不拖垮主流程）
 //   Ξ-B⑤ 开闸下 instant=false 世界的对账路径也走：truth=true / instant=false ⇒
@@ -256,11 +256,14 @@ test('Ξ-B②: kernelEvolutionEnabled 缺省/false ⇒ settleOracle 调用计数
 
 // ─── Ξ-B③ 门控开 + 假神谕：对账一致/不一致与 margin 数值 ───
 
-test('Ξ-B③: 开闸 + 注入 settleOracle —— 真值与即时一致 ⇒ success:true、不一致 ⇒ false、margin = 距离 − 容差', async () => {
-  // 容差取值取证：world.hammingTolerance 未注册 ⇒ 回声缺省 3（margin = distance − 3）
-  assert.equal(kernelRegistry.get('world.hammingTolerance'), null, '本套不注册内核参数 ⇒ margin 按缺省容差 3 计算');
+test('Ξ-B③: 开闸 + 注入 settleOracle —— 真值与即时一致 ⇒ success:true、不一致 ⇒ false、margin = 原始 dhash 距离（ΠΑΝ-52 去内生）', async () => {
+  // ΠΑΝ-52：margin 自此记录外部可观测的原始距离（不再减当前内核容差）。
+  // 旧口径 margin = distance − 当前容差 是对合映射（校准器学得阈 ≈ q − x、落回
+  // 新值 ⇒ 迭代导数 −1 的结构性振荡）；新口径 margin 分布与参数现值无关 ⇒
+  // 学得阈直接是外部判别分位。world.hammingTolerance 注册与否不影响 margin 域。
+  assert.equal(kernelRegistry.get('world.hammingTolerance'), null, '本套不注册内核参数（margin 域已与容差解耦）');
 
-  // 一致：progress 世界（instant=true）+ 真值 detected=true ⇒ agree ⇒ success:true、margin 10−3=7
+  // 一致：progress 世界（instant=true）+ 真值 detected=true ⇒ agree ⇒ success:true、margin = 10
   const agree = collector();
   await runOnce(
     makeConfig({ kernelEvolutionEnabled: true }),
@@ -273,13 +276,13 @@ test('Ξ-B③: 开闸 + 注入 settleOracle —— 真值与即时一致 ⇒ suc
   const agreeRows = agree.rows.filter(r => r.key === 'world.hammingTolerance');
   assert.equal(agreeRows.length, 1, '单步 ⇒ 恰一条对账记录');
   assert.equal(agreeRows[0].success, true, 'instant(true) === truth(true) ⇒ success:true');
-  assert.equal(agreeRows[0].margin, 7, 'margin = dhash 距离 10 − 内核容差 3 = 7');
+  assert.equal(agreeRows[0].margin, 10, 'margin = 原始 dhash 距离 10（ΠΑΝ-52：外部观测量直录入账）');
   assert.ok(
     agree.rows.some(r => r.key === 'policy.matchConfident' && r.success === true),
     '开闸不关免费证据（两本账并行）',
   );
 
-  // 不一致：error 世界（instant=false）+ 真值 detected=true ⇒ 分歧 ⇒ success:false、margin 6−3=3
+  // 不一致：error 世界（instant=false）+ 真值 detected=true ⇒ 分歧 ⇒ success:false、margin = 6
   const disagree = collector();
   await runOnce(
     makeConfig({ kernelEvolutionEnabled: true }),
@@ -292,7 +295,7 @@ test('Ξ-B③: 开闸 + 注入 settleOracle —— 真值与即时一致 ⇒ suc
   const disagreeRows = disagree.rows.filter(r => r.key === 'world.hammingTolerance');
   assert.equal(disagreeRows.length, 1, '单步 ⇒ 恰一条对账记录');
   assert.equal(disagreeRows[0].success, false, 'instant(false) !== truth(true) ⇒ success:false');
-  assert.equal(disagreeRows[0].margin, 3, 'margin = dhash 距离 6 − 内核容差 3 = 3（有符号距离差，与训练营同口径）');
+  assert.equal(disagreeRows[0].margin, 6, 'margin = 原始 dhash 距离 6（ΠΑΝ-52：与当前容差无关的裕量分布）');
 });
 
 // ─── Ξ-B④ 主流程零影响：恶意桩抛错不炸跑环 ───
@@ -336,7 +339,7 @@ test('Ξ-B⑤: 开闸 error 世界 ⇒ 对账路径照走（truth=true / instant
   const rows = c.rows.filter(r => r.key === 'world.hammingTolerance');
   assert.equal(rows.length, 2, '两步各落一条 failure 账');
   assert.ok(rows.every(r => r.success === false), 'truth=true / instant=false ⇒ 记 failure');
-  assert.ok(rows.every(r => r.margin === 3), 'margin = 6 − 3（数值口径一致）');
+  assert.ok(rows.every(r => r.margin === 6), 'margin = 原始距离 6（ΠΑΝ-52 去内生气口径一致）');
 
   // before 串血脉取证：settleOracle 收到的就是感知快照指纹（lastSnapshotRef 机制复用）
   const expected = await dhashFn(pngA);

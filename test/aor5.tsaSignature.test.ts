@@ -381,12 +381,14 @@ test('ΑΩ-R5 S-9: 端到端伪造（错钥签名 + 正确 imprint+nonce）⇒ �
   assert.equal(notary.lastError, null, '诚实判决不是故障');
 
   const r = notary.verifyNotary();
-  // 保守取舍（工单明示）：signatureVerified=false 体现在注记/报告，不改既有章判据
-  assert.equal(r.badges['timestamp-anchor'].status, 'green', '章判据不变（绑定维度仍立）');
+  // ΠΑΝ-53（分级执法）：signatureVerified=false 自注记级升 degraded 黄章 ——
+  // 绑定维度仍立（不指控篡改 ⇒ 不是红），但「第三方背书未证」升到章状态面，
+  // 不读 detail 的下游（ok 聚合面）不再对伪造回执全绿（C1-9 H2 落差的分级披露）。
+  assert.equal(r.badges['timestamp-anchor'].status, 'degraded', '黄章：绑定维度仍立、背书维度未证');
   assert.match(r.badges['timestamp-anchor'].detail, /TSA signature verification FAILED/, '失败注记在场');
   assert.match(r.badges['timestamp-anchor'].detail, /UNPROVEN/, '第三方背书未证如实申报');
   assert.equal(r.lastAnchor?.signatureVerified, false, '报告字段可供下游独立执法');
-  assert.equal(r.ok, true);
+  assert.equal(r.ok, true, '黄章不翻 ok（ok = 无红 —— 分级语义见 NotaryReport.clockRollback 注）');
 });
 
 // ─── ΑΩ-R42：旁链快照进 TSA 摘要域（双账覆盖的第三方绑定面） ───
@@ -541,7 +543,11 @@ test('ΝΩ-21 S-12: pin 命中 ⇒ true / 未命中 ⇒ unpinned-key / 缺席 �
     assert.equal(a.timestamp.signatureVerified, 'unpinned-key', '锚载降级判决（随 anchorHash 防篡改入册）');
     assert.equal(notary.lastError, null, '诚实判决不是故障');
     const r = notary.verifyNotary();
-    assert.equal(r.badges['timestamp-anchor'].status, 'green', '注记级不翻章（判据面隔离）');
+    // ΠΑΝ-53 重锚：pin 不命中自此升 **degraded 黄章**（原「注记级不翻章」被
+    // ΠΑΝ-53 立法废弃 —— C1-9 H2：自造 token 只要绑定成立、签名失败被一行注记
+    // 吞掉 ⇒「四章对持写权限者全绿」）。黄 ≠ 红：ok 聚合面只认红，不指控篡改。
+    assert.equal(r.badges['timestamp-anchor'].status, 'degraded', 'ΠΑΝ-53：信任锚拒绝 ⇒ 黄章（背书维度如实降级）');
+    assert.equal(r.ok, true, '黄 ≠ 红 —— ok 聚合面不动（不指控篡改，绑定维度在场）');
     assert.match(r.badges['timestamp-anchor'].detail, /NOT pinned/, '未钉住注记在场');
     assert.match(r.badges['timestamp-anchor'].detail, /trust anchor refused/, '信任锚拒绝如实申报');
     assert.equal(r.lastAnchor?.signatureVerified, 'unpinned-key', '报告字段可供下游独立执法');

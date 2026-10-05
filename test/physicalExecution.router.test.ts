@@ -14,7 +14,7 @@ import { PhysicalActionRouterImpl } from '../src/physicalExecution/router.ts';
 import { CapabilityCache } from '../src/physicalExecution/capabilityCache.ts';
 import type {
   ClickResult, CursorKindInfo, DragResult, HealthInfo, HitTestResult, HotkeyResult,
-  MoveResult, PhysicalError, PhysicalExecutionAdapter, PhysicalExecutionConfig,
+  ActiveWindowResult, MoveResult, PhysicalError, PhysicalExecutionAdapter, PhysicalExecutionConfig,
   ScreenshotHandleLike, ScreenshotResult, ScrollResult, SwitchWindowResult,
   TypeResult, UiTreeResult,
 } from '../src/physicalExecution/contracts.ts';
@@ -61,6 +61,8 @@ class FakeAdapter implements PhysicalExecutionAdapter {
     if (this.failSwitchWindow) return { ok: false, error: this.failSwitchWindow };
     return { ok: true, value: { method: 'native', matched: null, keyword: args.keyword } };
   }
+  // R2-3（焦点保卫）：前台探测假实现 —— router 测试不消费，仅满足接口面
+  async getActiveWindow(): Promise<Result<ActiveWindowResult, PhysicalError>> { return ok(); }
   async getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>> { return ok(); }
   async getCursorKind(): Promise<Result<CursorKindInfo, PhysicalError>> { return ok(); }
   async hitTest(): Promise<Result<HitTestResult, PhysicalError>> { return ok(); }

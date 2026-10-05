@@ -346,8 +346,9 @@ test('ΝΩ-22 mtime 缓存：未变文件零重读；变更文件恰重读；缓
   rmSync(other.root, { recursive: true, force: true });
 });
 
-test('D-4 规则统计: 20 条抗体覆盖四大类目与六条铁律（13 既有 + W6R-B9 七条安全不变量）', () => {
-  assert.equal(DOCTOR_RULES.length, 20);
+test('D-4 规则统计: 21 条抗体覆盖四大类目与六条铁律（13 既有 + W6R-B9 七条安全不变量 + ΠΑΝ-116 WAL 篡改检视）', () => {
+  // ΠΑΝ-116（F2-1 移交项⑤）：chain.wal-tampered 增补 —— 计数 20 → 21
+  assert.equal(DOCTOR_RULES.length, 21);
   const cats = new Set(DOCTOR_RULES.map(r => r.category));
   for (const c of ['genesis', 'smell', 'security', 'chain'] as const) assert.ok(cats.has(c));
   const laws = new Set(DOCTOR_RULES.flatMap(r => r.laws));

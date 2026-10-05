@@ -77,16 +77,23 @@ test('ΝΩ-31②: press_hotkey keys 枚举进 schema —— 白名单键集对�
   // dsh-tools 编译为 JSON Schema：items.enum（作者面为 items: { type, enum }）
   const en: unknown[] = keys?.items?.enum ?? keys?.enum;
   assert.ok(Array.isArray(en) && en.length >= 20, `枚举必须呈现（实测 ${JSON.stringify(en).slice(0, 60)}...）`);
-  for (const k of ['ctrl', 'cmd', 'alt', 'shift', 'enter', 'tab', 'space', 'backspace', 'delete', 'esc', 'f1', 'f12', 'a', 'c', 'v', 'z']) {
+  for (const k of ['ctrl', 'cmd', 'alt', 'shift', 'enter', 'tab', 'space', 'backspace', 'delete', 'esc', 'f1', 'f12', 'a', 'c', 'v', 'z',
+    // R2-2: 全字母表 + 导航键入枚举（ctrl+s 保存 / ctrl+home·ctrl+end 行级导航 /
+    // shift+end 选整行 —— suite-full 编辑任务主路径）
+    's', 'l', 't', 'home', 'end', 'up', 'down', 'left', 'right']) {
     assert.ok(en.includes(k), `合法键 ${k} 必须在枚举里`);
   }
-  for (const k of ['meta', 'win', 'x', 'q', 'printscreen']) {
+  // R2-2: 立法变更——字母键属应用内安全面（OS 壳层逃逸和弦仍由黑名单独立执法），
+  // x/q 不再是"白名单外"样本；not-in-enum 样本改为仍刻意排除的 OS 壳层别名与
+  // 无需求面的键（win/meta/printscreen/insert/capslock/数字）。
+  for (const k of ['meta', 'win', 'printscreen', 'insert', 'capslock', '7']) {
     assert.ok(!en.includes(k), `白名单外键 ${k} 不得进枚举`);
   }
   assert.deepEqual([...en].sort(), [...HOTKEY_WHITELIST_KEYS].sort(), '枚举 = 导出白名单键集');
   // 协议层即拒：白名单外键名 ToolArgsError（不再先派发再由 system 层拒绝）
+  // R2-2: 样本键从 x（现已合法）换成仍被排除的 win
   await assert.rejects(
-    exec(tool)({ keys: ['ctrl', 'x'] }),
+    exec(tool)({ keys: ['ctrl', 'win'] }),
     (e: Error) => e.constructor.name.includes('ToolArgsError'),
     'schema 枚举在协议层执法',
   );

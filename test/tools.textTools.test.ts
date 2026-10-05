@@ -234,7 +234,10 @@ test('find_text: 探针开启 —— UIA control/text 双判决 + via=uia 证据
   const ctrlLine = (out.state_anchor.locations as string[]).find(l => l.includes('"Login"'))!;
   assert.match(textLine, /shape=content-like interactivity=text \[via=uia\(Text\), conf=0\.93\]/);
   assert.match(ctrlLine, /shape=control-like interactivity=control \[via=uia\(Button, ancestor\+2\), conf=0\.97\]/);
-  assert.match(out.next_step, /A control match exists in this result\./);
+  // R4-3（b2，证据：R1-8 a5/a7）：anyControl 尾注加 control 语义限定 ——
+  // 「某控件响应」≠「哪个控件」，期望同步为新文案（防回归锚随话术演进）。
+  assert.match(out.next_step, /A control match exists in this result \(control = some interactive control responded/);
+  assert.match(out.next_step, /it does NOT identify WHICH control; verify visually before clicking\)\./);
   assert.ok(!out.next_step.includes('WARNING: only text matches'));
 });
 

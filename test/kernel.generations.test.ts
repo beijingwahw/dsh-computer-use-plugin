@@ -24,12 +24,17 @@ const SEED = 4242;
 /**
  * 铸一座「容差故意设错」的实验室馆：registry/ledger/lineage 注入（校准器由馆内
  * 自铸 ⇒ 血统挂入校准器 + 虚拟时钟 ⇒ 全确定），随后把 world.hammingTolerance
- * 设 8（过松）并注入 60 条历史误报证据（success:false、margin:+3 = 入账当时
- * 容差 8 下、距离 11 的未变帧被误判为变化 —— 台账是历史日志，margin 按入账当时
- * 的容差计；与 Θ-2 的漏报样本（margin −2）互补的另一侧近阈值噪声）。
- * 收敛机理：训练营自身的成功样本 margin 随容差现值走（同帧感知 margin = t、
- * 页变化 margin = d−t ≥ 8），最优分离阈落在「+3 误报带」与「成功样本下沿」
- * 之间 ⇒ 目标恒低于现值 ⇒ 逐代向固定点 3（= 已知良好值）逼近。
+ * 设 8（过松）并注入两条历史证据带（台账是历史日志，margin 按入账当时的容差判
+ * 定成败、按 ΤΕΛ-5 D-G21② 的新口径直录原始 dhash 距离）：
+ *   - 60 条「漏检带」：margin=2、success:false —— 入账当时容差 8 下，距离 2 的
+ *     真实变化被判未变（误报的另一侧：容差过松吞掉小变化）；
+ *   - 60 条「正确同帧带」：margin=4、success:true —— 入账当时容差 8 下，同帧
+ *     噪声距离 4 被正确判为未变。
+ * 收敛机理（ΤΕΛ-5 行为更新）：D-G21② 起 margin 域 = 与容差现值无关的原始距离
+ * （旧口径 margin = 距离−容差 的对合映射已随工单退役）⇒ 最优分离阈 = 两带交界
+ * 的平票中位 3.5（候选网格含平台值 3.5/4 ⇒ 平票集 {3.5,4} 取中位）恒低于现值
+ * 8 ⇒ 逐代向固定点 3.5 逼近（落在已知良好值 3 的 ±1 带内）。margin 分布不随
+ * 容差平移 ⇒ 收敛单调、不再代际振荡（工单的立法动机）。
  */
 function miscalibratedGym(): {
   gym: AutonomyGym;
@@ -43,7 +48,10 @@ function miscalibratedGym(): {
   const gym = new AutonomyGym({ seed: SEED, kernel: { registry, ledger, lineage } });
   assert.equal(registry.set('world.hammingTolerance', 8).ok, true, '预调容差 8（过松）');
   for (let i = 0; i < 60; i++) {
-    ledger.record({ key: 'world.hammingTolerance', success: false, margin: 3, ts: i });
+    ledger.record({ key: 'world.hammingTolerance', success: false, margin: 2, ts: i });
+  }
+  for (let i = 0; i < 60; i++) {
+    ledger.record({ key: 'world.hammingTolerance', success: true, margin: 4, ts: 100 + i });
   }
   return { gym, registry, ledger, lineage };
 }
@@ -141,7 +149,8 @@ test('Ξ-2: 收敛证明 —— 容差故意设 8 + trainGenerations(3,4) ⇒ �
   );
   assert.equal(registry.get('world.hammingTolerance'), conv!.value, '注册表现值 = 探针值（同一事实源）');
 
-  // 收敛终点落在已知良好带 3±1 内（实测确定性轨迹：8 → 5.9 → 4.075 → 3.538）
+  // 收敛终点落在已知良好带 3±1 内（实测确定性轨迹：8 → 5.2 → 3.5 → 3.5，
+  // 固定点 3.5 = ΤΕΛ-5 新 margin 口径下分离带 [2,4] 的平票中位）
   assert.ok(Math.abs(conv!.value - 3) <= 1, `末值落在 3±1 良好带（实测 ${conv!.value}）`);
 
   // 血统同步在场（收敛的每一跳都是一次立代）

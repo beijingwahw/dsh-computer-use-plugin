@@ -60,17 +60,26 @@ function resetClock(): void { clockBase = Date.now(); clockOffset = 0; }
 function now(): number { return clockBase + clockOffset; }
 function advance(ms: number): void { clockOffset += ms; }
 
-/** 带外通道在场信号（暂存资格的前提；码不消费 —— 本册不测带外协议） */
-function armChannel(): void { setConfirmCodeChannel(() => true); }
+/** 带外通道在场信号（暂存资格的前提）+ 码采集（ΠΑΝ-1：grant 臂须携码） */
+const deliveries: Array<{ token: string; confirmCode: string }> = [];
+function armChannel(): void {
+  deliveries.length = 0;
+  setConfirmCodeChannel(d => { deliveries.push({ token: d.token, confirmCode: d.confirmCode }); });
+}
+/** 令牌对应的带外码（不存在 ⇒ 空串 = 无码降级路径） */
+function codeOf(token: string): string {
+  return deliveries.find(d => d.token === token)?.confirmCode ?? '';
+}
 
-/** 超时入队一条待批条目（推进越过缺省 5min 暂存超时 —— w2queue stageOne 同律） */
-async function stageOne(description = 'click 发送 to submit the report'): Promise<string> {
+/** 超时入队一条待批条目（推进越过缺省 5min 暂存超时 —— w2queue stageOne 同律；
+ *  ΠΑΝ-1 后返回 {token,id} —— grant 裁决须携 token 的带外码） */
+async function stageOne(description = 'click 发送 to submit the report'): Promise<{ token: string; id: string }> {
   const pa = approval.request(description);
   advance(301_000);
   const r = approvalQueue.stageAction({ token: pa.token, description });
   assert.equal(r.ok, true, JSON.stringify(r));
   if (!r.ok) throw new Error('unreachable');
-  return r.entry.id;
+  return { token: pa.token, id: r.entry.id };
 }
 
 /** escrow 侧可控端口（F4）：通用 executor 与热键端口各记各账 */
@@ -185,7 +194,7 @@ test('W6-3 F2-①正: deny 后保留期内不清理；到期在下次落盘清�
   approvalQueue.arm({ now, storage: createApprovalQueueFileStorage(qfile), stagingTimeoutMs: 300_000, ttlMs: 600_000, deniedRetentionMs: RETENTION });
 
   const a = await stageOne(); // 落盘 #1（deny 的 at ≈ now）
-  assert.equal(approvalQueue.adjudicate([a], false).results[0].outcome, 'denied');
+  assert.equal(approvalQueue.adjudicate([a.id], false).results[0].outcome, 'denied');
   await stageOne();           // 落盘 #2（推进 301s < 保留期）
   assert.equal(approvalQueue.queueStats().prunedDenied, 0, '保留期内：不清理（反路在此同测）');
   assert.equal(approvalQueue.pendingSummary().deniedAwaitingPrune, 1, '保留期内：晨报仍可见 denied 条目（审计窗口）');
@@ -196,12 +205,13 @@ test('W6-3 F2-①正: deny 后保留期内不清理；到期在下次落盘清�
   assert.equal(st.prunedDenied, 1, '到期落盘：denied 条目清除，审计计数 +1（不静默消失）');
   assert.equal(st.entries, 2, 'A 已清；其余待批条目保留');
   assert.equal(approvalQueue.pendingSummary().deniedAwaitingPrune, 0, '晨报不再唠叨过期 denied');
-  assert.ok(!approvalQueue.dumpQueue().some(e => e.id === a), 'A 从队列消失');
+  assert.ok(!approvalQueue.dumpQueue().some(e => e.id === a.id), 'A 从队列消失');
 
   // 档审计：prunedDeniedTotal 随档落盘（条目消失，「曾拒绝过多少」账面长存）
-  const raw = JSON.parse(readFileSync(qfile, 'utf8')) as { prunedDeniedTotal: number; entries: Array<{ id: string }> };
+  // （ΠΑΝ-3：队列档为 HMAC 信封 —— 审计字段在内层 payload 原文中）
+  const raw = JSON.parse(JSON.parse(readFileSync(qfile, 'utf8')).payload) as { prunedDeniedTotal: number; entries: Array<{ id: string }> };
   assert.equal(raw.prunedDeniedTotal, 1, '审计留痕随档长存');
-  assert.ok(!raw.entries.some(e => e.id === a));
+  assert.ok(!raw.entries.some(e => e.id === a.id));
 
   // 跨进程：重新武装（同档）⇒ 累计清理数读回（取 max 不回退）
   approvalQueue.arm({ now: () => Date.now(), storage: createApprovalQueueFileStorage(qfile), deniedRetentionMs: RETENTION });
@@ -214,12 +224,12 @@ test('W6-3 F2-②反: 清理只针对 denied —— granted（待续跑）与 pe
   approvalQueue.arm({ now, storage: createApprovalQueueFileStorage(qfile), stagingTimeoutMs: 300_000, ttlMs: 600_000, deniedRetentionMs: 1_000 });
   const g = await stageOne();
   const p = await stageOne();
-  assert.equal(approvalQueue.adjudicate([g], true).results[0].outcome, 'granted'); // Y-10 桶满 3，1 枚可扣
+  assert.equal(approvalQueue.adjudicate([g.id], true, undefined, codeOf(g.token)).results[0].outcome, 'granted'); // ΠΑΝ-1 携码；Y-10 桶满 3，1 枚可扣
   advance(1_000_000); // 越过保留期
   const t = await stageOne(); // 落盘触发 prune：无 denied ⇒ 零清理
   assert.equal(approvalQueue.queueStats().prunedDenied, 0, '无 denied ⇒ 零清理');
   const ids = approvalQueue.dumpQueue().map(e => e.id);
-  assert.ok(ids.includes(g) && ids.includes(p) && ids.includes(t),
+  assert.ok(ids.includes(g.id) && ids.includes(p.id) && ids.includes(t.id),
     'granted（takeGranted 的续跑面）与 pending（裁决面）不受清理影响 —— 清理语义精确锁定 denied');
   assert.equal(approvalQueue.pendingSummary().grantedAwaitingResume, 1, 'granted 条目的续跑语义原样');
 });
@@ -244,7 +254,7 @@ test('W6-3 F2-④降级: 存储缺席（仅内存）⇒ 落盘尝试同样清理
   approvalQueue.arm({ now, stagingTimeoutMs: 300_000, ttlMs: 600_000, deniedRetentionMs: 1_000 }); // 无 storage
   assert.equal(approvalQueue.queueStats().storageArmed, false, '仅内存队列');
   const a = await stageOne();
-  approvalQueue.adjudicate([a], false);
+  approvalQueue.adjudicate([a.id], false);
   advance(2_000);
   await stageOne(); // persist（仅内存恒 ok）⇒ prune 执行
   assert.equal(approvalQueue.queueStats().prunedDenied, 1, '仅内存队列：清理照常执法');
@@ -256,7 +266,7 @@ test('W6-3 F2-⑤配置: 保留期透明化 + 负值 = 部署显式关闭清理'
   approvalQueue.arm({ now, deniedRetentionMs: -1 });
   assert.equal(approvalQueue.queueStats().deniedRetentionMs, -1, '注入值透明化');
   const a = await stageOne();
-  approvalQueue.adjudicate([a], false);
+  approvalQueue.adjudicate([a.id], false);
   advance(10 * 60_000_000); // 远超任何合理保留期
   await stageOne();
   assert.equal(approvalQueue.queueStats().prunedDenied, 0, '负保留期 = 关闭清理（部署显式选择）');

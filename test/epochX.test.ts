@@ -5,6 +5,7 @@
 //   X-1 引号锚定提取（信息无损：六种引号风格 + 空/未配对段拒绝）
 //   X-2 刺激类别判别（动词位；'delete "x"' 不误入笔迹弧）
 //   X-3 残差铸造（载荷剥夺：引号内词不参加落点选举）
+//   X-3b（ΠΑΝ-30）多引号段残差 —— 切分索引错位的执法重放（双载荷/紧邻/混族/撇号）
 //   X-4 滚动指令提取（方向唯一 + 幅度运动学域，域外拒绝不钳制）
 //   X-5 热键和弦提取（键名归一 + 键宇宙校验 + 和弦上限）
 //   X-6 运动弧选择表（先落点后运笔 / 自证 L4 锚 / 精确性优先拒绝）
@@ -100,6 +101,52 @@ test('X-3: 残差 —— 引号内词不参加落点选举', () => {
   assert.ok(!r1.includes('type'), '动词被切除');
   const r2 = residueTokens('type "alpha.local"');
   assert.equal(r2.filter(t => t !== 'into' && t !== 'the').length, 0, '纯载荷意图残差为空（只剩虚词）');
+});
+
+// ─── X-3b（ΠΑΝ-30）：多引号段残差 —— 切分索引错位的执法重放 ───
+
+test('X-3b/ΠΑΝ-30: 多引号段残差错位 —— 最小重放（载荷泄漏 + 动词腰斩必须绝迹）', () => {
+  // 批判 C1-2 H5 实证 bug：span range 基于原文索引，左→右逐段 splice 后字符串
+  // 收缩，后续段持陈旧索引做手术 ⇒ 残差 ["then","\"bb","ess","ctrl"] —— 第二
+  // 载荷泄漏进残差、'press' 被腰斩成 'ess'。自右向左切除后残差必须干净
+  //（'ctrl' 是键名不是动词 —— 残差合法成员，热键弧的消费对象）。
+  const r = residueTokens('type "aa" then "bb" press ctrl');
+  assert.deepEqual(r, ['then', 'ctrl'], `双载荷+双动词残差恰为连接词+键名（实际 ${JSON.stringify(r)}）`);
+  // 载荷词绝无泄漏（无引号残片、无载荷子串）
+  assert.ok(!r.some(t => t.includes('bb') || t.includes('aa')), '载荷词不进残差');
+  // 动词词表在残差中的识别不被腰斩（'ess' 绝迹 = press 被完整切除）
+  assert.ok(!r.some(t => t === 'ess' || t === 'pres'), '动词完整切除（无腰斩碎片）');
+});
+
+test('X-3b/ΠΑΝ-30: 双载荷场景（用户名 + 密码）—— 两段无损提取且都被剥夺投票权', () => {
+  const text = 'type "user@example.com" then type "p@ss word" into the login form';
+  const spans = extractQuotedSpans(text);
+  assert.equal(spans.length, 2, '双载荷如实计数');
+  assert.equal(spans[0].content, 'user@example.com', '用户名无损（编辑距离 0）');
+  assert.equal(spans[1].content, 'p@ss word', '密码无损（含空格的第二段不腐蚀第一段）');
+  const r = residueTokens(text);
+  assert.ok(!r.some(t => t.includes('example') || t.includes('p@ss') || t.includes('word')), '两段载荷全部被剥夺落点投票权');
+  assert.ok(r.includes('login') && r.includes('form'), '落点词保留（多段切除后仍可投票）');
+  assert.equal(classifyMotor(text), 'typing', '多段载荷下动词位判别照常');
+  // 相邻/混合引号族边界：紧邻双段、单双混用、三段、角引号（中文）
+  assert.deepEqual(residueTokens('type "aa""bb" now'), ['now'], '紧邻双段（无间隔）');
+  assert.deepEqual(residueTokens("press 'a' then \"b\" ctrl"), ['then', 'ctrl'], '单双引号混用双段');
+  const cn = residueTokens('输入「甲」然后 键入「乙」到这里');
+  assert.ok(!cn.some(t => t.includes('甲') || t.includes('乙')), '角引号双段载荷被剥夺（中文同律）');
+  assert.ok(cn.includes('然后'), '连接词保留（多段切除后残差仍可读）');
+  assert.deepEqual(residueTokens('"one" "two" "three" press ctrl'), ['ctrl'], '三段载荷 + 尾部动词（动词在末段之后不被腰斩）');
+  // 缩写撇号 + 多段载荷共存（X-1 防护与 ΠΑΝ-30 修复的正交性）
+  assert.deepEqual(residueTokens("don't type 'x' then 'y' ok"), ['don', 't', 'then', 'ok'], '撇号防护不被多段切除破坏');
+});
+
+test('X-3b/ΠΑΝ-30: 多段场景下热键/滚动弧的残差消费 —— 引号段不再误拒', () => {
+  // 旧 bug 的下游症状：'"bb'/'ess' 不是键名 ⇒ extractHotkey 误拒。修后带双引号
+  // 段的热键意图残差只余真键名。
+  const hk = extractHotkey('"note text" press ctrl s');
+  assert.ok(hk.kind === 'ok' && JSON.stringify(hk.value.keys) === JSON.stringify(['ctrl', 's']),
+    `引号载荷段不参与键名选举（实际 ${JSON.stringify(hk)}）`);
+  const sc = extractScroll('scroll down "comment" 3');
+  assert.ok(sc.kind === 'ok' && sc.value.direction === 'down' && sc.value.amount === 3, '滚动量不被引号段错位吞并');
 });
 
 // ─── X-4 滚动指令提取 ───

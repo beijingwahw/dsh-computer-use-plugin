@@ -20,6 +20,15 @@
 //      段结构垃圾 ⇒ 归零 + SKIPPED、条目级垃圾 ⇒ 弃置保好；
 //   H4-8 工具面透明化 —— request_approval 的 staging 锚点、
 //      adjudicate_approval_queue 批量裁决输出。
+//   ΠΑΝ-1 裁决人证补全 —— grant 臂必须携带外确认码（入队锚定的哈希在裁决时
+//      消费）：无码 / 错码 / 封顶焚毁 / 降级无锚 / 恢复无锚全部 fail-closed；
+//      人证先于 Y-10（错码不烧预算 —— 与 grantDetailed 同序）；
+//   ΠΑΝ-2 takeGranted 复查 TTL —— 陈年 granted 以当前时钟重验，过期即拒绝
+//      并清理，新鲜条目照常可取；
+//   ΠΑΝ-3 持久化完整性 —— HMAC-SHA256 信封：可信往返 granted 照常恢复；篡改
+//      档整档归零；无密钥/旧明文降级恢复拒绝 granted 条目（不丢队列本体）；
+//   ΠΑΝ-4 双通道双花封堵 —— 交互式 grant 兑现 ⇒ 条目 absorbed 终态不可再
+//      take（一次同意恰一次物理兑付；执行载体 = 交互令牌本尊）。
 // 全程离线确定性：注入时钟 / 注入存储（tmp 目录）、码从带外 sink 采集、
 // 不依赖 CSPRNG 具体取值（只断言格式与行为）。
 import { test, beforeEach } from 'node:test';
@@ -228,7 +237,13 @@ test('H4-2: 队列持久化与恢复 —— 原子写无 tmp 残留、跨进程�
   assert.equal(adj.results[0].outcome, 'denied');
   assert.ok(existsSync(qfile), '队列已落盘');
   assert.ok(!existsSync(qfile + '.tmp'), '原子写：换名后无 tmp 残留');
-  const raw = JSON.parse(readFileSync(qfile, 'utf8'));
+  // ΠΑΝ-3：队列档为 HMAC-SHA256 完整性信封（内层 payload 仍是队列 JSON 原文）
+  const envelope = JSON.parse(readFileSync(qfile, 'utf8'));
+  assert.equal(envelope.v, 2, '信封版本 v2');
+  assert.equal(envelope.alg, 'hmac-sha256');
+  assert.match(envelope.mac, /^[0-9a-f]{64}$/, 'HMAC 随档（完整性证据面）');
+  assert.ok(existsSync(qfile + '.key'), '密钥档与数据档同生（filePerms 加固面）');
+  const raw = JSON.parse(envelope.payload);
   assert.equal(raw.version, 1);
   assert.equal(raw.entries.length, 2);
   assert.equal(raw.entries.find((e: { id: string }) => e.id === b.id).decision.verdict, 'denied', '裁决随档');
@@ -282,7 +297,8 @@ test('H4-2: 队列持久化与恢复 —— 原子写无 tmp 残留、跨进程�
   const c = await stageOne({ description: 'unpersistable op' });
   assert.equal(approvalQueue.queueStats().entries, 1, '落盘失败 ⇒ 内存队列仍有效（降级不丢功能）');
   assert.ok(approvalQueue.queueStats().persistError !== undefined, '持久化错误在案（透明化）');
-  const adjc = approvalQueue.adjudicate([c.id], true);
+  // ΠΑΝ-1：grant 臂携码（内存队列的人证锚照常执法 —— 与持久化成败正交）
+  const adjc = approvalQueue.adjudicate([c.id], true, undefined, codeOf(c.token));
   assert.equal(adjc.results[0].outcome, 'granted');
   assert.equal(adjc.persisted, false, '批量裁决如实上报持久化失败');
   assert.equal(approvalQueue.takeGranted(), null, '落盘失败 ⇒ 拒绝交出执行权（双发封堵）');
@@ -310,7 +326,7 @@ test('H4-3: 晨报消费待批队列 —— 清单/计数/JSONL 行齐全；dep 
   const p3 = await stageOne({ description: 'stale delete op', ttlMs: 1_000 });
   const p4 = await stageOne({ description: 'already approved send' });
   advance(1_500); // p3 TTL 到期（1s 宽度）
-  approvalQueue.adjudicate([p4.id], true);
+  approvalQueue.adjudicate([p4.id], true, undefined, codeOf(p4.token)); // ΠΑΝ-1：携码批准
 
   const deps: SleepDeps = {
     journal: fakeJournal([{ hash: 'w2q-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]) as unknown as SleepDeps['journal'],
@@ -388,9 +404,13 @@ test('H4-4: 批量裁决 —— 一次批注多项、各铸 amendment、Y-10 逐
   const e4 = await stageOne({ description: 'pay the electricity bill' });
 
   // Y-10 缺省桶容量 3：四项同批 grant ⇒ 3 批 1 限流（批量不是 click-fatigue 后门）
+  // ΠΑΝ-1：批量裁决逐条目各交各码（每条目锚定各自触发令牌的带外码）
   const budgetBefore = approvalBudget();
   const NOTE = '都同意，但改用正式抬头签名再发';
-  const r = approvalQueue.adjudicate([e1.id, e2.id, e3.id, e4.id], true, NOTE);
+  const r = approvalQueue.adjudicate([e1.id, e2.id, e3.id, e4.id], true, NOTE, {
+    [e1.id]: codeOf(e1.token), [e2.id]: codeOf(e2.token),
+    [e3.id]: codeOf(e3.token), [e4.id]: codeOf(e4.token),
+  });
   assert.deepEqual(
     r.results.map(x => ({ id: x.id, outcome: x.outcome })),
     [
@@ -464,8 +484,8 @@ test('H4-5: TTL 保守律 —— 过期不自动作废、grant 保守拒绝、�
   // 再次列入晨报（持续唠叨直到用户显式处理）
   assert.equal(approvalQueue.pendingSummary().expired, 1);
 
-  // 有效条目照常可批
-  assert.equal(approvalQueue.adjudicate([fresh.id], true).results[0].outcome, 'granted');
+  // 有效条目照常可批（ΠΑΝ-1：携码）
+  assert.equal(approvalQueue.adjudicate([fresh.id], true, undefined, codeOf(fresh.token)).results[0].outcome, 'granted');
 
   // deny 过期条目恒可 —— 用户清场的出口
   const d = approvalQueue.adjudicate([stale.id], false, '这件事别做了');
@@ -473,15 +493,17 @@ test('H4-5: TTL 保守律 —— 过期不自动作废、grant 保守拒绝、�
   assert.equal(approvalQueue.pendingSummary().expired, 0, '清场后过期清单归零');
 });
 
-// ─── H4-6：grantDetailed 裁决传播 + takeGranted 续跑执行令牌 ───
+// ─── H4-6（ΠΑΝ-4 重写）：grantDetailed 裁决传播 + 双通道双花封堵 ───
 
-test('H4-6: 交互式裁决传播（Y-10 不双计）；takeGranted 铸已授予令牌（amendment 随行、验收式消费照常）', async () => {
+test('H4-6+ΠΑΝ-4: 交互式裁决传播进入 absorbed 终态 —— 双通道双花封堵；执行载体 = 交互令牌本尊', async () => {
   armChannel();
   armAll();
   const e1 = await stageOne({ description: 'send the contract' });
   const e2 = await stageOne({ description: 'delete the draft' });
 
-  // 传播·授予：暂存令牌被交互式 grant（携码 + 批注）⇒ 在途条目同步裁决
+  // 传播·授予：暂存令牌被交互式 grant（携码 + 批注）⇒ 条目同步进入 absorbed 终态
+  // （ΠΑΝ-4：旧实现传播为 granted，同一份同意可经交互令牌 + takeGranted 续跑
+  //  令牌两条通道各铸一枚执行令牌 = 一次 Y-10 兑付两次不可逆派发）
   const budgetBefore = approvalBudget();
   assert.deepEqual(
     approval.grantDetailed(e1.token, true, { confirmCode: codeOf(e1.token), note: '同意，但用附件形式发' }),
@@ -490,7 +512,7 @@ test('H4-6: 交互式裁决传播（Y-10 不双计）；takeGranted 铸已授予
   );
   assert.equal(approvalBudget(), budgetBefore - 1, 'Y-10 恰计一次（传播不双计）');
   const d1 = approvalQueue.dumpQueue().find(x => x.id === e1.id)!.decision!;
-  assert.equal(d1.verdict, 'granted');
+  assert.equal(d1.verdict, 'absorbed', 'ΠΑΝ-4：交互兑现 ⇒ absorbed 终态（不再冒充可续跑）');
   assert.equal(d1.amendment!.note, '同意，但用附件形式发');
 
   // 传播·否决：拒绝路径同样铸批注（否决理由随行）
@@ -499,27 +521,23 @@ test('H4-6: 交互式裁决传播（Y-10 不双计）；takeGranted 铸已授予
   assert.equal(d2.verdict, 'denied');
   assert.equal(d2.amendment!.note, '草稿留着还有用');
 
-  // 续跑消费：铸已授予执行令牌（amendment 原样携带；V 纪元生命周期照常）
-  assert.equal(approvalQueue.pendingSummary().grantedAwaitingResume, 1);
-  const taken = approvalQueue.takeGranted();
-  assert.ok(taken, '最早已批条目可取');
-  assert.equal(taken!.entry.id, e1.id);
-  assert.equal(taken!.entry.decision!.amendment!.note, '同意，但用附件形式发');
-  assert.equal(approval.validate(taken!.executionToken), true, '执行令牌已授予');
-  assert.equal(approvalBudget(), budgetBefore - 1, 'takeGranted 不再扣预算（裁决时已扣）');
-  // 执行侧批注消费点（W1-2 API 原样工作）
-  const am = approval.amendmentOf(taken!.executionToken);
-  assert.equal(am!.targetDescriptionDelta.original, 'send the contract');
-  const plan = approval.applyAmendment(taken!.executionToken, {
+  // ΠΑΝ-4 执法：absorbed 条目不可再 take —— 一次同意只兑付一次物理执行
+  const s = approvalQueue.pendingSummary();
+  assert.equal(s.grantedAwaitingResume, 0, '无可续跑的已批条目（已被交互通道吸收）');
+  assert.equal(s.absorbedByInteractive, 1, '终态分账透明化（晨报不误导）');
+  assert.equal(approvalQueue.takeGranted(), null, '双通道双花封堵：队列侧不得再铸第二枚执行令牌');
+
+  // 执行载体 = 交互令牌本尊（W1-2 批注消费 + V 纪元验收式消费照常）
+  assert.equal(approval.amendmentOf(e1.token)!.targetDescriptionDelta.original, 'send the contract');
+  const plan = approval.applyAmendment(e1.token, {
     tool: 'click_mouse', x: 0.5, y: 0.5, target_description: 'send the contract',
   });
-  assert.equal(plan.target_description, '同意，但用附件形式发', '续跑执行照修正后的计划');
-  // V 纪元验收式消费照常：beginAttempt → consume
-  assert.equal(approval.beginAttempt(taken!.executionToken), true);
-  assert.equal(approval.consume(taken!.executionToken), true);
-  // 恰一次：已消费 ⇒ 再取为空
-  assert.equal(approvalQueue.takeGranted(), null);
+  assert.equal(plan.target_description, '同意，但用附件形式发', '交互执行照修正后的计划');
+  assert.equal(approval.beginAttempt(e1.token), true);
+  assert.equal(approval.consume(e1.token), true);
+  assert.equal(approvalQueue.takeGranted(), null, '消费后队列侧仍无兑付（终态不可翻案）');
   assert.equal(approvalQueue.pendingSummary().deniedAwaitingPrune, 1, '已拒条目留档待审计清理');
+  assert.equal(approvalQueue.pendingSummary().absorbedByInteractive, 1);
 });
 
 // ─── H4-7：checkpoint 段与续跑步账 ───
@@ -536,14 +554,20 @@ test('H4-7: checkpoint 续跑 —— approval-queue 段随档往返、stepCursor
   // 不可逆动作超时入队（stepCursor = 当前账面 2 步 —— 此前可逆部分不重演）
   const staged = await stageOne({ description: 'click 发送 to submit', stepCursor: journal.list(false).length });
   assert.equal(staged.id !== '', true);
-  approvalQueue.adjudicate([staged.id], true, '同意发送');
+  approvalQueue.adjudicate([staged.id], true, '同意发送', codeOf(staged.token)); // ΠΑΝ-1：携码批准
 
-  // 保存 → 快照含队列段
+  // 保存 → 快照含队列段（ΠΑΝ-80：approvalQueue 段为 HMAC-SHA256 信封 ——
+  // 盘面形状 {v:2, alg, mac, payload}，队列 JSON 原文在 payload 内）
   const saved = saveCheckpoint(cpFile);
   assert.equal(saved.ok, true, saved.error);
   const rawCp = JSON.parse(readFileSync(cpFile, 'utf8'));
-  assert.ok(Array.isArray(rawCp.approvalQueue?.entries), 'approval-queue 段随档');
-  assert.equal(rawCp.approvalQueue.entries.length, 1);
+  assert.equal(rawCp.approvalQueue?.v, 2, 'approval-queue 段为信封形态（ΠΑΝ-80）');
+  assert.match(rawCp.approvalQueue?.mac ?? '', /^[0-9a-f]{64}$/, '信封携带 mac（密钥档同生）');
+  const aqRaw = typeof rawCp.approvalQueue?.payload === 'string'
+    ? JSON.parse(rawCp.approvalQueue.payload)
+    : rawCp.approvalQueue; // 旧版明文段（ΠΑΝ-80 前）兼容消费
+  assert.ok(Array.isArray(aqRaw?.entries), 'approval-queue 段随档（信封 payload 内）');
+  assert.equal(aqRaw.entries.length, 1);
 
   // 模拟崩溃：全部归零
   resetApproval();
@@ -577,9 +601,10 @@ test('H4-7: checkpoint 续跑 —— approval-queue 段随档往返、stepCursor
   assert.equal(approvalQueue.queueStats().entries, 0, '垃圾段 ⇒ 队列归零（不残留不冒充）');
   assert.equal(journal.list(false).length, 2, '其余 section 照常恢复（坏段隔离）');
 
-  // 条目级垃圾 ⇒ 弃置保好（dropped 注记进报告）
+  // 条目级垃圾 ⇒ 弃置保好（dropped 注记进报告；ΠΑΝ-80：明文段 = 不可信 ⇒
+  // granted 剥离同律执法，好条目本体照常恢复）
   const mixed = path.join(dir, 'cp-mixed.json');
-  const entry = rawCp.approvalQueue.entries[0];
+  const entry = aqRaw.entries[0];
   writeFileSync(mixed, JSON.stringify({ ...rawCp, approvalQueue: { entries: [entry, { junk: true }, 3] } }));
   resetApproval();
   const rm2 = loadCheckpoint(mixed);
@@ -630,32 +655,62 @@ test('H4-8: request_approval 的 staging 锚点 + adjudicate_approval_queue 批�
   assert.equal(out1.state_anchor.staging.persistence, 'file');
 
   // 批量裁决工具：两条入队 → 一次批注裁决 → 输出透明
+  // w2queue 修复（F3-6）：注入钟领先真实铸造点的余量须留足数量级（本册头注的
+  // 纪律）。旧 advance(1) 只留 ~1s 余量 —— 满载并行跑时两次工具执行的墙钟耗时
+  // 可超 1s（本册全量跑实测 1.9s），pa2/pa3 的 stageAction 悄悄落入
+  // not-timed-out-yet ⇒ adjudicated=0 误报。步进改为 60s 级余量，且 stage 结果
+  // 显式断言（拒绝静默失败 —— 失败时第一现场即入队面，不再是下游计数）。
   const pa1 = approval.request('mail the letter');
-  advance(301_000);
+  advance(360_000);
   assert.equal(approvalQueue.stageAction({ token: pa1.token, description: 'mail the letter' }).ok, true);
   const pa2 = approval.request('ship the crate');
-  advance(1);
+  advance(60_000);
   assert.equal(approvalQueue.stageAction({ token: pa2.token, description: 'ship the crate' }).ok, true);
   const items = approvalQueue.pendingSummary().items;
 
+  // 批量裁决工具（当前工具面未携 confirm_code 参数 —— ΠΑΝ-1 队列侧执法）：
+  // 无码 grant=true ⇒ 全项 confirm-code-required 结构化拒绝，零批准、零预算消耗
+  const budgetBefore = approvalBudget();
   const adjOut = JSON.parse(await exec(adjTool)({
     ids: items.map(i => i.id), grant: true, note: '都发，用加急渠道',
   }));
   assert.equal(adjOut.status, 'ADJUDICATED');
   assert.equal(adjOut.state_anchor.adjudicated, 2);
-  assert.equal(adjOut.state_anchor.granted, 2);
-  assert.equal(adjOut.state_anchor.persisted, true);
-  assert.equal(adjOut.state_anchor.queue_after.granted_awaiting_resume, 2);
-  assert.equal(adjOut.per_item.length, 2);
-  assert.ok(existsSync(qfile), '工具路径落盘');
+  assert.equal(adjOut.state_anchor.granted, 0, 'ΠΑΝ-1：无码 grant 零批准（fail-closed —— 模型自批链封死）');
+  assert.equal(adjOut.state_anchor.queue_after.granted_awaiting_resume, 0);
+  assert.deepEqual(
+    adjOut.per_item.map((x: { outcome: string }) => x.outcome),
+    ['confirm-code-required', 'confirm-code-required'],
+    '结构化拒绝（绝不抛）',
+  );
+  assert.equal(approvalBudget(), budgetBefore, '无码拒绝不烧 Y-10');
+  assert.equal(approvalQueue.pendingSummary().pending, 2, '条目保持待批（等待带码裁决）');
 
-  // 续跑语义透明化：next_step 指向 takeGranted 消费（不再打扰用户）
-  assert.match(adjOut.next_step, /RESUME/);
+  // ΠΑΝ-36a（F2 波接线）：工具面 confirm_code 参数已透传 —— 携 per-id 码经
+  // 工具批量裁决 ⇒ 批准（队列侧契约就绪后的目标形态）；无码调用的 next_step
+  // 给出人证出路（ΠΑΝ-1 的诚实指引面 —— 零批准时不误导「已等续跑」）
+  const codes = Object.fromEntries(
+    approvalQueue.dumpQueue().filter(e => e.decision === undefined).map(e => [e.id, codeOf(e.token)]),
+  );
+  const okAdjTool = JSON.parse(await exec(adjTool)({
+    ids: items.map(i => i.id), grant: true, note: '都发，用加急渠道', confirm_code: codes,
+  }));
+  assert.deepEqual(
+    okAdjTool.per_item.map((x: { outcome: string }) => x.outcome),
+    ['granted', 'granted'],
+    '工具携 per-id 码批量批准（ΠΑΝ-36 透传贯通）',
+  );
+  assert.equal(approvalBudget(), budgetBefore - 2, '通过人证后 Y-10 逐项计费');
+  assert.ok(existsSync(qfile), '工具路径落盘');
+  assert.match(adjOut.next_step, /OUT-OF-BAND confirm code/, '无码调用的指引 = 人证出路（ΠΑΝ-36）');
+  assert.match(okAdjTool.next_step, /RESUME/, '批准后的续跑语义透明化：next_step 指向 takeGranted 消费（不再打扰用户）');
 
   // ids 缺省 ⇒ 全部待批（新入队一条再测）
+  // w2queue 修复（F3-6）：同上 —— advance(1) 余量过薄（满载跑实测在此翻车），
+  // 改 60s 余量 + stage 结果显式断言。
   const pa3 = approval.request('fax the form');
-  advance(1);
-  approvalQueue.stageAction({ token: pa3.token, description: 'fax the form' });
+  advance(60_000);
+  assert.equal(approvalQueue.stageAction({ token: pa3.token, description: 'fax the form' }).ok, true);
   const adjAll = JSON.parse(await exec(adjTool)({ grant: false, note: '传真算了' }));
   assert.equal(adjAll.state_anchor.adjudicated, 1);
   assert.equal(adjAll.state_anchor.denied, 1);
@@ -668,4 +723,200 @@ test('H4-8: request_approval 的 staging 锚点 + adjudicate_approval_queue 批�
   const cfgOff = { enableApprovalGate: false } as unknown as Config;
   const adjOff = await exec(createAdjudicateApprovalQueueTool(cfgOff))({ grant: true });
   assert.match(adjOff, /Approval gate disabled/);
+});
+
+// ─── ΠΑΝ-1：裁决人证补全（模型自批链封堵） ───
+
+test('ΠΑΝ-1: 裁决人证 —— 无码/错码/封顶焚毁/降级无锚/恢复无锚全部 fail-closed；人证先于 Y-10', async () => {
+  armChannel();
+  armAll();
+  const e = await stageOne({ description: 'wire the funds' });
+  const budget0 = approvalBudget();
+
+  // ① 无码 ⇒ confirm-code-required（结构化拒绝；条目保持待批；不烧 Y-10）
+  const noCode = approvalQueue.adjudicate([e.id], true);
+  assert.equal(noCode.results[0].outcome, 'confirm-code-required', '无码 grant 一律拒绝');
+  assert.equal(approvalBudget(), budget0, '无码拒绝不烧同意预算（限速 ≠ 人证）');
+  assert.equal(approvalQueue.queueStats().pending, 1, '条目保持待批');
+
+  // ② 错码 ⇒ confirm-code-mismatch 逐次计数；封顶第 5 次 ⇒ 条目焚毁
+  for (let i = 1; i <= 4; i++) {
+    const wrong = approvalQueue.adjudicate([e.id], true, undefined, '000000');
+    assert.equal(wrong.results[0].outcome, 'confirm-code-mismatch', `第 ${i} 次错码计数在案`);
+  }
+  assert.equal(approvalBudget(), budget0, '错码不烧 Y-10（码校验先于令牌桶 —— grantDetailed 同序）');
+  const burned = approvalQueue.adjudicate([e.id], true, undefined, '000000');
+  assert.equal(burned.results[0].outcome, 'code-attempts-exhausted', '枚举封顶 ⇒ 条目焚毁');
+  assert.equal(approvalQueue.queueStats().entries, 0, '焚毁条目出队（重新走 request_approval 带外铸造）');
+  assert.equal(approvalQueue.adjudicate([e.id], true, undefined, '000000').results[0].outcome, 'unknown-id');
+
+  // ③ 正码 ⇒ granted + Y-10 计费（人证通过后限速照常是第二道闸）
+  const g = await stageOne({ description: 'renew the certificate' });
+  const right = approvalQueue.adjudicate([g.id], true, undefined, codeOf(g.token));
+  assert.equal(right.results[0].outcome, 'granted', '用户读码交回 ⇒ 批准（模型只是邮差）');
+  assert.equal(approvalBudget(), budget0 - 1, '通过人证后逐项计费');
+  // 错码不焚毁无辜批注：deny 恒可（不需要人证）
+  assert.equal(approvalQueue.adjudicate([g.id], false).results[0].outcome, 'already-decided');
+
+  // ④ 降级令牌（通道在场但投递失败 ⇒ 无 confirmCodeHash）⇒ 入队成功但永不可批量批准
+  setConfirmCodeChannel(() => false);
+  const pa = approval.request('degraded mint');
+  advance(301_000);
+  assert.equal(approvalQueue.stageAction({ token: pa.token, description: 'degraded mint' }).ok, true,
+    '通道在场 ⇒ 暂存资格成立（降级的是码，不是暂存）');
+  const degradedId = approvalQueue.pendingSummary().items.find(i => i.description === 'degraded mint')!.id;
+  assert.equal(
+    approvalQueue.adjudicate([degradedId], true, undefined, '123456').results[0].outcome,
+    'confirm-channel-absent',
+    '无哈希锚 ⇒ fail-closed（与 grantDetailed 的 degraded 令牌同律）',
+  );
+
+  // ⑤ 跨进程恢复的条目无证据锚（哈希仅内存驻留 —— ΠΑΝ-1 设计取舍）⇒ 同律拒绝
+  const qfile = path.join(dir, 'pan1-queue.json');
+  resetApproval();
+  resetClock();
+  armChannel();
+  armAll({ queueFile: qfile });
+  const rr = await stageOne({ description: 'overnight op' });
+  const savedCode = codeOf(rr.token); // 模拟用户仍持有当班投递的原码
+  resetApproval();
+  resetClock();
+  armChannel();
+  armAll({ queueFile: qfile });
+  assert.equal(approvalQueue.pendingSummary().items[0]?.id, rr.id, '条目跨进程恢复（ΠΑΝ-3 可信档）');
+  assert.equal(
+    approvalQueue.adjudicate([rr.id], true, undefined, savedCode).results[0].outcome,
+    'confirm-channel-absent',
+    '恢复面无码锚 ⇒ 即使持有原码也拒绝（须 deny 后重新 request 走带外铸造）',
+  );
+});
+
+// ─── ΠΑΝ-2：takeGranted 复查 TTL（陈年同意不可兑换） ───
+
+test('ΠΑΝ-2: takeGranted 以当前时钟重验 TTL —— 过期 granted 拒绝并清理；新鲜条目照常可取', async () => {
+  armChannel();
+  armAll();
+  const stale = await stageOne({ description: 'day-zero consent', ttlMs: 1_000 });
+  // 裁决时刻 stale 仍有效（过期检查在裁决面先行通过；随后的 stageOne 推进 301s
+  // 会使 stale 陈年化 —— 恰是本用例要制造的「裁决与消费之间的间隙」）
+  assert.equal(approvalQueue.adjudicate([stale.id], true, undefined, codeOf(stale.token)).results[0].outcome, 'granted');
+  const fresh = await stageOne({ description: 'fresh consent' }); // 推进 301s ⇒ stale 过期、fresh（24h）有效
+  assert.equal(approvalQueue.adjudicate([fresh.id], true, undefined, codeOf(fresh.token)).results[0].outcome, 'granted');
+  advance(2_000); // 再跨一段消费间隙
+
+  // 陈年 granted 被清理，不越过新鲜条目被 take；新鲜条目照常可取
+  const taken = approvalQueue.takeGranted();
+  assert.ok(taken, '新鲜条目照常可取（清理不误伤）');
+  assert.equal(taken!.entry.id, fresh.id, '取到的是未过期条目');
+  assert.ok(!approvalQueue.dumpQueue().some(x => x.id === stale.id), '过期 granted 条目被清理出队');
+  assert.equal(approvalQueue.pendingSummary().grantedAwaitingResume, 0, '无可续跑残留');
+
+  // 纯陈年面：唯一的 granted 过期 ⇒ take 拒绝（null）且条目清理
+  const stale2 = await stageOne({ description: 'another day-zero consent', ttlMs: 1_000 });
+  assert.equal(approvalQueue.adjudicate([stale2.id], true, undefined, codeOf(stale2.token)).results[0].outcome, 'granted');
+  advance(2_000);
+  assert.equal(approvalQueue.takeGranted(), null, '陈年同意不得铸成执行令牌');
+  assert.equal(approvalQueue.queueStats().entries, 0, '过期即清理（不冒充可续跑账面）');
+});
+
+// ─── ΠΑΝ-3：持久化完整性（HMAC-SHA256 信封三态） ───
+
+test('ΠΑΝ-3: 可信往返 granted 照常恢复；篡改档整档归零；密钥缺席降级恢复拒绝 granted', async () => {
+  const qfile = path.join(dir, 'pan3-queue.json');
+
+  // 铸一条 granted（带码裁决）+ 一条 pending ⇒ 落盘为 HMAC 信封
+  armChannel();
+  armAll({ queueFile: qfile });
+  const g = await stageOne({ description: 'trusted grant me' });
+  const p = await stageOne({ description: 'still pending' });
+  assert.equal(approvalQueue.adjudicate([g.id], true, undefined, codeOf(g.token)).results[0].outcome, 'granted');
+  const envelope = JSON.parse(readFileSync(qfile, 'utf8'));
+  assert.equal(envelope.v, 2, '信封版本 v2');
+  assert.match(envelope.mac, /^[0-9a-f]{64}$/, 'HMAC 随档');
+  assert.equal(JSON.parse(envelope.payload).version, 1, '内层载荷仍是队列 JSON 原文');
+
+  // ① 可信往返：同密钥重载 ⇒ granted 照常恢复并可 take（完整性验证通过）
+  resetApproval();
+  resetClock();
+  armChannel();
+  armAll({ queueFile: qfile });
+  const s1 = approvalQueue.pendingSummary();
+  assert.equal(s1.grantedAwaitingResume, 1, '可信恢复：granted 裁决在案');
+  assert.equal(s1.items.length, 1, 'pending 照常恢复');
+  const taken = approvalQueue.takeGranted();
+  assert.ok(taken && taken.entry.id === g.id, '可信恢复后可续跑消费');
+  assert.equal(approval.validate(taken!.executionToken), true);
+
+  // ② 篡改（改 payload 保 mac）⇒ 整档归零（绝不冒充恢复）
+  const g2 = await stageOne({ description: 'forge me' });
+  assert.equal(approvalQueue.adjudicate([g2.id], true, undefined, codeOf(g2.token)).results[0].outcome, 'granted');
+  const env2 = JSON.parse(readFileSync(qfile, 'utf8'));
+  const forgedPayload = JSON.stringify({
+    version: 1, savedAt: 0, prunedDeniedTotal: 0,
+    entries: [{
+      id: 'QA-FORGED000000001', token: 'APR-FORGED', description: 'attacker entry',
+      evidence: {}, enqueuedAt: 0, ttlMs: 86_400_000, expiresAt: now() + 86_400_000,
+      decision: { verdict: 'granted', at: 0 },
+    }],
+  });
+  writeFileSync(qfile, JSON.stringify({ ...env2, payload: forgedPayload }), 'utf8');
+  resetApproval();
+  resetClock();
+  armChannel();
+  armAll({ queueFile: qfile });
+  assert.equal(approvalQueue.queueStats().entries, 0, 'HMAC 不匹配 ⇒ 篡改档归零（不冒充恢复）');
+  assert.equal(approvalQueue.takeGranted(), null, '伪造 granted 无从兑换');
+
+  // ③ 无密钥降级：密钥档被移除（只读环境/密钥损坏同律）⇒ 内容读回但 granted 剥离
+  const qfile3 = path.join(dir, 'pan3-keyless.json');
+  resetApproval();
+  resetClock();
+  armChannel();
+  armAll({ queueFile: qfile3 });
+  const g3 = await stageOne({ description: 'keyless grant' });
+  assert.equal(approvalQueue.adjudicate([g3.id], true, undefined, codeOf(g3.token)).results[0].outcome, 'granted');
+  rmSync(qfile3 + '.key');
+  resetApproval();
+  resetClock();
+  armChannel();
+  armAll({ queueFile: qfile3 });
+  const s3 = approvalQueue.pendingSummary();
+  assert.equal(s3.items.length, 1, '条目本体恢复（降级不丢队列 —— 晨报仍可唠叨）');
+  assert.equal(s3.grantedAwaitingResume, 0, 'ΠΑΝ-3 fail-closed：不可信盘面的 granted 决不恢复');
+  assert.equal(approvalQueue.takeGranted(), null, '不可信 granted 不可兑换执行令牌');
+});
+
+test('ΠΑΝ-3(续): 写侧无密钥 ⇒ 信封诚实省略 mac；旧版明文档 ⇒ 结构兼容但 granted 剥离', async () => {
+  // ④ 写侧铸不出密钥（密钥路径被目录占位）⇒ 降级信封无 mac；读侧同律剥离 granted
+  const qfile4 = path.join(dir, 'pan3-nowritekey.json');
+  mkdirSync(qfile4 + '.key'); // 目录占位：loadOrCreateHmacKey 读档抛 EISDIR ⇒ null
+  armChannel();
+  approvalQueue.arm({ now, storage: createApprovalQueueFileStorage(qfile4) });
+  const g4 = await stageOne({ description: 'no-key grant' });
+  assert.equal(approvalQueue.adjudicate([g4.id], true, undefined, codeOf(g4.token)).results[0].outcome, 'granted');
+  const env4 = JSON.parse(readFileSync(qfile4, 'utf8'));
+  assert.equal(env4.mac, undefined, '无密钥 ⇒ 信封省略 mac（诚实降级，不伪装受保护）');
+  assert.equal(env4.v, 2);
+  resetApproval();
+  resetClock();
+  armChannel();
+  approvalQueue.arm({ now, storage: createApprovalQueueFileStorage(qfile4) });
+  assert.equal(approvalQueue.pendingSummary().grantedAwaitingResume, 0, '降级档恢复：granted 剥离');
+  assert.equal(approvalQueue.pendingSummary().items.length, 1, '条目本体照常恢复');
+
+  // ⑤ 旧版明文档（W2-1 原格式，无信封）⇒ 结构兼容读回但不可信 ⇒ granted 剥离
+  const qfile5 = path.join(dir, 'pan3-legacy.json');
+  writeFileSync(qfile5, JSON.stringify({
+    version: 1, savedAt: 0, prunedDeniedTotal: 0,
+    entries: [{
+      id: 'QA-LEGACY0000000001', token: 'APR-LEGACY', description: 'legacy granted',
+      evidence: {}, enqueuedAt: 0, ttlMs: 86_400_000, expiresAt: now() + 86_400_000,
+      decision: { verdict: 'granted', at: 0 },
+    }],
+  }), 'utf8');
+  resetApproval();
+  armChannel();
+  approvalQueue.arm({ now, storage: createApprovalQueueFileStorage(qfile5) });
+  assert.equal(approvalQueue.pendingSummary().grantedAwaitingResume, 0, '旧明文档不可信 ⇒ granted 剥离（升级部署的在途 granted 须重裁）');
+  assert.equal(approvalQueue.pendingSummary().items.length, 1, '条目本体照常恢复（不丢队列）');
 });

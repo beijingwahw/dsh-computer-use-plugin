@@ -20,10 +20,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ScreenshotHandle, ScreenshotBatch } from '../src/physicalExecution/screenshotHandle.ts';
 import { resolvePythonBin } from '../src/physicalExecution/pythonBin.ts';
+import { allowMmapRoot } from '../src/physicalExecution/shmReader.ts'; // ΠΑΝ-66：测试种子目录进白名单
 import type {
   ClickResult, CursorKindInfo, DragResult, HealthInfo, HitTestResult, HotkeyResult, MoveResult,
-  PhysicalError, PhysicalExecutionAdapter, Result, ScreenshotResult, ScrollResult,
-  SwitchWindowResult, TypeResult, UiTreeResult,
+  ActiveWindowResult, PhysicalError, PhysicalExecutionAdapter, Result, ScreenshotResult,
+  ScrollResult, SwitchWindowResult, TypeResult, UiTreeResult,
 } from '../src/physicalExecution/contracts.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,8 @@ class MockAdapter implements PhysicalExecutionAdapter {
   async takeScreenshotHandle(): Promise<Result<ScreenshotHandle, PhysicalError>> { return { ok: true, value: {} as ScreenshotHandle }; }
   async getUiTree(): Promise<Result<UiTreeResult, PhysicalError>> { return { ok: true, value: {} as UiTreeResult }; }
   async switchWindow(): Promise<Result<SwitchWindowResult, PhysicalError>> { return { ok: true, value: {} as SwitchWindowResult }; }
+  // R2-3（焦点保卫）：前台探测假实现 —— handle 测试不消费，仅满足接口面
+  async getActiveWindow(): Promise<Result<ActiveWindowResult, PhysicalError>> { return { ok: true, value: { method: 'native', title: null } }; }
   async getCursor(): Promise<Result<{ x: number; y: number }, PhysicalError>> { return { ok: true, value: { x: 0, y: 0 } }; }
   async getCursorKind(): Promise<Result<CursorKindInfo, PhysicalError>> { return { ok: true, value: { kind: 'arrow' } }; }
   async hitTest(): Promise<Result<HitTestResult, PhysicalError>> { return { ok: true, value: { available: false, classification: 'unavailable' } }; }
@@ -72,6 +75,8 @@ function seedScreenshot(transport: 'mmap-file' | 'base64', mmapDir: string): {
   proc: ReturnType<typeof spawn>;
   metaPromise: Promise<SeededMeta>;
 } {
+  // ΠΑΝ-66：mmap-file 读取防线（白名单根 fail-closed）—— 测试种子目录须登记
+  allowMmapRoot(mmapDir);
   const proc = spawn(resolvePythonBin(), [FIXTURE, transport, mmapDir], {
     stdio: ['pipe', 'pipe', 'inherit'],
   });

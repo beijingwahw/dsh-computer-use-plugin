@@ -389,6 +389,12 @@ test('ΝΩ-1c: guardDryRun 在场 ⇒ 宿主重放拒绝派发并诚实报错（
     const markers: Array<Record<string, unknown>> = [];
     const ex = physicalBackendHostExecutor(systemNs, {
       appendMarker: m => { markers.push(m); return Promise.resolve(); },
+    }, {
+      // F4-4（终验工单）：本册文件契约「全离线确定性、零网络」—— ΠΑΝ-42 的
+      // before 基线取证走生产路径会拉起真实 D-5 服务（spawn python），被拉起
+      // 的服务持有子进程句柄 ⇒ node:test 子进程永不退出、全量套件挂起。注入
+      // 缺席基线（既有诚实降级路径）；效果验证语义由 pan39-42 另册执法。
+      captureBeforeProbe: async () => null,
     });
     const r = await ex.executeAction({ kind: 'type_text', args: { text: 'topsecret' } });
     assert.equal(r.ok, false, 'dryRun 宿主上拒绝派发');
@@ -412,6 +418,12 @@ test('ΝΩ-1d: 黑名单热键被 system 层拦截（第四通道不再绕过黑
     const markers: Array<Record<string, unknown>> = [];
     const ex = physicalBackendHostExecutor(systemNs, {
       appendMarker: m => { markers.push(m); return Promise.resolve(); },
+    }, {
+      // F4-4（终验工单）：本册文件契约「全离线确定性、零网络」—— ΠΑΝ-42 的
+      // before 基线取证走生产路径会拉起真实 D-5 服务（spawn python），被拉起
+      // 的服务持有子进程句柄 ⇒ node:test 子进程永不退出、全量套件挂起。注入
+      // 缺席基线（既有诚实降级路径）；效果验证语义由 pan39-42 另册执法。
+      captureBeforeProbe: async () => null,
     });
     const r = await ex.executeAction({ kind: 'press_hotkey', args: { keys: ['alt', 'f4'] } });
     assert.equal(r.ok, false);
@@ -433,6 +445,12 @@ test('ΝΩ-1e: 存证 marker 三态 + 坐标经 system 换算派发 + 无机械�
     const markers: Array<Record<string, unknown>> = [];
     const ex = physicalBackendHostExecutor(systemNs, {
       appendMarker: m => { markers.push(m); return Promise.resolve(); },
+    }, {
+      // F4-4（终验工单）：本册文件契约「全离线确定性、零网络」—— ΠΑΝ-42 的
+      // before 基线取证走生产路径会拉起真实 D-5 服务（spawn python），被拉起
+      // 的服务持有子进程句柄 ⇒ node:test 子进程永不退出、全量套件挂起。注入
+      // 缺席基线（既有诚实降级路径）；效果验证语义由 pan39-42 另册执法。
+      captureBeforeProbe: async () => null,
     });
     // ok 态：归一坐标 → system 像素域换算（0.5,0.5)×(1000,500) = (500,250)
     const okClick = await ex.executeAction({

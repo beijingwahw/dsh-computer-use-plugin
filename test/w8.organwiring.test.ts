@@ -373,10 +373,12 @@ test('W8-源级①: src/index.ts 铸 som.sparseBudget 内核键 —— config.so
   const line = src.slice(i, src.indexOf('\n', i));
   assert.ok(line.includes('defaultValue: config.somSparseBudget'), 'config.somSparseBudget 铸入（配置通道）');
   assert.ok(line.includes("organ: 'perception'"), '器官归属 perception');
-  // 缺省不变：config.somSparseBudget 缺省 0（config.ts:551 default(0)）⇒ 入册值 0
+  // 缺省不变：config.somSparseBudget 缺省 0（config.ts default(0)）⇒ 入册值 0
   // = 未入册时 getOrDefault 的回声 0 —— 两条路径读数逐字节一致（D-B1 保持）。
+  // ΠΑΝ-105（配置域执法）：Schema.number() 铸造升级为 bNum(0, 4096) 域墙 ——
+  // 字面前缀同步，缺省 0 语义断言不动（F4-4 终验同步期望）。
   const cfg = readFileSync(new URL('../src/config.ts', import.meta.url), 'utf8');
-  const ci = cfg.indexOf('somSparseBudget: Schema.number()');
+  const ci = cfg.indexOf('somSparseBudget: bNum(0, 4096)');
   assert.ok(ci > 0 && cfg.slice(ci, cfg.indexOf('\n', ci)).includes('.default(0)'), 'config 缺省 0 在场（缺省不变的前提证据）');
 });
 

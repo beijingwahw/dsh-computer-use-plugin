@@ -12,7 +12,11 @@
 // 204/坏 JSON 400、32KB 超限 413。ΝΩ-4 追加：base_url 白名单（恶意外发目标
 // 400 base-url-not-allowed 零上游）、Host 头校验（伪造 Host 403
 // host-not-allowed）、Sec-Fetch-Site（cross-site 403 / same-origin/none 放行）、
-// connect 非预设 host 强制探测（endpoint-probe-failed 拒存）。每个用例 finally close。
+// connect 非预设 host 强制探测（endpoint-probe-failed 拒存）。
+// ΠΑΝ-20 追加：向导本机进程认证 —— 探测/写端点（/api/test、/api/models、
+// /api/connect、/api/disconnect）无 nonce ⇒ 403 wizard-nonce-required
+// （fail-closed，执法用例见 pan20.onboarding.nonce.test.ts）；本文件其余
+// 用例一律携带 handle.nonce 过闸，专注各自原有断言面。每个用例 finally close。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request, type Server } from 'node:http';
@@ -79,9 +83,19 @@ async function getJson(
   return { status: r.status, json: JSON.parse(r.body) };
 }
 
-async function postJson(port: number, path: string, payload: unknown): Promise<{ status: number; json: any }> {
-  const r = await httpReq(port, 'POST', path, JSON.stringify(payload));
+async function postJson(
+  port: number,
+  path: string,
+  payload: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<{ status: number; json: any }> {
+  const r = await httpReq(port, 'POST', path, JSON.stringify(payload), extraHeaders);
   return { status: r.status, json: JSON.parse(r.body) };
+}
+
+/** ΠΑΝ-20：受保护端点的法定 nonce 头（handle.nonce 的便捷包装） */
+function nonceHdr(h: { nonce: string }): Record<string, string> {
+  return { 'x-wizard-nonce': h.nonce };
 }
 
 /** 兜底关停（每个用例 finally 调；已关/未启动皆安静） */
@@ -271,7 +285,7 @@ test('Λ-2: /api/test 成功 —— 预设装配（缺省基址/模型 + Bearer�
     const { fetchImpl, calls } = recorder(() => chatOk('ok'));
     h = await startOnboarding({ port: 0, deps: { fetchImpl } });
     const KEY = 'sk-wizard-probe-1234567890';
-    const r = await postJson(h.port, '/api/test', { platform: 'glm', api_key: KEY });
+    const r = await postJson(h.port, '/api/test', { platform: 'glm', api_key: KEY }, nonceHdr(h));
     assert.equal(r.status, 200);
     assert.equal(r.json.ok, true);
     assert.equal(r.json.probe.ok, true);
@@ -288,12 +302,12 @@ test('Λ-2: /api/test 成功 —— 预设装配（缺省基址/模型 + Bearer�
     // 覆盖线：base_url/model 覆盖预设
     const r2 = await postJson(h.port, '/api/test', {
       platform: 'openai', api_key: KEY, base_url: 'http://127.0.0.1:9/v1', model: 'gpt-4o',
-    });
+    }, nonceHdr(h));
     assert.equal(r2.json.probe.ok, true);
     assert.equal(calls[1]!.url, 'http://127.0.0.1:9/v1/chat/completions');
     assert.equal(bodyOf(calls[1]!).model, 'gpt-4o');
     // 非法平台 ⇒ 400
-    const bad = await postJson(h.port, '/api/test', { platform: 'nonexistent', api_key: 'x' });
+    const bad = await postJson(h.port, '/api/test', { platform: 'nonexistent', api_key: 'x' }, nonceHdr(h));
     assert.equal(bad.status, 400);
     assert.equal(bad.json.ok, false);
     // 非法平台零上游请求
@@ -316,7 +330,8 @@ test('Λ-2/ΑΩ-R7: /api/models —— 密钥走请求头（Bearer）；发现�
     h = await startOnboarding({ port: 0, deps: { fetchImpl } });
     const KEY = 'sk-wizard-models-123456789';
     // 成功：缺省基址 + 密钥走 Authorization 头（ΑΩ-R7：绝不进 URL query）+ {base}/models
-    const ok = await getJson(h.port, '/api/models?platform=glm', { authorization: `Bearer ${KEY}` });
+    // ΠΑΝ-20：/api/models 属探测端点 —— 须带 nonce 头
+    const ok = await getJson(h.port, '/api/models?platform=glm', { authorization: `Bearer ${KEY}`, ...nonceHdr(h) });
     assert.equal(ok.status, 200);
     assert.equal(ok.json.ok, true);
     assert.equal(ok.json.models.length, 2);
@@ -329,12 +344,12 @@ test('Λ-2/ΑΩ-R7: /api/models —— 密钥走请求头（Bearer）；发现�
     assert.ok(!calls[0]!.url.includes(KEY), '上游 URL 不得含密钥原文');
     assert.equal(headersOf(calls[0]!)['x-api-key'], undefined, 'openai 方言只发 Bearer，不另发 x-api-key');
     // base_url 覆盖线（base_url 非密钥，留 query 合法）
-    const ok2 = await getJson(h.port, `/api/models?platform=ollama&base_url=${encodeURIComponent('http://127.0.0.1:4321/v1')}`);
+    const ok2 = await getJson(h.port, `/api/models?platform=ollama&base_url=${encodeURIComponent('http://127.0.0.1:4321/v1')}`, nonceHdr(h));
     assert.equal(ok2.json.ok, true);
     assert.equal(calls[1]!.url, 'http://127.0.0.1:4321/v1/models');
     assert.equal(headersOf(calls[1]!).authorization, undefined, '本地无 key ⇒ 免鉴权头');
     // 失败 ⇒ {ok:false, models:[]}（协议已知 ⇒ 单方言一次尝试，零重试）
-    const fail = await getJson(h.port, '/api/models?platform=glm', { authorization: `Bearer ${KEY}` });
+    const fail = await getJson(h.port, '/api/models?platform=glm', { authorization: `Bearer ${KEY}`, ...nonceHdr(h) });
     assert.equal(fail.status, 200);
     assert.equal(fail.json.ok, false);
     assert.deepEqual(fail.json.models, []);
@@ -342,7 +357,7 @@ test('Λ-2/ΑΩ-R7: /api/models —— 密钥走请求头（Bearer）；发现�
     assert.ok(!JSON.stringify(fail.json).includes(KEY), '失败响应面零密钥');
     assert.equal(calls.length, 3, 'glm 协议已知（openai）⇒ 失败不换方言重试');
     // 非法平台 ⇒ 400（零上游请求）
-    const bad = await getJson(h.port, '/api/models?platform=nope');
+    const bad = await getJson(h.port, '/api/models?platform=nope', nonceHdr(h));
     assert.equal(bad.status, 400);
     assert.equal(bad.json.ok, false);
     assert.deepEqual(bad.json.models, []);
@@ -368,7 +383,7 @@ test('ΑΩ-R7: /api/models 密钥头法 —— x-api-key 兜底生效、query ap
     await withClearedEnv(async () => {
       // 1) x-api-key 兜底：无 Authorization 头时从 x-api-key 取（anthropic 方言转发为 x-api-key）
       const altKey = 'sk-hdr-alt-abcdef123456';
-      const r1 = await getJson(h!.port, '/api/models?platform=anthropic', { 'x-api-key': altKey });
+      const r1 = await getJson(h!.port, '/api/models?platform=anthropic', { 'x-api-key': altKey, ...nonceHdr(h!) });
       assert.equal(r1.json.ok, true);
       assert.equal(calls[0]!.url, 'https://api.anthropic.com/v1/models');
       assert.equal(headersOf(calls[0]!)['x-api-key'], altKey, 'x-api-key 头密钥照常转发上游');
@@ -378,12 +393,13 @@ test('ΑΩ-R7: /api/models 密钥头法 —— x-api-key 兜底生效、query ap
       const r2 = await getJson(h!.port, '/api/models?platform=anthropic', {
         authorization: 'Bearer sk-priority-wins-1234567890',
         'x-api-key': altKey,
+        ...nonceHdr(h!),
       });
       assert.equal(headersOf(calls[1]!)['x-api-key'], 'sk-priority-wins-1234567890', 'Bearer 优先者胜出');
       // 3) legacy query api_key 一律无视：头缺失 ⇒ 走 env（已清空）⇒ 免鉴权头；
       //    query 密钥既不进上游 URL 也不进任何头（清 env 后断言免鉴权即证明未采信）
       const QUERY_KEY = 'sk-query-legacy-should-die-999';
-      const r3 = await getJson(h!.port, `/api/models?platform=glm&api_key=${encodeURIComponent(QUERY_KEY)}`);
+      const r3 = await getJson(h!.port, `/api/models?platform=glm&api_key=${encodeURIComponent(QUERY_KEY)}`, nonceHdr(h!));
       assert.equal(calls[2]!.url, 'https://open.bigmodel.cn/api/paas/v4/models');
       assert.ok(!calls[2]!.url.includes('api_key'), '上游 URL 不得含 api_key 参数');
       assert.ok(!calls[2]!.url.includes(QUERY_KEY), 'query 密钥绝不进上游 URL');
@@ -392,7 +408,7 @@ test('ΑΩ-R7: /api/models 密钥头法 —— x-api-key 兜底生效、query ap
       assert.ok(!JSON.stringify(r3.json).includes(QUERY_KEY), '响应面零 query 密钥');
       // 4) 错误面脱敏：上游 401 错误体里的 canary 密钥与我方 Bearer 都到不了响应面
       const MY_KEY = 'sk-err-face-1234567890abcd';
-      const r4 = await getJson(h!.port, '/api/models?platform=glm', { authorization: `Bearer ${MY_KEY}` });
+      const r4 = await getJson(h!.port, '/api/models?platform=glm', { authorization: `Bearer ${MY_KEY}`, ...nonceHdr(h!) });
       assert.equal(r4.json.ok, false);
       assert.ok(r4.json.error, '失败附原因');
       assert.ok(!JSON.stringify(r4.json).includes(CANARY), '上游泄漏的 canary 密钥被挡在错误面外');
@@ -414,7 +430,7 @@ test('Λ-2: /api/connect 成功 —— 存档（via wizard）+ 热应用回调�
     const store = new ConnectionStore(storePath);
     const seen: VisionConnection[] = [];
     h = await startOnboarding({ port: 0, deps: { store, onConnect: async c => { seen.push(c); } } });
-    const r = await postJson(h.port, '/api/connect', { platform: 'glm', api_key: RAW, model: 'glm-5.3' });
+    const r = await postJson(h.port, '/api/connect', { platform: 'glm', api_key: RAW, model: 'glm-5.3' }, nonceHdr(h));
     assert.equal(r.status, 200);
     assert.equal(r.json.ok, true);
     assert.equal(r.json.current, 'glm');
@@ -455,7 +471,7 @@ test('Λ-2: /api/connect 回调抛错 ⇒ 200 但 ok:false（热应用失败文�
       port: 0,
       deps: { store, onConnect: async () => { calls++; throw new Error('hot-apply boom'); } },
     });
-    const r = await postJson(h.port, '/api/connect', { platform: 'qwen', api_key: RAW });
+    const r = await postJson(h.port, '/api/connect', { platform: 'qwen', api_key: RAW }, nonceHdr(h));
     assert.equal(r.status, 200, '热应用失败也是 200（存档已成功）');
     assert.equal(r.json.ok, false);
     assert.match(r.json.error, /热应用失败/);
@@ -484,7 +500,7 @@ test('Λ-2: /api/disconnect —— 清档 {ok:true}；/api/state 回到未连接
     let s = await getJson(h.port, '/api/state');
     assert.equal(s.json.current, 'glm');
     assert.equal(s.json.connectedVia, 'tool');
-    const r = await postJson(h.port, '/api/disconnect', {});
+    const r = await postJson(h.port, '/api/disconnect', {}, nonceHdr(h));
     assert.equal(r.status, 200);
     assert.equal(r.json.ok, true);
     assert.equal(new ConnectionStore(storePath).load(), null, '档位已清');
@@ -507,7 +523,7 @@ test('Λ-2: 密钥卫生 —— connect 回执 / /api/state / GET / 页面全部
   try {
     const store = new ConnectionStore(storePath);
     h = await startOnboarding({ port: 0, deps: { store, onConnect: async () => {} } });
-    const conn = await postJson(h.port, '/api/connect', { platform: 'anthropic', api_key: RAW });
+    const conn = await postJson(h.port, '/api/connect', { platform: 'anthropic', api_key: RAW }, nonceHdr(h));
     assert.equal(conn.json.ok, true);
     const state = await httpReq(h.port, 'GET', '/api/state');
     const page = await httpReq(h.port, 'GET', '/');
@@ -541,7 +557,10 @@ test('Λ-2: 端口回退 —— 18432 被占 ⇒ startOnboarding 落 18433；url
     });
     h = await startOnboarding({ deps: { store: new ConnectionStore(storePath) } }); // 缺省口 18432
     assert.equal(h.port, 18433, '被占 +1 回退');
-    assert.equal(h.url, `http://127.0.0.1:${h.port}/`);
+    // ΠΑΝ-20：页面地址挂 nonce fragment（fragment 永不进 HTTP 请求 —— 服务端零泄漏）
+    assert.ok(h.url.startsWith(`http://127.0.0.1:${h.port}/#`), `url 应为本端口 + nonce fragment：${h.url}`);
+    assert.ok(h.url.endsWith(`#${h.nonce}`), 'fragment 即会话 nonce');
+    assert.match(h.nonce, /^[0-9a-f]{64}$/, 'nonce = 32 字节高熵十六进制');
     assert.equal(h.closed, false);
     // 回退口真活：向导响应标题；占坑者不是向导
     const mine = await httpReq(h.port, 'GET', '/api/state');
@@ -667,15 +686,15 @@ test('Λ-2: 405/404/OPTIONS 204/坏 JSON 400 —— 安全律的裁决面', asyn
       const o = await httpReq(h.port, 'OPTIONS', p);
       assert.equal(o.status, 204, `OPTIONS ${p} ⇒ 204`);
     }
-    // 坏 JSON ⇒ 400
-    const bj = await httpReq(h.port, 'POST', '/api/connect', '{not json');
+    // 坏 JSON ⇒ 400（ΠΑΝ-20：带 nonce 过闸后落到体解析层）
+    const bj = await httpReq(h.port, 'POST', '/api/connect', '{not json', nonceHdr(h));
     assert.equal(bj.status, 400);
     assert.equal(JSON.parse(bj.body).ok, false);
     // 空体 ⇒ 400
-    const eb = await httpReq(h.port, 'POST', '/api/connect', '');
+    const eb = await httpReq(h.port, 'POST', '/api/connect', '', nonceHdr(h));
     assert.equal(eb.status, 400);
     // 非对象 JSON（数组）⇒ 400
-    const arr = await httpReq(h.port, 'POST', '/api/connect', '[]');
+    const arr = await httpReq(h.port, 'POST', '/api/connect', '[]', nonceHdr(h));
     assert.equal(arr.status, 400);
   } finally {
     await closeHandle(h);
@@ -692,7 +711,7 @@ test('Λ-2: 请求体限 32KB —— 33KB 体 ⇒ 413（Content-Length 预告短
     h = await startOnboarding({ port: 0, deps: { store: new ConnectionStore(storePath) } });
     const big = JSON.stringify({ platform: 'glm', api_key: 'x'.repeat(33 * 1024) });
     assert.ok(Buffer.byteLength(big) > 32 * 1024, '前置：体确超 32KB');
-    const r = await httpReq(h.port, 'POST', '/api/test', big);
+    const r = await httpReq(h.port, 'POST', '/api/test', big, nonceHdr(h));
     assert.equal(r.status, 413);
     assert.equal(JSON.parse(r.body).ok, false);
     // 服务仍在（超限不杀伤服务器）
@@ -714,40 +733,40 @@ test('ΝΩ-4: 恶意 base_url ⇒ 400 base-url-not-allowed 零上游请求；同
     h = await startOnboarding({ port: 0, deps: { fetchImpl, store: new ConnectionStore(storePath) } });
     const KEY = 'sk-now4-whitelist-1234567890';
     // 攻击面一：/api/models 的 <img> 外发通道（GET 简单请求无预检）—— 任意域名
-    const evil1 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('http://attacker.example/v1')}`, { authorization: `Bearer ${KEY}` });
+    const evil1 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('http://attacker.example/v1')}`, { authorization: `Bearer ${KEY}`, ...nonceHdr(h) });
     assert.equal(evil1.status, 400);
     assert.equal(evil1.json.ok, false);
     assert.match(evil1.json.error, /base-url-not-allowed/);
     assert.deepEqual(evil1.json.models, []);
     // 攻击面二：后缀仿冒预设域名（api.openai.com.evil.tld —— 归一比对不匹配）
-    const evil2 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('https://api.openai.com.evil.tld/v1')}`);
+    const evil2 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('https://api.openai.com.evil.tld/v1')}`, nonceHdr(h));
     assert.equal(evil2.status, 400);
     assert.match(evil2.json.error, /base-url-not-allowed/);
     // 攻击面三：他平台预设端点（platform=openai + glm 官方域 —— 非同平台）
-    const evil3 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('https://open.bigmodel.cn/api/paas/v4')}`);
+    const evil3 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('https://open.bigmodel.cn/api/paas/v4')}`, nonceHdr(h));
     assert.equal(evil3.status, 400);
     assert.match(evil3.json.error, /base-url-not-allowed/);
     // 攻击面四：/api/test（text/plain 表单 POST 同属简单请求）与 /api/connect（诱导存攻击者端点）
-    const evil4 = await postJson(h.port, '/api/test', { platform: 'openai', api_key: KEY, base_url: 'http://attacker.example/v1' });
+    const evil4 = await postJson(h.port, '/api/test', { platform: 'openai', api_key: KEY, base_url: 'http://attacker.example/v1' }, nonceHdr(h));
     assert.equal(evil4.status, 400);
     assert.match(evil4.json.error, /base-url-not-allowed/);
-    const evil5 = await postJson(h.port, '/api/connect', { platform: 'openai', api_key: KEY, base_url: 'http://attacker.example/v1' });
+    const evil5 = await postJson(h.port, '/api/connect', { platform: 'openai', api_key: KEY, base_url: 'http://attacker.example/v1' }, nonceHdr(h));
     assert.equal(evil5.status, 400);
     assert.match(evil5.json.error, /base-url-not-allowed/);
     assert.equal(new ConnectionStore(storePath).load(), null, '拒存的端点绝不落档');
     // 脏 URL（无协议碎片串）⇒ 同拒
-    const evil6 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('attacker.example/v1')}`);
+    const evil6 = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('attacker.example/v1')}`, nonceHdr(h));
     assert.equal(evil6.status, 400);
     assert.match(evil6.json.error, /base-url-not-allowed/);
     // 白名单内零上游请求 —— 密钥一步都没出门
     assert.equal(calls.length, 0, '一切恶意 base_url 均被 400 短路，零上游请求');
     // 合法臂一：同平台预设端点（openai 官方域 + openai 平台）⇒ 放行且功能完好
-    const okPreset = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('https://api.openai.com/v1')}`, { authorization: `Bearer ${KEY}` });
+    const okPreset = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('https://api.openai.com/v1')}`, { authorization: `Bearer ${KEY}`, ...nonceHdr(h) });
     assert.equal(okPreset.status, 200);
     assert.equal(okPreset.json.ok, true);
     assert.equal(calls[0]!.url, 'https://api.openai.com/v1/models');
     // 合法臂二：显式回环地址（任意端口 —— 本地服务改口场景）⇒ 放行
-    const okLoop = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('http://127.0.0.1:4321/v1')}`);
+    const okLoop = await getJson(h.port, `/api/models?platform=openai&base_url=${encodeURIComponent('http://127.0.0.1:4321/v1')}`, nonceHdr(h));
     assert.equal(okLoop.status, 200);
     assert.equal(okLoop.json.ok, true);
     assert.equal(calls[1]!.url, 'http://127.0.0.1:4321/v1/models');
@@ -805,6 +824,7 @@ test('ΝΩ-4: Sec-Fetch-Site: cross-site/same-site ⇒ 403；same-origin/none/�
     const bad1 = await getJson(h.port, '/api/models?platform=openai&base_url=' + encodeURIComponent('http://127.0.0.1:4321/v1'), {
       authorization: 'Bearer sk-now4-secfetch-1234567890',
       'sec-fetch-site': 'cross-site',
+      ...nonceHdr(h),
     });
     assert.equal(bad1.status, 403);
     assert.equal(bad1.json.ok, false);
@@ -818,6 +838,7 @@ test('ΝΩ-4: Sec-Fetch-Site: cross-site/same-site ⇒ 403；same-origin/none/�
     const ok1 = await getJson(h.port, '/api/models?platform=openai', {
       authorization: 'Bearer sk-now4-sameorigin-1234',
       'sec-fetch-site': 'same-origin',
+      ...nonceHdr(h),
     });
     assert.equal(ok1.status, 200);
     assert.equal(ok1.json.ok, true);
@@ -847,7 +868,7 @@ test('ΝΩ-4: connect 非预设 host —— 探测未过 ⇒ ok:false 拒存（e
     // ① 回环自定义端点 + 探测未过 ⇒ 拒存（未写档、未回调）
     const r1 = await postJson(h.port, '/api/connect', {
       platform: 'ollama', base_url: 'http://127.0.0.1:4321/v1', model: 'qwen2.5vl',
-    });
+    }, nonceHdr(h));
     assert.equal(r1.status, 200);
     assert.equal(r1.json.ok, false);
     assert.match(r1.json.error, /endpoint-probe-failed/);
@@ -857,7 +878,7 @@ test('ΝΩ-4: connect 非预设 host —— 探测未过 ⇒ ok:false 拒存（e
     // ② 同一端点探测通过（假 fetch 换 chatOk）⇒ 正常存档
     const r2 = await postJson(h.port, '/api/connect', {
       platform: 'ollama', base_url: 'http://127.0.0.1:4321/v1', model: 'qwen2.5vl',
-    });
+    }, nonceHdr(h));
     assert.equal(r2.status, 200);
     assert.equal(r2.json.ok, true);
     assert.equal(calls.length, 2, '第二次 connect 重探（探测在前存档在后）');
@@ -869,9 +890,9 @@ test('ΝΩ-4: connect 非预设 host —— 探测未过 ⇒ ok:false 拒存（e
     const before = calls.length;
     const r3 = await postJson(h.port, '/api/connect', {
       platform: 'ollama', base_url: 'http://127.0.0.1:11434/v1', model: 'qwen2.5vl',
-    });
+    }, nonceHdr(h));
     assert.equal(r3.json.ok, true);
-    const r4 = await postJson(h.port, '/api/connect', { platform: 'glm', api_key: 'sk-now4-preset-1234567890' });
+    const r4 = await postJson(h.port, '/api/connect', { platform: 'glm', api_key: 'sk-now4-preset-1234567890' }, nonceHdr(h));
     assert.equal(r4.json.ok, true);
     assert.equal(calls.length, before, '预设端点与未覆盖 baseUrl ⇒ 零探测请求');
   } finally {

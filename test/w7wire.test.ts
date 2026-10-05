@@ -114,7 +114,10 @@ test('W7-①a: index.ts 组合根接线源级 —— checkpoint 同目录派生 
   assert.match(src, /armFederationTrustPersistence\(trustStore\)/, '恢复后武装（突变计数节流原子落盘）');
   // 卸载面：flush 最后一程 + 解除武装（resetFederationRuntime 是唯一解除缝）
   assert.match(src, /const trustFlushed = flushFederationTrust\(\);/, '卸载路径冲刷节流未及落盘的突变');
-  assert.match(src, /try \{ resetFederationRuntime\(\); \} catch/, '卸载解除武装 + 清账（W-1 单例隔离律）');
+  // ΠΑΝ-28b 注记：卸载链重构为 runUnloadAction 登记制后，解除武装调用进动作
+  // 闭包（异常吞没语义由登记簿统一提供）—— 锚跟随新结构，执法语义不变。
+  assert.match(src, /runUnloadAction\('federation\.reset', \(\) => \{ resetFederationRuntime\(\); \}\)/,
+    '卸载解除武装 + 清账（W-1 单例隔离律；经 ΠΑΝ-28b 登记簿执行）');
 });
 
 test('W7-①b: 接线行为级往返 —— 冷启动空账 → 武装 → 节流落盘 → 卸载面（flush+reset）→ 再启动恢复', () => {

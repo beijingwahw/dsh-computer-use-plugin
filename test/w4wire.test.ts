@@ -426,9 +426,13 @@ test('W4-G: orchestratorParallel 缺省 false + 生产透传表达式；四新�
   assert.equal(resolved.autonomySteerEnabled, false, '环内漂移消费缺省关（零回归红律）');
 
   const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  // ΤΕΛ-4 行为更新（D-G16③，见 C:\2\.survey\fix\T1-4.md）：start_complex_task 的
+  // runOrchestrator opts 由单行字面量扩为多行 —— parallel 透传行之后追加了
+  // planReady（沙箱栈链臂发射）条件展开。透传表达式本体分毫未动，锚从
+  // 「单行 { parallel: ... }」改为钉透传表达式本身（不再钉排版形状）。
   assert.match(
     src,
-    /\{ parallel: config\.orchestratorParallel === true \}/,
+    /parallel: config\.orchestratorParallel === true,/,
     'start_complex_task 把 config 透传为 RunOrchestratorOptions.parallel',
   );
 });

@@ -23,6 +23,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
+import { createHmac, randomBytes } from 'node:crypto';
 import {
   reversalEscrow, loadExternalStrategyTable, builtinCompensationSemantics, compensationPathOf,
 } from '../src/reversalEscrow.ts';
@@ -341,6 +342,17 @@ function ephemeralPort(): Promise<number> {
   });
 }
 
+/** ΠΑΝ-88：有界轮询直至谓词命中（组提交落盘到达是异步去抖后的——非同步路径） */
+async function waitFor<T>(probe: () => T | Promise<T | null>, timeoutMs: number, what: string): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await probe();
+    if (v !== null && v !== undefined) return v;
+    if (Date.now() > deadline) throw new Error(`waitFor 超时（${timeoutMs}ms）：${what}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 /** 最小合法摘要（v=1/K=8 坨）—— aggregate 环入件 */
 function tinyDigest(key = 'w9.tiny'): string {
   return JSON.stringify({ v: 1, mintedAt: 1, epsilon: 1, keys: [{ key, n: 1, bins: Array.from({ length: 8 }, () => [1, 0]) }] });
@@ -459,11 +471,14 @@ test('W9-2 D-C2-② env 面执法：PORT / MAX_BODY_BYTES / BARRIER_TTL_MS 逐�
   }
 });
 
-test('W9-2 D-C2-③ 持久化开关：缺席 = 关机即忘不变；设置 = 环随入落盘 + 重启防御回读；坏档 ⇒ 空环起步不炸', { timeout: 90_000 }, async t => {
+test('W9-2 D-C2-③ 持久化开关：缺席 = 关机即忘不变；设置 = 组提交落盘 + 重启验签回读；坏档/篡改档 ⇒ 空环起步不炸', { timeout: 90_000 }, async t => {
   const dir = mkdtempSync(path.join(tmpdir(), 'w9persist-'));
   dirs.push(dir);
   const persistFile = path.join(dir, 'federation-digests.json');
-  // (a) 开关开启：入环 ⇒ 落盘；进程消亡后重启 ⇒ 环恢复
+  // (a) 阶段保存的正档副本（后续关停可能覆写盘上文件，篡改用例以副本为基准）
+  let goodPayload: { contentSig: string; digests: Array<Record<string, unknown>> } | null = null;
+  // (a) 开关开启：入环 ⇒ 组提交落盘（ΠΑΝ-88：150ms 去抖后异步批写——不再每次
+  //     POST 同步 fsync 阻塞事件循环；落盘到达按有界轮询断言）；进程消亡后重启 ⇒ 环恢复
   let srv: Awaited<ReturnType<typeof startFedServer>>;
   try {
     srv = await startFedServer({ DSH_FED_PERSIST_DIR: dir });
@@ -481,10 +496,18 @@ test('W9-2 D-C2-③ 持久化开关：缺席 = 关机即忘不变；设置 = 环
       assert.equal(r.status, 200);
     }
     assert.equal(((await (await fetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).json()) as { buffered: number }).buffered, 2);
-    const persisted = JSON.parse(readFileSync(persistFile, 'utf8')) as { digests: unknown[] };
-    assert.equal(persisted.digests.length, 2, '随入环原子落盘（tmp+fsync+rename —— 绝无半档）');
+    // ΠΑΝ-88：组提交有界等待（去抖 150ms + 异步 fsync——非 POST 同步路径）
+    const persisted = await waitFor(async () => {
+      try {
+        const p = JSON.parse(readFileSync(persistFile, 'utf8')) as { digests?: unknown[]; contentSig?: string };
+        return (p.digests?.length === 2 && typeof p.contentSig === 'string') ? p : null;
+      } catch { return null; }
+    }, 5_000, '组提交落盘（digests=2 + contentSig）');
+    assert.equal(persisted.digests!.length, 2, '突发入环合并落盘（tmp+fsync+rename 原子写）');
+    assert.match(persisted.contentSig!, /^[0-9a-f]{64}$/, 'ΠΑΝ-88：载荷带内容签名（HMAC）');
+    goodPayload = JSON.parse(JSON.stringify(persisted)) as { contentSig: string; digests: Array<Record<string, unknown>> };
   } finally {
-    await srv.stop(); // POSIX 走优雅关停落盘；win32 硬终断 —— 环已在入环时落盘（两者皆覆盖）
+    await srv.stop(); // POSIX 走优雅关停落盘；win32 硬终断 —— 环已在组提交窗口内落盘（两者皆覆盖）
   }
   let srv2: Awaited<ReturnType<typeof startFedServer>>;
   try {
@@ -495,7 +518,7 @@ test('W9-2 D-C2-③ 持久化开关：缺席 = 关机即忘不变；设置 = 环
   try {
     const base2 = `http://127.0.0.1:${srv2.port}`;
     const h1 = (await (await fetch(`${base2}/health`, { signal: AbortSignal.timeout(2_000) })).json()) as { buffered: number };
-    assert.equal(h1.buffered, 2, '重启防御回读：环恢复（生产化能力 —— 缺省仍关机即忘）');
+    assert.equal(h1.buffered, 2, '重启验签回读：环恢复（生产化能力 —— 缺省仍关机即忘）');
     const r = await fetch(`${base2}/aggregate`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: tinyDigest('w9.p3'), signal: AbortSignal.timeout(5_000),
     });
@@ -517,6 +540,27 @@ test('W9-2 D-C2-③ 持久化开关：缺席 = 关机即忘不变；设置 = 环
     assert.equal(h2.buffered, 0, '坏档 ⇒ 空环起步（诚实归零，不冒充恢复）');
   } finally {
     await srv3.stop();
+  }
+  // (c) ΠΑΝ-88 篡改档：形状合法 + contentSig 在场但内容被改（签名失配）⇒ 空环起步
+  //     —— 持久化把磁盘完整性引入信任面，回读必须验内容签名（不再「形状对即入环」）
+  assert.notEqual(goodPayload, null, '篡改基准 = (a) 阶段的正档副本');
+  const tampered = {
+    ...goodPayload!,
+    digests: goodPayload!.digests.map((d) => ({ ...d, keys: (d.keys as Array<Record<string, unknown>>).map((k) => ({ ...k, n: 999 })) })),
+  };
+  writeFileSync(persistFile, JSON.stringify(tampered), 'utf8');
+  let srv4: Awaited<ReturnType<typeof startFedServer>>;
+  try {
+    srv4 = await startFedServer({ DSH_FED_PERSIST_DIR: dir });
+  } catch (e) {
+    return t.skip(`环境不支持子进程/环回监听：诚实跳过（${(e as Error).message}）`);
+  }
+  try {
+    const h3 = (await (await fetch(`http://127.0.0.1:${srv4.port}/health`, { signal: AbortSignal.timeout(2_000) })).json()) as { ok: boolean; buffered: number };
+    assert.equal(h3.ok, true, '篡改档不炸起动');
+    assert.equal(h3.buffered, 0, 'ΠΑΝ-88：内容签名失配 ⇒ 拒入环（形状合法但伪造的摘要进不了聚合源）');
+  } finally {
+    await srv4.stop();
   }
 });
 
@@ -664,6 +708,72 @@ test('W9-2 D-C5-③ 带签客户端双端 barrier 往返：注入 fetchImpl 加�
   }
 });
 
+// ═══ ΠΑΝ-88：HMAC nonce + ±30s 窗 + 重放拒绝（C2-6/M-4 落锤）═══
+
+/** v2 签名头（推荐协议）：`${ts}.${nonce}.${body}`；v1（legacy 无 nonce）：`${ts}.${body}` */
+function hmacHeaders(body: string, secret: string, ts: number, nonce: string | null): Record<string, string> {
+  const input = nonce === null ? `${ts}.${body}` : `${ts}.${nonce}.${body}`;
+  const h: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-dsh-fed-timestamp': String(ts),
+    'x-dsh-fed-signature': createHmac('sha256', secret).update(input).digest('hex'),
+  };
+  if (nonce !== null) h['x-dsh-fed-nonce'] = nonce;
+  return h;
+}
+
+test('ΠΑΝ-88 nonce+时间戳+重放拒绝：v2 首发 200 / 同 nonce 重放 401（新 ts 新签也拒）/ v1 兼容 200 / 31s 前 stale', { timeout: 60_000 }, async t => {
+  const SECRET = 'pan88-replay-secret';
+  let srv: Awaited<ReturnType<typeof startFedServer>>;
+  try {
+    srv = await startFedServer({ DSH_FEDERATION_TOKEN: SECRET });
+  } catch (e) {
+    return t.skip(`环境不支持子进程/环回监听：诚实跳过（${(e as Error).message}）`);
+  }
+  const base = `http://127.0.0.1:${srv.port}`;
+  const body = tinyDigest('pan88.replay');
+  const post = async (h: Record<string, string>) => {
+    const r = await fetch(`${base}/aggregate`, { method: 'POST', headers: h, body, signal: AbortSignal.timeout(2_000) });
+    return { status: r.status, json: (await r.json()) as { reason?: string } };
+  };
+  try {
+    // health 透明面：nonce 推荐与 ±30s 窗在指引中可见
+    const h = (await (await fetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).json()) as { authMode: string; authNotice: string };
+    assert.equal(h.authMode, 'token');
+    assert.ok(h.authNotice.includes('nonce'), `authNotice 指引提及 nonce（${h.authNotice}）`);
+    assert.ok(h.authNotice.includes('±30s'), '±30s 窗口透明');
+    // v2 首发：200
+    const nonce = randomBytes(12).toString('hex');
+    const ok = await post(hmacHeaders(body, SECRET, Date.now(), nonce));
+    assert.equal(ok.status, 200, 'v2 带签首发通过');
+    // 同 nonce 重放：401 replayed-request（时间戳与签名全部重造也不行——nonce 是重放身份证）
+    const rp = await post(hmacHeaders(body, SECRET, Date.now(), nonce));
+    assert.equal(rp.status, 401);
+    assert.equal(rp.json.reason, 'replayed-request', '同 nonce 重放被拒');
+    // 新 nonce：200（重放拒绝不误伤合法新请求）
+    const ok2 = await post(hmacHeaders(body, SECRET, Date.now(), randomBytes(12).toString('hex')));
+    assert.equal(ok2.status, 200, '新 nonce 合法通过');
+    // v1（legacy 无 nonce，federationAuthHeaders 既有面）：首发 200、原样重放 401
+    const v1 = await post(hmacHeaders(body, SECRET, Date.now(), null));
+    assert.equal(v1.status, 200, 'v1 legacy 兼容（既有客户端零变化）');
+    const v1Headers = hmacHeaders(body, SECRET, Date.now() - 1_000, null);
+    const v1replay1 = await post(v1Headers);
+    const v1replay2 = await post(v1Headers); // 同一签名第二次
+    assert.equal(v1replay1.status, 200, 'v1 首发（1s 前时间戳仍在 ±30s 窗内）');
+    assert.equal(v1replay2.status, 401, 'v1 原样重放（同签名材料）被拒');
+    assert.equal((v1replay2.json as { reason?: string }).reason, 'replayed-request');
+    // 31s 前时间戳 ⇒ stale（±30s 窗收窄执法）
+    const stale = await post(hmacHeaders(body, SECRET, Date.now() - 31_000, randomBytes(12).toString('hex')));
+    assert.equal(stale.status, 401);
+    assert.equal(stale.json.reason, 'stale-timestamp', '±30s 窗外的重放面就位');
+    // 全程重放被拒 ⇒ 环内恰 4 份合法摘要（v2 首发 + v2 新 nonce + v1 首发 + v1 1s前首发）
+    const h2 = (await (await fetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).json()) as { buffered: number };
+    assert.equal(h2.buffered, 4, '拒绝在解体之前——重放零入环（stale 与 replayed 均未入环）');
+  } finally {
+    await srv.stop();
+  }
+});
+
 test('W9-2 D-C2-④ 优雅关停：SIGTERM ⇒ 排空后 exit 0（POSIX）；win32 硬终断亦不挂（诚实分层）+ 立法在源', { timeout: 60_000 }, async t => {
   // (a) 立法在源（w5cross ⑩ 同律 —— 结构断言把守关停纪律，平台无关）
   const srv = readFileSync(new URL('../scripts/federation-server.mjs', import.meta.url), 'utf8');
@@ -672,6 +782,12 @@ test('W9-2 D-C2-④ 优雅关停：SIGTERM ⇒ 排空后 exit 0（POSIX）；win
   assert.match(srv, /persistRing\('shutdown'\)/, '关停随行落盘（持久化开启时）');
   assert.match(srv, /for \(const sig of \['SIGINT', 'SIGTERM'\]\)/, '双信号接线');
   assert.match(srv, /BARRIER_AUTH_REQUIRED = AUTH_REQUIRED && !ALLOW_OPEN_BARRIER/, 'D-C5 立法：缺省签名 + 兼容开关');
+  // ΠΑΝ-88 立法在源：nonce 重放拒绝 + ±30s 窗 + 组提交 + 回读验签
+  assert.match(srv, /x-dsh-fed-nonce/, 'ΠΑΝ-88：nonce 头协议在场');
+  assert.match(srv, /AUTH_SKEW_MS = 30_000/, 'ΠΑΝ-88：±30s 窗立法');
+  assert.match(srv, /replayed-request/, 'ΠΑΝ-88：重放拒绝理由面在场');
+  assert.match(srv, /schedulePersist\('aggregate'\)/, 'ΠΑΝ-88：运行期组提交（不再每次 POST 同步 fsync）');
+  assert.match(srv, /persist-tamper/, 'ΠΑΝ-88：回读内容签名验证事件在场');
   for (const envName of ['DSH_FED_PORT', 'DSH_FED_MAX_BODY_BYTES', 'DSH_FED_BARRIER_TTL_MS', 'DSH_FED_PERSIST_DIR', 'FED_ALLOW_OPEN_BARRIER']) {
     assert.ok(srv.includes(envName), `env 面 ${envName} 在源`);
   }

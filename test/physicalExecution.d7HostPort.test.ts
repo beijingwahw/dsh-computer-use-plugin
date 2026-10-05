@@ -145,13 +145,21 @@ maybeTest('execute(noop): immediate success (router internal short-circuit, no m
 maybeTest('execute(click_mouse out_of_bounds): honest failure with correct kind', async () => {
   const host = shared!;
   // (2.0, 2.0) 超出归一化范围 [0,1] —— 应被 Python 端拒绝为 out_of_bounds，
-  // router.toFailureResult 映射为 host-error（PhysicalErrorKind.out_of_bounds → ...）
+  // router.toFailureResult 映射为 out-of-bounds（ΝΩ-27 细分透传）
   const r = await host.execute(makeAction('click_mouse', { x: 2.0, y: 2.0, button: 'left' }));
   assert.equal(r.status, 'failure');
   assert.ok(r.failure, 'failure must carry detail');
-  // 无 X 环境：pyautogui 不可用 ⇒ 错误可能是 out_of_bounds 或 host-error，只要不是 success 就是诚实链路
-  assert.ok(['host-error', 'sandbox-degraded', 'gate-rejected', 'timeout', 'cancelled', 'timed-out']
-    .includes(r.failure.kind), `unexpected failure kind: ${r.failure.kind}`);
+  // 无 X 环境：pyautogui 不可用 ⇒ 错误可能是 out-of-bounds 或 host-error 等，
+  // 只要不是 success 就是诚实链路。ΤΕΛ-4（D-G20）：词表已扩容为 D7FailureKind
+  // 全量（D-6 ExecutionFailureKind ∪ timed-out）—— 按全集校验（transport-error
+  // 等细分值到达 knowledge 面即目标态，非缺陷）。
+  assert.ok([
+    'gate-rejected', 'host-error', 'timeout', 'timeout-aborted', 'timed-out',
+    'sandbox-degraded', 'cancelled', 'invalid-args', 'out-of-bounds',
+    'unknown-button', 'unknown-key', 'element-not-found', 'screen-capture-failed',
+    'ocr-unavailable', 'vlm-unavailable', 'window-unavailable', 'unauthorized',
+    'internal-error', 'transport-error',
+  ].includes(r.failure.kind), `unexpected failure kind: ${r.failure.kind}`);
 });
 
 maybeTest('execute(click_mouse valid): works or honest degradation (link must be open)', async () => {
@@ -180,6 +188,47 @@ maybeTest('execute(press_hotkey with unknown keys): fails with invalid_args → 
 });
 
 // ── 独立生命周期例（ΝΩ-49 保留独立 spawn —— 语义必须独占一个 Python 进程）──
+
+// ΠΑΝ-67（连接韧性）：Python 崩溃后 respawn 端到端执法 —— kill 子进程后
+// 下一次 execute 检测 isRunning 掉线 ⇒ 拆除陈旧路由 ⇒ 自动重生（新 pid），
+// 端口恢复可用。旧缺陷：`if (this.router) return this.router` 无条件复用死
+// 路由 ⇒ transport-error 永续直至插件重载。
+maybeTest('ΠΑΝ-67: Python 崩溃后 respawn —— kill 后下一次调用自动重生（新 pid + 恢复可用）', async () => {
+  const key = makeTempKey('dsh-d7-respawn-');
+  const host = new D7PhysicalHostPort({
+    service: {
+      pythonServiceRoot: PYTHON_ROOT,
+      startupTimeoutMs: STARTUP_CEILING_MS,
+      tcpPort: await freePort(),
+      keyPath: key.keyPath,
+      env: { DSH_PHYSICAL_TEST_SCREEN: '1' },
+    },
+  });
+  try {
+    await host.prewarm();
+    const pid1 = host.manager.pid;
+    assert.ok(pid1 != null && host.manager.isRunning);
+
+    // 模拟崩溃：外部 kill（SIGKILL —— 服务来不及优雅关停）
+    process.kill(pid1!, 'SIGKILL');
+    // 等 exit 事实落到 ChildProcess（exitCode/signalCode 置位）
+    const deadline = Date.now() + 5000;
+    while (host.manager.isRunning && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.equal(host.manager.isRunning, false, '场景在位：进程已死');
+
+    // 下一次调用：_ensureInitialized 检测掉线 ⇒ teardown + respawn（ΠΑΝ-67）
+    const r = await host.execute(makeAction('noop'));
+    assert.equal(r.status, 'success', '崩溃后自动重生 —— 端口恢复可用');
+    assert.ok(host.manager.pid != null && host.manager.pid !== pid1,
+      '重生后是新 pid（旧缺陷：复用死路由，永不恢复）');
+    assert.ok(host.manager.isRunning, '新进程存活');
+  } finally {
+    await host.dispose().catch(() => { /* noop */ });
+    key.cleanup();
+  }
+});
 
 maybeTest('dispose: idempotent + disposed host returns host-error', async () => {
   const host = new D7PhysicalHostPort({

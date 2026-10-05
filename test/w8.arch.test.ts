@@ -63,17 +63,27 @@ test('W8-架构②′: steerTools.ts 装载即注册生产工厂 —— 注册�
 });
 
 // ─── ③ autonomy 包全域对 '../tools' 零 import（环彻底断开） ───
+// ΠΑΝ-56（宏执行入宪）窄白名单：tools/actionGate 是 F1 波（ΠΑΝ-12/14）确立的
+// **纯判定闭集事实源**（ActionKind 物理写通道宇宙 + assertActionAllowed 纯函数），
+// 其依赖面（riskGate/fuzzy/approval/focusTracker/system.hotkeyPolicy）零 autonomy
+// 回依赖 —— runtime.ts 的宏步闸 import 它不构成环。白名单执法面收窄到该文件
+// 本体（再分发桶/其他 tools 模块仍一律禁止）—— 宏的内部键鼠操作自此与直接
+// 点击同过一道闸（C1-4 高-1 修复的立法前提）。
+const ARCH_TOOLS_WHITELIST: ReadonlySet<string> = new Set(['../tools/actionGate']);
 
-test('W8-架构③: autonomy 包全域无 ../tools import —— tools↔autonomy 双向依赖已破', () => {
+test('W8-架构③: autonomy 包全域无 ../tools import —— tools↔autonomy 双向依赖已破（ΠΑΝ-56 白名单：actionGate 纯判定面）', () => {
   const dir = join(ROOT, 'src', 'autonomy');
   const files = readdirSync(dir).filter(f => f.endsWith('.ts'));
   assert.ok(files.length > 0, 'autonomy 包在册');
   const offenders: string[] = [];
   for (const f of files) {
     const text = readFileSync(join(dir, f), 'utf8');
-    if (/from '\.\.\/tools\//.test(text) || /from "\.\.\/tools\//.test(text)) offenders.push(f);
+    const specs = [...text.matchAll(/from ['"](\.\.\/tools\/[^'"]+)['"]/g)].map(m => m[1]);
+    for (const spec of specs) {
+      if (!ARCH_TOOLS_WHITELIST.has(spec)) offenders.push(`${f} → ${spec}`);
+    }
   }
-  assert.deepEqual(offenders, [], `以下文件仍反向 import tools：${offenders.join(', ')}`);
+  assert.deepEqual(offenders, [], `以下文件仍反向 import tools（白名单外）：${offenders.join(', ')}`);
 });
 
 // ─── ④ 判据证伪面接线在册（任务一与 autoPilot 的缝合点） ───

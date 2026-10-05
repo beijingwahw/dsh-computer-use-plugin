@@ -252,6 +252,7 @@ test('S4-4: fail-closed 绝不抛 —— 提交通道自身抛异常也被捕获
 });
 
 test('S4-5: WAL 先行落盘 —— 派发前 .wal 同步行在场且自带链；磁盘故障 ⇒ fail-closed', async () => {
+  // w2audit 修复：join 未导入（本册其余处均 path.join）—— 测试自身缺陷，非行为变化
   const dir = mkdtempSync(path.join(tmpdir(), 'w2audit-wal-'));
   try {
     // 健康通道：同步落盘（appendFileSync —— 调用返回即已交割 OS）
@@ -261,16 +262,24 @@ test('S4-5: WAL 先行落盘 —— 派发前 .wal 同步行在场且自带链�
     const out1 = await pre[0]({ name: 'click_mouse', arguments: { x: 0.5, y: 0.5 } }, async () => ({ ok: 1 }));
     assert.deepEqual(out1, { ok: 1 }, '健康通道放行');
     const walRaw = readFileSync(path.join(dir, 'j.jsonl.wal'), 'utf8');
-    const line1 = JSON.parse(walRaw.trim().split('\n')[0]);
+    // ΠΑΝ-55：首行是 genesis（机器指纹 + 启动计数 + 本地密钥 HMAC），审计行随后
+    const walLines = walRaw.trim().split('\n');
+    const genesis = JSON.parse(walLines[0]);
+    assert.equal(genesis.kind, 'genesis', 'ΠΑΝ-55：WAL 首行 = 创世记录');
+    assert.equal(genesis.seq, 0, '创世 seq=0（不占审计序号）');
+    assert.equal(genesis.boot, 1, '首次铸造 ⇒ 启动计数 1');
+    assert.match(genesis.genesis_mac, /^[0-9a-f]{64}$/, 'filePerms 保护密钥的 HMAC 在场');
+    const line1 = JSON.parse(walLines[1]);
     assert.equal(line1.tool, 'click_mouse', 'WAL 行携带工具名');
     assert.equal(line1.seq, 1, 'WAL 序号单调');
     assert.match(line1.wal_hash, /^[0-9a-f]{64}$/, 'WAL 自身哈希链');
-    assert.equal(line1.main_tip_before, 'GENESIS', '首行引用主链尖端（交叉锚）');
+    assert.equal(line1.main_tip_before, 'GENESIS', '首审计行引用主链尖端（交叉锚）');
+    assert.equal(line1.prev_wal, genesis.wal_hash, '审计行接续创世链尖（WAL 链连续）');
 
     await pre[0]({ name: 'type_text', arguments: { text: 'a' } }, async () => ({ ok: 2 }));
-    const line2 = JSON.parse(readFileSync(path.join(dir, 'j.jsonl.wal'), 'utf8').trim().split('\n')[1]);
+    const line2 = JSON.parse(readFileSync(path.join(dir, 'j.jsonl.wal'), 'utf8').trim().split('\n')[2]);
     assert.equal(line2.seq, 2);
-    assert.equal(line2.prev_wal, line1.wal_hash, 'WAL 链连续（第二行 prev = 第一行哈希）');
+    assert.equal(line2.prev_wal, line1.wal_hash, 'WAL 链连续（第二审计行 prev = 第一审计行哈希）');
 
     // 故障通道：路径父级是文件（mkdir/append 必败）⇒ fail-closed，且主链无半提交
     const blocker = path.join(dir, 'blocker.txt');
@@ -972,12 +981,15 @@ test('ΝΩ-45: WAL 仍同步执法 —— 主 JSONL 在组提交窗口内未落�
     assert.equal(existsSync(path.join(dir, 'j.jsonl')), false, '主 JSONL 在组提交窗口内（未冲刷）');
     assert.equal(journalDiskStats().buffered, 1, 'AUDIT_PRE 的主 JSONL 副本走队列（WAL 为同步底线）');
     // WAL：同步先行在盘 —— appendFileSync 返回即交割 OS（fail-closed 的物理根基）
+    // ΠΑΝ-55：首行 genesis（创世记录），首审计行第二 —— 结构如实解析
     const wal = readFileSync(path.join(dir, 'j.jsonl.wal'), 'utf8');
-    const row = JSON.parse(wal.trim());
+    const walRows = wal.trim().split('\n').map(l => JSON.parse(l));
+    assert.equal(walRows[0].kind, 'genesis', 'ΠΑΝ-55：WAL 首行 = 创世记录');
+    const row = walRows[1];
     assert.equal(row.tool, 'click_mouse', 'WAL 行携带工具名');
     assert.equal(row.seq, 1, 'WAL 序号单调');
     assert.match(row.wal_hash, /^[0-9a-f]{64}$/, 'WAL 自身哈希链在场');
-    assert.equal(row.main_tip_before, 'GENESIS', '首行引用主链尖端（交叉锚）');
+    assert.equal(row.main_tip_before, 'GENESIS', '首审计行引用主链尖端（交叉锚）');
     // 冲刷后主 JSONL 取证副本补齐（与 WAL 行同源对账）
     assert.equal(flushJournal(), 1);
     const disk = JSON.parse(readFileSync(path.join(dir, 'j.jsonl'), 'utf8').trim());

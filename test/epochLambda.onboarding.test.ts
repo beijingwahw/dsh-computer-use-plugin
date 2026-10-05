@@ -86,6 +86,8 @@ function fakeServer(url = 'http://127.0.0.1:18432/') {
   const calls: Array<{ port?: number; deps?: { onConnect?: (c: VisionConnection) => Promise<void> } }> = [];
   const handle: OnboardingHandle = {
     port: 18432, url, closed: false,
+    // ΠΑΝ-20：假 handle 补 nonce 字段（OnboardingHandle 契约新增 —— 假件同形）
+    nonce: '0'.repeat(64),
     close: async () => { /* 假件无需真关 */ },
   };
   const server = async (opts: { port?: number; deps?: { onConnect?: (c: VisionConnection) => Promise<void> } }) => {

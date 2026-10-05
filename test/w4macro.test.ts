@@ -506,7 +506,11 @@ test('ΝΩ-30h: stepSignature 深键序 —— 嵌套键序无关（去重不误
   const cyc: Record<string, unknown> = { x: 1 };
   cyc.self = cyc;
   const sig = stepSignature([{ kind: 'type_text', args: cyc as never }] as SA[]);
-  assert.ok(typeof sig === 'string' && sig.includes('<cycle>'), `环形哨兵：${sig}`);
+  // ΠΑΝ-49 适配（本工单）：canonical 单源收编后环形/超深哨兵全库统一为
+  // '"#unserializable"'（dialects/canonical.ts 单源 —— 旧 '"<cycle>"' 废弃，
+  // memory.ts canonicalArgs 注释在案）。行为面不变：环形 args 收敛哨兵入签、
+  // 绝不抛（运行层铁律）。
+  assert.ok(typeof sig === 'string' && sig.includes('#unserializable'), `环形哨兵：${sig}`);
   // 行为面：深键序不同的同动作链 consolidate 去重强化（不重铸新条目）
   const store = new MuscleMemoryStore();
   const gate = new MacroRehearsalGate(store);

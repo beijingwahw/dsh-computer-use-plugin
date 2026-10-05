@@ -70,10 +70,10 @@ test('markerCentroid: 中心点数值正确（整数与半像素）', () => {
 
 // ─── 纯函数：提示词构造器（离线）─────────────────────────────────
 
-test('buildGroundingSystemPrompt: 契约字段齐全且 ≤300 字', () => {
+test('buildGroundingSystemPrompt: 契约字段齐全且 ≤320 字（ΠΑΝ-21 铁律行 +43 字后上限放宽）', () => {
   const p = buildGroundingSystemPrompt();
   assert.equal(typeof p, 'string');
-  assert.ok(p.length <= 300, `系统提示词超长：${p.length} 字`);
+  assert.ok(p.length <= 320, `系统提示词超长：${p.length} 字`); // ΠΑΝ-21：共享反注入铁律行入词（旧 300 → 320）
   // 严格 JSON + 五个字段名
   assert.ok(p.includes('JSON'), '须要求 JSON 输出');
   for (const f of ['id', 'label', 'role', 'bbox', 'confidence']) {

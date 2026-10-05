@@ -218,8 +218,10 @@ test('Φ-3b: ① popups 非空且无确认类元素 ⇒ hotkey Esc（payload 恰
 
 test('Φ-3b: ① 弹窗内确认类元素（允许）⇒ 点击之（utility 0.9）；确认元素不可交互 ⇒ 回退 Esc', async () => {
   const engine = new PolicyEngine();
+  // ΤΕΛ-5 D-G22：确认元素须落弹窗栖息地（1920×1080 中央 40% 带 [576,1344]×[324,756]）
+  const DLG = { x0: 700, y0: 420, x1: 800, y1: 460 };
   const dec = await engine.decide(
-    ctx({ snapshot: snap({ popups: ['更新可用'], elements: [elem('稍后'), elem('允许', { confidence: 0.7 })] }) }),
+    ctx({ snapshot: snap({ popups: ['更新可用'], elements: [elem('稍后'), elem('允许', { confidence: 0.7, bbox: DLG })] }) }),
   );
   assert.equal(dec.action.kind, 'click');
   assert.equal(dec.action.target?.label, '允许');
@@ -231,7 +233,7 @@ test('Φ-3b: ① 弹窗内确认类元素（允许）⇒ 点击之（utility 0.9
     ctx({
       snapshot: snap({
         popups: ['更新可用'],
-        elements: [elem('允许', { interactive: false }), elem('稍后')],
+        elements: [elem('允许', { interactive: false, bbox: DLG }), elem('稍后')],
       }),
     }),
   );
@@ -241,9 +243,10 @@ test('Φ-3b: ① 弹窗内确认类元素（允许）⇒ 点击之（utility 0.9
 
 test('Φ-3b: ① 确认词面扩表（纪元 Δ）—— 确定/同意/是/yes 皆判确认元素并点击，不再反落 Esc', async () => {
   const engine = new PolicyEngine();
+  const DLG = { x0: 700, y0: 420, x1: 800, y1: 460 }; // ΤΕΛ-5 D-G22：弹窗栖息地内
   for (const label of ['确定', '同意', '是', 'Yes', 'OK 恢复出厂设置']) {
     const dec = await engine.decide(
-      ctx({ snapshot: snap({ popups: ['系统提示'], elements: [elem(label, { confidence: 0.7 })] }) }),
+      ctx({ snapshot: snap({ popups: ['系统提示'], elements: [elem(label, { confidence: 0.7, bbox: DLG })] }) }),
     );
     assert.equal(dec.action.kind, 'click', `label=${label} 应识别为确认类元素`);
     assert.equal(dec.action.target?.label, label);
@@ -254,7 +257,7 @@ test('Φ-3b: ① 确认词面扩表（纪元 Δ）—— 确定/同意/是/yes �
     ctx({
       snapshot: snap({
         popups: ['放弃更改？'],
-        elements: [elem('取消', { confidence: 0.95 }), elem('是(Y)', { confidence: 0.6 })],
+        elements: [elem('取消', { confidence: 0.95 }), elem('是(Y)', { confidence: 0.6, bbox: DLG })],
       }),
     }),
   );

@@ -75,7 +75,10 @@ test('Ψ-1: 导出面契约 —— 具名函数+共享常量、无 default、类
     Object.keys(vpt).sort(),
     // W8-A6（D-G3）：新增 maskBaseUrl —— baseUrl 暴露面的端点脱敏（host 保留、路径/查询打码）
     // ΝΩ 收官：再导出 HTTP_STATUS_BAD_REQUEST —— 三厂 400 降级回退链的共享信号位（magic-number 清偿）
-    ['HTTP_STATUS_BAD_REQUEST', 'buildDataUrl', 'extractProviderJson', 'fetchWithRetry', 'isLocalBaseUrl', 'jitterDelayMs', 'maskBaseUrl', 'sanitizeError'],
+    // R3-2：再导出 tokenCapForModel/clampMaxTokensForModel —— 模型名键控的
+    // 生成硬顶知识单点（glm-4v-flash ≤1024；cast.ts 铸造点 + glmClient 双路消费；
+    // 硬顶常量 R32_GLM_FLASH_TOKEN_CAP 是 types.ts 模块内私量，不入导出面）
+    ['HTTP_STATUS_BAD_REQUEST', 'buildDataUrl', 'clampMaxTokensForModel', 'extractProviderJson', 'fetchWithRetry', 'isLocalBaseUrl', 'jitterDelayMs', 'maskBaseUrl', 'sanitizeError', 'tokenCapForModel'],
   );
   assert.equal((vpt as { default?: unknown }).default, undefined);
 });

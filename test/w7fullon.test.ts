@@ -52,7 +52,7 @@ import { ProviderPool } from '../src/vlm/providers/failover.ts';
 import { VlmCascade, schemaValidator } from '../src/vlm/providers/cascade.ts';
 import type { VisionProvider, VisionChatRequest, VisionChatResult, ProviderTier } from '../src/vlm/providers/types.ts';
 import { createClickMouseTool, gateByReversibility } from '../src/tools/clickMouse.ts';
-import { stopBackend } from '../src/physicalBackend.ts';
+import * as backend from '../src/physicalBackend.ts';
 import type { ReversalPlan } from '../src/reversalEscrow.ts';
 
 // ─── 环境卫兵：GLM 全键清空（PolicyEngine 咨询臂 / cascade 单例零网络） ───
@@ -168,7 +168,7 @@ afterEach(() => {
 // 物理后端若被任何路径拉起（生产设计：服务存活到卸载），测试收尾显式关停，
 // 免子进程占住事件循环（epochDelta.safety 同律）
 after(async () => {
-  await stopBackend();
+  await backend.stopBackend();
 });
 
 // ═════════════════════════ 家族一：自主环 ═════════════════════════
@@ -862,11 +862,23 @@ test('W7-D2 补偿全链: compensable × 托管武装 × 审计同开 —— min
 
 test('W7-D3 补偿真跑: 验收失败(no-effect) ⇒ 托管补偿两步执行 + 屏幕哈希校验 ⇒ compensated-verified + 令牌保留重试', async () => {
   installFakeSystem();
-  const savedCapture = (system as unknown as { captureScreen?: unknown }).captureScreen;
+  // w7fullon 修复（F3-6·测试自身缺陷·封闭性）：效果验证链（captureBefore/
+  // settleAndVerify）自 D-5 重构起走 backend.captureProcessed（Python 服务端
+  // 指纹往返），**不再消费 system.captureScreen** —— 旧 override 是死缝，本用例
+  // 实际截的是真屏：单跑时真屏恰好静止 ⇒ 偶然绿；全量并行跑时终端滚屏/
+  // 真后端跨进程抢端口 ⇒ detected 漂移成 verified、或后端故障冒 FAILED。
+  // 改走 _setAdapterForTests 假 adapter（pan15-19 同款注入方言）：恒定 dhash +
+  // unchanged=true（屏恒不变的服务端方言）⇒ before==after ⇒ no-effect 判决
+  // 恢复确定性（本册头注「全离线确定性」复位）。
+  const STILL_DHASH = '7'.repeat(16);
+  backend._setAdapterForTests({
+    takeScreenshot: async () => ({
+      ok: true,
+      value: { dhash: STILL_DHASH, width: 320, height: 240, unchanged: true, frame_id: null, transport: 'base64' },
+    }),
+    getUiTree: async () => ({ ok: true, value: { funnel_depth: 'L2', elements: [] } }),
+  } as never);
   try {
-    // 屏恒不变（同一 PNG）+ verifyActions 开 ⇒ effect.detected=false ⇒ attemptFailed(no-effect)
-    const stillPng = await solidPng(320, 240);
-    (system as unknown as { captureScreen: unknown }).captureScreen = async () => stillPng;
     let hash: string | null = 'a'.repeat(64);
     const clock = fixedClock();
     const { execLog } = armEscrow({ now: clock, hashNow: () => hash });
@@ -900,7 +912,7 @@ test('W7-D3 补偿真跑: 验收失败(no-effect) ⇒ 托管补偿两步执行 +
     assert.equal(ev, undefined, 'attemptFailed 不入示范账（机械重试不是人类裁决）');
   } finally {
     restoreSystem();
-    (system as unknown as { captureScreen: unknown }).captureScreen = savedCapture;
+    backend._setAdapterForTests(null); // 假 adapter 拆除（后续用例回到真实装配面）
   }
 });
 

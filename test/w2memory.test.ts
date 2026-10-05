@@ -95,11 +95,11 @@ test('W2-6a 既有 58 键语义不动：增量入册后生产键值逐字节不�
   try {
     registerProductionKernels();
     const before = kernelRegistry.snapshot();
-    assert.equal(Object.keys(before).length, 58, '生产单册基线 58 键（55+ΝΩ-10 三键）');
+    assert.equal(Object.keys(before).length, 62, '生产单册基线 62 键（R3-3+R5-4 各双键入册后；58+2+2）');
     const count = registerMemoryOpKernels();
     assert.equal(count, 28);
     const after = kernelRegistry.snapshot();
-    assert.equal(Object.keys(after).length, 86, '58 + 28 = 86');
+    assert.equal(Object.keys(after).length, 90, '62 + 28 = 90');
     for (const [k, v] of Object.entries(before)) {
       assert.equal(after[k], v, `既有键 ${k} 语义不动`);
     }

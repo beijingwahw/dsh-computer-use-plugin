@@ -166,10 +166,12 @@ function fakePS(hooks?: { onCmd?: (args: string[]) => void; geo?: string }) {
   };
 }
 
-test('K-2a: 能力探测 —— PowerShell 在场 ⇒ 窗口四动作；set_contrast 诚实缺席', async () => {
+test('K-2a: 能力探测 —— PowerShell 在场 ⇒ 窗口四动作 + launch_app；set_contrast 官方 API 在场', async () => {
   const { adapter } = fakePS();
   const caps = await adapter.capabilities();
-  assert.deepEqual([...caps].sort(), ['maximize_window', 'move_window', 'raise_window', 'set_contrast', 'set_zoom']);
+  // R2-5：launch_app 无条件在场（Node 内建 spawn 直启，零 PS 依赖 —— 沙箱预置
+  // GUI 应用窗口的唯一可靠通道）；其余五 kind 语义零回归
+  assert.deepEqual([...caps].sort(), ['launch_app', 'maximize_window', 'move_window', 'raise_window', 'set_contrast', 'set_zoom']);
 });
 
 test('K-2b: raise_window 发出 PS 命令且标题注入面闭合（单引号加倍）', async () => {
@@ -384,7 +386,9 @@ test('L-4: auditGuard TODO 兑现 —— 审计行携带风险语境（消费 J 
 
 test('L-5: 服务自荐注册 —— sandbox/knowledge 插件向宿主总线上线', async () => {
   // 编译期：两插件源码含 set?. 自荐注册（宿主裁决架构决策成文）
-  const sbx = readFileSync(new URL('../src/sandbox/index.ts', import.meta.url), 'utf8');
+  // ΠΑΝ-39：D-5 装配面收口至 sandbox/apply.ts（applySandboxStack 单一装配函数），
+  // 自荐注册代码随之移驻 —— 断言面对齐新装配文件（index.ts 壳化为一行挂线）。
+  const sbx = readFileSync(new URL('../src/sandbox/apply.ts', import.meta.url), 'utf8');
   const knw = readFileSync(new URL('../src/knowledge/index.ts', import.meta.url), 'utf8');
   assert.ok(sbx.includes("set?.('dsh.sandbox'"), 'D-5 自荐注册 dsh.sandbox');
   assert.ok(knw.includes("set?.('dsh.knowledge-pipeline'"), 'D-7 自荐注册 dsh.knowledge-pipeline');

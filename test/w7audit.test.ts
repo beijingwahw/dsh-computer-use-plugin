@@ -205,3 +205,58 @@ test('W7-B 抽样护栏（纯函数）：sample=1 ⇒ 每纪元恰 1 条可实�
   assert.deepEqual(A.sampleClaims(claims, null), claims);
   assert.equal(A.sampleClaims(claims, 0).length, 1); // 0 ⇒ 仅 n/a（CLI 层把 0 归一为 null=全部）
 });
+
+// ─── ΠΑΝ-84：执法面 = 发现面（纯函数 enforcementBreaks） ───
+
+const mkR = (over: Record<string, unknown> = {}): any => ({
+  claimVerdicts: [],
+  epochSums: [],
+  unledgered: [],
+  debtsAudit: { dupIds: [], enumViolations: [] },
+  fullResult: null,
+  ...over,
+});
+
+test('ΠΑΝ-84 enforcementBreaks：干净结果 ⇒ 零破面', () => {
+  assert.deepEqual(A.enforcementBreaks(mkR()), []);
+});
+
+test('ΠΑΝ-84 enforcementBreaks：虚报/实跑异常/合计不自洽/DEBTS 违例 ⇒ 各自破面', () => {
+  const r = mkR({
+    claimVerdicts: [
+      { epoch: 'W1', label: 'w1exec', verdict: '虚报', detail: 'x' },
+      { epoch: 'W2', label: 'w2q', verdict: '实跑异常', detail: 'timeout' },
+    ],
+    epochSums: [{ epoch: 'W5', tableSum: 90, declared: 83, prose另立InTable: 0, proseOnlySum: 0, ok: '不自洽' }],
+    debtsAudit: {
+      dupIds: ['D-A1'],
+      enumViolations: [{ id: 'D-B2', token: '已忘记录', raw: '已忘记录' }],
+    },
+  });
+  assert.deepEqual(
+    A.enforcementBreaks(r).map((b: any) => b.kind),
+    ['虚报', '实跑异常', '合计不自洽', 'DEBTS编号重复', 'DEBTS枚举违例'],
+  );
+});
+
+test('ΠΑΝ-84 enforcementBreaks：未入账红面（删行洗白封堵）⇒ 破面；显式豁免 ⇒ 放行', () => {
+  const r = mkR({ unledgered: [
+    { file: 'test/w6x.test.ts', verdict: '未入账·fail>0', actual: { tests: 3, pass: 1, fail: 2 } },
+    { file: 'test/w6y.test.ts', verdict: '未入账·0 fail ✓', actual: { tests: 3, pass: 3, fail: 0 } },
+    { file: 'test/w6z.test.ts', verdict: '未入账·实跑异常', actual: null, error: 'timeout>300000ms' },
+  ] });
+  assert.equal(A.enforcementBreaks(r).length, 2, 'fail>0 与实跑异常破面；0 fail 不破');
+  const kinds = A.enforcementBreaks(r).map((b: any) => b.kind);
+  assert.deepEqual([...new Set(kinds)], ['未入账红面']);
+  assert.deepEqual(
+    A.enforcementBreaks(r, { exemptUnledgered: ['test/w6x.test.ts', '  ', 'test/w6z.test.ts'] }),
+    [],
+    '红面全部显式豁免 ⇒ 零破面（豁免登记制，缺省零豁免）',
+  );
+});
+
+test('ΠΑΝ-84 enforcementBreaks：--full 附加全量 fail>0 与 tsc≠0（既有口径不变）', () => {
+  const r = mkR({ fullResult: { fullRun: { ok: true, tests: 10, pass: 9, fail: 1 }, tsc: { ok: false, code: 2 } } });
+  assert.deepEqual(A.enforcementBreaks(r, { full: true }).map((b: any) => b.kind), ['全量fail>0', 'tsc≠0']);
+  assert.deepEqual(A.enforcementBreaks(r, { full: false }), []);
+});

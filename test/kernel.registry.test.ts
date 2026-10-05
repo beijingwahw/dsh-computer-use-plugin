@@ -209,13 +209,13 @@ test('Θ-1j snapshot/restore：值复原 / 未注册 key 忽略 / 越界值重�
 
 // ─── Θ-1 实验室晋升 ───
 
-test('Θ-1k promoteFrom：交集拷入 / lab 宽区间值重夹生产 bounds / generation+1 / evidence 取 lab / lab 不被消耗', () => {
+test('Θ-1k promoteFrom：交集拷入 / lab 宽区间值重夹生产 bounds / generation+1 / ΠΑΝ-50 步长夹取 + 证据只升不降 / lab 不被消耗', () => {
   const prod = new KernelRegistry();
   prod.register(spec('a', { defaultValue: 0.5, min: 0, max: 1 })); // 生产窄区间
   prod.register(spec('b', { defaultValue: 0.5 }));
   prod.register(spec('c', { defaultValue: 0.5 }));
   prod.addEvidence('a');
-  prod.addEvidence('a'); // 生产 a 证据 2（晋升后应被 lab 的取代，不是相加）
+  prod.addEvidence('a'); // 生产 a 证据 2（ΠΑΝ-50：晋升后证据只升不降 —— max(2,4)=4）
 
   const lab = new KernelRegistry();
   lab.register(spec('a', { defaultValue: 0.5, min: 0, max: 2 })); // 实验室宽区间
@@ -224,25 +224,32 @@ test('Θ-1k promoteFrom：交集拷入 / lab 宽区间值重夹生产 bounds / g
   lab.set('b', 0.2, 7); // lab b 证据 7
   // lab 无 c ⇒ 缺省交集 = {a, b}
 
+  // ΠΑΝ-50 重锚：晋升不再一次跳到 [min,max] 任意点 —— 单步 ≤ maxStepPct(缺省 0.1)
+  // × 区间宽。a：0.5 →（重夹 1）→ 截到 0.5+0.1×1 = 0.6（step-capped）；b：0.5 →
+  // 0.2 截到 0.5−0.1×1 = 0.4（step-capped）。远距值经多次晋升逐步走近（每次都
+  // 过证据门）—— 老断言「一次跳到 1 / 直落 0.2」是被立法废弃的零护栏语义。
   const changes = prod.promoteFrom(lab);
   assert.deepEqual(changes.map(ch => ch.key).sort(), ['a', 'b'], '只晋升交集，c 不在');
   const chA = changes.find(ch => ch.key === 'a')!;
   assert.equal(chA.from, 0.5);
-  assert.equal(chA.to, 1, 'lab 值 1.7 重夹进生产 [0,1] ⇒ 1');
-  assert.equal(prod.get('a'), 1);
-  assert.equal(prod.get('b'), 0.2);
+  assert.equal(chA.to, 0.6, 'lab 值 1.7 重夹 [0,1] ⇒ 1，再被步长夹取截到 0.6（ΠΑΝ-50）');
+  assert.equal(chA.reason, 'step-capped', '步长截断形态如实标注（ΠΑΝ-50 审计面）');
+  assert.equal(prod.get('a'), 0.6);
+  assert.equal(prod.get('b'), 0.4, '0.5 → 0.2 被步长截到 0.4（ΠΑΝ-50）');
   const pa = prod.list().find(p => p.key === 'a')!;
   assert.equal(pa.generation, 1, '晋升 +1 代');
-  assert.equal(pa.evidence, 4, '证据取 lab 的（不是生产的 2，不是相加的 6）');
+  assert.equal(pa.evidence, 4, '证据只升不降：max(生产 2, lab 4) = 4（ΠΑΝ-50 —— 不覆写不相加）');
   assert.equal(prod.list().find(p => p.key === 'b')!.evidence, 7);
   assert.equal(prod.list().find(p => p.key === 'c')!.generation, 0, '未晋升者代际不动');
   // 晋升是拷贝不是移动 —— lab 不被消耗
   assert.equal(lab.get('a'), 1.7);
   assert.equal(lab.list().find(p => p.key === 'a')!.evidence, 4);
 
-  // 显式 keys：lab 未注册的 key（c/zzz）跳过；b 值未变也入清单（证据与代际已更新）
+  // 显式 keys：lab 未注册的 key（c/zzz）跳过；b 继续步进（0.4 → 0.4−0.1 仍 step-capped；
+  // IEEE 浮点直书 0.30000000000000004 —— 与实现同律不四舍五入）
   const again = prod.promoteFrom(lab, { keys: ['b', 'c', 'zzz'] });
-  assert.deepEqual(again, [{ key: 'b', from: 0.2, to: 0.2 }]);
+  assert.deepEqual(again, [{ key: 'b', from: 0.4, to: 0.30000000000000004, reason: 'step-capped' }]);
+  assert.equal(prod.get('b'), 0.30000000000000004);
   assert.equal(prod.list().find(p => p.key === 'b')!.generation, 2, '二次晋升再 +1');
   // 垃圾 lab / 空 keys 静默
   assert.deepEqual(prod.promoteFrom(null as never), []);
